@@ -3399,9 +3399,18 @@ pub fn escapeRegExp(input: string, writer: *std.Io.Writer): void ! std.Io.Writer
 - **符号预检与作用域注入**：编译器在语义分析阶段自动预扫描模块顶层 `zig { ... }` 块内声明的符号（`const`, `var`, `fn`），并将标识符自动注入 CP 根作用域（`scopes[0]`）；
 - **查找表与常量无感复用**：CP 原生算法可直接按名访问 `zig { ... }` 中声明的编译期查找表（如 `@setEvalBranchQuota` 构建的 `vlq_lookup_table` 或 `base64_lut`），无需重复映射或通过繁琐的外部包装访问。
 
-#### 11.7.8 根结构体（Root Struct `@This()`）与运行时标识符隔离
+#### 11.7.8 根结构体（`@root struct`）与原生 `@This()` 映射规范
 
-- **根结构体语义对接**：当在原生逃逸舱中声明 `pub const Self = @This();` 并定义根字段时，编译器自动将其识别为紧凑值类型并注册到 `ref_classes`，确保跨模块引用时按值直接返回与传递，杜绝非预期的指针分配；
+在重构类似 Zig 独有的“文件即结构体”（`@This()`）底层模块时，CP 语言提供了优雅的 `@root` 装饰器机制：
+- **纯正结构体建模**：使用 `export @root struct Name { ... }` 编写纯正的 CP 结构体定义，支持字段声明、默认值赋初值（如 `len: u8 = 0`）与 `@inline` 实例方法；
+- **原生文件级结构体展开**：CP 编译器遇到 `@root` 结构体时，自动将其映射发射为 Zig 文件顶层根作用域：
+  ```zig
+  pub const Name = @This();
+  bytes: [7]u8 = undefined,
+  len: u8 = 0,
+  pub inline fn slice(self: *const Name) []const u8 { ... }
+  ```
+  外部调用方直接做 `const Name = @import("./Name.zig");` 时，该模块既具备完整的实例类型定义（`[_]Name{ ... }`），又天然导出全部模块级函数与常量，彻底根除将结构体硬塞进 `zig { ... }` 逃逸舱的陈旧做法；
 - **Prelude 运行时标识符隔离**：转译器内置的运行时辅助例程（Prelude helpers）内部变量命名统一采用专有前缀（如 `cp_str_slice`、`cp_slice`），严密隔离与用户公开方法（如 `pub inline fn slice(...)`）的标识符碰撞，杜绝 Zig 局部作用域遮蔽（Identifier Shadowing）报错。
 
 ---

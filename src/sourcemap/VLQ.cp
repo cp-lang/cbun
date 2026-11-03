@@ -3,46 +3,24 @@
 
 zig {
     const bun = @import("bun");
-
-    pub const VLQ = @This();
-
-    bytes: [7]u8 = undefined,
-    len: u8 = 0,
-
-    pub inline fn slice(self: *const VLQ) []const u8 {
-        return self.bytes[0..self.len];
-    }
-
-    pub fn writeTo(self: VLQ, writer: anytype) !void {
-        try writer.writeAll(self.bytes[0..self.len]);
-    }
-
-    pub const zero = vlq_lookup_table[0];
-
-    const vlq_lookup_table: [256]VLQ = brk: {
-        @setEvalBranchQuota(9999);
-        var entries: [256]VLQ = undefined;
-        var i: usize = 0;
-        var j: i32 = 0;
-        while (i < 256) : (i += 1) {
-            entries[i] = encodeSlowPath(j);
-            j += 1;
-        }
-        break :brk entries;
-    };
-
-    const base64_lut: [128]u8 = brk: {
-        @setEvalBranchQuota(9999);
-        var bytes = [_]u8{127} ** 128;
-        for (base64, 0..) |c, i| {
-            bytes[c] = i;
-        }
-        break :brk bytes;
-    };
 }
 
 const vlq_max_in_bytes: usize = 7;
 const base64: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+export @root struct VLQ {
+    bytes: [u8; 7],
+    len: u8 = 0,
+
+    @inline
+    pub fn slice(this): string {
+        return this.bytes[0..this.len as usize];
+    }
+
+    pub fn writeTo(this, writer: anytype): !void {
+        writer.writeAll(this.bytes[0..this.len as usize])?;
+    }
+}
 
 export struct VLQResult {
     value: i32,
@@ -55,6 +33,30 @@ export struct VLQResult {
         };
     }
 }
+
+fn make_base64_lut(): [u8; 128] {
+    let mut bytes: [u8; 128] = [127; 128];
+    for (let i of 0..64) {
+        let c = base64[i as usize];
+        bytes[c as usize] = i as u8;
+    }
+    return bytes;
+}
+
+fn make_vlq_lookup_table(): [VLQ; 256] {
+    zig {
+        @setEvalBranchQuota(9999);
+    }
+    let mut entries: [VLQ; 256] = [VLQ { bytes: [0; 7], len: 0 }; 256];
+    for (let i of 0..256) {
+        entries[i as usize] = encodeSlowPath(i);
+    }
+    return entries;
+}
+
+const base64_lut: [u8; 128] = make_base64_lut();
+const vlq_lookup_table: [VLQ; 256] = make_vlq_lookup_table();
+pub const zero: VLQ = vlq_lookup_table[0];
 
 pub fn encode(value: i32): VLQ {
     if (value >= 0 && value <= 255) {

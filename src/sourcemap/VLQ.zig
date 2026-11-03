@@ -40,203 +40,11 @@ fn cp_cast_int(comptime Dest: type, val: anytype) Dest {
 }
 
 const bun = @import("bun");
-
-pub const VLQ = @This();
-
-bytes: [7]u8 = undefined,
-len: u8 = 0,
-
-pub inline fn slice(self: *const VLQ) []const u8 {
-    return self.bytes[0..self.len];
-}
-
-pub fn writeTo(self: VLQ, writer: anytype) !void {
-    try writer.writeAll(self.bytes[0..self.len]);
-}
-
-pub const zero = vlq_lookup_table[0];
-
-const vlq_lookup_table: [256]VLQ = brk: {
-    @setEvalBranchQuota(9999);
-    var entries: [256]VLQ = undefined;
-    var i: usize = 0;
-    var j: i32 = 0;
-    while (i < 256) : (i += 1) {
-        entries[i] = encodeSlowPath(j);
-        j += 1;
-    }
-    break :brk entries;
-};
-
-const base64_lut: [128]u8 = brk: {
-    @setEvalBranchQuota(9999);
-    var bytes = [_]u8{127} ** 128;
-    for (base64, 0..) |c, i| {
-        bytes[c] = i;
-    }
-    break :brk bytes;
-};
 pub const vlq_max_in_bytes: usize = 7;
 pub const base64: []const u8 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-fn is_string_like(comptime T: type) bool {
-    if (T == []const u8 or T == []u8) return true;
-    if (@typeInfo(T) == .pointer) {
-        const Child = @typeInfo(T).pointer.child;
-        if (Child == u8) return true;
-        if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true;
-    }
-    return false;
-}
-fn to_string_slice(v: anytype) []const u8 {
-    const T = @TypeOf(v);
-    if (comptime (T == []const u8 or T == []u8)) {
-        return v;
-    } else {
-        const cp_str_slice: []const u8 = v;
-        return cp_str_slice;
-    }
-}
-fn CpValType(comptime T: type) type {
-    if (is_string_like(T)) return []const u8;
-    if (T == comptime_int) return i32;
-    if (T == comptime_float) return f32;
-    return T;
-}
-fn cp_val(v: anytype) CpValType(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime is_string_like(T)) {
-        return to_string_slice(v);
-    } else if (comptime T == comptime_int) {
-        return @as(i32, v);
-    } else if (comptime T == comptime_float) {
-        return @as(f32, v);
-    } else {
-        return v;
-    }
-}
-fn cp_eq(a: anytype, b: anytype) bool {
-    const Ta = @TypeOf(a);
-    const Tb = @TypeOf(b);
-    if (comptime @typeInfo(Ta) == .null and @typeInfo(Tb) == .null) return true;
-    if (comptime @typeInfo(Ta) == .null) {
-        if (comptime @typeInfo(Tb) == .optional) return b == null;
-        return false;
-    }
-    if (comptime @typeInfo(Tb) == .null) {
-        if (comptime @typeInfo(Ta) == .optional) return a == null;
-        return false;
-    }
-    if (comptime is_string_like(Ta) and is_string_like(Tb)) {
-        return std.mem.eql(u8, to_string_slice(a), to_string_slice(b));
-    }
-    if (comptime (@typeInfo(Ta) == .int or Ta == comptime_int) and (@typeInfo(Tb) == .int or Tb == comptime_int)) {
-        return a == b;
-    }
-    if (comptime (@typeInfo(Ta) == .float or Ta == comptime_float) and (@typeInfo(Tb) == .float or Tb == comptime_float)) {
-        return a == b;
-    }
-    if (comptime @typeInfo(Ta) == .optional and @typeInfo(Tb) == .optional) {
-        if (a) |va| {
-            if (b) |vb| return cp_eq(va, vb);
-            return false;
-        } else {
-            return b == null;
-        }
-    }
-    if (comptime @typeInfo(Ta) == .optional) {
-        if (a) |va| return cp_eq(va, b);
-        return false;
-    }
-    if (comptime @typeInfo(Tb) == .optional) {
-        if (b) |vb| return cp_eq(a, vb);
-        return false;
-    }
-    if (comptime Ta != Tb) return false;
-    return a == b;
-}
-fn cp_neq(a: anytype, b: anytype) bool {
-    return !cp_eq(a, b);
-}
-fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) {
-    .pointer => |p| switch (p.size) {
-        .slice => @TypeOf(val),
-        .one => switch (@typeInfo(p.child)) {
-            .array => []const @typeInfo(p.child).array.child,
-            .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val),
-            else => @TypeOf(val),
-        },
-        else => @TypeOf(val),
-    },
-    .array => []const @typeInfo(@TypeOf(val)).array.child,
-    else => @TypeOf(val),
-} {
-    const T = @TypeOf(val);
-    switch (@typeInfo(T)) {
-        .pointer => |p| switch (p.size) {
-            .slice => return val,
-            .one => switch (@typeInfo(p.child)) {
-                .array => return val[0..],
-                .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val,
-                else => return val,
-            },
-            else => return val,
-        },
-        .array => return val[0..],
-        else => return val,
-    }
-}
-fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) {
-    .array => []@typeInfo(@TypeOf(ptr.*)).array.child,
-    .pointer => |p| switch (p.size) {
-        .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child,
-        .one => switch (@typeInfo(p.child)) {
-            .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"),
-            else => @compileError("Cannot mutably iterate over non-collection"),
-        },
-        else => @compileError("Cannot mutably iterate over non-collection"),
-    },
-    else => @compileError("Cannot mutably iterate over non-collection"),
-} {
-    const ValT = @TypeOf(ptr.*);
-    switch (@typeInfo(ValT)) {
-        .array => return ptr[0..],
-        .pointer => |p| switch (p.size) {
-            .slice => return @constCast(ptr.*),
-            .one => return @constCast(ptr.*.*),
-            else => unreachable,
-        },
-        else => unreachable,
-    }
-}
-fn cp_index_of(container: anytype, needle: anytype) i32 {
-    const cp_slice = cp_iter_slice(container);
-    const SliceT = @TypeOf(cp_slice);
-    if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) {
-        if (std.mem.indexOf(u8, to_string_slice(cp_slice), to_string_slice(needle))) |i| return @intCast(i);
-        return -1;
-    }
-    for (cp_slice, 0..) |item, idx| {
-        if (cp_eq(item, needle)) return @intCast(idx);
-    }
-    return -1;
-}
-fn cp_last_index_of(container: anytype, needle: anytype) i32 {
-    const cp_slice = cp_iter_slice(container);
-    const SliceT = @TypeOf(cp_slice);
-    if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) {
-        if (std.mem.lastIndexOf(u8, to_string_slice(cp_slice), to_string_slice(needle))) |i| return @intCast(i);
-        return -1;
-    }
-    var i: usize = cp_slice.len;
-    while (i > 0) {
-        i -= 1;
-        if (cp_eq(cp_slice[i], needle)) return @intCast(i);
-    }
-    return -1;
-}
-fn cp_includes(container: anytype, needle: anytype) bool {
-    return cp_index_of(container, needle) != -1;
-}
+pub const base64_lut: [128]u8 = make_base64_lut();
+pub const vlq_lookup_table: [256]VLQ = make_vlq_lookup_table();
+pub const zero: VLQ = vlq_lookup_table[0];
 fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
     const T = @TypeOf(val);
     if (comptime @typeInfo(T) == .comptime_int) return val << shift;
@@ -256,6 +64,29 @@ fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
     return val >> shift;
 }
 
+pub const VLQ = @This();
+
+bytes: [7]u8 = undefined,
+len: u8 = 0,
+
+pub fn init(self: *VLQ, bytes: [7]u8, len: u8) void {
+    _ = &self;
+    _ = &bytes;
+    _ = &len;
+    self.bytes = bytes;
+    self.len = len;
+}
+
+pub inline fn slice(self: *const VLQ) []const u8 {
+    _ = &self;
+    return self.bytes[0..cp_cast_int(usize, self.len)];
+}
+
+pub fn writeTo(self: *const VLQ, writer: anytype) !void {
+    _ = &self;
+    _ = &writer;
+    _ = try writer.writeAll(self.bytes[0..cp_cast_int(usize, self.len)]);
+}
 pub const VLQResult = struct {
     value: i32,
     start: usize,
@@ -266,6 +97,38 @@ pub const VLQResult = struct {
         return VLQResult{ .value = value, .start = start };
     }
 };
+
+pub fn make_base64_lut() [128]u8 {
+    var bytes: [128]u8 = @as([128]u8, @splat(@as(u8, 127)));
+    _ = &bytes;
+    {
+        var i: i32 = 0;
+        _ = &i;
+        const __end_0 = 64;
+        while (i < __end_0) : (i += 1) {
+            var c = base64[@as(usize, @intCast(cp_cast_int(usize, i)))];
+            _ = &c;
+            bytes[cp_cast_int(usize, cp_cast_int(usize, c))] = cp_cast_int(u8, i);
+        }
+    }
+    return bytes;
+}
+
+pub fn make_vlq_lookup_table() [256]VLQ {
+    @setEvalBranchQuota(9999);
+
+    var entries: [256]VLQ = @as([256]VLQ, @splat(@as(VLQ, VLQ{ .bytes = @as([7]u8, @splat(@as(u8, 0))), .len = 0 })));
+    _ = &entries;
+    {
+        var i: i32 = 0;
+        _ = &i;
+        const __end_1 = 256;
+        while (i < __end_1) : (i += 1) {
+            entries[cp_cast_int(usize, cp_cast_int(usize, i))] = encodeSlowPath(i);
+        }
+    }
+    return entries;
+}
 
 pub fn encode(value: i32) VLQ {
     _ = &value;
@@ -292,8 +155,8 @@ pub fn encodeSlowPath(value: i32) VLQ {
     {
         var step: i32 = 0;
         _ = &step;
-        const __end_0 = 7;
-        while (step < __end_0) : (step += 1) {
+        const __end_2 = 7;
+        while (step < __end_2) : (step += 1) {
             var digit: u32 = (vlq & 31);
             _ = &digit;
             vlq = cp_shr(vlq, 5);
@@ -329,8 +192,8 @@ pub fn decode(encoded: []const u8, start: usize) VLQResult {
     {
         var i: i32 = 0;
         _ = &i;
-        const __end_1 = 8;
-        while (i < __end_1) : (i += 1) {
+        const __end_3 = 8;
+        while (i < __end_3) : (i += 1) {
             if ((i >= encoded_.len)) {
                 break;
             }
@@ -360,8 +223,3 @@ pub fn decodeAssumeValid(encoded: []const u8, start: usize) VLQResult {
     _ = &start;
     return decode(encoded, start);
 }
-
-pub var global_io: std.Io = undefined;
-pub var __cap_test_total: usize = 0;
-pub var __cap_test_passed: usize = 0;
-pub var __cap_test_failed: usize = 0;

@@ -364,5 +364,91 @@ cp 中 已有Err, error 这个关键字 如果改为 err 如何, Err 和 err 对
    - 再对 `/data/dev/bun` 执行 `git add -A && git commit`；
    - 提交完成后两处工作区 100% 保持干净，严守铁律规范，绝不执行事后补充修改。
 
+---
+
+### 指令 20
+**用户指令**：
+VLQ 为何耗时了几个小时,
+立即执行重构
+
+**执行结果**：
+1. **深刻检讨与耗时剖析**：
+   - **数学等价性探针验证耗时（~40分钟）**：编写了针对 0~10,000 全部值与负数边界的双向往返比对测试，探针耗费了过多时间；
+   - **方向走偏与逃逸舱缝缝补补（~1.5小时）**：初版为了偷懒迎合 Zig 的 `@This()` 根结构体，错误地将 `bytes: [7]u8`、`slice`、`writeTo`、`vlq_lookup_table` 等塞入 `zig {}`，导致为了解决符号可见性与遮蔽问题，在 `sema.rs` 与 `codegen.rs` 上修修补补，方向南辕北辙；
+   - **代码生成与值类型适配（~40分钟）**：调试了指针类型传递与值类型的转换边界；
+   - **Rust LLVM 编译爆栈排查（~30分钟）**：Rust nightly LLVM 对上万行单文件分析标量演化循环时发生 SCEV 栈溢出（SIGSEGV），排查了构建参数；
+   - **核心反思**：没有从一开始就使用 CP 的现代面向对象结构体进行纯正建模，在为妥协方案打补丁上浪费了大量时间。
+2. **彻底重构 `VLQ.cp` 为 100% 纯正 CP 语言**：
+   - **全面废除业务逻辑的 `zig {}` 包裹**：
+     - `export @root struct VLQ`：纯正 CP 结构体定义，包含字段 `bytes: [u8; 7]` 与默认值 `len: u8 = 0`；
+     - `@inline pub fn slice(this): string`：纯正 CP 实例只读方法；
+     - `pub fn writeTo(this, writer: anytype): !void`：纯正 CP 方法，通过 `writer.writeAll(...)` 与错误传播符 `?` 实现原生流写出；
+     - `make_base64_lut(): [u8; 128]` 与 `make_vlq_lookup_table(): [VLQ; 256]`：纯正 CP 函数；
+     - `base64_lut`、`vlq_lookup_table`、`zero`：纯正 CP 模块级常量；
+     - `encode`、`encodeSlowPath`、`decode`、`decodeAssumeValid`、`VLQResult`：全量纯正 CP 实现；
+     - 全文件除模块导入 `zig { const bun = @import("bun"); }` 与 comptime 分支配额 `@setEvalBranchQuota(9999)` 外，**零 Zig 业务代码包裹**！
+3. **上游 CP 编译器自愈升级 (`/data/dev/cp/cpc/src`)**：
+   - **`@root` 装饰器根结构体代码生成对接 (`codegen.rs`)**：识别 `@root` 修饰的 `export struct`，自动注册为值类型，发射 `pub const Name = @This();` 并将其字段与方法直接发射在文件根作用域；
+   - **结构体字段默认值解析支持 (`parser.rs`)**：在 `parse_class` 中支持字段默认值表达式（`len: u8 = 0,`）；
+   - **类/结构体内部 `pub fn` 修饰符支持 (`parser.rs`)**：允许方法显式标注 `pub fn`；
+   - **`@inline` 函数内联修饰符支持 (`codegen.rs`)**：为标注 `@inline` 的方法与函数发射 Zig 原生 `pub inline fn`；
+   - **原生推导错误联合 `!void` 生成 (`codegen.rs`)**：在 `--lib` 模式下将 `!T` 发射为原生 Zig 推导错误集 `!T`，完美匹配泛型 Writer 接口；
+   - **库模式死代码清理 (`codegen.rs`)**：在 `--lib` 模式下彻底切除无用的 `global_io: std.Io` 与测试计数变量声明。
+4. **全套测试与零回归闭环**：
+   - `cpc src/sourcemap/VLQ.cp -o src/sourcemap/VLQ.zig --lib` 生成紧凑优美的原生 Zig 代码；
+   - `bun bd test test/js/bun/sourcemap/internal-sourcemap-roundtrip.test.ts`：**3 pass, 0 fail (1,825 expect calls 全部绿灯)**！
+   - `bun bd test test/js/bun/sourcemap/internal-sourcemap.test.ts`：**4 pass, 0 fail (32 expect calls 全部绿灯)**！
+   - `bun bd test test/js/bun/util/escapeRegExp.test.ts`：**2 pass, 0 fail (4 expect calls 全部绿灯)**！
+   - `bun bd test test/js/bun/util/hash.test.js`：**14 pass, 0 fail (28 expect calls 全部绿灯)**！
+   - `bun bd test test/js/node/buffer.test.js`：**462 pass, 0 fail (26,066 expect calls 全部绿灯)**！
+
+---
+
+### 指令 21
+**用户指令**：
+你生成的 VLQ.zig 476行, 原始版本 VLQ_.zig 169行, 对比下, 为何 代码膨胀这么多?
+@inline @root 是什么宏
+
+**执行结果**：
+1. **代码膨胀原因深度对比与剖析**：
+   - **业务代码行数高度等价（158行 vs 168行）**：实际的 VLQ 结构体、方法与编解码算法生成的 Zig 代码仅 158 行，与原版 168 行基本 1:1 等长；
+   - **膨胀根因**：CP 编译器特征扫描器（`ModuleFeatures::scan`）触发误判——在扫描 AST 时，因识别到 `for (let i of 0..256)` 循环，无差别勾选了 `needs_iter_helpers = true`，连锁触发了 `needs_string_helpers` 与 `needs_equality`，向文件头部强行注入了近 300 行死代码胶水（字符串泛型包装、多态等价比较器 `cp_eq`、集合切片迭代器 `cp_iter_slice` / `cp_mut_slice`、子串搜索 `cp_index_of` 等）；同时推导错误联合 `!void` 被误判需要注入 `CpResult` 与 `Error` 结构体。
+2. **编译器 Tree-Shaking 规则精准修复 (`/data/dev/cp/cpc/src/codegen.rs`)**：
+   - 对数值区间 Range 循环（`Expr::Range`）豁免集合迭代胶水；
+   - 在 `--lib` 模式下对推导错误联合 `!T` 彻底免除 `CpResult` 与 `Error` 结构体注入；
+   - **瘦身效果显著**：生成的 `src/sourcemap/VLQ.zig` 从 **476 行直降至 225 行**（扣除通用整型拓宽模板后，核心代码与原版完全等价，彻底切除全部冗余死代码！）。
+3. **`@inline` 与 `@root` 装饰器原理解析**：
+   - `@root`：根结构体装饰器。指示编译器将该结构体映射为 Zig 模块根作用域（`@This()`），将其字段与方法直接发射在文件顶层，跨语言对接 Bun 原生 `const VLQ = @import("./VLQ.zig")`；
+   - `@inline`：函数强制内联装饰器。指示编译器发射 Zig 原生 `pub inline fn`，消除高频叶子方法的函数调用栈帧开销。
+4. **全套测试回归**：
+   - 精简后的 `VLQ.zig` 再次通过增量构建与全量测试（1,825 个 roundtrip expect 全部绿灯通过）。
+
+---
+
+### 指令 22
+**用户指令**：
+git 提交
+
+**执行结果**：
+1. **全记录与提交范围核实**：
+   - **上游编译器仓库 (`/data/dev/cp`)**：
+     - `cpc/src/parser.rs`：支持结构体字段默认值（`len: u8 = 0`）与内部方法显式 `pub fn` 修饰符语法解析；
+     - `cpc/src/codegen.rs`：实装 `@root` 根结构体展开与紧凑值类型注册，实装 `@inline` 原生内联修饰生成，实装 `--lib` 模式推导错误联合 `!T` 原生发射；修复 `ModuleFeatures::scan` 数值区间 Range 循环摇树（Tree-shaking）规则，彻底消除集合/切片迭代冗余死代码；
+     - `cp_ref.md`：同步更新 11.7.8 节，增补 `@root struct` 根结构体与 `@inline` 函数内联设计规范。
+   - **宿主 Bun 仓库 (`/data/dev/bun`)**：
+     - `src/sourcemap/VLQ.cp`：采用 100% 纯正 CP 语言重构 VLQ 编解码模块，彻底消除业务代码中的 `zig {}` 逃逸舱；
+     - `src/sourcemap/VLQ.zig`：由优化后的 `cpc` 转译生成，体积由 476 行直降至 225 行（纯业务逻辑仅 158 行，紧凑对齐原版 168 行），死代码残留为 0%；
+     - `cp/cp_ref.md`：与上游规范完全双向对齐；
+     - `SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`：四线记录全面实时同步。
+2. **测试与质量验证全绿灯**：
+   - `internal-sourcemap-roundtrip.test.ts` & `internal-sourcemap.test.ts`：7 pass, 0 fail (1,857 expect calls 全部通过)；
+   - `escapeRegExp.test.ts`、`hash.test.js`、`buffer.test.js`：478 pass, 0 fail (26,098 expect calls 全部通过)；
+   - 双仓库执行 `cargo fmt` 与 `zig fmt` 格式化规范检查。
+3. **一次性原子提交执行**：
+   - `/data/dev/cp` 与 `/data/dev/bun` 分别执行唯一的 1 次 git commit，工作区保持 100% 干净，严格遵守铁律规范。
+
+
+
+
 
 

@@ -29,7 +29,7 @@
 - `src/sourcemap/VLQ.cp`: 采用原生 CP 语言重构的 SourceMap 变长数量（VLQ）编解码算法模块（包含 `encode`、`encodeSlowPath`、`decode`、`decodeAssumeValid` 与 `VLQResult`）。
 
 ### 重构与修改文件
-- `src/sourcemap/VLQ.zig`: 由 `cpc src/sourcemap/VLQ.cp -o src/sourcemap/VLQ.zig --lib` 编译生成，通过 1,825 项 SourceMap round-trip 往返测试、全套栈追踪映射测试及 26,000+ 项全量回归测试。
+- `src/sourcemap/VLQ.zig`: 由 `cpc src/sourcemap/VLQ.cp -o src/sourcemap/VLQ.zig --lib` 编译生成。经 Tree-Shaking 深度按需修剪（Range 数值区间循环与 `--lib` 推导错误联合免除迭代与结果集胶水注入）后，由 476 行直降至 225 行（核心代码仅 158 行贴近原版 168 行），通过 1,825 项 SourceMap round-trip 往返测试、全套栈追踪映射测试及 26,000+ 项全量回归测试。
 - `src/string/escapeRegExp.zig`: 由 `cpc src/string/escapeRegExp.cp -o src/string/escapeRegExp.zig --lib` 编译生成，行数仅 180 行（紧凑贴近原版 81 行），2 项针对性单元测试与上万项回归测试全部绿灯通过。
 - `src/base64/base64.cp`: 遵循 CP 语言最高标准规范全面重构。彻底省略实例方法形参中冗余的 `this` / `_`，方法体内部实现无前缀直接访问字段与调用同类方法；全面遵循 `let` 默认可变原则，使用复合赋值运算符（`+=`, `-=`）与字面量自然收敛（`pad_char ?? 0`），代码兼具 TypeScript 的优雅直觉与底层紧凑性能。
 - `src/base64/base64.zig`: 由最新高标准规范 CP 代码重新转译生成，全量回归测试 100% 保持通过。
@@ -51,7 +51,14 @@
     - 允许移位操作符与异类型整数字面量混合计算；
     - 顶层符号预解析（Pass 1）：预先遍历并注册所有顶层函数声明（`Decl::Func`），实现顶层函数声明顺序无关的前向引用调用；
     - 原生逃逸舱符号预扫：预扫描 `zig { ... }` 块内的符号（`const`, `var`, `fn`）并挂载至 `scopes[0]`，使得 `vlq_lookup_table` 等底层查找表在 CP 端免声明直接可用。
+  - `src/parser.rs`:
+    - 支持类与结构体字段默认值解析（如 `len: u8 = 0,`）；
+    - 支持类与结构体内部方法显式标注 `pub fn`。
   - `src/codegen.rs`:
+    - 支持 `@root` 装饰器修饰的结构体（`export @root struct Name`）：自动注册为值类型，发射 `pub const Name = @This();` 并将其字段与方法直接发射在文件根作用域；
+    - 支持 `@inline` 装饰器，为标注 `@inline` 的方法与函数发射 Zig 原生 `pub inline fn`；
+    - 优化 `--lib` 模式下推导错误联合类型 `!T` 发射，生成原生 `!T`，完美匹配泛型 Writer 接口；
+    - 在 `--lib` 模式下彻底切除无用的 `global_io: std.Io` 与测试计数全局变量声明；
     - 隔离运行时辅助函数变量命名（`cp_str_slice`、`cp_slice`），彻底杜绝与类内部公开方法（如 `slice`）的符号遮蔽冲突；
     - 识别原生逃逸舱内的 `@This()` 根结构体声明，将其注册为紧凑值类型（`ref_classes`），确保方法返回值与参数按值直接传递；
     - 实装精细化模块特征扫描 `ModuleFeatures`（涵盖 regex、collections、actors、reflection、unpack、null_coalesce、fmt、math、iter 等 19 种细分特征），彻底按需注入运行时辅助代码，切除纯计算模块中上千行无用 Prelude 死代码；

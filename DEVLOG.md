@@ -294,3 +294,73 @@
   - `bun bd test test/js/bun/util/hash.test.js`：**14 pass, 0 fail (28 expect calls 全部绿灯)**！
   - `bun bd test test/js/node/buffer.test.js`：**462 pass, 0 fail (26,066 expect calls 全部绿灯)**！
 - 零临时文件残留，代码格式化与四线文档记录完全同步。
+
+---
+
+## 2026-11-03 VLQ 模块彻底去逃逸舱与 100% 纯正 CP 架构重构
+
+### 1. 深度复盘与耗时剖析
+针对用户的严肃批评，深度剖析了初次迁移耗时数小时且产生妥协代码的核心根因：
+1. **探针验证耗时过多**：为追求 100% 算法正确性，编写独立对比探针测试了 0~10,000 全部值与负数边界，耗时约 40 分钟；
+2. **架构方向妥协引发连锁修改**：因 Zig 允许“文件即结构体”（`@This()`），初版为了走捷径直接把结构体字段 `bytes`、`len`、方法 `slice`、`writeTo` 与常量查找表塞进 `zig {}`，导致后续遇到符号解析缺失、变量遮蔽等问题，耗费大量时间修改 `sema.rs` 与 `codegen.rs` 给妥协方案打补丁；
+3. **Rust 编译器 LLVM 爆栈故障**：夜间版 Rust 在 release 编译超大 `codegen.rs` 时发生 SCEV 递归栈溢出，排查构建参数耗费了约 30 分钟。
+4. **教训**：遇到语言模型差异时，必须先设计清晰的纯 CP 数据结构和语法方案，而非妥协塞入逃逸舱。
+
+### 2. 重构设计：`@root` 根结构体与纯正 CP 架构
+彻底废除初版 `zig {}` 中的结构体定义与查表算法，全面采用纯正 CP 现代语法：
+1. **`export @root struct VLQ`**：
+   - 引入 `@root` 装饰器标识该结构体为模块根结构体，代码生成器自动将其转换为 Zig 根作用域 `@This()`；
+   - 字段 `bytes: [u8; 7]` 与默认值 `len: u8 = 0` 使用纯 CP 语法声明；
+   - `@inline pub fn slice(this): string` 与 `pub fn writeTo(this, writer: anytype): !void` 均作为 CP 实例方法，自动绑定 `this` 接收者；
+2. **纯 CP 算法生成查找表**：
+   - 实现 `make_base64_lut(): [u8; 128]` 纯 CP 循环算法；
+   - 实现 `make_vlq_lookup_table(): [VLQ; 256]` 纯 CP 循环算法；
+   - 模块级常量 `base64_lut`、`vlq_lookup_table`、`zero` 均使用纯 CP 声明并在编译期自动求值；
+3. **全文件除引入外部模块 `const bun = @import("bun")` 外，零 Zig 业务逻辑残留**。
+
+### 3. 上游 CP 编译器升级实装 (`/data/dev/cp/cpc/src`)
+1. **`cpc/src/parser.rs`**：
+   - 支持结构体字段默认值解析（`len: u8 = 0,`）；
+   - 支持结构体方法显式标注 `pub fn`；
+2. **`cpc/src/codegen.rs`**：
+   - 实装 `@root` 装饰器：自动注册值类型并展开根结构体定义到 Zig 文件顶层；
+   - 实装 `@inline` 装饰器：发射原生 `pub inline fn`；
+   - 优化推导错误联合返回：在 `--lib` 模式下发射原生 `!T`；
+   - 在 `--lib` 模式下切除无用的 `global_io: std.Io` 全局变量声明。
+
+### 4. 验证结果
+- 全量测试 **100% 绿灯通过**（1,825 expect calls in `roundtrip`, 32 in `internal-sourcemap`, 4 in `escapeRegExp`, 28 in `hash`, 26,066 in `buffer`）。
+
+---
+
+## 2026-11-03 VLQ 模块转译代码膨胀剖析、Tree-Shaking 瘦身与 @root/@inline 宏机制
+
+### 1. 初始 476 行对比原始 169 行代码膨胀深度剖析
+针对用户提出的“生成的 `VLQ.zig` 476 行，原始版本 `VLQ_.zig` 169 行，为何代码膨胀这么多”的质询，进行了逐段代码对比与编译器 AST 分析：
+1. **纯业务逻辑等价（158 行 vs 168 行）**：
+   - 提取业务代码发现：`VLQ` 根结构体（`bytes`、`len`、`slice`、`writeTo`）、`VLQResult`、`make_base64_lut`、`make_vlq_lookup_table`、`encode`、`encodeSlowPath`、`decode`、`decodeAssumeValid` 等核心实现编译为 Zig 代码后仅 **158 行**，与原版 `VLQ_.zig` 的 168 行基本 1:1 相当甚至更短。
+2. **膨胀根因：Tree-Shaking 辅助函数无差别误判注入（~310 行死代码）**：
+   - **Range 循环误判集合迭代**：CP 编译器特征扫描器（`ModuleFeatures::scan`）在遍历 AST 时，遇到 `for (let i of 0..256)` 语法时，因 `Stmt::For` 无条件置位 `needs_iter_helpers = true`；
+   - **链式连锁污染**：`needs_iter_helpers` 连锁触发了 `needs_string_helpers` 与 `needs_equality`，向文件头部强行注入了近 250 行完全未使用的死代码模板（`is_string_like`、`to_string_slice`、`CpValType`、`cp_val`、`cp_eq`、多态等价比较器、切片迭代包装 `cp_iter_slice` / `cp_mut_slice`、子串搜索 `cp_index_of` 等）；
+   - **推导错误联合误判结果集包装**：`pub fn writeTo(...): !void` 中的推导错误联合类型 `!void` 被误判需要注入完整 `CpResult` 错误处理包装（`CpResult`、`Error`、`cp_convert_err`，~60 行）。
+
+### 2. 编译器精细化按需摇树（Tree-Shaking）修复 (`/data/dev/cp/cpc/src/codegen.rs`)
+1. **数值区间循环（`Expr::Range`）豁免集合迭代器注入**：
+   - 在 `ModuleFeatures::scan` 中增加判断：只有非 `Expr::Range` 的 `Stmt::For` 迭代才标记 `needs_iter_helpers = true`。因为数值区间在代码生成阶段直接翻译为原生的 Zig `while (i < end) : (i += 1)` 循环，完全不需要任何集合迭代与切片辅助函数。
+2. **库模式（`--lib`）推导错误联合豁免 `CpResult` 注入**：
+   - 在扫描 `Type::ErrorUnion` 时，如果编译目标是 `--lib` 且仅使用原生推导错误 `!T`，彻底免除 `CpResult` 与 `Error` 结构体的生成。
+3. **瘦身成果**：
+   - 重新转译后，`src/sourcemap/VLQ.zig` 从 **476 行断崖式下降至 225 行**！
+   - 除去必要的整型位宽安全转换模板（`cp_cast_int`、`cp_shl`、`cp_shr`，共 67 行）外，全部业务代码与原版 1:1 紧凑对齐，死代码残留率为 0%。
+
+### 3. @root 与 @inline 宏/装饰器原理解析
+1. **`@root`（根结构体装饰器）**：
+   - **作用**：解决 Zig 的“文件即结构体”（`@This()`）与 CP 模块化类定义的语义映射问题。
+   - **机制**：在 CP 语言中，默认 `export class/struct Foo` 会生成 `pub const Foo = struct { ... };` 并在内部包裹字段。但在 Bun 中，大量模块（如 `VLQ.zig`）使用 `const VLQ = @This();`，即整个文件的顶层字段 `bytes: [7]u8` 和实例方法直接暴露在文件根作用域。
+   - **实现**：CP 编译器识别 `@root` 装饰器后：
+     - 自动发射 `pub const VLQ = @This();`；
+     - 将该结构体的字段（`bytes: [7]u8`、`len: u8 = 0`）与方法（`slice`、`writeTo`）直接拍平发射在 `.zig` 文件的根作用域；
+     - 自动将该结构体注册至值类型名单（`ref_classes`），确保在外部函数（如 `make_vlq_lookup_table(): [VLQ; 256]`）中始终作为紧凑值类型传递。
+2. **`@inline`（函数强制内联装饰器）**：
+   - **作用**：对极高频调用的叶子微函数（如 `slice()` 只有 1 行切片取值）进行强制内联，消除函数调用开销。
+   - **机制**：在 CP 语言中修饰方法或函数 `@inline pub fn slice(this): string`，CP 编译器在生成 Zig 代码时发射为 `pub inline fn slice(self: *const VLQ) []const u8`，直接指示 LLVM 进行内联展开。
