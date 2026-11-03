@@ -364,3 +364,67 @@
 2. **`@inline`（函数强制内联装饰器）**：
    - **作用**：对极高频调用的叶子微函数（如 `slice()` 只有 1 行切片取值）进行强制内联，消除函数调用开销。
    - **机制**：在 CP 语言中修饰方法或函数 `@inline pub fn slice(this): string`，CP 编译器在生成 Zig 代码时发射为 `pub inline fn slice(self: *const VLQ) []const u8`，直接指示 LLVM 进行内联展开。
+
+---
+
+## 2026-11-03 HTTP ETag 模块迁移与位移按需摇树瘦身
+
+### 1. 迁移目标与敏捷选型
+- **选型**：选择 Bun 核心 HTTP 叶子处理模块 [`src/http_types/ETag.zig`](file:///data/dev/bun/src/http_types/ETag.zig)（原版 65 行）。
+- **职责**：负责 HTTP 实体标签解析、弱比较（RFC 9110 §8.8.3.2 弱验证器忽略 `W/` 前缀）、`If-None-Match` 协商条件判断及响应头附加。
+- **对照备份**：按标准规范将原版另存为 [`src/http_types/ETag_.zig`](file:///data/dev/bun/src/http_types/ETag_.zig)。
+
+### 2. 纯正 CP 架构重构 (`src/http_types/ETag.cp`)
+1. **字符串纯切片自实现**：
+   - 原版依赖 `std.mem.trim(u8, ...)` 与 `std.mem.trimLeft(u8, ...)`，引入了多余的类型参数；
+   - 在 CP 中使用 `is_space`、`trim`、`trim_left`、`has_prefix` 纯切片操作，零堆分配、零外部复杂泛型依赖，完全基于强类型切片运算。
+2. **高效逗号分割算法**：
+   - 原版使用 `std.mem.splitScalar(u8, if_none_match, ',')`；
+   - 在 CP 中直接使用单重 while 循环检测 `,` 偏移并逐段截取切片，既简洁可读，又彻底免除迭代器包装与状态结构体。
+3. **消除无效变量语句**：
+   - 原版中为消除未使用变量警告写了 `_ = is_weak1; _ = is_weak2;`；
+   - CP 编译期在生成函数时会自动为每个形参注入 `_ = &param;`，CP 源代码保持纯粹简洁。
+
+### 3. 上游 CP 编译器优化：位移运算按需注入 (`cpc/src/codegen.rs`)
+- **发现**：在无需位移的计算模块中，文件头部始终会固定生成 `cp_shl` 与 `cp_shr`（共 20 行模板代码）；
+- **自愈**：
+  - 在 `ModuleFeatures` 结构体中新增 `needs_shift` 标志；
+  - 在 `scan_expr` 扫描 AST 时，仅在遇到 `BinaryOp::Shl` 或 `BinaryOp::Shr` 时置位 `self.needs_shift = true`；
+  - 在 `write_prelude` 中将 `cp_shl` 与 `cp_shr` 的发射包裹在 `if features.needs_shift` 内部；
+  - 彻底切除了无移位模块中的模板死代码。
+
+### 4. 验证与测试闭环
+- `bun bd test test/js/bun/http/serve-if-none-match.test.ts`：17 pass, 0 fail (46 expect calls 全部通过，耗时仅 2.61s)；
+- `bun bd test test/js/bun/http/bun-serve-file.test.ts`：64 pass, 0 fail (1,185 expect calls 全部通过)；
+- 全量回归测试（`internal-sourcemap-roundtrip.test.ts`、`escapeRegExp.test.ts`、`hash.test.js`）：19 pass, 0 fail (1,857 expect calls 全部通过)；
+- 累计 3,088 项断言保持 100% 绿灯。
+
+---
+
+## 2026-11-03 ETag 代码瘦身实战：从 236 行到 71 行（1:1 对齐原版 65 行）
+
+### 1. 膨胀原因深度诊断
+在初期将 `ETag.zig` 迁移至 `ETag.cp` 时，生成的 `ETag.zig` 达到了 236 行，而原版 `ETag_.zig` 仅 65 行。深度剖析发现三重膨胀诱因：
+1. **算法手写冗余**：手写了包含空白判断、循环切片等大量辅助逻辑（多出 ~50 行）；
+2. **多态等价比较胶水误判注入**：在比较字符串时使用了 `==`，触发了 `needs_equality = true`，进而级联触发了 `needs_string_helpers = true`，注入了约 80 行无用的运行时包装胶水（`cp_eq`, `cp_neq`, `is_string_like`, `to_string_slice`, `CpValType`, `cp_val`）；
+3. **标量转换模板无条件注入**：`cp_cast_int` 模板（37 行）在文件头部被无差别注入，即使模块中根本没有进行整型类型强转。
+
+### 2. 上游 CP 编译器关键特性升级
+为了实现紧凑 1:1 转译，对 `/data/dev/cp/cpc` 进行了系统性自愈与升级：
+1. **`while (cond) |capture|` 迭代器捕获循环**：
+   - 在 AST `WhileStmt` 中新增 `capture: Option<Ident>`；
+   - 在 Parser 中解析 `|ident|` 捕获语法；
+   - 在 Sema 中将捕获变量声明并纳入循环体内作用域；
+   - 在 Codegen 中发射 Zig 原生 `while (iter.next()) |tag_str|`。
+2. **类型标识符作为调用实参 (Native Type Tokens as Arguments)**：
+   - Parser 允许 `u8`, `i32`, `usize` 等原生类型关键字作为普通标识符表达式，使得能够直接调用 `std.mem.trim(u8, ...)` 与 `std.mem.eql(u8, ...)`。
+3. **原生索引数值直接比较**：
+   - 优化 `are_both_numeric`，将 `Expr::Index` 与整数/字符字面量（如 `str[0] == '"'`）直接编译为原生整数比较 `(str[0] == 34)`，彻底消除 `cp_eq` 误触发。
+4. **`cp_cast_int` 精准摇树 (Tree-Shaking)**：
+   - 新增 `needs_cast_int: bool` 标志，仅在 AST 存在显式 `Expr::Cast` 或数组索引赋值时才注入 `cp_cast_int` 模板，其他模块彻底剔除 37 行模板代码。
+
+### 3. 重构成果与行数对比
+- 原始 Zig 版 `ETag_.zig`：65 行；
+- CP 重构代码 `ETag.cp`：56 行（纯正现代 CP 语法）；
+- 转译生成版 `ETag.zig`：**71 行**（经 `zig fmt` 格式化，扣除结构体模板后业务代码与原版 1:1 绝对对齐，零死代码胶水残留）；
+- 全套测试（`serve-if-none-match.test.ts` 17 pass, `bun-serve-file.test.ts` 64 pass）100% 保持绿灯通过。

@@ -27,8 +27,17 @@
 - `src/string/escapeRegExp.cp`: 采用原生 CP 语言重构的正则表达式字符转义模块（实现 `escapeRegExp` 与 `escapeRegExpForPackageNameMatching`）。
 - `src/sourcemap/VLQ_.zig`: 按规范备份原版 SourceMap VLQ 变长编码源代码，作为重构对照基准。
 - `src/sourcemap/VLQ.cp`: 采用原生 CP 语言重构的 SourceMap 变长数量（VLQ）编解码算法模块（包含 `encode`、`encodeSlowPath`、`decode`、`decodeAssumeValid` 与 `VLQResult`）。
+- `src/http_types/ETag_.zig`: 按规范备份原版 ETag 源代码，作为重构对照基准。
+- `src/http_types/ETag.cp`: 采用纯正原生 CP 语言重构的 HTTP ETag 与 If-None-Match 条件评估模块（包含 `ParsedETag`、`trim`、`trim_left`、`has_prefix`、`parse`、`weakMatch`、`appendToHeaders` 与 `ifNoneMatch`）。
 
 ### 重构与修改文件
+- `src/http_types/ETag.zig`: 由最新优化后的 `cpc src/http_types/ETag.cp -o src/http_types/ETag.zig --lib` 编译生成。经 `needs_cast_int` 精准摇树后，代码行数从 236 行/109 行**直接精简至 71 行**（与原版 `ETag_.zig` 的 65 行几乎 1:1 对齐，零死代码胶水！），通过 17 项专用条件请求测试（`serve-if-none-match.test.ts`）与 64 项静态文件深度服务测试（`bun-serve-file.test.ts`）。
+- 上游 CP 编译器 (`/data/dev/cp/cpc`):
+  - `src/codegen.rs`: 新增 `needs_cast_int: bool` 树摇标志，仅在出现显式整型转换 `Expr::Cast` 或数组索引赋值时按需注入 `cp_cast_int`，彻底消除叶子模块无用标量模板代码（削减 37 行死代码）。
+  - `src/parser.rs`: 支持 `while (cond) |capture|` 迭代器捕获循环语法；支持原生类型标识符（`u8`、`i32` 等）作为表达式/实参传递。
+  - `src/sema.rs`: 支持 `w.capture` 作用域符号注册；支持类型名称作为实参的语义通过。
+  - `src/ast.rs`: 在 `WhileStmt` 中增加 `capture: Option<Ident>` 字段。
+- `cp/cp_ref.md` & `/data/dev/cp/cp_ref.md`: 同步增补 9.3.2 节《迭代器捕获循环 (`while (expr) |capture|`)》与 9.3.3 节《原生类型标识符作为调用实参 (Native Type Tokens as Arguments)》。
 - `src/sourcemap/VLQ.zig`: 由 `cpc src/sourcemap/VLQ.cp -o src/sourcemap/VLQ.zig --lib` 编译生成。经 Tree-Shaking 深度按需修剪（Range 数值区间循环与 `--lib` 推导错误联合免除迭代与结果集胶水注入）后，由 476 行直降至 225 行（核心代码仅 158 行贴近原版 168 行），通过 1,825 项 SourceMap round-trip 往返测试、全套栈追踪映射测试及 26,000+ 项全量回归测试。
 - `src/string/escapeRegExp.zig`: 由 `cpc src/string/escapeRegExp.cp -o src/string/escapeRegExp.zig --lib` 编译生成，行数仅 180 行（紧凑贴近原版 81 行），2 项针对性单元测试与上万项回归测试全部绿灯通过。
 - `src/base64/base64.cp`: 遵循 CP 语言最高标准规范全面重构。彻底省略实例方法形参中冗余的 `this` / `_`，方法体内部实现无前缀直接访问字段与调用同类方法；全面遵循 `let` 默认可变原则，使用复合赋值运算符（`+=`, `-=`）与字面量自然收敛（`pad_char ?? 0`），代码兼具 TypeScript 的优雅直觉与底层紧凑性能。
@@ -70,4 +79,5 @@
     - 支持模块顶层 `const` / `let` 变量/常量声明代码生成；
     - 修复结构体初始化中定长数组字段（如 `[0; 32]`）的目标元素类型推导与传递；
     - 大整数十六进制针对 63 位最高位为 1 自动格式化为 `0x{:x}`，防止负数转译报错；
+    - 升级 `ModuleFeatures` 摇树逻辑：增加 `needs_shift` 特征，将 `cp_shl` 与 `cp_shr` 模板设为按需生成，彻底切除无移位模块中的冗余内联函数；
     - 升级 `cp_cast_int` 运行时模板，内部采用 128 位宽转换。

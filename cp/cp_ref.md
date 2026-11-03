@@ -2032,6 +2032,60 @@ while idx < len {
 
 ---
 
+### 9.3.2 迭代器捕获循环 (`while (expr) |capture|`)
+
+针对流式解析、字符串切分器等迭代器模式，CP 支持捕获解包式 `while (iter.next()) |item|` 循环。循环体在每次迭代时自动将可选值解包赋值给捕获变量 `item`，当迭代器返回 `null` 时自动优雅终止循环，无缝对接 Zig 原生迭代器契约：
+
+```typescript
+var iter = std.mem.splitScalar(u8, if_none_match, 44); // 按逗号切分
+while (iter.next()) |tag_str| {
+    let parsed = parse(tag_str);
+    if (weakMatch(our_parsed.tag, our_parsed.is_weak, parsed.tag, parsed.is_weak)) {
+        return true;
+    }
+}
+```
+
+---
+
+### 9.3.3 原生类型标识符作为调用实参 (Native Type Tokens as Arguments)
+
+CP 允许原生类型标识符（如 `u8`、`i32`、`usize` 等）直接作为泛型函数或标准库函数的实参传递，无缝契合系统级与标准库接口（如 `std.mem.trim(u8, ...)`、`std.mem.eql(u8, ...)`）：
+
+```typescript
+let str = std.mem.trim(u8, raw_str, " \t");
+let is_same = std.mem.eql(u8, slice_a, slice_b);
+```
+
+---
+
+### 9.3.2 迭代器捕获循环 (`while (expr) |capture|`)
+
+针对流式解析、字符串切分器等迭代器模式，CP 支持捕获解包式 `while (iter.next()) |item|` 循环。循环体在每次迭代时自动将可选值解包赋值给捕获变量 `item`，当迭代器返回 `null` 时自动优雅终止循环，无缝对接 Zig 原生迭代器契约：
+
+```typescript
+var iter = std.mem.splitScalar(u8, if_none_match, 44); // 按逗号切分
+while (iter.next()) |tag_str| {
+    let parsed = parse(tag_str);
+    if (weakMatch(our_parsed.tag, our_parsed.is_weak, parsed.tag, parsed.is_weak)) {
+        return true;
+    }
+}
+```
+
+---
+
+### 9.3.3 原生类型标识符作为调用实参 (Native Type Tokens as Arguments)
+
+CP 允许原生类型标识符（如 `u8`、`i32`、`usize` 等）直接作为泛型函数或标准库函数的实参传递，无缝契合系统级与标准库接口（如 `std.mem.trim(u8, ...)`、`std.mem.eql(u8, ...)`）：
+
+```typescript
+let str = std.mem.trim(u8, raw_str, " \t");
+let is_same = std.mem.eql(u8, slice_a, slice_b);
+```
+
+---
+
 ### 9.4 字符串模板插值与原生正则表达式
 
 ```typescript
