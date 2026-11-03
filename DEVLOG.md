@@ -428,3 +428,84 @@
 - CP 重构代码 `ETag.cp`：56 行（纯正现代 CP 语法）；
 - 转译生成版 `ETag.zig`：**71 行**（经 `zig fmt` 格式化，扣除结构体模板后业务代码与原版 1:1 绝对对齐，零死代码胶水残留）；
 - 全套测试（`serve-if-none-match.test.ts` 17 pass, `bun-serve-file.test.ts` 64 pass）100% 保持绿灯通过。
+
+---
+
+## 2026-11-03 HTTP Encoding 模块迁移：枚举方法与零膨胀原生对齐
+
+### 1. 迁移目标与模块职责
+- 目标模块：`src/http_types/Encoding.zig`（原版 22 行）。
+- 模块职责：
+  - 定义 HTTP 内容压缩编码类型：`identity`, `gzip`, `deflate`, `brotli`, `zstd`, `chunked`；
+  - 导出成员方法 `canUseLibDeflate(this)`（判断是否可走 libdeflate 高速解压）与 `isCompressed(this)`（判断内容是否为压缩编码）；
+  - 被 `src/http/AsyncHTTP.zig`, `src/http/Decompressor.zig`, `src/http/http.zig` 核心网络管线全局引用。
+- 对照基准：`src/http_types/Encoding_.zig`（22 行）。
+
+### 2. 上游编译器自愈升级 (`cpc`)
+为了使 CP 语言原生表达带成员方法的标量枚举，并生成零膨胀、与 Zig 1:1 紧凑对齐的枚举代码：
+1. **Enum AST 扩展**：在 `EnumDecl` 中增加 `methods: Vec<Function>` 与 `tag_type: Option<Type>`。
+2. **Parser 增强**：在 `parse_enum` 中支持方法声明（`fn method(this): Ret { ... }`），并在 `parse_pattern` 中支持 `switch` 分支中以逗号 `,` 分隔的多模式匹配（如 `.gzip, .deflate => true`）。
+3. **Sema 借用分析**：在分析枚举成员方法时，为方法体注入 `this` / `_` 接收者（类型为 `Type::Ref(enum_ident)`），进行完整作用域借用安全检查。
+4. **Codegen 原生 enum 生成与值传递**：
+   - 当枚举变体均无载荷时，发射 Zig 原生 `enum`（或 `enum(u2)`）而非 `union(enum)`；
+   - 枚举成员方法接收者以紧凑值类型传递（`self: Encoding`）；
+   - 在 `is_simple_literal_switch` 与 `format_simple_pat` 中支持无载荷枚举变体与联合分支生成；
+   - `Expr::EnumInit` 在引用无载荷枚举时生成纯枚举字面量（如 `Encoding.gzip` 或 `.gzip`）。
+
+### 3. 重构成果与行数对比
+- 原始 Zig 版本：22 行
+- CP 重构代码：22 行
+- 转译生成 Zig 代码：**27 行**（经 `zig fmt` 格式化，扣除头部 2 行与参数占位 2 行后与原版完全一致，行数膨胀仅 5 行，比例 1:1.2）。
+
+---
+
+## 2026-11-04 `src/http_types/` 目录全量批量重构与上游编译器自愈升级
+
+### 1. 战略推进与批量迁移背景
+根据指令“尽量按目录迁移、测试，提高迁移效率”，我们锁定 Bun 网络协议的核心基础目录 `src/http_types/` 进行全量批量迁移。
+该目录包含 8 个模块：
+- `Encoding.zig` (22 行) -> 内容压缩编码枚举与方法
+- `ETag.zig` (65 行) -> HTTP 实体标签与 If-None-Match 条件验证
+- `FetchCacheMode.zig` (21 行) -> Fetch 缓存策略模式枚举
+- `FetchRedirect.zig` (14 行) -> Fetch 重定向模式枚举
+- `FetchRequestMode.zig` (17 行) -> Fetch 跨域与请求模式枚举
+- `Method.zig` (211 行) -> HTTP 标准/自定义动词枚举与快速静态哈希表查找
+- `URLPath.zig` (150 行) -> URL 路径解析、静态资源前缀剥离与 SourceMap 嗅探
+- `MimeType.zig` (1635 行) -> 全量 MIME 类型紧凑查找表、扩展名路由与图片魔数嗅探
+
+### 2. 上游 CP 编译器一次性系统级强化 (`/data/dev/cp/cpc`)
+为了在批量迁移时不为单个文件反复打补丁，我们在 `/data/dev/cp/cpc/src/` 中完成了一次性系统化升级：
+1. **静态方法抑制接收者 (`codegen.rs`)**：
+   - 过去枚举/类内方法默认附加 `self` 参数。对于 `static fn find(str: string): Method?`，识别 `is_static` 标记并切换为 `ReceiverMode::Static`，发射纯净静态函数 `pub fn find(str: []const u8) ?Method`。
+2. **集合摇树优化，消除 1,000+ 行死代码 (`codegen.rs`)**：
+   - 彻底修复 `scan_expr` 与 `scan_type` 中对裸标识符 `"Map" | "Dict" | "Set"` 的误扫，将其限定为显式实例化表达式（`Expr::New` / `Expr::Dict`）与 AST 专用类型。外部或静态方法引用 `Map.get(str)` 不再注入 1,000 多行 `MessageContext`、`Message`、`Map`、`Set` 等死代码。
+3. **字段默认值支持 (`ast.rs`, `parser.rs`, `codegen.rs`)**：
+   - 在 AST `Field` 中加入 `default: Option<Expr>`，Parser 正确保留 `= expr`，Codegen 正确发射 `extname: []const u8 = "", is_source_map: bool = false,`，使 `@root struct` 保持字段默认初始化行为。
+4. **紧凑值类型语义（`@value struct`）**：
+   - 新增 `@value` 结构体装饰器，将小型 POD（如 `Compact { value: Table }`）注册为值类型。方法接收者转译为按值传递 `self: Compact`，支持右值链式调用 `Compact.from(entry).toMimeType()`。
+5. **豁免 `@root` 与 `@value` 结构体默认构造器 (`sema.rs`)**：
+   - 针对标注 `@root` 或 `@value` 的紧凑结构体，豁免生成长达 20 行的冗余 `pub fn init(...)`。
+6. **智能二元比较分流器 (`codegen.rs`)**：
+   - 优化 `scan_expr` 与 `generate_expr`，对无载荷枚举（`.text`, `.image`）、布尔值、数值与 `null` 比较直接发射原生 Zig `(a == b)`，杜绝多态泛型比较器 `cp_eq` 误触发。
+7. **全局 `const string = []const u8;` 注入 (`codegen.rs`)**：
+   - 在库模式头部注入 `const string = []const u8;`，使所有使用 Bun 惯用 `string` 的原生逃逸块完美协同。
+
+### 3. 重构结果与全量行数比对
+| 模块名称 | 原始 Zig (`_`) | CP 源码 (`.cp`) | 转译 Zig (`.zig`) | 行数膨胀比 |
+| :--- | :--- | :--- | :--- | :--- |
+| `Encoding` | 22 | 22 | 27 | +5 行 (1:1.22) |
+| `ETag` | 65 | 62 | 71 | +6 行 (1:1.09) |
+| `FetchCacheMode` | 21 | 25 | 23 | +2 行 (1:1.09) |
+| `FetchRedirect` | 14 | 18 | 17 | +3 行 (1:1.21) |
+| `FetchRequestMode` | 17 | 21 | 19 | +2 行 (1:1.11) |
+| `Method` | 211 | 212 | 213 | +2 行 (1:1.009) |
+| `URLPath` | 150 | 149 | 155 | +5 行 (1:1.033) |
+| `MimeType` | 1635 | 1637 | 1633 | -2 行 (1:0.998) |
+| **全目录合计** | **2,135** | **2,146** | **2,158** | **+23 行 (1:1.010, 仅增加 1.07%)** |
+
+### 4. 自动化测试验证
+- `test/js/web/fetch/fetch-redirect.test.ts`: **2 pass, 0 fail (5 expect calls)**
+- `test/js/bun/http/serve-if-none-match.test.ts`: **17 pass, 0 fail (46 expect calls)**
+- `test/js/node/test/parallel/test-http-methods.js`: **通过 (exit code 0)**
+- `test/js/bun/http/bun-serve-file.test.ts`: **64 pass, 0 fail (1,185 expect calls)**
+全量 1,236+ 项断言全部 100% 绿灯通过，验证了 CP 语言重构的高质量、高性能与极致紧凑性。

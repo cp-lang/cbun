@@ -1132,6 +1132,32 @@ let t3: Task = .Move [15, 25];
 let t4: Task = .Compute { batch: 200, priority: 7 };
 ```
 
+#### 3.5.4 特殊符号变体、底层标签与嵌套逃逸舱 (Escaped Identifiers & Nested Escapes)
+
+针对网络协议、系统 API 与 Web 标准等场景中出现的含连字符名称（如 `same-origin`）或语言保留关键字（如 `error`）：
+- CP 原生支持 `@"identifier"` 逃逸标识符字面量；
+- 支持为无载荷枚举指定底层定长整型标签类型（如 `: u2`、`: u3`、`: u8`）；
+- 支持在枚举体内直接使用局部 `zig { ... }` 逃逸舱注入编译期元数据（如 `ComptimeStringMap`），实现与宿主系统的零开销互操作：
+
+```typescript
+export enum FetchRequestMode: u2 {
+    @"same-origin",
+    @"no-cors",
+    cors,
+    navigate,
+
+    zig {
+        pub const Map = bun.ComptimeStringMap(FetchRequestMode, .{
+            .{ "same-origin", .@"same-origin" },
+            .{ "no-cors", .@"no-cors" },
+            .{ "cors", .cors },
+            .{ "navigate", .navigate },
+        });
+        pub const toJS = @import("../http_jsc/fetch_enums_jsc.zig").fetchRequestModeToJS;
+    }
+}
+```
+
 ---
 
 ## 四、解构赋值与 `switch` 模式匹配体系
@@ -1190,7 +1216,7 @@ let status_code = 404;
 
 let msg = switch (status_code) {
     200 => "OK",
-    // 联合模式匹配
+    // 联合多模式匹配（支持 | 或 , 逗号合并）
     400 | 401 | 403 => "Client Error",
     // 闭区间匹配
     500..=599 => "Server Error",
@@ -3466,6 +3492,72 @@ pub fn escapeRegExp(input: string, writer: *std.Io.Writer): void ! std.Io.Writer
   ```
   外部调用方直接做 `const Name = @import("./Name.zig");` 时，该模块既具备完整的实例类型定义（`[_]Name{ ... }`），又天然导出全部模块级函数与常量，彻底根除将结构体硬塞进 `zig { ... }` 逃逸舱的陈旧做法；
 - **Prelude 运行时标识符隔离**：转译器内置的运行时辅助例程（Prelude helpers）内部变量命名统一采用专有前缀（如 `cp_str_slice`、`cp_slice`），严密隔离与用户公开方法（如 `pub inline fn slice(...)`）的标识符碰撞，杜绝 Zig 局部作用域遮蔽（Identifier Shadowing）报错。
+
+#### 11.7.9 紧凑值结构体（`@value struct`）与零开销值传递语义
+
+在底层高性能系统开发中，诸如句柄、短索引、紧凑枚举包装等小型 POD 结构体（如 `Compact { value: u14 }`）通常需要像原生标量一样按值传递，避免指针解引用的间接开销，并支持在临时右值上直接调用成员方法（例如 `Compact.from(entry).toMimeType()`）。
+
+CP 提供了 `@value` 装饰器：
+```typescript
+export @value struct Compact {
+    value: Table,
+
+    static fn from(value: Table): Compact {
+        return Compact { value: value };
+    }
+
+    pub fn toMimeType(this): MimeType {
+        // ...
+    }
+}
+```
+- **值接收者发射**：编译器将成员方法的 `this` 接收者直接转译为值拷贝 `self: Compact`，而非指针借用 `self: *const Compact`；
+- **免除多余析构与移动守卫**：`@value` 结构体天然免疫析构守卫代码生成，零开销、零冗余胶水；
+- **支持右值链式调用**：在转译至 Zig 目标代码时，调用临时对象方法不会触发“taking pointer of rvalue”的 Zig 编译报错。
+
+#### 11.7.10 原生二元比较（`==` / `!=`）与枚举/布尔/数值直接发射
+
+在早期编译模式中，二元比较易误触发泛型比较器 `cp_eq`，引入数十行字符串与反射辅助模板。现代 CP 编译器内置智能二元分流器：
+1. **数值/指针/字面量原生比较**：任一操作数为整型、浮点型、布尔型或 `null` 时，直接发射 `(a == b)` 或 `(a != b)`；
+2. **枚举变体原生比较**：当操作数涉及无载荷枚举变体（如 `.text`、`.image`）或枚举类型时，直接发射原生 Zig `(self.category == .text)`，不引入任何辅助模板；
+3. **摇树按需注入**：仅在两个动态字符串或未知复杂对象等值比较时，才精确激活 `needs_equality` 运行时支持。
+
+#### 11.7.11 顶层 `string` 原生别名与跨语言零摩擦交互
+
+CP 编译器在每个库模块头部自动注入 `const string = []const u8;`。无论是纯 CP 类型推导、还是内嵌 `zig { ... }` 块中复用的宿主代码（如 Bun 内部普遍使用的 `string`），均能天然无缝解析，彻底消除未声明标识符报错。
+
+#### 11.7.9 紧凑值结构体（`@value struct`）与零开销值传递语义
+
+在底层高性能系统开发中，诸如句柄、短索引、紧凑枚举包装等小型 POD 结构体（如 `Compact { value: u14 }`）通常需要像原生标量一样按值传递，避免指针解引用的间接开销，并支持在临时右值上直接调用成员方法（例如 `Compact.from(entry).toMimeType()`）。
+
+CP 提供了 `@value` 装饰器：
+```typescript
+export @value struct Compact {
+    value: Table,
+
+    static fn from(value: Table): Compact {
+        return Compact { value: value };
+    }
+
+    pub fn toMimeType(this): MimeType {
+        // ...
+    }
+}
+```
+- **值接收者发射**：编译器将成员方法的 `this` 接收者直接转译为值拷贝 `self: Compact`，而非指针借用 `self: *const Compact`；
+- **免除多余析构与移动守卫**：`@value` 结构体天然免疫析构守卫代码生成，零开销、零冗余胶水；
+- **支持右值链式调用**：在转译至 Zig 目标代码时，调用临时对象方法不会触发“taking pointer of rvalue”的 Zig 编译报错。
+
+#### 11.7.10 原生二元比较（`==` / `!=`）与枚举/布尔/数值直接发射
+
+在早期编译模式中，二元比较易误触发泛型比较器 `cp_eq`，引入数十行字符串与反射辅助模板。现代 CP 编译器内置智能二元分流器：
+1. **数值/指针/字面量原生比较**：任一操作数为整型、浮点型、布尔型或 `null` 时，直接发射 `(a == b)` 或 `(a != b)`；
+2. **枚举变体原生比较**：当操作数涉及无载荷枚举变体（如 `.text`、`.image`）或枚举类型时，直接发射原生 Zig `(self.category == .text)`，不引入任何辅助模板；
+3. **摇树按需注入**：仅在两个动态字符串或未知复杂对象等值比较时，才精确激活 `needs_equality` 运行时支持。
+
+#### 11.7.11 顶层 `string` 原生别名与跨语言零摩擦交互
+
+CP 编译器在每个库模块头部自动注入 `const string = []const u8;`。无论是纯 CP 类型推导、还是内嵌 `zig { ... }` 块中复用的宿主代码（如 Bun 内部普遍使用的 `string`），均能天然无缝解析，彻底消除未声明标识符报错。
 
 ---
 

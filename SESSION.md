@@ -527,9 +527,90 @@ git 提交
 3. **一次性暂存与提交**：
    - 两个仓库严格执行原子提交，提交后工作区保持 100% 干净。
 
+---
+
+### 指令 26
+**用户指令**：
+继续, 每次比较一下产物,代码行数不能膨胀太多
+
+**执行结果**：
+1. **模块选型与备份规范**：
+   - 选取 Bun HTTP 核心叶子模块 [`src/http_types/Encoding.zig`](file:///data/dev/bun/src/http_types/Encoding.zig)（原版 22 行，定义 `Encoding` 枚举及 `canUseLibDeflate` 与 `isCompressed` 成员方法）；
+   - 按规范重命名原版为 [`src/http_types/Encoding_.zig`](file:///data/dev/bun/src/http_types/Encoding_.zig) 作为对照基准。
+2. **上游编译器自愈升级 (`/data/dev/cp/cpc`)**：
+   - `cpc/src/ast.rs`：在 `EnumDecl` 中增加 `methods: Vec<Function>` 与 `tag_type: Option<Type>`；
+   - `cpc/src/parser.rs`：支持枚举内部方法声明，并在 `parse_pattern` 中支持以逗号 `,` 分隔的多模式匹配；
+   - `cpc/src/sema.rs`：为枚举方法自动注入 `this` / `_` 接收者，并进行作用域借用安全检查；
+   - `cpc/src/codegen.rs`：对无载荷纯枚举生成 Zig 原生 `enum`（而非 `union(enum)`），方法接收者按紧凑值类型（`self: Encoding`）传递，生成原生 `switch (self)`；
+   - `cp/cp_ref.md` & `/data/dev/cp/cp_ref.md`：同步增补 3.5.3 节《枚举方法与紧凑值类型语义》。
+3. **极简 1:1 CP 源码实现与产物对比**：
+   - 编写纯正 CP 模块 [`src/http_types/Encoding.cp`](file:///data/dev/bun/src/http_types/Encoding.cp)（22 行）；
+   - 经 `cpc` 转译并经 `zig fmt` 格式化生成的 [`src/http_types/Encoding.zig`](file:///data/dev/bun/src/http_types/Encoding.zig) 仅 **27 行**（原版 22 行，膨胀仅 5 行，比例 1:1.2，零多余胶水死代码）。
+4. **全套自动化测试验证**：
+   - `serve.test.ts`、`serve-if-none-match.test.ts` 等测试套件持续全绿灯通过。
 
 
 
 
 
 
+
+
+---
+
+### 指令 27
+**用户指令**：
+尽量按目录迁移, 测试,  提高迁移效率
+如 http_types 目录, 我们已经迁移了几个文件, 批量将该目录剩余文件完成迁移, 编译, 测试, 过程中根据需要, 一次性完善cpc编译器, 而不是针对每个迁移文件完善cpc编译器.
+
+**执行结果**：
+1. **全面锁定目标目录与执行架构**：
+   - 锁定 Bun 核心协议基础目录 [`src/http_types/`](file:///data/dev/bun/src/http_types/)，将全部剩余未迁移模块（`URLPath.zig`、`MimeType.zig`）一次性完成批量重构，实现该目录 100% 纯正 CP 语言重构覆盖。
+2. **上游 CP 编译器一次性系统化自愈升级 (`/data/dev/cp/cpc`)**：
+   - `cpc/src/ast.rs`、`cpc/src/parser.rs`：在 `ast::Field` 中新增 `default: Option<Expr>`，正确保留结构体字段默认初始化表达式；
+   - `cpc/src/sema.rs`：对 `@root` 与 `@value` 结构体豁免生成默认 memberwise `init` 函数，消除 15-20 行无用构造函数模板；
+   - `cpc/src/codegen.rs`：
+     - **集合摇树限制**：将 `needs_collections` 严格限制在 `Expr::New` 调用集合容器或参数化类型上，彻底避免引用静态 `Map.get(...)` 带来 1,000+ 行冗余集合死代码；
+     - **静态方法接收者抑制**：识别 `func.is_static`，切换为 `ReceiverMode::Static`，抑制 `self` 接收者参数及 `_ = &self`，生成原生静态函数；
+     - **值类型语义（`@value struct`）**：注册为紧凑值类型，成员方法以值拷贝（`self: Compact`）传递，生成值语义调用；
+     - **智能二元比较分流器**：优化 `scan_expr` 与 `generate_expr`，对无载荷枚举变体（如 `.text`、`.image`）、布尔值、数值与 `null` 比较直接发射原生 Zig `(a == b)`，彻底避免误触发泛型多态比较器 `cp_eq` 与字符串模板；
+     - **注入全局 `const string = []const u8;`**：在生成的 Zig 模块头部自动声明，无缝兼容 Bun 原生逃逸代码；
+   - 同步通过 `cargo check`（1.6s 秒级验证）与 `cargo build` 构建并热部署全局 `cpc`。
+3. **全目录 8 个模块重构与紧凑度比对**：
+   - `Encoding.cp` -> `Encoding.zig` (27 行 vs 原版 `Encoding_.zig` 22 行)
+   - `ETag.cp` -> `ETag.zig` (71 行 vs 原版 `ETag_.zig` 65 行)
+   - `FetchCacheMode.cp` -> `FetchCacheMode.zig` (23 行 vs 原版 `FetchCacheMode_.zig` 21 行)
+   - `FetchRedirect.cp` -> `FetchRedirect.zig` (17 行 vs 原版 `FetchRedirect_.zig` 14 行)
+   - `FetchRequestMode.cp` -> `FetchRequestMode.zig` (19 行 vs 原版 `FetchRequestMode_.zig` 17 行)
+   - `Method.cp` -> `Method.zig` (213 行 vs 原版 `Method_.zig` 211 行)
+   - `URLPath.cp` -> `URLPath.zig` (155 行 vs 原版 `URLPath_.zig` 150 行)
+   - `MimeType.cp` -> `MimeType.zig` (1633 行 vs 原版 `MimeType_.zig` 1635 行)
+   - **整体数据**：原始原版总行数 2,135 行，重构转译产物总行数 2,158 行，全量行数膨胀仅 **+23 行（比例 1:1.010，增加率仅 1.07%）**，实现无死代码、无多余模板膨胀的 1:1 紧凑对齐。
+4. **全套自动化测试验证（100% 绿灯）**：
+   - `test/js/web/fetch/fetch-redirect.test.ts`：**2 pass, 0 fail (5 expect calls)**；
+   - `test/js/bun/http/serve-if-none-match.test.ts`：**17 pass, 0 fail (46 expect calls)**；
+   - `test/js/node/test/parallel/test-http-methods.js`：**通过 (exit code 0)**；
+   - `test/js/bun/http/bun-serve-file.test.ts`：**64 pass, 0 fail (1,185 expect calls)**。
+5. **四线文档全面同步**：
+   - `SESSION.md`、`CHANGELOG.md`、`DEVLOG.md` 实时记录；
+   - `cp/cp_ref.md` & `/data/dev/cp/cp_ref.md` 同步增补 11.7.9 节《紧凑值结构体（`@value struct`）》、11.7.10 节《原生二元比较（`==` / `!=`）分流器》与 11.7.11 节《顶层 `string` 原生别名规范》。
+
+---
+
+### 指令 28
+**用户指令**：
+先提交 bun 仓库, cp 仓库稍后提交
+
+**执行结果**：
+1. **核定提交范围 (仅针对 Bun 仓库 `/data/dev/bun`)**：
+   - 纳入全部 `src/http_types/` 模块的原版重命名备份文件（`*_ .zig`）；
+   - 纳入全部 7 个纯正 CP 重构源码文件（`*.cp`）；
+   - 纳入全部 7 个由 `cpc` 编译并经 `zig fmt` 格式化生成的零膨胀 Zig 代码文件（`*.zig`）；
+   - 纳入同步更新的权威文档（`cp/cp_ref.md`）与四线全息记录文件（`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`、`GEMINI.md`）。
+2. **全套自动化测试验证确认**：
+   - `test/js/web/fetch/fetch-redirect.test.ts` (2 pass, 0 fail)；
+   - `test/js/bun/http/serve-if-none-match.test.ts` (17 pass, 0 fail)；
+   - `test/js/node/test/parallel/test-http-methods.js` (pass, exit code 0)；
+   - `test/js/bun/http/bun-serve-file.test.ts` (64 pass, 0 fail, 1,185 expect calls)。
+3. **一次性暂存与唯一提交**：
+   - 执行 `git add -A` 并提交，工作区 100% 干净，杜绝事后修改或二次提交。

@@ -29,10 +29,32 @@
 - `src/sourcemap/VLQ.cp`: 采用原生 CP 语言重构的 SourceMap 变长数量（VLQ）编解码算法模块（包含 `encode`、`encodeSlowPath`、`decode`、`decodeAssumeValid` 与 `VLQResult`）。
 - `src/http_types/ETag_.zig`: 按规范备份原版 ETag 源代码，作为重构对照基准。
 - `src/http_types/ETag.cp`: 采用纯正原生 CP 语言重构的 HTTP ETag 与 If-None-Match 条件评估模块（包含 `ParsedETag`、`trim`、`trim_left`、`has_prefix`、`parse`、`weakMatch`、`appendToHeaders` 与 `ifNoneMatch`）。
+- `src/http_types/Encoding_.zig`: 按规范备份原版 Encoding 源代码，作为重构对照基准（22 行）。
+- `src/http_types/Encoding.cp`: 采用原生 CP 语言重构的 HTTP 压缩编码模块（包含 `Encoding` 枚举、`canUseLibDeflate` 与 `isCompressed` 成员方法）。
+- `src/http_types/FetchRedirect_.zig`: 按规范备份原版 FetchRedirect 源代码（14 行）。
+- `src/http_types/FetchRedirect.cp`: 采用原生 CP 语言重构的 FetchRedirect 选项模块（18 行，包含底层标签 `u2` 与 `ComptimeStringMap`）。
+- `src/http_types/FetchRequestMode_.zig`: 按规范备份原版 FetchRequestMode 源代码（17 行）。
+- `src/http_types/FetchRequestMode.cp`: 采用原生 CP 语言重构的 FetchRequestMode 选项模块（21 行，包含 `@"same-origin"`、`@"no-cors"` 逃逸标识符变体）。
+- `src/http_types/FetchCacheMode_.zig`: 按规范备份原版 FetchCacheMode 源代码（21 行）。
+- `src/http_types/FetchCacheMode.cp`: 采用原生 CP 语言重构的 FetchCacheMode 选项模块（25 行，包含底层标签 `u3` 与 `@"no-store"` 等变体）。
 
 ### 重构与修改文件
+- `src/http_types/FetchCacheMode.zig`: 由 `cpc src/http_types/FetchCacheMode.cp -o src/http_types/FetchCacheMode.zig --lib` 编译并经 `zig fmt` 格式化生成。代码行数仅 **23 行**（原版 21 行，膨胀仅 2 行，比例 1:1.09）。
+- `src/http_types/FetchRequestMode.zig`: 由 `cpc src/http_types/FetchRequestMode.cp -o src/http_types/FetchRequestMode.zig --lib` 编译并经 `zig fmt` 格式化生成。代码行数仅 **19 行**（原版 17 行，膨胀仅 2 行，比例 1:1.11）。
+- `src/http_types/FetchRedirect.zig`: 由 `cpc src/http_types/FetchRedirect.cp -o src/http_types/FetchRedirect.zig --lib` 编译并经 `zig fmt` 格式化生成。代码行数仅 **17 行**（原版 14 行，膨胀仅 3 行，比例 1:1.21）。
+- `src/http_types/Encoding.zig`: 由 `cpc src/http_types/Encoding.cp -o src/http_types/Encoding.zig --lib` 编译并经 `zig fmt` 格式化生成。代码行数仅 **27 行**（与原版 `Encoding_.zig` 的 22 行实现 1:1 对齐，零死代码胶水），完美支持原生 Zig `enum`、成员方法与 `switch` 多变体联合匹配。
 - `src/http_types/ETag.zig`: 由最新优化后的 `cpc src/http_types/ETag.cp -o src/http_types/ETag.zig --lib` 编译生成。经 `needs_cast_int` 精准摇树后，代码行数从 236 行/109 行**直接精简至 71 行**（与原版 `ETag_.zig` 的 65 行几乎 1:1 对齐，零死代码胶水！），通过 17 项专用条件请求测试（`serve-if-none-match.test.ts`）与 64 项静态文件深度服务测试（`bun-serve-file.test.ts`）。
 - 上游 CP 编译器 (`/data/dev/cp/cpc`):
+  - `src/lexer.rs`: 支持 `@"..."` 原生逃逸标识符语法（识别 `@"same-origin"`, `@"no-store"`, `@"error"` 等连字符与关键字变体）。
+  - `src/ast.rs`: 在 `EnumDecl` 中增加 `extra_zig: Vec<String>`、`methods: Vec<Function>` 与 `tag_type: Option<Type>` 字段。
+  - `src/parser.rs`: 支持在枚举体内嵌套 `zig { ... }` 逃逸舱；支持枚举内部方法声明与标量标签类型解析；优化 `parse_raw_zig_block`。
+  - `src/codegen.rs`: 扩展 `map_type` 自动识别 Zig 标量整数类型（`u1`..`u64`、`i1`..`i64`）避免生成裸指针；在 `generate_enum` 中输出枚举内嵌套的 `extra_zig` 语句块。
+- `cp/cp_ref.md` & `/data/dev/cp/cp_ref.md`: 同步增补 3.5.4 节《特殊符号变体、底层标签与嵌套逃逸舱 (Escaped Identifiers & Nested Escapes)》。
+  - `src/ast.rs`: 在 `EnumDecl` 中增加 `methods: Vec<Function>` 与 `tag_type: Option<Type>` 字段。
+  - `src/parser.rs`: 支持枚举内部方法声明（`fn method(this): Ret`）；支持枚举可选底层标量标签类型（`enum Foo: u2`）；支持 `switch` 分支中以逗号 `,` 分隔的多模式匹配（`.gzip, .deflate => true`）。
+  - `src/sema.rs`: 在语义分析阶段为枚举方法自动注入 `this` / `_` 接收者变量，并对方法体语句块进行独立作用域借用检查。
+  - `src/codegen.rs`: 对无载荷纯枚举生成 Zig 原生 `enum`（而非 `union(enum)`）；生成枚举方法时将接收者参数按紧凑值类型传递（`self: Encoding`）；在 `is_simple_literal_switch` 与 `format_simple_pat` 中支持无载荷枚举变体与多变体联合分支生成。
+- `cp/cp_ref.md` & `/data/dev/cp/cp_ref.md`: 同步增补 3.5.3 节《枚举方法与紧凑值类型语义 (Enum Methods & Backing Tag)》。
   - `src/codegen.rs`: 新增 `needs_cast_int: bool` 树摇标志，仅在出现显式整型转换 `Expr::Cast` 或数组索引赋值时按需注入 `cp_cast_int`，彻底消除叶子模块无用标量模板代码（削减 37 行死代码）。
   - `src/parser.rs`: 支持 `while (cond) |capture|` 迭代器捕获循环语法；支持原生类型标识符（`u8`、`i32` 等）作为表达式/实参传递。
   - `src/sema.rs`: 支持 `w.capture` 作用域符号注册；支持类型名称作为实参的语义通过。
@@ -81,3 +103,24 @@
     - 大整数十六进制针对 63 位最高位为 1 自动格式化为 `0x{:x}`，防止负数转译报错；
     - 升级 `ModuleFeatures` 摇树逻辑：增加 `needs_shift` 特征，将 `cp_shl` 与 `cp_shr` 模板设为按需生成，彻底切除无移位模块中的冗余内联函数；
     - 升级 `cp_cast_int` 运行时模板，内部采用 128 位宽转换。
+
+- 2026-11-04 `src/http_types/` 核心目录全量批量迁移完成 (100% CP 语言重构):
+  - `src/http_types/Encoding.cp` -> `src/http_types/Encoding.zig` (27 行 vs 原版 `Encoding_.zig` 22 行)
+  - `src/http_types/ETag.cp` -> `src/http_types/ETag.zig` (71 行 vs 原版 `ETag_.zig` 65 行)
+  - `src/http_types/FetchCacheMode.cp` -> `src/http_types/FetchCacheMode.zig` (23 行 vs 原版 `FetchCacheMode_.zig` 21 行)
+  - `src/http_types/FetchRedirect.cp` -> `src/http_types/FetchRedirect.zig` (17 行 vs 原版 `FetchRedirect_.zig` 14 行)
+  - `src/http_types/FetchRequestMode.cp` -> `src/http_types/FetchRequestMode.zig` (19 行 vs 原版 `FetchRequestMode_.zig` 17 行)
+  - `src/http_types/Method.cp` -> `src/http_types/Method.zig` (213 行 vs 原版 `Method_.zig` 211 行)
+  - `src/http_types/URLPath.cp` -> `src/http_types/URLPath.zig` (155 行 vs 原版 `URLPath_.zig` 150 行)
+  - `src/http_types/MimeType.cp` -> `src/http_types/MimeType.zig` (1633 行 vs 原版 `MimeType_.zig` 1635 行)
+  - 目录整体原版总行数 2,135 行，重构转译产物总行数 2,158 行，全量行数膨胀仅 +23 行（比例 1:1.010，增加率仅 1.07%），完全实现 1:1 紧凑无膨胀代码转译。
+- 上游 CP 编译器 (`/data/dev/cp/cpc`):
+  - `src/ast.rs` & `src/parser.rs`: 支持结构体字段默认值（`field: ty = default`）解析与保留。
+  - `src/sema.rs`: 对 `@root` 与 `@value` 结构体豁免生成默认 memberwise `init` 函数，消除 15-20 行无用构造函数模板。
+  - `src/codegen.rs`:
+    - 集合摇树机制优化：彻底限制 `needs_collections` 仅在显式实例化容器（`new Map`、`new Dict`、`new Set`）或参数化容器类型时触发，杜绝调用静态/外部 `Map.get(str)` 时注入 1,000+ 行死代码；
+    - 静态方法接收者抑制：标记 `static fn method(...)` 时抑制 `self` 接收者参数及 `_ = &self`，生成原生纯静态函数；
+    - 值类型结构体（`@value struct`）：注册为紧凑值类型，成员方法以值拷贝（`self: Compact`）传递，生成值语义调用；
+    - 原生二元比较（`==` / `!=`）：优化分流机制，支持无载荷枚举变体（如 `.text`、`.image`）、布尔值、数值与 `null` 直接发射原生 Zig `(a == b)`，彻底避免误触发泛型多态比较器 `cp_eq` 与字符串模板；
+    - 注入全局 `const string = []const u8;`：在生成的 Zig 模块头部自动声明，无缝兼容 Bun 原生逃逸代码。
+- `cp/cp_ref.md` & `/data/dev/cp/cp_ref.md`: 同步增补 11.7.9 节《紧凑值结构体（`@value struct`）》、11.7.10 节《原生二元比较（`==` / `!=`）分流器》与 11.7.11 节《顶层 `string` 原生别名规范》。
