@@ -509,3 +509,37 @@
 - `test/js/node/test/parallel/test-http-methods.js`: **通过 (exit code 0)**
 - `test/js/bun/http/bun-serve-file.test.ts`: **64 pass, 0 fail (1,185 expect calls)**
 全量 1,236+ 项断言全部 100% 绿灯通过，验证了 CP 语言重构的高质量、高性能与极致紧凑性。
+
+---
+
+## 2026-11-04 开发日志：`src/sha_hmac/` 底层密码学目录全量批量迁移
+
+### 1. 目标与目录选型
+- **目标目录**：`src/sha_hmac/`
+  - 仅包含 2 个关键核心文件：`hmac.zig`（19 行）与 `sha.zig`（199 行），总计 218 行；
+  - 属于无外部系统 I/O 耦合的底层核心密码学抽象层，被全局 `bun.zig` 导出为 `bun.sha` 和 `bun.hmac`，供 CSRF、S3 签名、PostgreSQL SASL、Node.js `crypto` 及 `Bun.hash` 广泛调用；
+  - 完全符合“文件不是特别多、底层功能、尽量被引用、少引用其他模块”的迁移准则。
+
+### 2. 编译器针对性自愈与升级 (`/data/dev/cp/cpc`)
+- **消除冗余 `_ = &param;`**：
+  - 之前编译器在生成非异步函数时，无条件为所有非 comptime 参数生成 `_ = &param;` 导致 4 行函数膨胀到 8 行以上，且强行取地址；
+  - 升级 `cpc/src/codegen.rs`：新增 `block_contains_ident` 辅助函数，递归扫描函数 AST 及其嵌套的 `zig { ... }` 原生块；结合 `last_use_map`，仅在参数完全未被使用时发射 Zig 官方标准惯用的 `_ = param;`，已使用参数 0 额外注入。
+- **逃逸舱类型自动注册 (`ref_classes` & `value_classes`)**：
+  - 在 `zig { ... }` 块中定义的常量别名（如 `pub const Algorithm = ...`、`pub const OutputBuffer = ...`）统一注册至 `ref_classes` 与 `value_classes`；
+  - 在 CP 函数签名中使用该类型作为参数或返回值时，正确发射原生类型名称 `Algorithm` 与 `OutputBuffer`，杜绝错误注入 `*Algorithm` 造成传值类型与 enum literal `.sha256` 不兼容的问题。
+
+### 3. 重构产物与代码行数严格比对
+| 模块名称 | 原版 Zig (`*_ .zig`) | 转译后 Zig (`*.zig`) | 行数变化与比例 |
+| :--- | :--- | :--- | :--- |
+| `hmac` | 19 | 25 | +6 行 (含编译器标识与类型映射) |
+| `sha` | 199 | 201 | +2 行 (1:1.010, 仅增加 1%) |
+| **全目录合计** | **218** | **226** | **+8 行 (1:1.036, 增加率仅 3.6%)** |
+
+### 4. 自动化测试与全量回归验证
+- `test/js/node/crypto/crypto-hmac-algorithm.test.ts`: **5 pass, 0 fail (21 expect calls)**
+- `test/js/node/crypto/crypto.hmac.test.ts`: **74 pass, 0 fail (111 expect calls)**
+- `test/js/bun/util/hash.test.js`: **14 pass, 0 fail (28 expect calls)**
+- `test/js/node/crypto/crypto.test.ts`: **369 pass, 0 fail (488 expect calls)**
+- `test/js/node/crypto/crypto-lazyhash.test.ts`: **2 pass, 0 fail (2 expect calls)**
+- `test/js/node/crypto/crypto-oneshot.test.ts`: **34 pass, 0 fail (282 expect calls)**
+全量 498 项测试、932 项断言全部 100% 绿灯通过！零回归、零崩溃，充分验证了迁移的安全性和精确性。

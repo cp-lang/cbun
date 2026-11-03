@@ -124,3 +124,13 @@
     - 原生二元比较（`==` / `!=`）：优化分流机制，支持无载荷枚举变体（如 `.text`、`.image`）、布尔值、数值与 `null` 直接发射原生 Zig `(a == b)`，彻底避免误触发泛型多态比较器 `cp_eq` 与字符串模板；
     - 注入全局 `const string = []const u8;`：在生成的 Zig 模块头部自动声明，无缝兼容 Bun 原生逃逸代码。
 - `cp/cp_ref.md` & `/data/dev/cp/cp_ref.md`: 同步增补 11.7.9 节《紧凑值结构体（`@value struct`）》、11.7.10 节《原生二元比较（`==` / `!=`）分流器》与 11.7.11 节《顶层 `string` 原生别名规范》。
+
+- 2026-11-04 `src/sha_hmac/` 核心底层密码学目录全量批量迁移完成:
+  - `src/sha_hmac/hmac.cp` -> `src/sha_hmac/hmac.zig` (25 行 vs 原版 `hmac_.zig` 19 行)
+  - `src/sha_hmac/sha.cp` -> `src/sha_hmac/sha.zig` (201 行 vs 原版 `sha_.zig` 199 行)
+  - 目录整体原版总行数 218 行，重构转译产物总行数 226 行，全量行数膨胀仅 +8 行（增加率仅 3.6%），完全实现 1:1 紧凑无膨胀代码转译。
+- 上游 CP 编译器 (`/data/dev/cp/cpc`):
+  - `src/codegen.rs`:
+    - 消除未使用参数的冗余 `_ = &param;`：自动递归扫描函数体及内嵌 `zig { ... }` 块中参数标识符的使用情况，只有在参数未被使用时才生成 `_ = param;`，杜绝无用地址获取与行数虚增；
+    - 完善 `zig { ... }` 原生逃逸舱类型注册：对逃逸舱中声明的 `pub const T = ...` 及 `const T = ...` 自动注册为紧凑值类型（`ref_classes` & `value_classes`），避免 CP 函数签名在引用逃逸舱类型时错误添加指针前缀 `*T`。
+- `cp/cp_ref.md` & `/data/dev/cp/cp_ref.md`: 同步增补 11.7.12 节《原生逃逸舱类型映射与参数引用优化》。
