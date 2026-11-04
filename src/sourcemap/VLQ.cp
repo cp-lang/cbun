@@ -17,7 +17,7 @@ export @root struct VLQ {
         return this.bytes[0..this.len as usize];
     }
 
-    pub fn writeTo(this, writer: anytype): void! {
+    pub fn writeTo(this, writer: anytype)! {
         writer.writeAll(this.bytes[0..this.len as usize])?;
     }
 }

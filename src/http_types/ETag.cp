@@ -34,7 +34,7 @@ fn weakMatch(tag1: string, is_weak1: bool, tag2: string, is_weak2: bool): bool {
     return std.mem.eql(u8, tag1, tag2);
 }
 
-pub fn appendToHeaders(bytes: string, headers: *bun.http.Headers): void! {
+pub fn appendToHeaders(bytes: string, headers: *bun.http.Headers)! {
     zig {
         const hash = std.hash.XxHash64.hash(0, bytes);
         var etag_buf: [40]u8 = undefined;

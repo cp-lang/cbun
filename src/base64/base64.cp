@@ -107,7 +107,7 @@ export struct Base64Decoder {
         return result;
     }
 
-    fn decode(*dest: u8[], source: string): void! {
+    fn decode(*dest: u8[], source: string)! {
         if (pad_char != null && source.len % 4 != 0) {
             return err.InvalidPadding;
         }
@@ -188,7 +188,7 @@ export struct Base64DecoderWithIgnore {
         return result;
     }
 
-    fn decode(*dest: u8[], source: string, *wrote: usize): void! {
+    fn decode(*dest: u8[], source: string, *wrote: usize)! {
         let acc: u32 = 0;
         let acc_len: u32 = 0;
         let dest_idx: usize = 0;

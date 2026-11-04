@@ -157,3 +157,15 @@
   - `src/http_types/ETag.cp`: `appendToHeaders(...): !void` 统一更新为 `void!`；
   - `src/sourcemap/VLQ.cp`: `writeTo(...): !void` 统一更新为 `void!`；
   - 各模块重新编译生成对应 `.zig` 并通过 `zig fmt` 格式化。
+- 2026-11-04 上游 CP 编译器 (`/data/dev/cp/cpc`) 与设计规范升级：
+  - `src/parser.rs`, `src/codegen.rs`: 语法解析器全面支持 `void!` 正交省略语法 `fn sum()!` 与 `fn sum(): !`，在 LL(1) 预读到紧随形参列表闭括号的 `!` 时直接构建 `Type::ErrorUnion(Type::Void)`；
+  - `cp/cp_ref.md` & `/data/dev/cp/cp_ref.md`: 同步增补第 5.4 节与第 8.2.2 节关于 `fn sum()!` 契约强防御与省略规则规范；
+  - 已迁移 CP 源码全面演化升级：
+    - `src/http_types/ETag.cp`: `appendToHeaders(...): void!` 简化为 `pub fn appendToHeaders(...)!`；
+    - `src/sourcemap/VLQ.cp`: `writeTo(...): void!` 简化为 `pub fn writeTo(...)!`；
+    - `src/base64/base64.cp`: `decode(...): void!` 简化为 `fn decode(...)!`。
+- 2026-11-04 `cp/cp_ref.md` 权威语言规范全量层级编号校准与目录重整：
+  - 目录（TOC）：补充遗漏的“符号总表”与“关键字清单”索引，校准 1~13 章全量小节标题并完全对齐 GitHub Markdown 锚点链接；
+  - 层级编号重整：统一标准化全文章节与子项编号（1.1~1.12、1.2.1~1.2.2、1.3.1~1.3.3、3.3.1~3.3.3、3.5.3、4.3.1、6.1~6.12 及 6.12.1~6.12.3、9.3.1~9.3.3、10.3.1~10.3.2、11.1~11.8 及 11.8.1~11.8.11、12.1~12.3、13.1~13.3）；
+  - 消除冗余副本：彻底切除历史遗留并重复粘贴的 9.3.2/9.3.3（27 行）与 11.7.9~11.7.11（36 行）两处冗余副本；
+  - 严肃保留设计规范：规范正文零改动，纯正 TS 静态结构体字面量 `{}`、推导错误联合后缀 `T!` 以及 `void!` 省略（`fn sum()!`）等关键语法设计严密保留。
