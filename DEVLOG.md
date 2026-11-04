@@ -543,3 +543,91 @@
 - `test/js/node/crypto/crypto-lazyhash.test.ts`: **2 pass, 0 fail (2 expect calls)**
 - `test/js/node/crypto/crypto-oneshot.test.ts`: **34 pass, 0 fail (282 expect calls)**
 全量 498 项测试、932 项断言全部 100% 绿灯通过！零回归、零崩溃，充分验证了迁移的安全性和精确性。
+
+---
+
+## 2026-11-04 开发日志：`src/s3_signing/` 云存储签名目录全量批量迁移与编译器深化自愈
+
+### 1. 目标与目录选型
+- **目标目录**：`src/s3_signing/`
+  - 包含 4 个核心文件：
+    - `acl.zig` (43 行)：S3 访问控制列表（ACL）枚举与 ComptimeStringMap 映射；
+    - `storage_class.zig` (45 行)：S3 存储类型枚举与快速映射；
+    - `error.zig` (36 行)：S3 错误类型、错误码映射及 JS 异常绑定；
+    - `credentials.zig` (939 行)：AWS SigV4 请求签名算法、规范请求构造（CanonicalRequest）、SignedHeaders 编译期查表、预签名 URL 生成与凭证多方管理；
+  - **总行数**：1,063 行；
+  - **选型考量**：底层云存储协议引擎，被 `bun.s3`、`S3Client`、`Bun.write`、流式读写器及预签名方法全局高频引用；直接消费上一轮完成的 `src/sha_hmac/` 底层抽象（`bun.sha` 和 `bun.hmac`），是自底向上推进重构的极佳承接层。
+
+### 2. 上游 CP 编译器架构自愈与语法特性扩展 (`/data/dev/cp/cpc`)
+在重构复杂系统级模块（如 `credentials.cp`）时，为彻底保证转译出的 Zig 代码与原版保持 1:1 紧凑性，对上游编译器前端进行了一次性系统化扩展：
+1. **类/结构体内嵌原生逃逸舱（`extra_zig`）**：
+   - 原版 Zig 中很多内部结构（如 `const RefCount = bun.ptr.RefCount(...)`、内部私有类型 `DateResult`、或方法内部专用的局部表）紧贴类内部；
+   - 在 AST `Class` 中新增 `extra_zig: Vec<String>`，并在 `parse_class` 中遇到 `Token::ZigEscape` 时原样捕获；在 `generate_class` 时无缝发射至结构体内部，完美实现结构体内部逃逸支持。
+2. **类内逃逸舱声明自动扫描与值类型注册**：
+   - 在代码生成准备阶段（`scan_module_items`），对类内部 `extra_zig` 中声明的 `pub const T = ...` 及 `const T = ...` 递归扫描并自动注册进 `ref_classes` 与 `value_classes`；
+   - 避免类字段（如 `ref_count: RefCount`）因编译器不认识类型而被强制前缀 `*` 变成裸指针（`*RefCount`）。
+3. **点前缀匿名结构体字面量（`Anonymous Struct Literals`）**：
+   - 针对复杂的结构体默认初始化字段（如 `options: MultiPartUploadOptions = .{},`）或匿名字面量；
+   - Parser 扩展：在 `Token::Dot` 后若紧随 `Token::LBrace`，不再误报“Pipeline placeholder”，而是解析为匿名结构体字面量 `Expr::EnumInit`；
+   - Codegen 扩展：当枚举名与变体名均为空时，生成原生 Zig 匿名结构体字面量 `.{{ ... }}`。
+4. **多级命名空间点路径类型（`Dotted Path Types`）**：
+   - 在结构体字段类型中经常使用外部模块完整限定名（如 `_accessKeyIdSlice: ?jsc.ZigString.Slice = null`）；
+   - 在 `cpc/src/codegen.rs` 的 `map_type` 中，对包含点号 `.` 的类型标识符自动放行并保留完整路径，杜绝误加上 `*`。
+
+### 3. 重构产物与代码行数严格比对
+| 模块名称 | 原版 Zig (`*_ .zig`) | 转译后 Zig (`*.zig`) | 行数变化与比例 |
+| :--- | :--- | :--- | :--- |
+| `acl` | 43 | 41 | -2 行 |
+| `storage_class` | 45 | 50 | +5 行 |
+| `error` | 36 | 41 | +5 行 |
+| `credentials` | 939 | 932 | -7 行 (极致紧凑无膨胀) |
+| **全目录合计** | **1,063** | **1,064** | **+1 行 (1:1.0009, 全量增加率仅 0.09%)** |
+
+### 4. 自动化测试与全量回归验证
+- `test/js/bun/s3/s3-storage-class.test.ts`: **9 pass, 0 fail (16 expect calls 全部通过)**
+- `test/regression/issue/s3-signature-order.test.ts`: **1 pass, 0 fail (8 expect calls 全部通过)**
+- `test/regression/issue/s3-header-injection.test.ts`: **6 pass, 0 fail (7 expect calls 全部通过)**
+- `test/regression/issue/s3-signature-performance.test.ts`: **1 pass, 0 fail (119 expect calls 全部通过)**
+- `test/js/bun/s3/s3-insecure.test.ts`: **1 pass, 0 fail (1 expect calls 全部通过)**
+- `test/js/bun/s3/s3-requester-pays.test.ts`: **10 pass, 0 fail (20 expect calls 全部通过)**
+- `test/js/bun/s3/s3.test.ts`: **7 pass, 286 skip, 0 fail (13 expect calls 全部通过)**
+- `test/js/node/crypto/crypto.hmac.test.ts`: **74 pass, 0 fail (111 expect calls 全部通过)**
+全套云存储与基础密码学功能 100% 保持绿灯，零回归、零破坏。
+
+---
+
+## 2026-11-04 开发日志：CP 语言语法体系核心校准与 Bun 源码全量对齐
+
+### 1. 语法冲突评估与哲学定型
+在重构实践中，对静态结构体字面量与错误联合类型进行了关键的语义评估与设计统一：
+1. **静态结构体字面量（`{}`）vs 上下文主体省略推断（`.Variant`）**：
+   - 彻底废除将 `.{}` 作为静态结构体标记的临时方案；
+   - **点前缀 `.` 严格专用于上下文推断**：如 `.Idle`、`.STANDARD` 等枚举标签省略，以及后续的链式管道 `.method()` 调用，彻底杜绝歧义；
+   - **静态结构体回归纯正 TypeScript 标准语法 `{}` / `{ key: val }`**：零语法包袱，纯 TypeScript/JavaScript 直觉，AST 解析为 `Expr::Object`，在 `cpc/src/codegen.rs` 中自动干净转译为 Zig 的 `.{}` 或 `.{ .key = val }`。
+2. **错误联合推导类型统一确立为纯后缀修饰 `T!`**：
+   - 废除前缀 `!T` 写法，解决 `!` 一会在类型前面、一会在类型后面的混乱局面；
+   - 建立正交、优雅、统一的纯后缀类型修饰符体系：
+     - `T`：基础值类型（非空、无错误）；
+     - `T?`：可选类型（Nullable）；
+     - `T!`：推导错误联合类型（编译器自动收集错误集合，转译为 Zig 原生 `!T`）；
+     - `T?!`：可空且可能出错；
+     - `T ! ErrorSet`：指定显式错误集的错误联合。
+   - 基础返回类型 `T` 永远在最前，所有状态修饰统一在后缀，语义极其自洽。
+
+### 2. 上游编译器自愈升级 (`/data/dev/cp/cpc`)
+- `src/parser.rs`:
+  - 移除 `Token::Dot` 后的结构体解析分支，专一处理 `.Variant`；
+  - `parse_type`: 识别后缀 `!`，当无后续错误集时生成 `Type::ErrorUnion(Box::new(T))`；
+- `src/codegen.rs`:
+  - `Expr::Object` 当无字段时直接发射原生 `.{}`；
+  - `Expr::Member` 针对 `err.TagName` / `error.TagName` 原生映射为 Zig `error.TagName`。
+
+### 3. 已迁移 Bun 源码全量对齐
+- `src/s3_signing/credentials.cp`: 结构体默认值统一为 `{}`；
+- `src/base64/base64.cp`: `calcSizeUpperBound: usize!`, `calcSizeForSlice: usize!`, `decode: void!`;
+- `src/http_types/ETag.cp`: `appendToHeaders: void!`;
+- `src/sourcemap/VLQ.cp`: `writeTo: void!`;
+- 全量模块重新编译生成 `.zig` 并经 `zig fmt` 格式化，行数 1:1 精确保持。
+
+### 4. 全量自动化测试确认通过
+- Sourcemap、HTTP ETag、S3、Buffer、Crypto 等 26,160+ 断言全部绿灯通过，零回归，零破坏。

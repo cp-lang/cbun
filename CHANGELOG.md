@@ -134,3 +134,26 @@
     - 消除未使用参数的冗余 `_ = &param;`：自动递归扫描函数体及内嵌 `zig { ... }` 块中参数标识符的使用情况，只有在参数未被使用时才生成 `_ = param;`，杜绝无用地址获取与行数虚增；
     - 完善 `zig { ... }` 原生逃逸舱类型注册：对逃逸舱中声明的 `pub const T = ...` 及 `const T = ...` 自动注册为紧凑值类型（`ref_classes` & `value_classes`），避免 CP 函数签名在引用逃逸舱类型时错误添加指针前缀 `*T`。
 - `cp/cp_ref.md` & `/data/dev/cp/cp_ref.md`: 同步增补 11.7.12 节《原生逃逸舱类型映射与参数引用优化》。
+
+- 2026-11-04 `src/s3_signing/` 核心云存储协议目录全量批量迁移完成 (100% 紧凑无膨胀转译):
+  - `src/s3_signing/acl.cp` -> `src/s3_signing/acl.zig` (41 行 vs 原版 `acl_.zig` 43 行)
+  - `src/s3_signing/storage_class.cp` -> `src/s3_signing/storage_class.zig` (50 行 vs 原版 `storage_class_.zig` 45 行)
+  - `src/s3_signing/error.cp` -> `src/s3_signing/error.zig` (41 行 vs 原版 `error_.zig` 36 行)
+  - `src/s3_signing/credentials.cp` -> `src/s3_signing/credentials.zig` (932 行 vs 原版 `credentials_.zig` 939 行)
+  - 目录整体原版总行数 1,063 行，重构转译产物总行数 1,064 行，全量行数净增仅 +1 行（比例 1:1.0009，增加率仅 0.09%），极致紧凑 1:1 对齐。
+- 上游 CP 编译器 (`/data/dev/cp/cpc`):
+  - `src/ast.rs`, `src/parser.rs`, `src/codegen.rs`, `src/sema.rs`:
+    - 类与结构体支持内嵌 `zig { ... }` 原生逃逸舱（`extra_zig`），并在结构体内部原位发射；
+    - 类内 `extra_zig` 声明的常量别名自动扫描并注册为值类型白名单（`value_classes` 与 `ref_classes`），防止结构体字段类型被误加裸指针；
+    - 支持类型注解中多级点路径类型（`Dotted Path Types`，如 `jsc.ZigString.Slice`），保持原生值语义发射；
+    - 废除 `.{}` 静态结构体标记，前缀点号 `.` 严格专一保留用于上下文主体推断（如 `.Variant` 枚举标签省略、链式成员调用）；
+    - 静态结构体字面量全面采用纯正 TypeScript 标准语法 `{}` / `{ key: val }`，零开销直译为 Zig 的 `.{}` / `.{ .key = val }`；
+    - 推导错误联合类型统一采用纯后缀语法 `T!`（例如 `usize!`, `void!`），映射为 Zig 原生 `!T`；
+    - 修复即席错误字面量 `err.TagName` / `error.TagName` 自动转译映射为 Zig `error.TagName`。
+- `cp/cp_ref.md` & `/data/dev/cp/cp_ref.md`: 同步增补 13.3 节《静态结构体字面量、结构体内逃逸舱与多级命名空间类型规范》与 8.2 节《推导错误联合后缀语法》。
+- 2026-11-04 已迁移 CP 源码全量语法对齐整改：
+  - `src/s3_signing/credentials.cp`: 结构体默认值采用纯正 TS 语法 `{}`；
+  - `src/base64/base64.cp`: `!usize` / `!void` 统一更新为标准后缀修饰 `usize!` 与 `void!`；
+  - `src/http_types/ETag.cp`: `appendToHeaders(...): !void` 统一更新为 `void!`；
+  - `src/sourcemap/VLQ.cp`: `writeTo(...): !void` 统一更新为 `void!`；
+  - 各模块重新编译生成对应 `.zig` 并通过 `zig fmt` 格式化。

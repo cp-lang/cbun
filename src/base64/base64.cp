@@ -76,7 +76,7 @@ export struct Base64Decoder {
         return result;
     }
 
-    fn calcSizeUpperBound(source_len: usize): !usize {
+    fn calcSizeUpperBound(source_len: usize): usize! {
         let result = (source_len / 4) * 3;
         let leftover = source_len % 4;
         if (pad_char != null) {
@@ -92,7 +92,7 @@ export struct Base64Decoder {
         return result;
     }
 
-    fn calcSizeForSlice(source: string): !usize {
+    fn calcSizeForSlice(source: string): usize! {
         let source_len = source.len;
         let result = calcSizeUpperBound(source_len)?;
         if (pad_char != null) {
@@ -107,7 +107,7 @@ export struct Base64Decoder {
         return result;
     }
 
-    fn decode(*dest: u8[], source: string): !void {
+    fn decode(*dest: u8[], source: string): void! {
         if (pad_char != null && source.len % 4 != 0) {
             return err.InvalidPadding;
         }
@@ -188,7 +188,7 @@ export struct Base64DecoderWithIgnore {
         return result;
     }
 
-    fn decode(*dest: u8[], source: string, *wrote: usize): !void {
+    fn decode(*dest: u8[], source: string, *wrote: usize): void! {
         let acc: u32 = 0;
         let acc_len: u32 = 0;
         let dest_idx: usize = 0;
@@ -362,7 +362,7 @@ zig {
         errdefer allocator.free(dest);
         const result = decode(dest, input);
         if (!result.isSuccessful()) {
-            return err.DecodingFailed;
+            return error.DecodingFailed;
         }
         return dest[0..result.count];
     }

@@ -1135,6 +1135,7 @@ let t4: Task = .Compute { batch: 200, priority: 7 };
 #### 3.5.4 特殊符号变体、底层标签与嵌套逃逸舱 (Escaped Identifiers & Nested Escapes)
 
 针对网络协议、系统 API 与 Web 标准等场景中出现的含连字符名称（如 `same-origin`）或语言保留关键字（如 `error`）：
+
 - CP 原生支持 `@"identifier"` 逃逸标识符字面量；
 - 支持为无载荷枚举指定底层定长整型标签类型（如 `: u2`、`: u3`、`: u8`）；
 - 支持在枚举体内直接使用局部 `zig { ... }` 逃逸舱注入编译期元数据（如 `ComptimeStringMap`），实现与宿主系统的零开销互操作：
@@ -1394,6 +1395,7 @@ class Account {
 ```
 
 > **方法前缀与静态函数规则**：
+>
 > 1. **只读接收者缺省**：非 `static` 函数在类/结构体中默认均为实例方法，若仅为只读借用，形参列表里的 `_` **完全可以省略**；
 > 2. **内部成员直接访问**：方法体内访问属性或兄弟方法时，直接裸写 `field` 或 `method(...)`。只有当形参或局部变量与类字段同名发生**作用域遮蔽（Shadowing）**时，才需使用 `_.field` 消除二义性；
 > 3. **静态函数明确隔离**：静态方法必须显式冠以 `static` 关键字（如 `static fn create(): Account`），与实例方法正交隔离，绝不产生识别混淆。
@@ -1423,44 +1425,32 @@ class Account {
 > 底层模型借鉴Rust所有权系统，但是语法采用CP自定义借用标记：`&T` 只读借用、`*T` 可变借用；显式 `move` 关键字转移所有权。
 > 核心纲领：**每一个值有且仅有一个所有者；所有者离开作用域，资源自动释放；借用不接管所有权，遵守借用互斥规则。**
 
-### 1. 所有权基础规则
+CP 语言通过编译器底层的“所有权、隐式借用、读写互斥与零摩擦生命周期”四大支柱，实现了对标 Rust 的 100% 编译期内存安全，同时彻底摒弃了 Rust 繁琐的 `<'a>` 生命周期泛型传染与冗长的 `&mut` 噪音，完美保留了 TypeScript 般丝滑的开发心智。
 
-1. 任何栈/堆分配的值，都拥有唯一所有者（绑定到某个变量）。
-2. 当所有者变量离开作用域（代码块结束、函数return），资源自动销毁释放，无需GC、无需手动free。
-3. 默认行为：**复制语义 vs 移动语义**
-   - 基础值类型（`bool`、u/i整数、f32/f64）：默认是拷贝（Copy），赋值、传参自动复制副本，所有权不变。
-   - 复合类型（`struct`、`class`、`[]T`切片、string、自定义枚举）：默认赋值是move 转移所有权，**不自动复制**
-   - 函数参数，转移所有权，必须显式写 `move`。
+### 1. 借用、所有权与指针符号统一标准 (Global Symbol Matrix)
 
-```cp
-// 基础类型，默认拷贝
-let a:i32 = 10;
-let b = a; // 副本，a仍然有效
+- **`&`（Ampersand）**：代表 **只读借用（Read-Only Borrow）**（在默认只读的位置可省略 `&`）。
+- **`*`（Star，无尾置 `!`）**：代表 **安全可变借用（Mutable Borrow）**（因指针解引用采用后缀 `p.*`，前置 `*` 全局专职代表受编译器生命周期与读写互斥保护的可变借用）。
+- **`*... !`（前置 `*` + 尾置 `!`）**：代表 **Unsafe 裸指针（Raw Pointer）**（前置 `*` 个数代表指针层级，尾置 `!` 代表非托管裸指针，仅限 `unsafe` 块内使用）。
+- **`move`（及直接赋值 `let a = b`）**：代表 **所有权转移（Ownership Transfer）**。
 
-// 复合类型，不能隐式转移
-let s:User = User{id:1, name:"cp"};
-let s2 = s; // ✅ 所有权转移到s2；s 此后失效，不可访问
-```
+### 2. 语法
 
-### 2. 所有权转移 move
+| 语法场景                    | 只读借用 (Read-Only)                                                | 可变借用 (Mutable)                                     | 所有权转移 (Move)                              | Unsafe 裸指针 (Raw Ptr)          |
+| :-------------------------- | :------------------------------------------------------------------ | :----------------------------------------------------- | :--------------------------------------------- | :------------------------------- |
+| **1. 函数参数**             | `fn f(x: T)` _(默认省略)_<br>_(兼容显式 `fn f(&x: T)`)_             | **`fn f(*x: T)`**<br>_(或 `fn f(x: *T)`)_              | **`fn f(move x: T)`**                          | `unsafe fn f(p: *T!)`            |
+| **2. 变量赋值**             | **`let a = &b`**                                                    | **`let a = *b`**                                       | **`let a = b`**<br>_(或 `let a = move b`)_     | `let a = *b!`<br>`let pp = **a!` |
+| **3. 类型声明 / 返回值**    | **`: &T`**                                                          | **`: *T`**                                             | **`: T`**                                      | **`: *T!`** / **`: **T!`**       |
+| **4. 对象/结构 `this`/`_`** | `fn get()` _(默认省略 `_`)_<br>*(兼容 `fn get(_)` / `fn get(&_)`) * | **`fn set(*_, v: i32)`**<br>_(兼容 `*this` / `mut _`)_ | **`fn close(move _)`**<br>_(兼容 `move this`)_ | —                                |
+| **5. `for` 循环迭代**       | `for x of list` _(默认省略)_<br>_(兼容 `for &x of list`)_           | **`for *x of list`**                                   | **`for move x of list`**                       | —                                |
 
-关键字 `move`：显式把一个值的所有权，从当前变量转移到目标位置（赋值、函数传参、返回）。
+## 3. 所有权与自动释放 (Ownership & Auto-Drop)
 
-- move之后：源变量进入失效状态，编译器阻止后续读取/修改源变量。
-- move 是浅转移：只转移管理权，不拷贝底层内存。
-- move 可以作用于普通值、可空值 `?T`、错误联合 `T!E`、结构体、类实例。
-
-```cp
-fn take_owner(u: move User): void {
-    // 本函数拿到User所有权，函数退出自动释放
-}
-
-let u = User{id:2, name:"test"};
-take_owner(move u); // ✅ move传入，u失效
-// print(u); // ❌ 编译报错，所有权已经移走
-```
-
-> 函数返回自动移交所有权，不需要在return处额外写move：
+- **局部变量去冗余**：废除局部变量的 `let mut`，统一使用 `let`（可变绑定）与 `const`（深度不可变）。
+- **严禁同作用域重复声明变量（No Same-Scope Redeclaration & `*` Wildcard）**：对标 TypeScript 与 Zig 的工程安全直觉，在同一个 `{}` 块作用域或同一个解构/模式匹配中严禁重复绑定同名变量（如连续写 `let v = 10; let v = [10, 20];`、`let [a, a] = [1, 2];` 或 `let [_, _] = [1, 2];`），编译器将直接报错拦截：`Compile Error: Cannot redeclare block-scoped variable 'v'`。**注意：CP 的模式匹配与解构通配符是 `*`（而非 `_`），`_` 是类/结构体方法接收者 `this` 的别名或普通变量标识符，重复使用 `_` 同样触发同名编译报错，丢弃元素请使用 `[*, second, *]` 或 `let * = expr;`。**
+- **创建即拥有**：`let tensor = new Tensor();` 创建对象时，`tensor` 拥有该堆内存的唯一所有权。
+- **作用域释放 (RAII)**：当所有者变量离开作用域且未被转移所有权时，编译器自动注入 `defer tensor.release()`（无需 GC，零停顿）。
+- 函数返回自动移交所有权，不需要在return处额外写move：
 
 ```cp
 fn new_user(): User {
@@ -1468,73 +1458,61 @@ fn new_user(): User {
 }
 ```
 
-### 3. 借用体系（安全域，默认开启借用检查）
+- **赋值即 Move**：`let a = b;`（或显式 `let a = move b;`）会将 `b` 的所有权转移给 `a`；而 `let a = &b;` 创建只读借用，`let a = *b;` 创建可变借用。所有权转移后继续访问 `b` 将触发编译期错误：`CP Compile Error: Use of moved value`。
 
-借用**不转移所有权**，只是临时获取访问权限；所有者依然持有资源，负责最终释放。
-两种借用类型：
+## 4. 隐式借用与读写推导 (Implicit Borrow Deduction)
 
-| 写法 | 名称     | 权限                           |
-| ---- | -------- | ------------------------------ |
-| `&T` | 只读借用 | 共享、只读，不能修改背后的值   |
-| `*T` | 可变借用 | 独占、可读写，可以修改背后的值 |
+函数传参默认**不转移所有权**，而是由编译器自动生成**隐式借用**。借用权限由函数签名中的**参数修饰符**决定：
 
-```cp
-let val:i32 = 100;
-let r_read: &i32 = &val;    // 只读借用
-let r_write: *i32 = *val;   // 可变借用
-```
+- **只读借用 (默认或 `&`)**：`fn view(data: Tensor)`（或 `fn view(&data: Tensor)`）-> 调用 `view(a)` 时，自动传入只读引用 `&T`，函数内禁止修改。
+- **可变借用 (`*`)**：`fn modify(*data: Tensor)`（或 `fn modify(data: *Tensor)`，兼容 `mut data: Tensor`）-> 调用 `modify(a)` 时，自动传入可变引用 `*T`，允许原地修改。
+- **转移所有权 (`move`)**：`fn consume(move data: Tensor)` -> 调用 `consume(a)` 时，转移所有权，调用后外层 `a` 立即失效。
+- **借用本身也可以被借用**：可以对 `&T`、`*T` 再次取只读借用。
 
-成员访问约定（非常重要，前面敲定）：
+## 5. 借用检查器规则与可变借用操作规范 (Borrow Checker & Mutable Borrow Operations)
 
-> 借用变量访问成员，直接 `.`，编译器自动隐式解引用；**不需要手动写解引用符号**
+- **读写互斥**：在同一有效生命周期内，允许存在多个只读借用（`&T`），或仅允许存在**唯一一个**可变借用（`*T`）。可变借用与任何其他借用严格互斥。
+- **借用期间锁定所有者**：当变量 `a` 存在尚未结束的活跃借用 `r`（即 `r` 在后续代码中还会被读取）时，严禁将 `a` 的所有权 Move 转移或对其进行破坏性修改。不能对已经move走的值创建借用。
+- **可变借用变量的三类核心操作（自动解引用与显式 `.*`）**：
+  1. **基础值类型（`i32`, `f32`, `bool` 等）**：通过后缀解引用 `p.* = val` 原地修改所借用变量的值；
+  2. **结构体 / 对象字面量（`{a: 10, b: 20}` / `struct` / `class`）**：支持自动解引用，直接通过 `p.a = val` 原地修改字段；
+  3. **容器类型（`Array` / `Vec` / `T[]`, `Map`, `Set`, `Dict`）**：支持自动解引用，直接通过 `p.push(...)`、`p.pop()`、`p.set(...)`、`p.add(...)`、`p.delete(...)`、`p.clear()`、`p[idx] = val` 原地修改容器内容。
+  ```cp
+  // 1. 基础类型可变借用：后缀 .* 解引用赋值
+  {
+      let v = 10;
+      let p = *v;
+      p.* = 20; // v 同步变为 20
+  }
 
-```cp
-struct User { id: u64 }
-let u = User{id: 10};
-let ru: &User = &u;
-print(ru.id); // ✅ 直接 . 访问，自动解引用
-```
+  // 2. 对象/结构体可变借用：自动解引用修改字段
+  {
+      let v = {a: 10, b: 20};
+      let p = *v;
+      p.a = 100; // v.a 同步变为 100
+  }
 
-借用本身也可以被借用：可以对 `&T`、`*T` 再次取只读借用。
+  // 3. 数组/容器可变借用：自动解引用调用可变方法与索引赋值
+  {
+      let v = [10, 20];
+      let p = *v;
+      p.push(30); // v 同步扩容为 [10, 20, 30]
+      p[1] = 25;
+  }
+  ```
+- **容器改变操作全面纳入可变借用检查 (`Array` / `Vec`, `Map`, `Set`, `Dict`)**：
+  - **受检容器改变操作清单**：
+    - `Array<T>` / `Vec<T>` / `T[]`：`push(v)`、`pop()`、`clear()`、索引写入 `arr[i] = v`、`for *x of arr` 原地可变遍历；
+    - `Map<K, V>`：`set(k, v)`、`delete(k)`、`clear()`、索引写入 `map[k] = v`；
+    - `Set<T>`：`add(v)`、`delete(v)`、`clear()`；
+    - `Dict<K, V>` (`#{}`)：`set(k, v)`、`put_all(other)`、`delete(k)`、`clear()`、索引写入 `dict[k] = v`。
+  - **四重编译期拦截保障**：
+    1. **禁止通过只读借用 (`&v`) 或只读参数改变容器**：如 `let r = &v; r.push(30);` 直接报错 `Cannot perform mutable operation (container method 'push') through read-only borrow 'r'`；
+    2. **读写互斥与活跃借用冲突拦截**：当容器存在活跃的只读借用 `let r = &m;` 或另一个可变借用时，对原容器或冲突借用执行 `set`/`push`/`delete`/`clear`/`[] =` 立即报错 `Borrow conflict on 'm': cannot borrow as mutable while 'r' is still active`；
+    3. **防御迭代器失效（Loop-Borrow Lock）**：在 `for x of container` 或 `for *x of container` 遍历期间，严禁在循环体内对该容器（或其借用别名）调用 `push`、`pop`、`set`、`add`、`delete`、`clear` 或重赋值；
+    4. **Use-After-Move 拦截**：容器所有权 `move` 转移后，任何读写或方法调用立即报错拦截。
 
-### 4. 借用检查核心约束（借用检查器强制执行）
-
-同一时间，对同一个所有者的值，只能满足下面其中一条规则（Rust经典借用规则，CP沿用）：
-
-1. 允许多个 **只读借用 `&T`** 同时共存；
-2. 或者，**最多一个可变借用 `*T`**；
-3. 只读借用 和 可变借用 **不能同时共存**。
-
-额外约束：
-
-- 借用不能比所有者活得更久（生命周期校验）；所有者先销毁，则所有借用全部失效，编译拦截。
-- 不能对已经move走的值创建借用。
-
-✅ 合法示例：多个只读借用
-
-```cp
-let x = 99;
-let r1 = &x;
-let r2 = &x;
-```
-
-❌ 非法示例：只读借用 + 可变借用共存
-
-```cp
-let x = 99;
-let r1 = &x;
-let r2 = *x; // 报错：存在活跃只读借用，不能创建可变借用
-```
-
-❌ 非法示例：多个可变借用共存
-
-```cp
-let x = 99;
-let r1 = *x;
-let r2 = *x; // 报错：同一值只允许一个可变借用
-```
-
-### 5. 借用、可空、错误联合交互规则
+### 6. 借用、可空、错误联合交互规则
 
 1. `?T`（可空类型）：只有当switch确认不为null之后，才允许对内部T创建借用；对null分支取借用编译报错。
 2. `T!E`（错误联合）：只有switch匹配到正常T分支，才能对T创建借用；err分支不能取T的借用。
@@ -1552,7 +1530,7 @@ switch(maybe) {
 }
 ```
 
-### 6. 借用与裸指针边界（unsafe逃逸）
+### 7. 借用与裸指针边界（unsafe逃逸）
 
 > 裸指针 `*T!` / `**T!` 不属于借用体系，**不受借用检查器保护**，仅能在 `unsafe {}` 块内使用。
 
@@ -1584,6 +1562,7 @@ CP 保留生命周期检查保证借用不悬垂，但是**不暴露显式生命
 - 编译器自动推导借用生命周期；
 - 禁止借用逃逸出所有者的作用域；
 - 暂时不支持手写生命周期参数，降低复杂度。
+- 借用不能比所有者活得更久（生命周期校验）；所有者先销毁，则所有借用全部失效，编译拦截。
 
 ❌ 悬垂借用（编译拦截）
 
@@ -1814,12 +1793,13 @@ CP 原生引入**三态原生值类型（3-State Value Type）**，彻底终结�
 #### 8.2.1 3 字母极简哲学与大小写镜像对称（`err` vs `Err` vs `errdefer`）
 
 CP 语言在错误处理体系中全面采用 **3 字母极简与大小写镜像对称哲学**：
+
 - **小写 `err`（定义、关键字与即席命名空间）**：
   - 声明错误集合：`err Base64Error { DecodingFailed, InvalidPadding }`；
   - 抛出即席错误标签：`return err.InvalidPadding;`；
   - 缺省开放错误类型：`fn parse(): string ! err`；
   - 延迟守卫前缀对齐：`errdefer alloc.free(dest);` 天然契合 `err`；
-  - *向前兼容*：保留 `error` 作为透明别名（`error.Tag` 与 `error Name { ... }`）。
+  - _向前兼容_：保留 `error` 作为透明别名（`error.Tag` 与 `error Name { ... }`）。
 - **大写 `Err`（构造器与模式匹配解包）**：
   - 构造错误值：`return Err(.HostUnreachable);` 或 `return Err("Timeout");`；
   - 模式匹配解包：`switch (res) { Err(e) => ..., data => ... }`。
@@ -1827,6 +1807,7 @@ CP 语言在错误处理体系中全面采用 **3 字母极简与大小写镜像
 #### 8.2.2 极简推导错误联合（`!T`）与即席错误字面量（`err.TagName`）
 
 在日常业务逻辑、纯算法与底层计算模块中，CP 推荐使用最精炼的**推导错误联合**：
+
 - **函数签名**：使用前缀感叹号 `!T`（如 `!usize`, `!u8[]`, `!void`），无需预先定义冗长的错误枚举；
 - **错误抛出**：直接返回即席错误字面量 `return err.TagName;`（`err` 为内置语法关键字，无需任何模块导入）；
 - **底层映射**：在底层转译为 Zig 的推导错误联合 `anyerror!T` 与 `error.TagName`，由编译器在编译期（Comptime）自动收集函数内所有抛出的错误标签。
@@ -1897,18 +1878,21 @@ fn ping(host: string): string ! NetworkError {
     return "PONG";
 }
 ```
+
     Timeout,
     ConnectionReset,
     HostUnreachable
+
 }
 
 fn ping(host: string): string ! NetworkError {
-    if host == "" {
-        return Err(.HostUnreachable);
-    }
-    return "PONG";
+if host == "" {
+return Err(.HostUnreachable);
 }
-```
+return "PONG";
+}
+
+````
 
 ---
 
@@ -1927,7 +1911,7 @@ let safe_res = ping("bad.host") ? "FALLBACK_HOST";
 // 遇到 null 时回退
 let opt_val: string? = null;
 let text = opt_val ?? "default_text";
-```
+````
 
 ---
 
@@ -3429,6 +3413,7 @@ export class NativeBuffer {
 #### 11.7.1 模块级精细化摇树按需注入 (Module Features Tree-Shaking)
 
 编译器对每个 CP 模块进行前置静态 AST 特征扫描（`ModuleFeatures`）：
+
 - **全域按需注入**：仅当模块显式使用了对应语法或特性时，才发射对应的运行时辅助代码。
 - **纯计算模块零死代码**：若模块未引入 Actor、集合容器、反射元数据或正则，编译器彻底切除全套 `PID`、`Message`、`Map/Dict/Set`、`TypeInfo` 等运行时结构，杜绝数千行死代码膨胀。
 - **示例收益**：如 `wyhash` 纯哈希模块转译代码由初始 2,401 行剧降至 256 行，极度贴近手写原生 Zig。
@@ -3436,6 +3421,7 @@ export class NativeBuffer {
 #### 11.7.2 标量与无析构类型 Drop Guard 彻底豁免
 
 传统所有权语言在生成中间代码时往往会为所有局部变量添加守卫标记（Drop Flag）。CP 编译器通过编译期内省实施严格的豁免规则：
+
 - **纯标量与原始类型**：`u8`~`u128`、`i8`~`i128`、`f32`/`f64`、`bool`、原生切片 `[]T`、原生裸指针直接声明为标准 Zig 局部变量，零守卫开销；
 - **POD 结构体**：凡未显式声明 `release(*this)` 析构方法的普通结构体（如 `WyhashStateless`），完全免除 `_moved` 标志与 `defer release()` 注入；
 - **独占资源精准守护**：仅对实现了 `release(*this)` 的资源类型、动态容器与胖指针自动生成安全的析构守卫。
@@ -3443,6 +3429,7 @@ export class NativeBuffer {
 #### 11.7.3 原生 Zig Switch 模式发射与多模式联合展开
 
 对于字面量匹配分支及多模式联合（如 `'|' | '\\' | '{' =>`），编译器自动跳过中间嵌套块作用域，直接发射为原生紧凑的 Zig 语句：
+
 ```zig
 switch (c) {
     '|', '\\', '{' => { ... },
@@ -3450,6 +3437,7 @@ switch (c) {
     else => { ... },
 }
 ```
+
 完全避免标签化跳转块（`__sw_blk_*`），显著提升 Zig 编译器的增量构建速度与内联优化效率。
 
 #### 11.7.4 原生空值比较（Null Comparison）与零成本指针/可选类型解包
@@ -3459,16 +3447,19 @@ switch (c) {
 #### 11.7.5 点路径显式错误联合与原生返回声明
 
 在对接外部或底层系统（如 Bun 原生 Writer）时，支持声明显式点路径错误类型：
+
 ```typescript
 pub fn escapeRegExp(input: string, writer: *std.Io.Writer): void ! std.Io.Writer.Error {
     ...
 }
 ```
+
 编译器自动将其对齐为 Zig 原生错误联合 `std.Io.Writer.Error!void`，并对 `void` 结果发射干净的 `return;`，消除多余的结构体包装开销。
 
 #### 11.7.6 顶层函数前向引用与声明顺序解耦 (Top-Level Function Forward References)
 
 在 CP 模块中，顶层函数支持声明顺序无关的前向引用调用（Forward References）：
+
 - **多阶段语义扫描（Multi-Pass Sema）**：语义分析器在 Pass 1 预注册当前模块所有顶层函数的签名（`Decl::Func`）至符号表；
 - **自然调用顺序**：允许顶层函数自由调用在文件下方声明的私有或辅助函数（如 `encode` 自由调用下方定义的 `encodeSlowPath`），消除传统 C 语言的前向声明负担；
 - **相互递归友好**：天然支持顶层函数之间的相互递归与循环依赖调用。
@@ -3476,12 +3467,14 @@ pub fn escapeRegExp(input: string, writer: *std.Io.Writer): void ! std.Io.Writer
 #### 11.7.7 原生逃逸舱符号预扫与双向无缝集成 (Native Escape Hatch Symbol Pre-Scanning)
 
 为了让 CP 逻辑与外部 Zig 上下文实现零成本互操作：
+
 - **符号预检与作用域注入**：编译器在语义分析阶段自动预扫描模块顶层 `zig { ... }` 块内声明的符号（`const`, `var`, `fn`），并将标识符自动注入 CP 根作用域（`scopes[0]`）；
 - **查找表与常量无感复用**：CP 原生算法可直接按名访问 `zig { ... }` 中声明的编译期查找表（如 `@setEvalBranchQuota` 构建的 `vlq_lookup_table` 或 `base64_lut`），无需重复映射或通过繁琐的外部包装访问。
 
 #### 11.7.8 根结构体（`@root struct`）与原生 `@This()` 映射规范
 
 在重构类似 Zig 独有的“文件即结构体”（`@This()`）底层模块时，CP 语言提供了优雅的 `@root` 装饰器机制：
+
 - **纯正结构体建模**：使用 `export @root struct Name { ... }` 编写纯正的 CP 结构体定义，支持字段声明、默认值赋初值（如 `len: u8 = 0`）与 `@inline` 实例方法；
 - **原生文件级结构体展开**：CP 编译器遇到 `@root` 结构体时，自动将其映射发射为 Zig 文件顶层根作用域：
   ```zig
@@ -3498,6 +3491,7 @@ pub fn escapeRegExp(input: string, writer: *std.Io.Writer): void ! std.Io.Writer
 在底层高性能系统开发中，诸如句柄、短索引、紧凑枚举包装等小型 POD 结构体（如 `Compact { value: u14 }`）通常需要像原生标量一样按值传递，避免指针解引用的间接开销，并支持在临时右值上直接调用成员方法（例如 `Compact.from(entry).toMimeType()`）。
 
 CP 提供了 `@value` 装饰器：
+
 ```typescript
 export @value struct Compact {
     value: Table,
@@ -3511,6 +3505,7 @@ export @value struct Compact {
     }
 }
 ```
+
 - **值接收者发射**：编译器将成员方法的 `this` 接收者直接转译为值拷贝 `self: Compact`，而非指针借用 `self: *const Compact`；
 - **免除多余析构与移动守卫**：`@value` 结构体天然免疫析构守卫代码生成，零开销、零冗余胶水；
 - **支持右值链式调用**：在转译至 Zig 目标代码时，调用临时对象方法不会触发“taking pointer of rvalue”的 Zig 编译报错。
@@ -3518,6 +3513,7 @@ export @value struct Compact {
 #### 11.7.10 原生二元比较（`==` / `!=`）与枚举/布尔/数值直接发射
 
 在早期编译模式中，二元比较易误触发泛型比较器 `cp_eq`，引入数十行字符串与反射辅助模板。现代 CP 编译器内置智能二元分流器：
+
 1. **数值/指针/字面量原生比较**：任一操作数为整型、浮点型、布尔型或 `null` 时，直接发射 `(a == b)` 或 `(a != b)`；
 2. **枚举变体原生比较**：当操作数涉及无载荷枚举变体（如 `.text`、`.image`）或枚举类型时，直接发射原生 Zig `(self.category == .text)`，不引入任何辅助模板；
 3. **摇树按需注入**：仅在两个动态字符串或未知复杂对象等值比较时，才精确激活 `needs_equality` 运行时支持。
@@ -3531,6 +3527,7 @@ CP 编译器在每个库模块头部自动注入 `const string = []const u8;`。
 在底层高性能系统开发中，诸如句柄、短索引、紧凑枚举包装等小型 POD 结构体（如 `Compact { value: u14 }`）通常需要像原生标量一样按值传递，避免指针解引用的间接开销，并支持在临时右值上直接调用成员方法（例如 `Compact.from(entry).toMimeType()`）。
 
 CP 提供了 `@value` 装饰器：
+
 ```typescript
 export @value struct Compact {
     value: Table,
@@ -3544,6 +3541,7 @@ export @value struct Compact {
     }
 }
 ```
+
 - **值接收者发射**：编译器将成员方法的 `this` 接收者直接转译为值拷贝 `self: Compact`，而非指针借用 `self: *const Compact`；
 - **免除多余析构与移动守卫**：`@value` 结构体天然免疫析构守卫代码生成，零开销、零冗余胶水；
 - **支持右值链式调用**：在转译至 Zig 目标代码时，调用临时对象方法不会触发“taking pointer of rvalue”的 Zig 编译报错。
@@ -3551,6 +3549,7 @@ export @value struct Compact {
 #### 11.7.10 原生二元比较（`==` / `!=`）与枚举/布尔/数值直接发射
 
 在早期编译模式中，二元比较易误触发泛型比较器 `cp_eq`，引入数十行字符串与反射辅助模板。现代 CP 编译器内置智能二元分流器：
+
 1. **数值/指针/字面量原生比较**：任一操作数为整型、浮点型、布尔型或 `null` 时，直接发射 `(a == b)` 或 `(a != b)`；
 2. **枚举变体原生比较**：当操作数涉及无载荷枚举变体（如 `.text`、`.image`）或枚举类型时，直接发射原生 Zig `(self.category == .text)`，不引入任何辅助模板；
 3. **摇树按需注入**：仅在两个动态字符串或未知复杂对象等值比较时，才精确激活 `needs_equality` 运行时支持。
@@ -3772,8 +3771,22 @@ cpc emit-types src/url.cp -o src/url.d.cp
 ### 13.2 原生逃逸舱类型映射与参数引用优化
 
 在与 Zig 原生代码深度混编时：
+
 1. **原生类型声明自动识别**：在 `zig { ... }` 块中声明的 `pub const T = ...` 或 `const T = ...` 常量别名，编译器会自动将其纳入值类型白名单。在 CP 函数签名中引用时直接发射原生类型标识符 `T`，而不是强加堆指针 `*T`；
 2. **未使用参数精确抑制**：函数参数在函数体内或内嵌 `zig { ... }` 原生块中已被引用时，编译器不再发射冗余的 `_ = &param;` 取地址操作；仅在参数真正未被任何代码使用时发射符合 Zig 官方规范的 `_ = param;`。
+
+### 13.3 结构体扩展逃逸舱、多级命名空间类型与标准 TS 静态结构体字面量
+
+1. **类与结构体内部内嵌 `zig { ... }`**：
+   允许在 `class` 或 `@value struct` 作用域内部直接内嵌 `zig { ... }` 原生逃逸舱，用于声明紧密绑定的内部引用计数器（如 `RefCount`）、常量查找表或底层 JSC 回调（如 `pub const toJS = ...;`）。编译器自动提取并在类结构体内无缝发射。
+2. **标准 TS 静态结构体字面量（`{}` / `{ key: val }`）与符号职责清晰划分**：
+   - **静态结构体**：遵循纯正 TypeScript 现代语法，直接使用 `{}`（默认空结构体）或 `{ key: val }`（匿名紧凑结构体），转译发射为原生紧凑的 Zig 结构体字面量（`.{}` / `.{ .key = val }`），零语法心智负担；
+   - **点前缀 `.`**：**严格专属于上下文主体推断与成员省略**（如 `.Variant` 枚举标签推断、`.method()` 管道主体调用），严禁作为结构体标记，杜绝与上下文主体推断产生语义二义性；
+   - **动态字典**：使用 `#{ key: val }`（专属于堆分配哈希字典）。
+3. **多级命名空间点路径类型（`Dotted Path Types`）**：
+   支持在类型注解中使用多级命名空间类型（如 `jsc.ZigString.Slice`、`std.mem.Allocator` 等），编译器自动识别其为外部原生值类型并保留完整路径，杜绝错误附加 `*` 指针前缀。
+4. **推导错误联合后缀语法（`T!`）**：
+   函数返回推导错误联合时，统一采用后缀语法 `T!`（如 `fn parse(): usize!`、`fn write(): void!`），正常返回类型 `T` 永远在最前，错误由编译器自动收集，与 `T?`（可空）及 `T ! ErrorSet`（显式错误集）构建完全自洽统一的后缀类型修饰符体系。
 
 ---
 
