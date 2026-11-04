@@ -863,4 +863,62 @@ git 提交
 3. **一次性暂存与唯一提交**：
    - 执行 `git add -A` 并提交，工作区 100% 保持干净，彻底杜绝后续补丁或分支二次分叉。
 
+---
+
+### 指令 39
+**用户指令**：
+可以, 废除兼容历史写法, 只保留推荐语法, 避免代码不统一导致的混乱
+
+**执行结果**：
+1. **上游编译器前端 (`/data/dev/cp/cpc`) 决绝收束与自愈**：
+   - **彻底废除类型前缀 `?T`**：在 `cpc/src/parser.rs` 的 `parse_base_type` 中，静态拦截任何以 `Token::Question` 开头的类型声明，直接抛出精准编译错误：`Prefix '?' for optional type is deprecated in CP; use postfix 'T?' or 'T?!' instead`；
+   - **全面锁定纯后缀修饰符体系**：
+     - 可选类型：纯后缀 `T?`（如 `string?`, `User?`）；
+     - 推导错误联合：纯后缀 `T!`（如 `usize!`, `void!`）；
+     - 可选且推导错误：纯后缀正交链式 `T?!`（如 `string?!`, `User?!`，转译为 Zig 的 `!?T`）；
+     - 显式错误集联合：`T ! ErrorSet`、`T? ! ErrorSet`（转译为 Zig 的 `ErrorSet!?T`）；
+     - 无返回值可能报错：`fn func()!` 或 `fn func(): !`。
+   - 类型名永远作为 Anchor（锚点）居于最左侧首位，所有修饰状态按“业务可选 ➔ 系统错误”自左向右链式纯后缀展开，彻底消灭前缀与后缀包夹的“三明治混乱”；
+   - 经 `cargo check` 与 `cargo build` 构建并部署至全局工具链 `/data/dev/cp/cap/bin/cpc`（遵循规范，`/data/dev/cp` 仓库不作 git 提交，留待上游独立审核）。
+2. **已迁移 CP 源码全量语法对齐整改**：
+   - `src/sha_hmac/hmac.cp`：`generate(...): string?`；
+   - `src/s3_signing/credentials.cp`：`storage_class: StorageClass? = null`、`acl: ACL? = null`、`content_disposition: string? = null`、`_accessKeyIdSlice: jsc.ZigString.Slice? = null` 等 14 处类字段全面由 `?T` 重构为纯正现代后缀语法 `T?`；
+   - 经 `cpc` 重新转译生成的 Zig 目标代码保持 0 diff，机器码与运行时绝对零开销。
+3. **权威语言规范手册 (`cp/cp_ref.md`) 全面同步**：
+   - 全书第 1.3 节、2.6 节、3.3 节、6.6 节、8.1 节及 13.3 节彻底剔除 `?T` 描述；
+   - 增补第 13.3.6 节《全量确立纯后缀修饰符体系，彻底废除前缀 `?T`》，明确纯后缀语法 `T?` 与 `T?!` 为 CP 全局唯一合法规范。
+4. **全套自动化测试回归（100% 绿灯，零破坏）**：
+   - `test/js/bun/s3/s3-storage-class.test.ts`：**9 pass, 0 fail (16 expect calls 全部通过)**；
+   - `test/regression/issue/s3-signature-order.test.ts`：**1 pass, 0 fail (8 expect calls 全部通过)**；
+   - `test/regression/issue/s3-header-injection.test.ts`：**6 pass, 0 fail (7 expect calls 全部通过)**；
+   - `test/js/node/crypto/crypto.hmac.test.ts`：**74 pass, 0 fail (111 expect calls 全部通过)**；
+   - `test/js/bun/sourcemap/internal-sourcemap-roundtrip.test.ts`：**3 pass, 0 fail (1,825 expect calls 全部通过)**；
+   - 累计 93 项系统测试用例、1,967 项断言全部绿灯！
+
+---
+
+### 指令 40
+**用户指令**：
+git 提交 bun 代码库
+
+**执行结果**：
+1. **核定提交范围 (严格仅限宿主仓库 `/data/dev/bun`)**：
+   - 恪守授权约束，不对 `/data/dev/cp` 仓库进行 git 操作（留存供上游 cp agy 独立审核）；
+   - 纳入全部已迁移 CP 源码纯后缀语法演进：
+     - `src/sha_hmac/hmac.cp`：采用标准后缀语法 `generate(...): string?`；
+     - `src/s3_signing/credentials.cp`：`storage_class: StorageClass?`、`acl: ACL?`、`content_disposition: string?`、`_accessKeyIdSlice: jsc.ZigString.Slice?` 等 14 处类字段全面规范化为 `T?` 后缀；
+   - 纳入权威语言规范手册 `cp/cp_ref.md`（确立纯后缀修饰符体系 `T?` 与 `T?!` 为唯一合法规范，彻底废除前缀 `?T`，增补第 13.3.6 节）；
+   - 纳入四线全息记录文档：`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`。
+2. **全套自动化测试回归确认（100% 绿灯，零破坏）**：
+   - `test/js/bun/s3/s3-storage-class.test.ts`：**9 pass, 0 fail (16 expect calls 全部通过)**；
+   - `test/regression/issue/s3-signature-order.test.ts`：**1 pass, 0 fail (8 expect calls 全部通过)**；
+   - `test/regression/issue/s3-header-injection.test.ts`：**6 pass, 0 fail (7 expect calls 全部通过)**；
+   - `test/js/node/crypto/crypto.hmac.test.ts`：**74 pass, 0 fail (111 expect calls 全部通过)**；
+   - `test/js/bun/sourcemap/internal-sourcemap-roundtrip.test.ts`：**3 pass, 0 fail (1,825 expect calls 全部通过)**；
+   - 累计 93 项系统测试、1,967 项断言全部 PASS！
+3. **一次性暂存与唯一提交**：
+   - 执行 `git add -A` 并提交，工作区 100% 保持干净，彻底杜绝事后修改或二次提交。
+
+
+
 

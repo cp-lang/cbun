@@ -689,3 +689,32 @@
 ### 3. 回归验证与成果核验
 - 通过 `git grep -n "^## "` 与 `git grep -n "^### "` 逐项复查，全书 13 章全部小节实现连续递增、无跳号、无重复；
 - 运行针对相关模块的自动化系统测试（Sourcemap、Buffer、HTTP），测试保持 100% 绿灯全通过。
+
+---
+
+## 2026-11-04 开发日志：确立纯后缀类型体系与彻底废除前缀 `?T` 语法实战
+
+### 1. 架构决策背景与混乱诱因消除
+在语言类型体系中，可选类型（`Option/Nullable`）与错误联合（`Result/Fallible`）存在两种流派：
+- Zig 流派：前置问号 `?T` 与前置感叹号 `!T`；
+- TypeScript/现代高级语言流派：后缀问号 `T?` 与后缀链式状态。
+
+在之前的实践中，为了快速兼容原版 Zig 模块，CP 曾部分沿用了 `?T` 与 `!T`，导致语法出现以下痛点：
+1. **前后包夹（三明治）视觉混乱**：当函数同时可空且可能报错时，若采用前缀问号与后缀感叹号，就会写成 `?T!`，甚至带错误集时写成 `?T ! Err`。类型核心名 `T` 被前后两头包夹，在面对长命名空间类型（如 `?jsc.ZigString.Slice!`）时，开发者的视觉动线被迫在左右反复折返；
+2. **多写法并存造成的团队风格撕裂**：代码中既有 `string?` 又有 `?string`，既有 `T?!` 又有 `?T!`，造成极大的维护心智负担。
+
+用户明确指示：“废除兼容历史写法, 只保留推荐语法, 避免代码不统一导致的混乱”。我们决绝收束为纯后缀模型。
+
+### 2. 上游编译器自愈升级 (`/data/dev/cp/cpc`)
+- `src/parser.rs`:
+  - 在 `parse_base_type` 中，若在类型开头遇到 `Token::Question`，不再递归包装为 `Type::Optional`，而是直接抛出 `ParseError::Generic` 阻止编译，并精准提示用户迁移为后缀 `T?` 或 `T?!`；
+  - 纯后缀逻辑：基础类型先解析为 `T`，后续通过后置 loop 消费 `?` 包装为 `Type::Optional(T)`，再由 `parse_type` 消费 `!` 包装为 `Type::ErrorUnion(Type::Optional(T))`；
+  - 严密对齐计算机类型的物理嵌套结构：`Result<Option<T>, Error>`（先业务结果可选 `T?`，再系统异常抛出 `!`）。
+
+### 3. 已迁移源码全量整改与 0-diff 验证
+- `src/sha_hmac/hmac.cp`：`generate: string?`；
+- `src/s3_signing/credentials.cp`：`storage_class: StorageClass?`、`acl: ACL?`、`content_disposition: string?`、`_accessKeyIdSlice: jsc.ZigString.Slice?` 等 14 处类字段全面由 `?T` 重构为 `T?`；
+- 重新编译生成的 Zig 目标代码保持 0 diff，验证了重构的极致安全与零损耗。
+
+### 4. 自动化测试与系统稳定性验证
+- S3 存储类、签名排序、Header 注入防御、Crypto HMAC、Sourcemap 往返等 93 项系统测试用例全部 100% 绿灯 PASS！
