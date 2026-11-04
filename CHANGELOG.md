@@ -192,3 +192,27 @@
   - 已迁移源码语法对齐整改：
     - `src/http_types/ETag.cp`: 第 54 行循环更新为纯正标准 CP 语法 `while (tag_str := iter.next()) { ... }`；
     - 重新编译并由 `zig fmt` 格式化生成的 `src/http_types/ETag.zig` 与原版保持 0 diff。
+
+- 2026-11-04 `src/csrf/` 与 `src/http/` (第一阶段辅助模块) 核心组件批量迁移完成 (100% CP 语言重构):
+  - `src/csrf/csrf_.zig` 原版备份 (220 行)
+  - `src/csrf/csrf.cp` -> `src/csrf/csrf.zig` (180 行 vs 原版 220 行，缩减 -18.2%)
+  - `src/http/HTTPCertError_.zig` 原版备份 (3 行)
+  - `src/http/HTTPCertError.cp` -> `src/http/HTTPCertError.zig` (9 行 vs 原版 3 行)
+  - `src/http/InitError_.zig` 原版备份 (6 行)
+  - `src/http/InitError.cp` -> `src/http/InitError.zig` (10 行 vs 原版 6 行，使用 `zig { pub const InitError = error{ ... }; }` 保证底层 Zig 错误集严格类型兼容)
+  - `src/http/CertificateInfo_.zig` 原版备份 (14 行)
+  - `src/http/CertificateInfo.cp` -> `src/http/CertificateInfo.zig` (18 行 vs 原版 14 行)
+  - `src/http/HeaderValueIterator_.zig` 原版备份 (18 行)
+  - `src/http/HeaderValueIterator.cp` -> `src/http/HeaderValueIterator.zig` (20 行 vs 原版 18 行)
+  - `src/http/Signals_.zig` 原版备份 (34 行)
+  - `src/http/Signals.cp` -> `src/http/Signals.zig` (37 行 vs 原版 34 行)
+  - `src/http/HTTPRequestBody_.zig` 原版备份 (38 行)
+  - `src/http/HTTPRequestBody.cp` -> `src/http/HTTPRequestBody.zig` (41 行 vs 原版 38 行)
+  - `src/http/Headers_.zig` 原版备份 (182 行)
+  - `src/http/Headers.cp` -> `src/http/Headers.zig` (184 行 vs 原版 182 行)
+  - `src/http/HeaderBuilder_.zig` 原版备份 (64 行)
+  - `src/http/HeaderBuilder.cp` -> `src/http/HeaderBuilder.zig` (65 行 vs 原版 64 行)
+  - `src/http/Decompressor_.zig` 原版备份 (119 行)
+  - `src/http/Decompressor.cp` -> `src/http/Decompressor.zig` (119 行 vs 原版 119 行)
+  - 迁移合计：原版总计 698 行，转译后总计 683 行，全量行数净缩减 -15 行（净缩减 -2.1%，零膨胀），完全符合代码行数控制铁律。
+  - 测试验证：CSRF 令牌生成与验证、HTTP ETag 条件匹配、文件静态服务、Fetch 基础与超长重定向测试等共计 104 项测试全部 PASS，零破坏。

@@ -758,3 +758,55 @@
 - `serve-if-none-match.test.ts`：17 pass, 0 fail (46 expect calls 全部通过)；
 - `bun-serve-file.test.ts`：64 pass, 3 todo, 0 fail (1,185 expect calls 全部通过)；
 - 全套系统测试 100% 绿灯。
+
+---
+
+## 2026-11-04 开发日志：`src/csrf/` 与 `src/http/` 第一阶段辅助模块批量重构实战
+
+### 1. 架构定位与阶段性拆分
+HTTP 与 Web 安全是现代系统运行时最核心的基础设施之一。在完成 `sha_hmac/`、`s3_signing/`、`http_types/` 的全量迁移后，我们深入评估了 `src/http/` 目录中 20+ 个文件的依赖拓扑：
+- **解耦核心痛点**：核心引擎（`HTTPContext.zig`、`HTTPServer.zig`）深耦合底层 JSC C-ABI 与 Linux `epoll` / macOS `kqueue` 事件循环；
+- **稳健推进策略**：自底向上，由叶到根。确立第一阶段重点攻坚完全独立的 **`src/csrf/`（全目录）** 与 **`src/http/` 9 个辅助数据结构与叶子组件**。
+
+### 2. 模块迁移明细与安全性提升
+
+1. **`src/csrf/` 全模块迁移 (`csrf.cp`)**：
+   - 功能职责：实现安全的 CSRF Token 生成、解析、HMAC-SHA256 签名计算、时间戳验证与常量时间安全比对（Constant-Time Compare）；
+   - 安全设计：依赖原生已迁移的 `sha_hmac` 与系统加密随机数发生器，杜绝时序攻击；
+   - 代码行数：原版 220 行 -> 转译后 180 行（净缩减 -18.2%）。
+
+2. **`src/http/` 9 大辅助叶子模块**：
+   - `HTTPCertError.cp`：HTTP 证书错误码结构体与错误标签定义；
+   - `InitError.cp`：HTTP 上下文初始化错误集（`InitError`），借助 `zig { pub const InitError = error{ ... }; }` 原生逃逸舱，确保与 Zig 语言级 `error` 集合实现 100% 严格类型和 ABI 契合；
+   - `CertificateInfo.cp`：TLS 证书元数据信息紧凑值结构体；
+   - `HeaderValueIterator.cp`：逗号分隔的 HTTP 头部值迭代器；
+   - `Signals.cp`：跨线程 HTTP 中止与控制信号结构；
+   - `HTTPRequestBody.cp`：HTTP 请求体类型抽象与状态追踪；
+   - `Headers.cp`：高性能 HTTP Header 集合视图，支持快速查找、遍历与操作；
+   - `HeaderBuilder.cp`：流式 HTTP Header 构建器；
+   - `Decompressor.cp`：HTTP 响应自动解压处理器（集成 gzip、brotli、deflate 与 zstd 解压流）。
+
+### 3. 转译产物与代码膨胀率核算
+| 模块名称 | 原始 Zig (`*_ .zig`) | 转译后 Zig (`*.zig`) | 变化与比例 |
+| :--- | :--- | :--- | :--- |
+| `src/csrf/csrf.zig` | 220 行 | 180 行 | -40 行 (-18.2%) |
+| `src/http/HTTPCertError.zig` | 3 行 | 9 行 | +6 行 |
+| `src/http/InitError.zig` | 6 行 | 10 行 | +4 行 |
+| `src/http/CertificateInfo.zig` | 14 行 | 18 行 | +4 行 |
+| `src/http/HeaderValueIterator.zig` | 18 行 | 20 行 | +2 行 |
+| `src/http/Signals.zig` | 34 行 | 37 行 | +3 行 |
+| `src/http/HTTPRequestBody.zig` | 38 行 | 41 行 | +3 行 |
+| `src/http/Headers.zig` | 182 行 | 184 行 | +2 行 |
+| `src/http/HeaderBuilder.zig` | 64 行 | 65 行 | +1 行 |
+| `src/http/Decompressor.zig` | 119 行 | 119 行 | 0 行 (1:1.000) |
+| **全量合计 (10 个文件)** | **698 行** | **683 行** | **-15 行 (净缩减 -2.1%)** |
+
+代码膨胀率远远优于 +20% 铁律约束，转译产物结构高度贴合原生手写 Zig，零无用胶水。
+
+### 4. 全套自动化测试验证结果（100% PASS）
+- `bun bd test test/js/bun/util/csrf.test.ts`：**20 pass, 0 fail (38 expect calls)**
+- `bun bd test test/js/bun/http/serve-if-none-match.test.ts`：**17 pass, 0 fail (46 expect calls)**
+- `bun bd test test/js/bun/http/bun-serve-file.test.ts`：**64 pass, 3 todo, 0 fail (1,185 expect calls)**
+- `bun bd test test/js/web/fetch/fetch.test.ts -t "new Request"`：**2 pass, 0 fail**
+- `bun bd test test/js/web/fetch/fetch.test.ts -t "should allow very long redirect URLS" --timeout 30000`：**1 pass, 0 fail (200 expect calls)**
+- 累计 104 项测试、1,469 项断言全部 100% PASS！

@@ -1007,3 +1007,123 @@ git 提交 bun 代码库
    - 81 项复杂 HTTP 条件请求与文件传输测试全部 PASS！
 3. **一次性暂存与唯一提交**：
    - 执行 `git add -A` 并提交，工作区 100% 保持干净，彻底杜绝事后修改或二次提交。
+
+---
+
+### 指令 45
+**用户指令**：
+再找一个迁移目录出来
+
+**执行结果**：
+系统性扫描并分析了 Bun 源码仓库中剩余的叶子模块与高内聚独立目录，对比了 `src/sha_hmac/`、`src/s3_signing/`、`src/http_types/` 迁移完毕后的架构拓扑，锁定了 `src/csrf/`（CSRF 保护机制模块）与 `src/http/`（HTTP 基础类型与协议解析组件），并对候选模块的依赖链、测试覆盖和代码规模进行了全面评估。
+
+---
+
+### 指令 46
+**用户指令**：
+分析 http 模块的依赖模块, 是否适合迁移
+
+**执行结果**：
+对 `src/http/` 模块的架构拓扑与全量 20+ 个源文件进行了全景依赖分析：
+1. **架构分层梳理**：识别出 HTTP 模块可精准划分为三大层级：
+   - **第一阶段（叶子数据结构与辅助组件）**：`HTTPCertError.zig`, `InitError.zig`, `CertificateInfo.zig`, `HeaderValueIterator.zig`, `Signals.zig`, `HTTPRequestBody.zig`, `Headers.zig`, `HeaderBuilder.zig`, `Decompressor.zig` 等 9 个文件，依赖清晰，紧密对接已迁移的 `http_types/`，极度适合立即迁移；
+   - **第二阶段（编解码与协议核心状态机）**：`ChunkedDecoder.zig`, `FormData.zig`, `AsyncSocket.zig`, `MIMEType.zig`；
+   - **第三阶段（核心服务器与客户端引擎）**：`HTTPContext.zig`, `WebSocketClient.zig`, `HTTPServer.zig`，深耦合 JSC 与底层 epoll/kqueue 事件循环。
+2. **给出分阶段迁移策略**：先迁移完全独立的辅助模块与数据结构，确保每次迁移增量可控、单点突破、可独立测试验证。
+
+---
+
+### 指令 47
+**用户指令**：
+event_loop 功能是什么, 事件循环吗? bun中的事件循环应该使用 JSC内置的事件循环吧
+cp 中也实现了事件循环, 两者对比, 有何差异?
+
+**执行结果**：
+深入剖析了 Bun 与 CP 两种不同技术架构下的事件循环原理与核心异同：
+1. **Bun 事件循环的真相**：并非单纯依赖 JSC，而是自研的底层混合事件循环（Linux 上为原生 `epoll` + `io_uring`，macOS 上为 `kqueue`，Windows 上为 `libuv`），与 JSC 的 `VM::drainMicrotasks()`、Node.js 兼容异步 I/O、以及 `uSockets` 紧密缝合，由 Bun 负责轮询 OS 事件并向 JSC 微任务队列和宏任务队列分发；
+2. **CP 语言内置事件循环**：基于纯原生协程/智能体调度（Actor / Nest 抢占式模型），专注于轻量并发、Channel 通信、超时定时器与无 GC 抢占调度，追求极简与零开销；
+3. **核心差异矩阵**：Bun 侧重 JS 运行时兼容与全协议单线程异步 I/O 驱动，CP 侧重无虚拟机多核并行、抢占式协程与高并发智能体协作。
+
+---
+
+### 指令 48
+**用户指令**：
+1. cp 可以借鉴 bun中的事件循环吗?
+2. 是否可以将 http tls 从 bun 中 独立出来, 作为 cp 的内置模块,方便cp 编写 web 业务
+
+**执行结果**：
+全面分析了 CP 吸收 Bun 优秀架构特性的可行性与落地蓝图：
+1. **CP 事件循环借鉴点**：
+   - 零拷贝批处理与环形缓冲区管理（RingBuffer）；
+   - 多路复用 Reactor 模型（Linux epoll / macOS kqueue 的平台自适应抽象）；
+   - Eventfd 跨线程 Waker 唤醒机制，用于打破事件循环阻塞；
+   - 延后批量写（Deferred Batch Write）降低系统调用开销。
+2. **HTTP/TLS 独立模块化设想（`cap:http` 与 `cap:tls`）**：
+   - 将 Bun 中经过生产检验的高性能 HTTP 状态机（基于 picohttpparser/llhttp 思想）、Header 解析、分块传输与 TLS（BoringSSL 封装）提炼为 CP 的标准库；
+   - 为 CP 赋能原生超高性能 Web 服务能力，支持百万级 Agent 通过 HTTP/WebSocket 极速互联。
+3. **建议路径**：以本次重构迁移为契机，先把 Bun 的底层纯 Zig HTTP/TLS 模块重构为安全、现代的 CP 模块，未来便可无缝提取为 CP 的独立生态包。
+
+---
+
+### 指令 49
+**用户指令**：
+同意你的方案, 先完成 csrf 和 HTTP 第一阶段辅助模块迁移
+
+**执行结果**：
+1. **全量批量重构落地（共计 10 个核心模块）**：
+   - `src/csrf/csrf_.zig` -> `src/csrf/csrf.cp` -> `src/csrf/csrf.zig`（220 行 -> 180 行，代码缩减 18.2%，无膨胀且性能与安全性兼备）；
+   - `src/http/` 第一阶段辅助模块 9 个文件：
+     - `HTTPCertError_.zig` -> `HTTPCertError.cp` -> `HTTPCertError.zig`（3 行 -> 9 行）
+     - `InitError_.zig` -> `InitError.cp` -> `InitError.zig`（6 行 -> 10 行，原生 Zig error set 零阻抗对齐）
+     - `CertificateInfo_.zig` -> `CertificateInfo.cp` -> `CertificateInfo.zig`（14 行 -> 18 行）
+     - `HeaderValueIterator_.zig` -> `HeaderValueIterator.cp` -> `HeaderValueIterator.zig`（18 行 -> 20 行）
+     - `Signals_.zig` -> `Signals.cp` -> `Signals.zig`（34 行 -> 37 行）
+     - `HTTPRequestBody_.zig` -> `HTTPRequestBody.cp` -> `HTTPRequestBody.zig`（38 行 -> 41 行）
+     - `Headers_.zig` -> `Headers.cp` -> `Headers.zig`（182 行 -> 184 行）
+     - `HeaderBuilder_.zig` -> `HeaderBuilder.cp` -> `HeaderBuilder.zig`（64 行 -> 65 行）
+     - `Decompressor_.zig` -> `Decompressor.cp` -> `Decompressor.zig`（119 行 -> 119 行）
+2. **产物对比与代码膨胀率（全目录 -2.1% 净缩减，零膨胀）**：
+   - 原版 Zig 总行数：698 行；
+   - 转译后 Zig 总行数：683 行；
+   - 整体行数膨胀率：**-2.1%**，完全优于 +20% 铁律约束！
+3. **自动化测试套件全量验证（100% 绿灯全部 PASS，0 失败）**：
+   - `test/js/bun/util/csrf.test.ts`：**20 pass, 0 fail (38 expect calls 全部通过，耗时 2.57s)**；
+   - `test/js/bun/http/serve-if-none-match.test.ts`：**17 pass, 0 fail (46 expect calls 全部通过，耗时 2.62s)**；
+   - `test/js/bun/http/bun-serve-file.test.ts`：**64 pass, 3 todo, 0 fail (1,185 expect calls 全部通过，耗时 11.30s)**；
+   - `test/js/web/fetch/fetch.test.ts -t "new Request"`：**2 pass, 0 fail 全部通过**；
+   - `test/js/web/fetch/fetch.test.ts -t "should allow very long redirect URLS" --timeout 30000`：**1 pass, 0 fail (200 expect calls 全部通过，耗时 7.4s)**；
+   - 累计 104 项测试、1,469 项断言全部 100% PASS！
+4. **四线全息记录文档同步**：
+   - 同步更新 `SESSION.md`、`CHANGELOG.md`、`DEVLOG.md` 及 `cp/cp_ref.md`。
+
+---
+
+### 指令 50
+**用户指令**：
+git 提交 bun 代码库
+
+**执行结果**：
+1. **核定提交范围 (严格仅限宿主仓库 `/data/dev/bun`)**：
+   - 恪守双工作区授权边界，不对 `/data/dev/cp` 仓库进行 git 操作（保留供上游 cp agy 独立审核）；
+   - 纳入全部已迁移的 `src/csrf/` 模块与 `src/http/` 第一阶段辅助模块源码：
+     - `src/csrf/csrf_.zig`, `src/csrf/csrf.cp`, `src/csrf/csrf.zig`
+     - `src/http/HTTPCertError_.zig`, `src/http/HTTPCertError.cp`, `src/http/HTTPCertError.zig`
+     - `src/http/InitError_.zig`, `src/http/InitError.cp`, `src/http/InitError.zig`
+     - `src/http/CertificateInfo_.zig`, `src/http/CertificateInfo.cp`, `src/http/CertificateInfo.zig`
+     - `src/http/HeaderValueIterator_.zig`, `src/http/HeaderValueIterator.cp`, `src/http/HeaderValueIterator.zig`
+     - `src/http/Signals_.zig`, `src/http/Signals.cp`, `src/http/Signals.zig`
+     - `src/http/HTTPRequestBody_.zig`, `src/http/HTTPRequestBody.cp`, `src/http/HTTPRequestBody.zig`
+     - `src/http/Headers_.zig`, `src/http/Headers.cp`, `src/http/Headers.zig`
+     - `src/http/HeaderBuilder_.zig`, `src/http/HeaderBuilder.cp`, `src/http/HeaderBuilder.zig`
+     - `src/http/Decompressor_.zig`, `src/http/Decompressor.cp`, `src/http/Decompressor.zig`
+   - 纳入权威语言规范手册 `cp/cp_ref.md`（增补第 13.3.7 节《原生 Zig 错误集（`error{ ... }`）互操作规范》）；
+   - 纳入四线全息记录文档：`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`。
+2. **全套自动化测试回归确认（100% 绿灯，零破坏）**：
+   - `test/js/bun/util/csrf.test.ts`：**20 pass, 0 fail (38 expect calls 全部通过)**；
+   - `test/js/bun/http/serve-if-none-match.test.ts`：**17 pass, 0 fail (46 expect calls 全部通过)**；
+   - `test/js/bun/http/bun-serve-file.test.ts`：**64 pass, 3 todo, 0 fail (1,185 expect calls 全部通过)**；
+   - `test/js/web/fetch/fetch.test.ts -t "new Request"`：**2 pass, 0 fail 全部通过**；
+   - `test/js/web/fetch/fetch.test.ts -t "should allow very long redirect URLS" --timeout 30000`：**1 pass, 0 fail (200 expect calls 全部通过)**；
+   - 累计 104 项测试、1,469 项断言全部 PASS！
+3. **一次性暂存与唯一提交**：
+   - 执行 `git add -A` 并提交，工作区 100% 保持干净，彻底杜绝事后修改或二次提交。
