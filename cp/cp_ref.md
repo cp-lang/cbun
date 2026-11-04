@@ -2006,13 +2006,15 @@ while idx < len {
 
 ---
 
-#### 9.3.2 迭代器捕获循环 (`while (expr) |capture|`)
+#### 9.3.2 Walrus 海象操作符条件绑定与解包循环 (`while (binding := expr)`)
 
-针对流式解析、字符串切分器等迭代器模式，CP 支持捕获解包式 `while (iter.next()) |item|` 循环。循环体在每次迭代时自动将可选值解包赋值给捕获变量 `item`，当迭代器返回 `null` 时自动优雅终止循环，无缝对接 Zig 原生迭代器契约：
+针对流式解析、字符串切分器等迭代器与生成器模式，CP 全面采用海象操作符（`:=`）实现条件赋值与可选类型非空解包，彻底废除旧版 Zig 风格的 `while (expr) |capture|` 语法。
+
+循环在每次迭代前对表达式 `expr` 求值：若返回非 `null` 值，则自动解包并将非空值绑定到循环局部变量 `binding`，进入循环体执行；当表达式求值为 `null`（或布尔为假）时，循环自动优雅终止。
 
 ```typescript
-var iter = std.mem.splitScalar(u8, if_none_match, 44); // 按逗号切分
-while (iter.next()) |tag_str| {
+let mut iter = std.mem.splitScalar(u8, if_none_match, ','); // 按逗号切分
+while (tag_str := iter.next()) {
     let parsed = parse(tag_str);
     if (weakMatch(our_parsed.tag, our_parsed.is_weak, parsed.tag, parsed.is_weak)) {
         return true;
@@ -2020,9 +2022,32 @@ while (iter.next()) |tag_str| {
 }
 ```
 
+- **类型收窄（Type Narrowing）**：若 `iter.next()` 的返回类型为可选类型 `T?`，在循环体内部，`tag_str` 的类型自动收窄为不可空的 `T`；
+- **作用域隔离**：`binding` 变量的作用域严格限制在 `while` 块内部，杜绝作用域污染；
+- **零成本转译**：底层 1:1 发射 Zig 原生的高效 `while (iter.next()) |tag_str|` 循环指令，零额外堆栈开销。
+
 ---
 
-#### 9.3.3 原生类型标识符作为调用实参 (Native Type Tokens as Arguments)
+#### 9.3.3 Walrus 海象操作符条件解包语句 (`if (binding := expr)`)
+
+同理，海象操作符（`:=`）在 `if` 条件语句中提供对称的条件非空解包能力，彻底取代了 Zig 风格的 `if (expr) |capture|`：
+
+```typescript
+if (user := find_user_by_id(user_id)) {
+    // 成功分支：user 自动解包并收窄为不可空的 User 类型
+    print(`Found user: ${user.name}`);
+} else {
+    // 空值分支：find_user_by_id 返回 null 时执行
+    print("User not found");
+}
+```
+
+> [!NOTE] 语法废弃规范说明
+> CP 已彻底废除 Zig 风格的管道捕获 `while (...) |capture|` 与 `if (...) |capture|`。在 CP 中，所有条件解包赋值必须统一使用海象操作符 `while (binding := expr)` 与 `if (binding := expr)`。若使用旧版管道捕获语法，编译器将在解析期直接报错拦截。
+
+---
+
+#### 9.3.4 原生类型标识符作为调用实参 (Native Type Tokens as Arguments)
 
 CP 允许原生类型标识符（如 `u8`、`i32`、`usize` 等）直接作为泛型函数或标准库函数的实参传递，无缝契合系统级与标准库接口（如 `std.mem.trim(u8, ...)`、`std.mem.eql(u8, ...)`）：
 
@@ -2691,7 +2716,7 @@ CP 语言的 `for ... of` 迭代语法采用**双轨智能分流架构**，既�
    - 目标为 `0..10` 时，直接发射为寄存器级 `while (i < 10) : (i += 1)` 计数器循环；
    - 目标为 `@comptime` 时，直接发射为编译期 `inline for` 展开。
 2. **流式轨（Iterator Stream Path，任意具备 `next()` 方法的类型）**：
-   - 任何实现了 `next(*_): ?Item` 契约的对象或流，编译器自动将其展开为零分配的 `while (stream.next()) |item|` 循环，当 `next()` 返回 `null` 时自动优雅终止循环！
+   - 任何实现了 `next(*_): Item?` 契约的对象或流，编译器自动将其展开为零分配的底层 Zig 原生 `while (stream.next()) |item|`（语义对齐 CP 的 `while (item := stream.next())`）循环，当 `next()` 返回 `null` 时自动优雅终止循环！
 
 ```cp
 // 示例：自定义流式迭代器

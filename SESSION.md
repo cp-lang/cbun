@@ -922,3 +922,88 @@ git 提交 bun 代码库
 
 
 
+---
+
+### 指令 41
+**用户指令**：
+#### 9.3.2 迭代器捕获循环 (`while (expr) |capture|`)
+
+针对流式解析、字符串切分器等迭代器模式，CP 支持捕获解包式 `while (iter.next()) |item|` 循环。循环体在每次迭代时自动将可选值解包赋值给捕获变量 `item`，当迭代器返回 `null` 时自动优雅终止循环，无缝对接 Zig 原生迭代器契约：
+
+```typescript
+var iter = std.mem.splitScalar(u8, if_none_match, 44); // 按逗号切分
+while (iter.next()) |tag_str| {
+    let parsed = parse(tag_str);
+    if (weakMatch(our_parsed.tag, our_parsed.is_weak, parsed.tag, parsed.is_weak)) {
+        return true;
+    }
+}
+```
+
+这个迭代捕获是 zig 语法, cp中的捕获是 :=, 这里是否应该写为
+while (tag_str:= iter.next()) {}
+你推荐的设计方案是?
+
+---
+
+### 指令 42
+**用户指令**：
+同意你的方案
+除了 switch/ while之外, 目前 cp 中 if/ for 等, 是如何支持变量捕捉的
+
+---
+
+### 指令 43
+**用户指令**：
+可以,按你的这个方案实现, 并同步修改cp_ref.md 设计规范中的相关内容
+
+**执行结果**：
+1. **架构方案决策与全语言捕获语法统一**：
+   - 彻底废止旧版 Zig 残余的管道捕获语法 `while (...) |capture|` 与 `if (...) |capture|`；
+   - 全面引入现代 Walrus（海象操作符 `:=`）条件赋值与非空解包语法：
+     - `while (binding := expr) { ... }`
+     - `if (binding := expr) { ... } else { ... }`
+   - 与 CP 现有 `switch`（`ident := pattern`）、`for`（`for item of list` / `for [k, v] of map`）、`try-catch`（`catch (e)`）实现全语言无割裂纯现代 TS 语法闭环。
+2. **上游 CP 编译器前端与代码生成器升级 (`/data/dev/cp/cpc`)**：
+   - `cpc/src/ast.rs`：在 `IfStmt` 结构体中新增 `pub capture: Option<Ident>` 字段；
+   - `cpc/src/parser.rs`：
+     - 在 `parse_while_stmt` 中解析 `while (ident := expr)`；
+     - 在 `parse_if_stmt_with_comptime` 中解析 `if (ident := expr)`；
+     - 静态拦截任何遗留的 `|capture|` 语法并直接抛出废弃警告与迁移指引错误；
+   - `cpc/src/sema.rs`：为 `IfStmt.capture` 与 `WhileStmt.capture` 注册不可变局部变量符号并创建独立词法作用域；
+   - `cpc/src/codegen.rs`：
+     - 当 `i.capture` 存在时发射原生 `if (expr) |cap| { ... }` 并注册局部变量作用域深度；
+     - 当 `w.capture` 存在时发射原生 `while (expr) |cap| { ... }`；
+   - 经 `cargo check`、`cargo build` 及 `cargo build --release`（结合 `RUST_MIN_STACK` 解决 LLVM SCEV 爆栈）构建并部署全局 `/data/dev/cp/cap/bin/cpc`。
+3. **已迁移源码全量规范对齐**：
+   - `src/http_types/ETag.cp`：更新第 54 行循环为标准 CP 语法 `while (tag_str := iter.next()) { ... }`；
+   - 经 `cpc` 重新转译生成的 `src/http_types/ETag.zig` 与原版保持 **0 diff**。
+4. **权威语言规范手册 (`cp/cp_ref.md`) 全面同步**：
+   - 更新第 9.3.2 节为《Walrus 海象操作符条件绑定与解包循环 (`while (binding := expr)`)》；
+   - 增补第 9.3.3 节《Walrus 海象操作符条件解包语句 (`if (binding := expr)`)》；
+   - 调整原 9.3.3 为 9.3.4，并同步更新双向副本 `/data/dev/cp/cp_ref.md`。
+5. **全套自动化测试回归（100% 绿灯全通过）**：
+   - `test/js/bun/http/serve-if-none-match.test.ts`：**17 pass, 0 fail (46 expect calls 全部通过)**；
+   - `test/js/bun/http/bun-serve-file.test.ts`：**64 pass, 3 todo, 0 fail (1,185 expect calls 全部通过)**；
+   - 81 项复杂 HTTP 条件请求与文件传输测试全部绿灯！
+
+
+---
+
+### 指令 44
+**用户指令**：
+git 提交 bun 代码库
+
+**执行结果**：
+1. **核定提交范围 (严格仅限宿主仓库 `/data/dev/bun`)**：
+   - 恪守双工作区授权边界，不对 `/data/dev/cp` 仓库进行 git 操作（保留供上游 cp agy 独立审核）；
+   - 纳入全部已迁移 CP 源码海象操作符语法演进：
+     - `src/http_types/ETag.cp`：采用标准 CP 海象解包语法 `while (tag_str := iter.next()) { ... }`；
+   - 纳入权威语言规范手册 `cp/cp_ref.md`（增补 9.3.2 节 Walrus while 循环与 9.3.3 节 Walrus if 语句，彻底废除旧版 Zig 管道捕获 `|capture|`）；
+   - 纳入四线全息记录文档：`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`。
+2. **全套自动化测试回归确认（100% 绿灯，零破坏）**：
+   - `test/js/bun/http/serve-if-none-match.test.ts`：**17 pass, 0 fail (46 expect calls 全部通过)**；
+   - `test/js/bun/http/bun-serve-file.test.ts`：**64 pass, 3 todo, 0 fail (1,185 expect calls 全部通过)**；
+   - 81 项复杂 HTTP 条件请求与文件传输测试全部 PASS！
+3. **一次性暂存与唯一提交**：
+   - 执行 `git add -A` 并提交，工作区 100% 保持干净，彻底杜绝事后修改或二次提交。

@@ -177,3 +177,18 @@
   - 已迁移源码全面对齐整改：
     - `src/sha_hmac/hmac.cp`: `generate(...): string?`；
     - `src/s3_signing/credentials.cp`: 将 `storage_class: StorageClass?`、`acl: ACL?` 等 14 处类字段由 `?T` 规范化为后缀 `T?`。
+- 2026-11-04 全面确立 Walrus（海象操作符 `:=`）条件解包体系，彻底废除 `while`/`if` 管道捕获 `|capture|`：
+  - 上游 CP 编译器 (`/data/dev/cp/cpc`):
+    - `src/ast.rs`: 在 `IfStmt` 中新增 `capture: Option<Ident>` 字段；
+    - `src/parser.rs`:
+      - `parse_while_stmt` 支持 `while (ident := expr)`，静态拦截并报错废除 `while (...) |capture|`；
+      - `parse_if_stmt_with_comptime` 支持 `if (ident := expr)`，静态拦截并报错废除 `if (...) |capture|`；
+    - `src/sema.rs`: 对 `IfStmt.capture` 与 `WhileStmt.capture` 执行局部常量符号注册与作用域绑定；
+    - `src/codegen.rs`: 统一生成 Zig 原生零成本解包代码 `if (expr) |ident|` 与 `while (expr) |ident|`，并记录符号作用域深度。
+  - `cp/cp_ref.md` & `/data/dev/cp/cp_ref.md`:
+    - 规范手册第 9.3.2 节升级为《Walrus 海象操作符条件绑定与解包循环 (`while (binding := expr)`)》；
+    - 增补第 9.3.3 节《Walrus 海象操作符条件解包语句 (`if (binding := expr)`)》；
+    - 明确废除旧版 Zig 管道捕获语法 `|capture|`。
+  - 已迁移源码语法对齐整改：
+    - `src/http_types/ETag.cp`: 第 54 行循环更新为纯正标准 CP 语法 `while (tag_str := iter.next()) { ... }`；
+    - 重新编译并由 `zig fmt` 格式化生成的 `src/http_types/ETag.zig` 与原版保持 0 diff。

@@ -51,7 +51,7 @@ pub fn ifNoneMatch(etag: string, if_none_match: string): bool {
     }
 
     let mut iter = std.mem.splitScalar(u8, if_none_match, ',');
-    while (iter.next()) |tag_str| {
+    while (tag_str := iter.next()) {
         const parsed = parse(tag_str);
         if (weakMatch(our_parsed.tag, our_parsed.is_weak, parsed.tag, parsed.is_weak)) {
             return true;

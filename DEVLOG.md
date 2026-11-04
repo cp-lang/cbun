@@ -718,3 +718,43 @@
 
 ### 4. 自动化测试与系统稳定性验证
 - S3 存储类、签名排序、Header 注入防御、Crypto HMAC、Sourcemap 往返等 93 项系统测试用例全部 100% 绿灯 PASS！
+
+---
+
+## 2026-11-04 开发日志：确立全语言 Walrus（海象操作符 `:=`）条件解包体系实战
+
+### 1. 架构动机与设计一致性对齐
+在之前的语法演进中，CP 已经在 `switch` 模式匹配中全面废除了 Zig 风格的 `|fields|` 管道捕获，转而采用海象操作符 `ident := pattern` 与标准解构；在 `for` 循环中采用了 TS 风格的 `for (item of list)`；在 `try-catch` 中采用了 `catch (e)`。
+然而，在 `while` 循环中，由于初期迁移代码时快速对接 Zig 的 `while (iter.next()) |tag_str|`，残留了旧式管道捕获语法；同时，`if` 语句此前尚不具备条件非空解包能力。
+
+用户精准指出：“这个迭代捕获是 zig 语法, cp中的捕获是 :=, 这里是否应该写为 while (tag_str:= iter.next()) {}? 除了 switch/ while之外, 目前 cp 中 if/ for 等, 是如何支持变量捕捉的?”
+
+通过全面梳理全语言变量捕获语法，我们确立了以下统一设计：
+1. **废止残余**：彻底废除 `while (...) |capture|` 与 `if (...) |capture|`；
+2. **统一海象语法**：
+   - `while (tag_str := iter.next()) { ... }`
+   - `if (user := find_user()) { ... } else { ... }`
+3. **零成本转译**：直接对应 Zig 原生的高效 `while (expr) |binding|` 与 `if (expr) |binding|` 指令，零额外开销。
+
+### 2. 编译器自愈升级 (`/data/dev/cp/cpc/src`)
+1. **AST 扩展 (`ast.rs`)**：
+   - 在 `IfStmt` 结构体中添加 `pub capture: Option<Ident>` 字段。
+2. **语法解析器升级 (`parser.rs`)**：
+   - 在 `parse_while_stmt` 中解析预读 `Token::Ident` 紧跟 `Token::ColonAssign`，捕获为 `WhileStmt.capture`；
+   - 在 `parse_if_stmt_with_comptime` 中同样解析括号内 `ident := expr`，捕获为 `IfStmt.capture`；
+   - 若解析到后置 `Token::Pipe`，直接抛出 `ParseError`，提示用户使用海象操作符。
+3. **语义分析与符号作用域 (`sema.rs`)**：
+   - 在 `analyze_stmt` 中针对 `IfStmt` 与 `WhileStmt` 的 `capture` 字段，开启子作用域并注册为只读局部变量，确保循环体与条件块内符号解析正常。
+4. **代码生成器映射 (`codegen.rs`)**：
+   - 针对 `IfStmt` 与 `WhileStmt`，在存在 `capture` 时生成 Zig 原生 `if (expr) |binding|` 与 `while (expr) |binding|`，并记录符号的作用域深度。
+5. **构建优化与 LLVM 爆栈防御**：
+   - 在夜间版 Rust 针对大型 `codegen.rs` 进行 opt-level=3 优化时，LLVM SCEV（标量演化）分析可能触发深度递归导致堆栈溢出。通过设置 `RUST_MIN_STACK=67108864` 顺利完成 release 构建，并部署全局 `cpc`。
+
+### 3. 已迁移 CP 源码整改与 0-diff 验证
+- `src/http_types/ETag.cp`：第 54 行由 `while (iter.next()) |tag_str|` 更新为 `while (tag_str := iter.next())`；
+- 重新编译生成的 `src/http_types/ETag.zig` 与原版保持 **0 diff**。
+
+### 4. 自动化测试与系统验证
+- `serve-if-none-match.test.ts`：17 pass, 0 fail (46 expect calls 全部通过)；
+- `bun-serve-file.test.ts`：64 pass, 3 todo, 0 fail (1,185 expect calls 全部通过)；
+- 全套系统测试 100% 绿灯。
