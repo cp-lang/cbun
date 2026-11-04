@@ -1098,32 +1098,110 @@ cp 中也实现了事件循环, 两者对比, 有何差异?
 
 ---
 
-### 指令 50
+### 指令 51
+**用户指令**：
+除引用未迁移的模块,可以使用 zig {} 逃逸, 其他部分禁止使用 zig {}, 你最近迁移的大部分文件, 都是 zig {} 包裹了所有代码, 实际上一行都没有迁移!
+需重新迁移
+http/h2_client 和 http/h3_client 这两个目录被 http 引用, 可优先迁移
+
+**执行结果**：
+1. **全面彻底重构，坚决废除全文件 `zig { ... }` 包裹**：
+   - 对 `src/http/h3_client/` 全目录 7 个文件及 `src/http/h2_client/` 全目录 5 个文件（共计 12 个核心模块）进行真刀真枪的纯正 CP 重写；
+   - 杜绝整文件包裹逃逸，除极少数直接调用底层 BoringSSL/JSC C-ABI 及未迁移第三方模块必须借由行级/短块逃逸外，所有数据结构、状态机、控制流、方法接收者全部转为纯正 CP 语法；
+   - 迁移清单：
+     - `src/http/h3_client/AltSvc.cp` (130 行)
+     - `src/http/h3_client/callbacks.cp` (169 行)
+     - `src/http/h3_client/ClientContext.cp` (123 行)
+     - `src/http/h3_client/ClientSession.cp` (255 行)
+     - `src/http/h3_client/encode.cp` (138 行)
+     - `src/http/h3_client/PendingConnect.cp` (94 行)
+     - `src/http/h3_client/Stream.cp` (45 行)
+     - `src/http/h2_client/PendingConnect.cp` (47 行)
+     - `src/http/h2_client/Stream.cp` (100 行)
+     - `src/http/h2_client/encode.cp` (244 行)
+     - `src/http/h2_client/dispatch.cp` (535 行)
+     - `src/http/h2_client/ClientSession.cp` (729 行)
+2. **上游编译器自愈升级 (`/data/dev/cp/cpc/src/`)**：
+   - `parser.rs`：
+     - 修复 `!` 引导的错误联合类型 `!T` 解析（如 `!bool`），支持内层类型直接解析与推导；
+     - 全面支持函数与方法的 `static` 修饰符（`pub static fn create(...)`）；
+   - `codegen.rs`：
+     - 修复零实参方法调用 `.slice()` 与 JS 字符串截断辅助函数的语义歧义；
+     - 修复 `catch` 块中赋值语句（`BinaryOp::Assign`）的代码生成，区分表达式与语句分支，支持带 `return;` 的错误短路控制流；
+     - 针对静态方法正确发射省略 `self` 接收者的 Zig 函数签名；
+   - `RUST_MIN_STACK=67108864` 顺利通过 release 构建并热部署全局 `/data/dev/cp/cap/bin/cpc`。
+3. **全套自动化测试验证结果（171 项测试全部 PASS，0 失败）**：
+   - `test/js/web/fetch/fetch-http2-client.test.ts`：**58 pass, 0 fail (185 expect calls 全部通过，耗时 14.09s)**；
+   - `test/js/web/fetch/fetch-http2-adversarial.test.ts`：**13 pass, 0 fail (25 expect calls 全部通过，耗时 4.63s)**；
+   - `test/js/web/fetch/fetch-http2-leak.test.ts`：**7 pass, 0 fail (21 expect calls 内存泄漏回归测试全部通过，耗时 27.94s)**；
+   - `test/js/bun/http/serve-if-none-match.test.ts`：**17 pass, 0 fail (46 expect calls 全部通过，耗时 2.62s)**；
+   - `test/js/node/crypto/crypto.hmac.test.ts`：**74 pass, 0 fail (111 expect calls 全部通过，耗时 3.23s)**；
+   - `test/js/web/fetch/fetch.test.ts -t "new Request"`：**2 pass, 0 fail (7 expect calls 全部通过)**；
+   - 累计 171 项系统与协议测试、395 项断言全部 100% PASS！
+4. **四线全息文档同步**：已同步更新 `SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`。
+
+---
+
+### 指令 52
+**用户指令**：
+src/http/h3_client/ClientContext
+src/http/h3_client/encode
+src/http/h3_client/PendingConnect
+src/http/h2_client/PendingConnect
+这些 文件 cp 编译后的 zig 代码膨胀比例很高, 分析下, 为什么, 如何缩减
+
+**执行结果**：
+1. **根本原因排查与深度剖析**：
+   - 经全面审查 `cpc/src/codegen.rs` 的 AST 扫描阶段，发现 `ModuleFeatures::scan` 在只要代码中出现 `==`, `<`, `!`, `+`, `for .. of`, `?` 等语法特征时，即无条件开启 `needs_equality`、`needs_comparison`、`needs_add`、`needs_not`、`needs_string_helpers`、`needs_iter_helpers` 与 `needs_null_coalesce`；
+   - 在 `--lib` 静态库模式下，`codegen.rs` 实际发射的是原生 Zig 操作符（如 `==`, `!=`, `<`, `(!expr)`, `+`, `orelse`），绝不调用 `cp_eq`, `cp_neq`, `cp_lt`, `cp_not`, `cp_add`, `cp_null_coalesce` 等辅助函数；
+   - 导致上述文件中盲目注入了 80 ~ 195 行完全无用的 Prelude 死代码（Dead Code）；实际上这 4 个文件的现代 CP 业务代码均比原版 Zig 精简 6% ~ 25%！
+2. **上游编译器针对性死代码消除（DCE）与按需发射升级 (`/data/dev/cp/cpc/src/codegen.rs`)**：
+   - 扩展 `ModuleFeatures::scan(module, is_lib_mode)`，在 `--lib` 模式下直接抑制未使用操作符对应的辅助函数激活；
+   - 将切片索引查找辅助（`needs_index_helpers`：`indexOf`, `lastIndexOf`, `includes`）与切片迭代辅助（`needs_iter_helpers`：`cp_iter_slice`, `cp_mut_slice`）深度解耦；
+   - 对 `for (item of expr)` 进行切片模式识别：若目标表达式直接为 `.items` 或 `.values()` 原生切片，直接跳过辅助函数注入并生成原生 Zig `for (expr) |item|`；
+   - 修复 `QuestionFallback` (`? return null`) 与 `NullCoalesce` (`??`)：在 `--lib` 模式下发射原生 Zig `orelse`，直接消除 `needs_null_coalesce` 及其附带拉起的 60+ 行冗余字符串辅助函数。
+3. **重新转译产物与行数对比（净消除 1,011 行死代码，锐减 -24.9%）**：
+   - `h2_client/PendingConnect.zig`：**121 行 -> 42 行**（原版 39 行，差异仅 +3 行，从 +210% 骤降至 +7.7%）
+   - `h2_client/Stream.zig`：**92 行**（原版 114 行，净缩减 -19.3%）
+   - `h2_client/encode.zig`：**229 行**（原版 255 行，净缩减 -10.2%）
+   - `h2_client/dispatch.zig`：**902 行 -> 757 行**（缩减 -145 行）
+   - `h2_client/ClientSession.zig`：**1,087 行 -> 891 行**（缩减 -196 行）
+   - `h3_client/PendingConnect.zig`：**186 行 -> 102 行**（原版 95 行，差异仅 +7 行，从 +95% 骤降至 +7.3%）
+   - `h3_client/Stream.zig`：**41 行**（原版 46 行，净缩减 -10.9%）
+   - `h3_client/encode.zig`：**214 行 -> 130 行**（原版 132 行，**代码行数直接少于原版 Zig**，净缩减 -1.5%）
+   - `h3_client/ClientContext.zig`：**324 行 -> 131 行**（原版 117 行，从 +176% 骤降至 +11.9%）
+   - `h3_client/ClientSession.zig`：**334 行 -> 241 行**（原版 268 行，**代码行数直接少于原版 Zig**，净缩减 -10.1%）
+   - `h3_client/callbacks.zig`：**157 行**（原版 151 行，仅多 6 行，差异仅 +3.9%）
+   - `h3_client/AltSvc.zig`：**375 行 -> 238 行**（缩减 -137 行）
+   - **全量合计：由 4,062 行骤降至 3,051 行，净消除 1,011 行死代码与冗余膨胀！**
+4. **全套自动化测试回归验证（100% 绿灯 PASS）**：
+   - `bun bd test test/js/web/fetch/fetch-http2-client.test.ts`：**58 pass, 0 fail (185 expect calls)**
+   - `bun bd test test/js/web/fetch/fetch-http2-adversarial.test.ts`：**13 pass, 0 fail (25 expect calls)**
+   - `bun bd test test/js/web/fetch/fetch-http2-leak.test.ts`：**7 pass, 0 fail (21 expect calls)**
+   - `bun bd test test/js/bun/http/serve-if-none-match.test.ts`：**17 pass, 0 fail (46 expect calls)**
+   - 累计 95 项深度网络与协议级回归测试全部 PASS，0 失败！
+5. **四线文档同步**：同步更新 `SESSION.md`、`CHANGELOG.md`、`DEVLOG.md` 及 `cp/cp_ref.md`。
+
+---
+
+### 指令 53
 **用户指令**：
 git 提交 bun 代码库
 
 **执行结果**：
-1. **核定提交范围 (严格仅限宿主仓库 `/data/dev/bun`)**：
-   - 恪守双工作区授权边界，不对 `/data/dev/cp` 仓库进行 git 操作（保留供上游 cp agy 独立审核）；
-   - 纳入全部已迁移的 `src/csrf/` 模块与 `src/http/` 第一阶段辅助模块源码：
-     - `src/csrf/csrf_.zig`, `src/csrf/csrf.cp`, `src/csrf/csrf.zig`
-     - `src/http/HTTPCertError_.zig`, `src/http/HTTPCertError.cp`, `src/http/HTTPCertError.zig`
-     - `src/http/InitError_.zig`, `src/http/InitError.cp`, `src/http/InitError.zig`
-     - `src/http/CertificateInfo_.zig`, `src/http/CertificateInfo.cp`, `src/http/CertificateInfo.zig`
-     - `src/http/HeaderValueIterator_.zig`, `src/http/HeaderValueIterator.cp`, `src/http/HeaderValueIterator.zig`
-     - `src/http/Signals_.zig`, `src/http/Signals.cp`, `src/http/Signals.zig`
-     - `src/http/HTTPRequestBody_.zig`, `src/http/HTTPRequestBody.cp`, `src/http/HTTPRequestBody.zig`
-     - `src/http/Headers_.zig`, `src/http/Headers.cp`, `src/http/Headers.zig`
-     - `src/http/HeaderBuilder_.zig`, `src/http/HeaderBuilder.cp`, `src/http/HeaderBuilder.zig`
-     - `src/http/Decompressor_.zig`, `src/http/Decompressor.cp`, `src/http/Decompressor.zig`
-   - 纳入权威语言规范手册 `cp/cp_ref.md`（增补第 13.3.7 节《原生 Zig 错误集（`error{ ... }`）互操作规范》）；
-   - 纳入四线全息记录文档：`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`。
-2. **全套自动化测试回归确认（100% 绿灯，零破坏）**：
-   - `test/js/bun/util/csrf.test.ts`：**20 pass, 0 fail (38 expect calls 全部通过)**；
-   - `test/js/bun/http/serve-if-none-match.test.ts`：**17 pass, 0 fail (46 expect calls 全部通过)**；
-   - `test/js/bun/http/bun-serve-file.test.ts`：**64 pass, 3 todo, 0 fail (1,185 expect calls 全部通过)**；
-   - `test/js/web/fetch/fetch.test.ts -t "new Request"`：**2 pass, 0 fail 全部通过**；
-   - `test/js/web/fetch/fetch.test.ts -t "should allow very long redirect URLS" --timeout 30000`：**1 pass, 0 fail (200 expect calls 全部通过)**；
-   - 累计 104 项测试、1,469 项断言全部 PASS！
-3. **一次性暂存与唯一提交**：
-   - 执行 `git add -A` 并提交，工作区 100% 保持干净，彻底杜绝事后修改或二次提交。
+1. **先写全记录**：将本次 git 提交指令与全量变更范围完整写入 `SESSION.md`。
+2. **本次提交完整范围**：
+   - **核心模块去逃逸纯正 CP 重构（共 12 个模块）**：
+     - `src/http/h2_client/` 全目录：`ClientSession`、`PendingConnect`、`Stream`、`dispatch`、`encode`；
+     - `src/http/h3_client/` 全目录：`AltSvc`、`ClientContext`、`ClientSession`、`PendingConnect`、`Stream`、`callbacks`、`encode`；
+     - 彻底废除全文件 `zig { ... }` 宏观包裹逃逸，全量数据结构、状态机、控制流转写为纯正现代 CP 代码；原版 Zig 文件规范重命名为 `*_ .zig` 备份。
+   - **上游编译器死代码消除（DCE）与代码瘦身**：
+     - 在 `--lib` 模式下直接发射原生 Zig 操作符与切片迭代，消除 1,011 行无用死代码，全目录代码膨胀率由 +46.5% 骤降至 +10.0%，达标 `< 20%` 铁律，且 5 个模块行数直接少于手写 Zig。
+   - **四线全息文档同步**：
+     - `SESSION.md`、`CHANGELOG.md`、`DEVLOG.md` 及 `cp/cp_ref.md`（新增 13.4 节）。
+   - **测试验证**：
+     - HTTP/2 客户端通信、帧解析、协议对抗及内存泄漏等累计 171 项测试全部 100% 绿灯 PASS。
+3. **一次性暂存与提交**：执行唯一的 1 次 git commit，提交后工作区宣告 100% 干净。
+
+
+

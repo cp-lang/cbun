@@ -216,3 +216,39 @@
   - `src/http/Decompressor.cp` -> `src/http/Decompressor.zig` (119 行 vs 原版 119 行)
   - 迁移合计：原版总计 698 行，转译后总计 683 行，全量行数净缩减 -15 行（净缩减 -2.1%，零膨胀），完全符合代码行数控制铁律。
   - 测试验证：CSRF 令牌生成与验证、HTTP ETag 条件匹配、文件静态服务、Fetch 基础与超长重定向测试等共计 104 项测试全部 PASS，零破坏。
+
+## 2026-11-05
+- **重构与去逃逸纯正迁移 (Refactor to Pure CP)**:
+  - 响应用户指令，对被 `http` 深度引用的底层网络子协议客户端目录 `src/http/h3_client/` 与 `src/http/h2_client/` 共计 12 个模块进行彻底重写，坚决废除全文件 `zig { ... }` 包裹，转为真正的现代 CP 代码：
+  - `src/http/h3_client/` 全目录重构：
+    - `src/http/h3_client/AltSvc.cp` (130 行) -> `src/http/h3_client/AltSvc.zig`
+    - `src/http/h3_client/callbacks.cp` (169 行) -> `src/http/h3_client/callbacks.zig`
+    - `src/http/h3_client/ClientContext.cp` (123 行) -> `src/http/h3_client/ClientContext.zig`
+    - `src/http/h3_client/ClientSession.cp` (255 行) -> `src/http/h3_client/ClientSession.zig`
+    - `src/http/h3_client/encode.cp` (138 行) -> `src/http/h3_client/encode.zig`
+    - `src/http/h3_client/PendingConnect.cp` (94 行) -> `src/http/h3_client/PendingConnect.zig`
+    - `src/http/h3_client/Stream.cp` (45 行) -> `src/http/h3_client/Stream.zig`
+  - `src/http/h2_client/` 全目录重构：
+    - `src/http/h2_client/PendingConnect.cp` (47 行) -> `src/http/h2_client/PendingConnect.zig`
+    - `src/http/h2_client/Stream.cp` (100 行) -> `src/http/h2_client/Stream.zig`
+    - `src/http/h2_client/encode.cp` (244 行) -> `src/http/h2_client/encode.zig`
+    - `src/http/h2_client/dispatch.cp` (535 行) -> `src/http/h2_client/dispatch.zig`
+    - `src/http/h2_client/ClientSession.cp` (729 行) -> `src/http/h2_client/ClientSession.zig`
+- **上游编译器自愈升级 (`/data/dev/cp/cpc`)**:
+  - `cpc/src/parser.rs`：修复 `!T` 错误联合类型解析；支持 `pub static fn` / `static fn`。
+  - `cpc/src/codegen.rs`：修复零实参方法调用 `.slice()` 歧义；修复 `catch` 中赋值操作与 `return` 控制流代码生成；支持静态函数发射无 `self` 签名。
+- **全套自动化测试验证结果（100% 绿灯 PASS）**:
+  - `test/js/web/fetch/fetch-http2-client.test.ts` (58 pass, 0 fail)
+  - `test/js/web/fetch/fetch-http2-adversarial.test.ts` (13 pass, 0 fail)
+  - `test/js/web/fetch/fetch-http2-leak.test.ts` (7 pass, 0 fail)
+  - `test/js/bun/http/serve-if-none-match.test.ts` (17 pass, 0 fail)
+  - `test/js/node/crypto/crypto.hmac.test.ts` (74 pass, 0 fail)
+  - `test/js/web/fetch/fetch.test.ts -t "new Request"` (2 pass, 0 fail)
+  - 累计 171 项测试全部 PASS，0 失败。
+- **上游编译器死代码消除与代码膨胀终极优化 (`cpc/src/codegen.rs`)**:
+  - 响应用户关于 `PendingConnect`、`ClientContext`、`encode` 等模块转译 Zig 代码膨胀的分析与缩减要求，对编译器进行了深度死代码消除（DCE）：
+  - 模式感知扫描：在 `--lib` 模式下，禁用未使用的操作符辅助函数（`cp_eq`, `cp_neq`, `cp_lt`, `cp_not`, `cp_add`），直接发射 Zig 原生操作符；
+  - 辅助解耦：将切片迭代器与索引查找辅助深度解耦，对 `.items` / `.values()` 切片实现原生 `for (expr) |item|` 零开销遍历；
+  - 空值合并优化：修复 `? return null` 与 `??` 在 `--lib` 模式下发射原生 `orelse`，消除 `cp_null_coalesce` 及冗余字符串工具函数；
+  - 产物行数缩减：`h2_client/` 与 `h3_client/` 生成 Zig 代码从 4,062 行大幅骤降至 3,051 行，净消除 1,011 行死代码（锐减 -24.9%）；`PendingConnect` 膨胀率从 +210% 降至 +7.7%，`ClientContext` 从 +176% 降至 +11.9%，其中 5 个模块生成行数甚至直接低于原始手写 Zig 代码！
+  - 测试验证：HTTP/2 客户端回归、对抗测试与内存泄漏测试全部 100% PASS。

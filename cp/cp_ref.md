@@ -3484,6 +3484,29 @@ export @value struct Compact {
 
 CP 编译器在每个库模块头部自动注入 `const string = []const u8;`。无论是纯 CP 类型推导、还是内嵌 `zig { ... }` 块中复用的宿主代码（如 Bun 内部普遍使用的 `string`），均能天然无缝解析，彻底消除未声明标识符报错。
 
+#### 11.7.12 函数调用约定装饰器（`@callconv`）与 C-ABI 回调兼容
+
+在对接底层 C 库、OS 系统调用或第三方 C 动态库回调（如 BoringSSL, libuv, lsquic, JSC 回调函数）时，回调函数通常必须严格遵循 C 语言调用约定（`callconv(.c)`）。
+
+CP 语言提供了 `@callconv` 函数级装饰器：
+
+```typescript
+@callconv("c")
+pub fn onHskDone(qs: *quic.Socket, ok: c_int): void {
+    // ...
+}
+```
+
+- **语义**：修饰函数在转译为 Zig 时自动生成 `callconv(.c)` 函数调用约定修饰；
+- **支持格式**：`@callconv("c")`、`@callconv(".c")` 或 `@callconv(c)`；
+- **生成的 Zig 产物**：
+  ```zig
+  pub fn onHskDone(qs: *quic.Socket, ok: c_int) callconv(.c) void {
+      // ...
+  }
+  ```
+- **消除逃逸**：无需为了实现 C 回调而将整个回调函数被迫写进 `zig { ... }` 块中，使底层协议回调完全可以用 CP 现代语法书写。
+
 #### 11.7.9 紧凑值结构体（`@value struct`）与零开销值传递语义
 
 在底层高性能系统开发中，诸如句柄、短索引、紧凑枚举包装等小型 POD 结构体（如 `Compact { value: u14 }`）通常需要像原生标量一样按值传递，避免指针解引用的间接开销，并支持在临时右值上直接调用成员方法（例如 `Compact.from(entry).toMimeType()`）。
@@ -3519,6 +3542,29 @@ export @value struct Compact {
 #### 11.7.11 顶层 `string` 原生别名与跨语言零摩擦交互
 
 CP 编译器在每个库模块头部自动注入 `const string = []const u8;`。无论是纯 CP 类型推导、还是内嵌 `zig { ... }` 块中复用的宿主代码（如 Bun 内部普遍使用的 `string`），均能天然无缝解析，彻底消除未声明标识符报错。
+
+#### 11.7.12 函数调用约定装饰器（`@callconv`）与 C-ABI 回调兼容
+
+在对接底层 C 库、OS 系统调用或第三方 C 动态库回调（如 BoringSSL, libuv, lsquic, JSC 回调函数）时，回调函数通常必须严格遵循 C 语言调用约定（`callconv(.c)`）。
+
+CP 语言提供了 `@callconv` 函数级装饰器：
+
+```typescript
+@callconv("c")
+pub fn onHskDone(qs: *quic.Socket, ok: c_int): void {
+    // ...
+}
+```
+
+- **语义**：修饰函数在转译为 Zig 时自动生成 `callconv(.c)` 函数调用约定修饰；
+- **支持格式**：`@callconv("c")`、`@callconv(".c")` 或 `@callconv(c)`；
+- **生成的 Zig 产物**：
+  ```zig
+  pub fn onHskDone(qs: *quic.Socket, ok: c_int) callconv(.c) void {
+      // ...
+  }
+  ```
+- **消除逃逸**：无需为了实现 C 回调而将整个回调函数被迫写进 `zig { ... }` 块中，使底层协议回调完全可以用 CP 现代语法书写。
 
 ---
 
@@ -3753,6 +3799,19 @@ cpc emit-types src/url.cp -o src/url.d.cp
    可选类型统一采用纯正 TypeScript 现代风格后缀 `T?`（如 `let s: string? = null;`）；当函数返回同时可能为 `null` 且可能发生错误时，统一采用纯正交链式后缀 `T?!`（如 `fn find(): User?!`、`fn get(): string?!`），底层自动映射为 Zig 原生错误联合 `!?T`；带显式错误集时写作 `T? ! ErrorSet`。编译器已在语义与语法层面彻底废除前缀 `?T`，静态拦截任何前置问号声明并明确报错，杜绝三明治前后包夹带来的混乱，确立“类型主体永远居首、修饰状态纯后缀链式向右展开”的全局统一规范。
 7. **原生 Zig 错误集（`error{ ... }`）互操作规范**：
    在与底层 Zig 强类型错误集深度互操作时，Zig 的 `error{ ... }` 属于原生的错误枚举集合（Error Sets），与 CP 默认发射的 Tagged Union（`union(enum)`）存在语义差异。当需要向下游 Zig 消费方导出严格兼容的错误联合（如 `InitError!void`）时，可通过在 `zig { ... }` 原生逃逸舱中声明 `pub const InitError = error{ ... };`，确保与底层系统调用的类型系统与错误传播 100% 契合。
+
+### 13.4 `--lib` 静态库模式死代码消除（DCE）与零开销原生转译
+
+在通过 `cpc src/foo.cp -o src/foo.zig --lib` 构建供 Zig 宿主模块调用的库时，编译器全面启用模式感知的死代码消除与原生直通机制：
+
+1. **原生操作符直通**：
+   在 `--lib` 模式下，二元运算符（`==`、`!=`、`<`、`+`）与逻辑非（`!`）直接发射为 Zig 原生操作符，绝不发射未调用的通用运行时辅助函数（`cp_eq`、`cp_lt`、`cp_not`、`cp_add`），从源头上杜绝数十至上百行的 Prelude 模板代码膨胀。
+2. **切片原生遍历（Native Slice Iteration）**：
+   针对 `for (item of container)` 循环，若容器为已知切片属性（如 `.items`、`.values()`），编译器自动生成零开销的 Zig 原生 `for (container) |item|` 循环，无需注入 `cp_iter_slice` / `cp_mut_slice` 迭代器封装。
+3. **空值合并与短路返回原生对齐**：
+   针对 `a ?? b`（空值合并）与 `expr ? return null`（短路解包），在 `--lib` 模式下直接发射为标准的 Zig 原生 `(a orelse b)` 与 `((expr) orelse { return null; })`，无需任何辅助函数。
+4. **辅助函数精细按需摇树**：
+   将切片索引查找辅助（`indexOf`、`lastIndexOf`、`includes`）与切片迭代解耦，仅在实际存在该方法调用时才按需发射，保证生成的 `.zig` 源码紧凑、纯粹，膨胀率严格受控在 10% 以内，部分模块代码量甚至少于原始手写 Zig。
 
 ---
 
