@@ -2,41 +2,43 @@
 // HTTP Request body payload representation in CP language
 
 zig {
-    pub const HTTPRequestBody = union(enum) {
-        bytes: []const u8,
-        sendfile: SendFile,
-        stream: struct {
-            buffer: ?*ThreadSafeStreamBuffer,
-            ended: bool,
-
-            pub fn detach(this: *@This()) void {
-                if (this.buffer) |buffer| {
-                    this.buffer = null;
-                    buffer.deref();
-                }
-            }
-        },
-
-        pub fn isStream(this: *const HTTPRequestBody) bool {
-            return this.* == .stream;
-        }
-
-        pub fn deinit(this: *HTTPRequestBody) void {
-            switch (this.*) {
-                .sendfile, .bytes => {},
-                .stream => |*stream| stream.detach(),
-            }
-        }
-        pub fn len(this: *const HTTPRequestBody) usize {
-            return switch (this.*) {
-                .bytes => this.bytes.len,
-                .sendfile => this.sendfile.content_size,
-                // unknow amounts
-                .stream => std.math.maxInt(usize),
-            };
-        }
-    };
-
     const SendFile = @import("./SendFile.zig");
     const ThreadSafeStreamBuffer = @import("./ThreadSafeStreamBuffer.zig");
+}
+
+export @value struct StreamBody {
+    buffer: *ThreadSafeStreamBuffer? = null,
+    ended: bool = false,
+
+    pub fn detach(*this): void {
+        if (buf := this.buffer) {
+            this.buffer = null;
+            buf.deref();
+        }
+    }
+}
+
+export enum HTTPRequestBody {
+    bytes: string,
+    sendfile: SendFile,
+    stream: StreamBody,
+
+    pub fn isStream(*this): bool {
+        return this.* == .stream;
+    }
+
+    pub fn deinit(*this): void {
+        switch (this.*) {
+            .sendfile, .bytes => {},
+            .stream => this.stream.detach(),
+        }
+    }
+
+    pub fn len(*this): usize {
+        return switch (this.*) {
+            .bytes => this.bytes.len,
+            .sendfile => this.sendfile.content_size,
+            .stream => std.math.maxInt(usize),
+        };
+    }
 }

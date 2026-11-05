@@ -2,18 +2,18 @@
 // TLS Certificate information struct in CP language
 
 zig {
-    pub const CertificateInfo = @This();
+    const HTTPCertError = @import("./HTTPCertError.zig");
+}
 
-    cert: []const u8,
+export @root struct CertificateInfo {
+    cert: string,
     cert_error: HTTPCertError,
-    hostname: []const u8,
+    hostname: string,
 
-    pub fn deinit(this: *const CertificateInfo, allocator: std.mem.Allocator) void {
+    pub fn deinit(this, allocator: std.mem.Allocator): void {
         allocator.free(this.cert);
         allocator.free(this.cert_error.code);
         allocator.free(this.cert_error.reason);
         allocator.free(this.hostname);
     }
-
-    const HTTPCertError = @import("./HTTPCertError.zig");
 }

@@ -2,17 +2,17 @@
 const std = @import("std");
 const string = []const u8;
 
+const HTTPCertError = @import("./HTTPCertError.zig");
+
 pub const CertificateInfo = @This();
 
 cert: []const u8,
 cert_error: HTTPCertError,
 hostname: []const u8,
 
-pub fn deinit(this: *const CertificateInfo, allocator: std.mem.Allocator) void {
-    allocator.free(this.cert);
-    allocator.free(this.cert_error.code);
-    allocator.free(this.cert_error.reason);
-    allocator.free(this.hostname);
+pub fn deinit(self: *const CertificateInfo, allocator: std.mem.Allocator) void {
+    _ = allocator.free(self.cert);
+    _ = allocator.free(self.cert_error.code);
+    _ = allocator.free(self.cert_error.reason);
+    _ = allocator.free(self.hostname);
 }
-
-const HTTPCertError = @import("./HTTPCertError.zig");

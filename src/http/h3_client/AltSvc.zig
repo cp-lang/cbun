@@ -6,40 +6,23 @@ fn cp_cast_int(comptime Dest: type, val: anytype) Dest {
     const Src = @TypeOf(val);
     if (comptime Src == Dest) return val;
     if (comptime Src == comptime_int) {
-        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) {
-            return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val)))));
-        } else {
-            return @as(Dest, @truncate(val));
-        }
+        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val));
     }
     const src_bits = @typeInfo(Src).int.bits;
     const dest_bits = @typeInfo(Dest).int.bits;
     if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {
-        if (comptime dest_bits >= src_bits) {
-            return @as(Dest, val);
-        } else {
-            return @truncate(val);
-        }
+        if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val);
     }
     if (comptime @typeInfo(Src).int.signedness == .signed) {
         const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val);
         const u: u128 = @bitCast(s);
-        if (comptime dest_bits >= 128) {
-            return @as(Dest, u);
-        } else {
-            return @truncate(u);
-        }
+        if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u);
     } else {
         const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val);
         const s: i128 = @bitCast(u);
-        if (comptime dest_bits >= 128) {
-            return @as(Dest, s);
-        } else {
-            return @truncate(s);
-        }
+        if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s);
     }
 }
-
 const bun = @import("bun");
 const strings = bun.strings;
 const log = bun.Output.scoped(.h3_client, .hidden);
@@ -58,7 +41,6 @@ pub const Entry = struct {
     }
 
     pub fn init(self: *Entry, port: u16, ma: u32) void {
-        _ = &self;
         self.port = port;
         self.ma = ma;
     }
@@ -75,7 +57,6 @@ pub const Record = struct {
     }
 
     pub fn init(self: *Record, h3_port: u16, expires_at: i64) void {
-        _ = &self;
         self.h3_port = h3_port;
         self.expires_at = expires_at;
     }
@@ -93,7 +74,6 @@ pub fn parse(field_value: []const u8) !?Entry {
     var entries = std.mem.splitScalar(u8, value, 44);
     _ = &entries;
     while (entries.next()) |raw_entry| {
-        _ = &raw_entry;
         var entry = strings.trim(raw_entry, " \t");
         _ = &entry;
         if ((entry.len == 0)) {
@@ -104,7 +84,6 @@ pub fn parse(field_value: []const u8) !?Entry {
         var alternative = strings.trim(params.first(), " \t");
         _ = &alternative;
         if (strings.indexOfChar(alternative, 61)) |eq| {
-            _ = &eq;
             var proto = alternative[0..eq];
             _ = &proto;
             if ((!std.ascii.eqlIgnoreCase(proto, "h3"))) {
@@ -116,7 +95,6 @@ pub fn parse(field_value: []const u8) !?Entry {
                 auth = auth[1..(auth.len - 1)];
             }
             if (std.mem.lastIndexOfScalar(u8, auth, 58)) |colon| {
-                _ = &colon;
                 if ((colon != 0)) {
                     continue;
                 }
@@ -133,11 +111,9 @@ pub fn parse(field_value: []const u8) !?Entry {
                 var result = Entry{ .port = port };
                 _ = &result;
                 while (params.next()) |raw_param| {
-                    _ = &raw_param;
                     var param = strings.trim(raw_param, " \t");
                     _ = &param;
                     if (strings.indexOfChar(param, 61)) |peq| {
-                        _ = &peq;
                         if (std.ascii.eqlIgnoreCase(param[0..peq], "ma")) {
                             result.ma = (blk_catch_1: {
                                 break :blk_catch_1 (std.fmt.parseInt(u32, param[(peq + 1)..], 10)) catch |__ce_1| {
@@ -163,7 +139,6 @@ pub fn sweepExpired(now: i64) void {
     var it = cache.iterator();
     _ = &it;
     while (it.next()) |kv| {
-        _ = &kv;
         if ((now >= kv.value_ptr.expires_at)) {
             const owned = kv.key_ptr.*;
             _ = &owned;
@@ -186,7 +161,6 @@ pub fn record(origin_host: []const u8, origin_port: u16, field_value: []const u8
         break :blk_catch_2 (parse(field_value)) catch |__ce_2| {
             _ = &__ce_2;
             if (cache.fetchRemove(k)) |kv| {
-                _ = &kv;
                 _ = bun.default_allocator.free(kv.key);
             }
             log("alt-svc clear {s}", .{k});
@@ -196,7 +170,6 @@ pub fn record(origin_host: []const u8, origin_port: u16, field_value: []const u8
     });
     _ = &entry_opt;
     if (entry_opt) |entry| {
-        _ = &entry;
         const now = std.time.timestamp();
         _ = &now;
         if (((cache.count() >= max_entries) and (!cache.contains(k)))) {
@@ -229,7 +202,6 @@ pub fn lookup(origin_host: []const u8, origin_port: u16) ?u16 {
     _ = &rec;
     if ((std.time.timestamp() >= rec.expires_at)) {
         if (cache.fetchRemove(k)) |kv| {
-            _ = &kv;
             _ = bun.default_allocator.free(kv.key);
         }
         return null;

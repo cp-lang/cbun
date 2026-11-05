@@ -10,8 +10,8 @@ zig {
 }
 
 export struct Entry {
-    port: u16,
-    ma: u32 = 86400,
+    pub port: u16,
+    pub ma: u32 = 86400,
 }
 
 pub fn parse(field_value: string): Entry?! {
@@ -57,8 +57,8 @@ pub fn parse(field_value: string): Entry?! {
 }
 
 struct Record {
-    h3_port: u16,
-    expires_at: i64,
+    pub h3_port: u16,
+    pub expires_at: i64,
 }
 
 const max_entries: usize = 256;

@@ -2,40 +2,44 @@
 const std = @import("std");
 const string = []const u8;
 
+const SendFile = @import("./SendFile.zig");
+const ThreadSafeStreamBuffer = @import("./ThreadSafeStreamBuffer.zig");
+
 pub const HTTPRequestBody = union(enum) {
     bytes: []const u8,
     sendfile: SendFile,
-    stream: struct {
-        buffer: ?*ThreadSafeStreamBuffer,
-        ended: bool,
+    stream: StreamBody,
 
-        pub fn detach(this: *@This()) void {
-            if (this.buffer) |buffer| {
-                this.buffer = null;
-                buffer.deref();
-            }
-        }
-    },
-
-    pub fn isStream(this: *const HTTPRequestBody) bool {
-        return this.* == .stream;
+    pub fn isStream(self: *HTTPRequestBody) bool {
+        return (self.* == .stream);
     }
 
-    pub fn deinit(this: *HTTPRequestBody) void {
-        switch (this.*) {
+    pub fn deinit(self: *HTTPRequestBody) void {
+        switch (self.*) {
             .sendfile, .bytes => {},
-            .stream => |*stream| stream.detach(),
+            .stream => {
+                _ = self.stream.detach();
+            },
         }
     }
-    pub fn len(this: *const HTTPRequestBody) usize {
-        return switch (this.*) {
-            .bytes => this.bytes.len,
-            .sendfile => this.sendfile.content_size,
-            // unknow amounts
+
+    pub fn len(self: *HTTPRequestBody) usize {
+        return (switch (self.*) {
+            .bytes => self.bytes.len,
+            .sendfile => self.sendfile.content_size,
             .stream => std.math.maxInt(usize),
-        };
+        });
     }
 };
 
-const SendFile = @import("./SendFile.zig");
-const ThreadSafeStreamBuffer = @import("./ThreadSafeStreamBuffer.zig");
+pub const StreamBody = struct {
+    buffer: ?*ThreadSafeStreamBuffer = null,
+    ended: bool = false,
+
+    pub fn detach(self: *StreamBody) void {
+        if (self.buffer) |buf| {
+            self.buffer = null;
+            _ = buf.deref();
+        }
+    }
+};

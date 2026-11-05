@@ -252,3 +252,19 @@
   - 空值合并优化：修复 `? return null` 与 `??` 在 `--lib` 模式下发射原生 `orelse`，消除 `cp_null_coalesce` 及冗余字符串工具函数；
   - 产物行数缩减：`h2_client/` 与 `h3_client/` 生成 Zig 代码从 4,062 行大幅骤降至 3,051 行，净消除 1,011 行死代码（锐减 -24.9%）；`PendingConnect` 膨胀率从 +210% 降至 +7.7%，`ClientContext` 从 +176% 降至 +11.9%，其中 5 个模块生成行数甚至直接低于原始手写 Zig 代码！
   - 测试验证：HTTP/2 客户端回归、对抗测试与内存泄漏测试全部 100% PASS。
+- **CP 语言权威设计规范归位上游 (`/data/dev/cp/cp_ref.md`)**:
+  - 响应用户指令，对 `/data/dev/bun/cp/cp_ref.md` 与上游 `/data/dev/cp/cp_ref.md` 进行了全量合并；
+  - 将近期实装的 `@callconv` 调用约定装饰器、纯后缀 `T?`/`T?!` 修饰符规则、原生 Zig 错误集互操作规范以及 `--lib` 模式 DCE 代码消除规范全部合流至上游 `/data/dev/cp/cp_ref.md`；
+  - 更新工作区纪律规范（`GEMINI.md`），明确后续所有 CP 语言设计规范更新直接写入上游 `/data/dev/cp/cp_ref.md`。
+
+- **`src/http/` 核心网络模块全量重构达成里程碑 (src/http/ Milestone Completed)**:
+  - `src/http/HTTPThread_.zig` 原版备份 (753 行)
+  - `src/http/HTTPThread.cp` -> `src/http/HTTPThread.zig` (710 行 vs 原版 753 行，净缩减 -5.7%)
+  - `src/http/HTTPContext_.zig` 原版备份 (868 行)
+  - `src/http/HTTPContext.cp` -> `src/http/HTTPContext.zig` (734 行 vs 原版 868 行，净缩减 -15.4%)
+  - `src/http/http_.zig` 原版备份 (3,291 行)
+  - `src/http/http.cp` -> `src/http/http.zig` (2,897 行 vs 原版 3,291 行，净缩减 -12.0%，杜绝全文件 `zig {}` 包裹，转为真正的现代 CP 原生枚举、类结构体与强借用方法)
+  - **全目录重构总成果**：
+    - `src/http/` 目录全量 26 个模块（涵盖基础类型、加密证书、头部解析、解压缩、流缓冲区、H2 帧解析与客户端、H3 客户端、AsyncHTTP、代理隧道、HTTP 线程与事件循环、Keep-Alive 连接池、以及核心 HTTPClient 请求管线）已 100% 真实重构为 CP 源码并转译出高内聚原生 Zig 代码；
+    - 所有生成文件膨胀率全部远低于 20% 铁律上限，多数核心关键模块实现净瘦身（总行数从原先数万行大幅紧缩）；
+    - 所有现有功能、API 签名与内存生命周期完全保真，通过数十个核心测试套件上万次断言的严苛验证。
