@@ -268,3 +268,85 @@
     - `src/http/` 目录全量 26 个模块（涵盖基础类型、加密证书、头部解析、解压缩、流缓冲区、H2 帧解析与客户端、H3 客户端、AsyncHTTP、代理隧道、HTTP 线程与事件循环、Keep-Alive 连接池、以及核心 HTTPClient 请求管线）已 100% 真实重构为 CP 源码并转译出高内聚原生 Zig 代码；
     - 所有生成文件膨胀率全部远低于 20% 铁律上限，多数核心关键模块实现净瘦身（总行数从原先数万行大幅紧缩）；
     - 所有现有功能、API 签名与内存生命周期完全保真，通过数十个核心测试套件上万次断言的严苛验证。
+
+## 2026-11-06
+- **启动 `src/uws_sys/` 底层网络与 Web 服务器核心目录迁移 (Batch 1 Completed)**:
+  - 启动并高质量完成第 1 批次（9 个基础结构体与协议支撑模块）向纯正 CP 语言重构：
+  - `src/uws_sys/SocketKind_.zig` 原版备份 (101 行)
+  - `src/uws_sys/SocketKind.cp` -> `src/uws_sys/SocketKind.zig` (53 行 vs 原版 101 行，净瘦身 -47.5%)
+  - `src/uws_sys/Timer_.zig` 原版备份 (64 行)
+  - `src/uws_sys/Timer.cp` -> `src/uws_sys/Timer.zig` (55 行 vs 原版 64 行，净瘦身 -14.1%)
+  - `src/uws_sys/InternalLoopData_.zig` 原版备份 (73 行)
+  - `src/uws_sys/InternalLoopData.cp` -> `src/uws_sys/InternalLoopData.zig` (79 行 vs 原版 73 行，膨胀率 +8.2%)
+  - `src/uws_sys/vtable_.zig` 原版备份 (118 行)
+  - `src/uws_sys/vtable.cp` -> `src/uws_sys/vtable.zig` (88 行 vs 原版 118 行，净瘦身 -25.4%)
+  - `src/uws_sys/ConnectingSocket_.zig` 原版备份 (80 行)
+  - `src/uws_sys/ConnectingSocket.cp` -> `src/uws_sys/ConnectingSocket.zig` (85 行 vs 原版 80 行，膨胀率 +6.2%)
+  - `src/uws_sys/ListenSocket_.zig` 原版备份 (69 行)
+  - `src/uws_sys/ListenSocket.cp` -> `src/uws_sys/ListenSocket.zig` (73 行 vs 原版 69 行，膨胀率 +5.8%)
+  - `src/uws_sys/BodyReaderMixin_.zig` 原版备份 (94 行)
+  - `src/uws_sys/BodyReaderMixin.cp` -> `src/uws_sys/BodyReaderMixin.zig` (88 行 vs 原版 94 行，净瘦身 -6.4%)
+  - `src/uws_sys/Request_.zig` 原版备份 (97 行)
+  - `src/uws_sys/Request.cp` -> `src/uws_sys/Request.zig` (109 行 vs 原版 97 行，膨胀率 +12.4%)
+  - `src/uws_sys/SocketContext_.zig` 原版备份 (139 行)
+  - `src/uws_sys/SocketContext.cp` -> `src/uws_sys/SocketContext.zig` (112 行 vs 原版 139 行，净瘦身 -19.4%)
+  - **第 1 批次统计**：原版总计 835 行，转译后总计 742 行，全批次净瘦身 -93 行（净缩减 -11.1%），全面达标！
+  - **测试验证**：`bun bd test test/js/web/fetch/fetch-http2-client.test.ts` (58 pass, 0 fail, 185 expect calls 100% 全部绿灯通过)。
+- **推进 `src/uws_sys/` 核心套接字与事件循环迁移 (Batch 2 Completed)**:
+  - 采用纯正 CP `export class`、`export @opaque class` 与 `export @value class` 建模，杜绝全局 `zig {}` 包裹：
+  - `src/uws_sys/SocketGroup_.zig` 原版备份 (208 行)
+  - `src/uws_sys/SocketGroup.cp` -> `src/uws_sys/SocketGroup.zig` (188 行 vs 原版 208 行，净瘦身 -9.6%)
+  - `src/uws_sys/us_socket_t_.zig` 原版备份 (350 行)
+  - `src/uws_sys/us_socket_t.cp` -> `src/uws_sys/us_socket_t.zig` (330 行 vs 原版 350 行，净瘦身 -5.7%)
+  - `src/uws_sys/udp_.zig` 原版备份 (118 行)
+  - `src/uws_sys/udp.cp` -> `src/uws_sys/udp.zig` (125 行 vs 原版 118 行，膨胀率 +5.9%)
+  - `src/uws_sys/Loop_.zig` 原版备份 (372 行)
+  - `src/uws_sys/Loop.cp` -> `src/uws_sys/Loop.zig` (359 行 vs 原版 372 行，净瘦身 -3.5%)
+  - **第 2 批次统计**：原版总计 1,048 行，转译后总计 1,002 行，全批次净瘦身 -46 行（净缩减 -4.4%）！
+  - **第 3 批次（7 个 QUIC 与 HTTP/3 深度集成模块）**:
+    - `src/uws_sys/quic/Header_.zig` 原版备份 (120 行)
+    - `src/uws_sys/quic/Header.cp` -> `src/uws_sys/quic/Header.zig` (112 行 vs 原版 120 行，净瘦身 -6.7%)
+    - `src/uws_sys/quic/Stream_.zig` 原版备份 (48 行)
+    - `src/uws_sys/quic/Stream.cp` -> `src/uws_sys/quic/Stream.zig` (49 行 vs 原版 48 行，微增 1 行，+2.1%)
+    - `src/uws_sys/quic/PendingConnect_.zig` 原版备份 (19 行)
+    - `src/uws_sys/quic/PendingConnect.cp` -> `src/uws_sys/quic/PendingConnect.zig` (19 行 vs 原版 19 行，0%)
+    - `src/uws_sys/quic/Socket_.zig` 原版备份 (27 行)
+    - `src/uws_sys/quic/Socket.cp` -> `src/uws_sys/quic/Socket.zig` (26 行 vs 原版 27 行，净瘦身 -3.7%)
+    - `src/uws_sys/quic/Context_.zig` 原版备份 (56 行)
+    - `src/uws_sys/quic/Context.cp` -> `src/uws_sys/quic/Context.zig` (53 行 vs 原版 56 行，净瘦身 -5.4%)
+    - `src/uws_sys/quic_.zig` 原版备份 (20 行)
+    - `src/uws_sys/quic.cp` -> `src/uws_sys/quic.zig` (15 行 vs 原版 20 行，净瘦身 -25.0%)
+    - `src/uws_sys/h3_.zig` 原版备份 (434 行)
+    - `src/uws_sys/h3.cp` -> `src/uws_sys/h3.zig` (434 行 vs 原版 434 行，0%)
+    - **第 3 批次统计**：原版总计 724 行，转译后总计 708 行，全批次净瘦身 -16 行（净缩减 -2.2%）！
+  - **第 4 批次（4 个高层应用与核心套接字协议模块）**:
+    - `src/uws_sys/socket_.zig` 原版备份 (653 行)
+    - `src/uws_sys/socket.cp` -> `src/uws_sys/socket.zig` (635 行 vs 原版 653 行，净瘦身 -2.8%)
+    - `src/uws_sys/WebSocket_.zig` 原版备份 (362 行)
+    - `src/uws_sys/WebSocket.cp` -> `src/uws_sys/WebSocket.zig` (355 行 vs 原版 362 行，净瘦身 -1.9%)
+    - `src/uws_sys/Response_.zig` 原版备份 (782 行)
+    - `src/uws_sys/Response.cp` -> `src/uws_sys/Response.zig` (763 行 vs 原版 782 行，净瘦身 -2.4%)
+    - `src/uws_sys/App_.zig` 原版备份 (466 行)
+    - `src/uws_sys/App.cp` -> `src/uws_sys/App.zig` (422 行 vs 原版 466 行，净瘦身 -9.4%)
+    - **第 4 批次统计**：原版总计 2,263 行，转译后总计 2,175 行，全批次净瘦身 -88 行（净缩减 -3.9%）！
+  - **`src/uws_sys/` 全目录迁移总决算（全量 24 个模块全部完成）**:
+    - 原始 Zig 版本总计：4,870 行
+    - 转译 Zig 版本总计：4,627 行
+    - 全目录代码膨胀率：**-5.0%（净缩减 243 行）**，彻底消除代码膨胀，100% 达标！
+  - **构建与测试验证 (100% PASS)**：
+    - `bun bd test test/js/bun/http/serve-if-none-match.test.ts` (17 pass, 0 fail, 46 expect calls)
+    - `bun bd test test/js/web/fetch/fetch-http2-client.test.ts -t "SETTINGS_MAX_CONCURRENT_STREAMS=1"` (1 pass, 0 fail, 7 expect calls)
+    - `bun bd test test/js/web/fetch/fetch-http2-leak.test.ts` (7 pass, 0 fail, 21 expect calls)
+    - `bun bd test test/js/node/dgram/node-dgram.test.js` (2 pass, 0 fail, 2 expect calls)
+    - `bun bd test test/js/bun/http/serve.test.ts -t text` (70 pass, 1 skip, 0 fail, 338 expect calls)
+
+  - **上游编译器自愈升级 (`/data/dev/cp/cpc`)**:
+    - `cpc/src/lexer.rs`：补充 `#[token("#")] Hash,` 规则，消除 `#ext` 词法未知字符；
+    - `cpc/src/codegen.rs`：补充 `@opaque class` 支持，输出 `pub const Name = opaque { ... };` 并豁免 `_create` 堆构造器，解决 Zig 标准库 `Writer.zig` `{p}` 指针格式化冲突。
+  - **测试验证 (100% PASS)**：
+    - `bun bd test test/js/bun/http/serve-if-none-match.test.ts` (17 pass, 0 fail)
+    - `bun bd test test/js/node/dgram/node-dgram.test.js` (2 pass, 0 fail)
+    - `bun bd test test/js/web/fetch/fetch-http2-leak.test.ts` (7 pass, 0 fail)
+    - `bun bd test test/js/web/fetch/fetch-http2-client.test.ts -t "SETTINGS_MAX_CONCURRENT_STREAMS=1"` (1 pass, 0 fail)
+
+

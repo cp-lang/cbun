@@ -1,0 +1,22 @@
+export @opaque class Socket {
+    zig {
+        extern fn us_quic_socket_make_stream(s: *Socket) void;
+        pub const makeStream = us_quic_socket_make_stream;
+
+        extern fn us_quic_socket_streams_avail(s: *Socket) c_uint;
+        pub const streamsAvail = us_quic_socket_streams_avail;
+
+        extern fn us_quic_socket_status(s: *Socket, buf: [*]u8, len: c_uint) c_int;
+        pub fn status(s: *Socket, buf: []u8) c_int {
+            return us_quic_socket_status(s, buf.ptr, @intCast(buf.len));
+        }
+
+        extern fn us_quic_socket_close(s: *Socket) void;
+        pub const close = us_quic_socket_close;
+
+        extern fn us_quic_socket_ext(s: *Socket) *anyopaque;
+        pub fn ext(s: *Socket, comptime T: type) *?*T {
+            return @ptrCast(@alignCast(us_quic_socket_ext(s)));
+        }
+    }
+}

@@ -1,0 +1,114 @@
+zig {
+    const std = @import("std");
+    const bun = @import("bun");
+    const uws = bun.uws;
+
+    const c = struct {
+        pub extern fn uws_req_is_ancient(res: *Request) bool;
+        pub extern fn uws_req_get_yield(res: *Request) bool;
+        pub extern fn uws_req_set_yield(res: *Request, yield: bool) void;
+        pub extern fn uws_req_get_url(res: *Request, dest: *[*]const u8) usize;
+        pub extern fn uws_req_get_method(res: *Request, dest: *[*]const u8) usize;
+        pub extern fn uws_req_get_header(res: *Request, lower_case_header: [*]const u8, lower_case_header_length: usize, dest: *[*]const u8) usize;
+        pub extern fn uws_req_get_query(res: *Request, key: [*c]const u8, key_length: usize, dest: *[*]const u8) usize;
+        pub extern fn uws_req_get_parameter(res: *Request, index: c_ushort, dest: *[*]const u8) usize;
+    };
+
+    pub const AnyRequest = union(enum) {
+        h1: *Request,
+        h3: *uws.H3.Request,
+
+        pub fn header(this: AnyRequest, name: []const u8) ?[]const u8 {
+            return switch (this) {
+                inline else => |r| r.header(name),
+            };
+        }
+        pub fn method(this: AnyRequest) []const u8 {
+            return switch (this) {
+                inline else => |r| r.method(),
+            };
+        }
+        pub fn url(this: AnyRequest) []const u8 {
+            return switch (this) {
+                inline else => |r| r.url(),
+            };
+        }
+        pub fn setYield(this: AnyRequest, y: bool) void {
+            switch (this) {
+                inline else => |r| r.setYield(y),
+            }
+        }
+        pub fn dateForHeader(this: AnyRequest, name: []const u8) bun.JSError!?u64 {
+            return switch (this) {
+                inline else => |r| r.dateForHeader(name),
+            };
+        }
+    };
+}
+
+export @value class Request {
+    pub fn isAncient(*this): bool {
+        zig {
+            return c.uws_req_is_ancient(self);
+        }
+    }
+
+    pub fn getYield(*this): bool {
+        zig {
+            return c.uws_req_get_yield(self);
+        }
+    }
+
+    pub fn setYield(*this, y: bool): void {
+        zig {
+            c.uws_req_set_yield(self, y);
+        }
+    }
+
+    pub fn url(*this): string {
+        zig {
+            var ptr: [*]const u8 = undefined;
+            return ptr[0..c.uws_req_get_url(self, &ptr)];
+        }
+    }
+
+    pub fn method(*this): string {
+        zig {
+            var ptr: [*]const u8 = undefined;
+            return ptr[0..c.uws_req_get_method(self, &ptr)];
+        }
+    }
+
+    zig {
+        pub fn header(req: *Request, name: []const u8) ?[]const u8 {
+            bun.assert(std.ascii.isLower(name[0]));
+
+            var ptr: [*]const u8 = undefined;
+            const len = c.uws_req_get_header(req, name.ptr, name.len, &ptr);
+            if (len == 0) return null;
+            return ptr[0..len];
+        }
+
+        pub fn dateForHeader(req: *Request, name: []const u8) bun.JSError!?u64 {
+            const value = header(req, name);
+            if (value == null) return null;
+            var string_val = bun.String.init(value.?);
+            defer string_val.deref();
+            const date_f64 = try bun.String.parseDate(&string_val, bun.jsc.VirtualMachine.get().global);
+            if (!std.math.isNan(date_f64) and std.math.isFinite(date_f64) and date_f64 >= 0) {
+                return @intFromFloat(date_f64);
+            }
+            return null;
+        }
+
+        pub fn query(req: *Request, name: []const u8) []const u8 {
+            var ptr: [*]const u8 = undefined;
+            return ptr[0..c.uws_req_get_query(req, name.ptr, name.len, &ptr)];
+        }
+
+        pub fn parameter(req: *Request, index: u16) []const u8 {
+            var ptr: [*]const u8 = undefined;
+            return ptr[0..c.uws_req_get_parameter(req, @as(c_ushort, @intCast(index)), &ptr)];
+        }
+    }
+}

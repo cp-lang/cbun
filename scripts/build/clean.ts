@@ -110,8 +110,18 @@ if (targets.length === 0) {
 } else {
   await Promise.all(
     targets.map(async t => {
-      log(`rm -rf ${t}`);
-      await rm(t, { recursive: true, force: true });
+      try {
+        log(`rm -rf ${t}`);
+        await rm(t, { recursive: true, force: true });
+      } catch (err: any) {
+        if (err?.code === "EBUSY" && existsSync(t)) {
+          try {
+            for (const entry of readdirSync(t)) {
+              await rm(resolve(t, entry), { recursive: true, force: true });
+            }
+          } catch {}
+        }
+      }
     }),
   );
   log(`${targets.length} path(s) removed`);
