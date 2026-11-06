@@ -2,156 +2,200 @@
 const std = @import("std");
 const string = []const u8;
 
-const ClientContext = @import("./ClientContext.zig");
-const ClientSession = @import("./ClientSession.zig");
-const H3 = @import("../H3Client.zig");
-const Stream = @import("./Stream.zig");
-const encode = @import("./encode.zig");
-
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 const bun = @import("bun");
-const strings = bun.strings;
-const quic = bun.uws.quic;
+    const quic = bun.uws.quic;
+    pub const ManyU8 = [*]const u8;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
-const log = bun.Output.scoped(.h3_client, .hidden);
-const ManyU8 = [*]const u8;
+pub const ClientContext = @import("./ClientContext.zig").ClientContext;
+pub const ClientSession = @import("./ClientSession.zig").ClientSession;
+pub const Stream = @import("./Stream.zig").Stream;
+pub const encode = @import("./encode.zig");
 
 pub fn register(qctx: *quic.Context) void {
-    _ = qctx.onHskDone(onHskDone);
-    _ = qctx.onGoaway(onGoaway);
-    _ = qctx.onClose(onConnClose);
-    _ = qctx.onStreamOpen(onStreamOpen);
-    _ = qctx.onStreamHeaders(onStreamHeaders);
-    _ = qctx.onStreamData(onStreamData);
-    _ = qctx.onStreamWritable(onStreamWritable);
-    _ = qctx.onStreamClose(onStreamClose);
+        _ = qctx.onHskDone(onHskDone);
+        _ = qctx.onGoaway(onGoaway);
+        _ = qctx.onClose(onConnClose);
+        _ = qctx.onStreamOpen(onStreamOpen);
+        _ = qctx.onStreamHeaders(onStreamHeaders);
+        _ = qctx.onStreamData(onStreamData);
+        _ = qctx.onStreamWritable(onStreamWritable);
+        _ = qctx.onStreamClose(onStreamClose);
 }
 
-pub fn onHskDone(qs: *quic.Socket, ok: c_int) callconv(.c) void {
-    if ((qs.ext(ClientSession)).*) |session| {
-        _ = &session;
-        log("hsk_done ok={d} pending={d}", .{ ok, session.pending.items.len });
-
-        if ((ok == 0)) {
-            session.closed = true;
-            return;
-        }
-        session.handshake_done = true;
-        for (session.pending.items) |_| qs.makeStream();
-    }
-}
-
-pub fn onGoaway(qs: *quic.Socket) callconv(.c) void {
-    if ((qs.ext(ClientSession)).*) |session| {
-        _ = &session;
-        log("goaway {s}:{d}", .{ session.hostname, session.port });
-
-        session.closed = true;
-    }
-}
-
-pub fn onConnClose(qs: *quic.Socket) callconv(.c) void {
-    if ((qs.ext(ClientSession)).*) |session| {
-        _ = &session;
-        session.closed = true;
-        session.qsocket = null;
-        var buf: [256]u8 = [_]u8{0} ** 256;
-        const st = qs.status(&buf);
-        log("conn_close status={d} '{s}'", .{ st, std.mem.sliceTo(&buf, 0) });
-        if (ClientContext.get()) |ctx| ctx.unregister(session);
-        while (session.pending.items.len > 0) {
-            const stream = session.pending.items[0];
-            bun.debugAssert(stream.qstream == null);
-            session.retryOrFail(stream, if (session.handshake_done)
-                error.ConnectionClosed
-            else
-                error.HTTP3HandshakeFailed);
-        }
-        _ = H3.live_sessions.fetchSub(1, .monotonic);
-
-        _ = session.deref();
-    }
-}
-
-pub fn onStreamOpen(s: *quic.Stream, is_client: c_int) callconv(.c) void {
-    (s.ext(Stream)).* = null;
-    if ((is_client == 0)) {
-        return;
-    }
-    const qs = s.socket() orelse return;
-    const session = qs.ext(ClientSession).* orelse {
-        s.close();
-        return;
-    };
-    const stream: *Stream = for (session.pending.items) |st| {
-        if (st.qstream == null) break st;
-    } else {
-        s.close();
-        return;
-    };
-    stream.qstream = s;
-    s.ext(Stream).* = stream;
-    log("stream_open", .{});
-    encode.writeRequest(session, stream, s) catch |err| {
-        session.fail(stream, err);
-    };
-}
-
-pub fn onStreamHeaders(s: *quic.Stream) callconv(.c) void {
-    if ((s.ext(Stream)).*) |stream| {
-        _ = &stream;
-        const n = s.headerCount();
-
-        stream.decoded_headers.clearRetainingCapacity();
-        bun.handleOom(stream.decoded_headers.ensureTotalCapacity(bun.default_allocator, n));
-        var status: u16 = 0;
-        var i: c_uint = 0;
-        while (i < n) : (i += 1) {
-            const h = s.header(i) orelse continue;
-            const name = h.name[0..h.name_len];
-            const value = h.value[0..h.value_len];
-            if (strings.hasPrefixComptime(name, ":")) {
-                if (strings.eqlComptime(name, ":status")) {
-                    status = std.fmt.parseInt(u16, value, 10) catch 0;
-                }
-                continue;
+pub export fn onHskDone(qs: *quic.Socket, ok: i32) callconv(.c) void {
+        if ((qs.ext(ClientSession)).*) |session| {
+            _ = &session;
+            if ((ok == 0)) {
+                session.closed = true;
+                return;
             }
-            stream.decoded_headers.appendAssumeCapacity(.{ .name = name, .value = value });
+            session.handshake_done = true;
+            var i: usize = 0;
+            _ = &i;
+            while ((i < session.pending.items.len)) {
+                _ = qs.makeStream();
+                i = (i + 1);
+            }
         }
-        if (status == 0) {
-            if (stream.status_code != 0) return;
-            stream.session.fail(stream, error.HTTP3ProtocolError);
+}
+
+pub export fn onGoaway(qs: *quic.Socket) callconv(.c) void {
+        if ((qs.ext(ClientSession)).*) |session| {
+            _ = &session;
+            session.closed = true;
+        }
+}
+
+pub export fn onConnClose(qs: *quic.Socket) callconv(.c) void {
+        if ((qs.ext(ClientSession)).*) |session| {
+            _ = &session;
+            session.closed = true;
+            session.qsocket = null;
+            var buf: [256]u8 = @as([256]u8, @splat(@as(u8, 0)));
+            _ = &buf;
+            const st = qs.status((&buf));
+            _ = &st;
+            if (ClientContext.get()) |ctx| {
+                _ = &ctx;
+                _ = ctx.unregister(session);
+            }
+            while ((session.pending.items.len > 0)) {
+                const stream = session.pending.items[0];
+                _ = &stream;
+                _ = bun.debugAssert((stream.qstream == null));
+                var err_val: anyerror = error.HTTP3HandshakeFailed;
+                _ = &err_val;
+                if (session.handshake_done) {
+                    err_val = error.ConnectionClosed;
+                }
+                _ = session.retryOrFail(stream, err_val);
+            }
+            _ = bun.http.H3.live_sessions.fetchSub(1, .monotonic);
+            _ = session.deref();
+        }
+}
+
+pub export fn onStreamOpen(s: *quic.Stream, is_client: i32) callconv(.c) void {
+        (s.ext(Stream)).* = null;
+        if ((is_client == 0)) {
             return;
         }
-        if (status >= 100 and status < 200) return;
-        stream.status_code = status;
-        stream.session.deliver(stream, false);
-    }
-}
+        if (s.socket()) |qs| {
+            _ = &qs;
+            if ((qs.ext(ClientSession)).*) |session| {
+                _ = &session;
+                var found_stream: ?*Stream = null;
+                for (session.pending.items) |st| {
+                    if (st.qstream == null) {
+                        found_stream = st;
+                        break;
+                    }
+                }
+                if (found_stream) |stream| {
+                    stream.qstream = s;
+                    s.ext(Stream).* = stream;
+                    encode.writeRequest(session, stream, s) catch |err| {
+                        session.fail(stream, err);
+                    };
+                } else {
+                    s.close();
+                    return;
+                }
 
-pub fn onStreamData(s: *quic.Stream, data: ManyU8, len: c_uint, fin: c_int) callconv(.c) void {
-    if ((s.ext(Stream)).*) |stream| {
-        _ = &stream;
-        if (len > 0) {
-            bun.handleOom(stream.body_buffer.appendSlice(bun.default_allocator, data[0..len]));
+            } else {
+                _ = s.close();
+                return;
+            }
+        } else {
+            return;
         }
-        stream.session.deliver(stream, fin != 0);
-    }
 }
 
-pub fn onStreamWritable(s: *quic.Stream) callconv(.c) void {
-    if ((s.ext(Stream)).*) |stream| {
-        _ = &stream;
-        _ = encode.drainSendBody(stream, s);
-    }
+pub export fn onStreamHeaders(s: *quic.Stream) callconv(.c) void {
+        if ((s.ext(Stream)).*) |stream| {
+            _ = &stream;
+            const n = s.headerCount();
+            _ = &n;
+            _ = stream.decoded_headers.clearRetainingCapacity();
+            _ = bun.handleOom(stream.decoded_headers.ensureTotalCapacity(bun.default_allocator, n));
+            var status: u16 = 0;
+            _ = &status;
+            var i: u32 = 0;
+            _ = &i;
+            while ((i < n)) {
+                if (s.header(i)) |h| {
+                    _ = &h;
+                    const name = h.name[0..h.name_len];
+                    _ = &name;
+                    const value = h.value[0..h.value_len];
+                    _ = &value;
+                    if (bun.strings.hasPrefixComptime(name, ":")) {
+                        if (bun.strings.eqlComptime(name, ":status")) {
+                            status = (blk_catch_0: { break :blk_catch_0 ((std.fmt.parseInt(u16, value, 10)) catch |__ce_0| { _ = &__ce_0; break :blk_catch_0 0; }); });
+                        }
+                        i = (i + 1);
+                        continue;
+                    }
+                    _ = stream.decoded_headers.appendAssumeCapacity(.{ .name = name, .value = value });
+                }
+                i = (i + 1);
+            }
+            if ((status == 0)) {
+                if ((stream.status_code != 0)) {
+                    return;
+                }
+                _ = stream.session.fail(stream, error.HTTP3ProtocolError);
+                return;
+            }
+            if (((status >= 100) and (status < 200))) {
+                return;
+            }
+            stream.status_code = status;
+            _ = stream.session.deliver(stream, false);
+        }
 }
 
-pub fn onStreamClose(s: *quic.Stream) callconv(.c) void {
-    if ((s.ext(Stream)).*) |stream| {
-        _ = &stream;
-        (s.ext(Stream)).* = null;
-        stream.qstream = null;
-        log("stream_close status={d} delivered={}", .{ stream.status_code, stream.headers_delivered });
+pub export fn onStreamData(s: *quic.Stream, data: ManyU8, len: u32, fin: i32) callconv(.c) void {
+        if ((s.ext(Stream)).*) |stream| {
+            _ = &stream;
+            if ((len > 0)) {
+                _ = bun.handleOom(stream.body_buffer.appendSlice(bun.default_allocator, data[0..len]));
+            }
+            _ = stream.session.deliver(stream, (fin != 0));
+        }
+}
 
-        _ = stream.session.deliver(stream, true);
-    }
+pub export fn onStreamWritable(s: *quic.Stream) callconv(.c) void {
+        if ((s.ext(Stream)).*) |stream| {
+            _ = &stream;
+            _ = encode.drainSendBody(stream, s);
+        }
+}
+
+pub export fn onStreamClose(s: *quic.Stream) callconv(.c) void {
+        if ((s.ext(Stream)).*) |stream| {
+            _ = &stream;
+            (s.ext(Stream)).* = null;
+            stream.qstream = null;
+            _ = stream.session.deliver(stream, true);
+        }
 }

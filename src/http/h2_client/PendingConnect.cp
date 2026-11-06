@@ -3,45 +3,42 @@
 
 zig {
     const bun = @import("bun");
-    const strings = bun.strings;
-    const SSLConfig = bun.api.server.ServerConfig.SSLConfig;
-
-    const HTTPClient = bun.http;
-    const NewHTTPContext = HTTPClient.NewHTTPContext;
-    const WaiterList = std.ArrayListUnmanaged(*HTTPClient);
+    pub const HTTPContextTLS = @import("../HTTPContext.zig").NewHTTPContext(true);
 }
 
 export @root struct PendingConnect {
-    hostname: string,
-    port: u16,
-    ssl_config: *SSLConfig?,
-    waiters: WaiterList,
-
     zig {
         pub const new = bun.TrivialNew(@This());
     }
 
-    pub fn matches(this, hostname: string, port: u16, ssl_config: *SSLConfig?): bool {
-        return this.port == port && this.ssl_config == ssl_config && strings.eqlLong(this.hostname, hostname, true);
+    hostname: string,
+    port: u16,
+    ssl_config: any? = null,
+    waiters: std.ArrayListUnmanaged(*bun.http.HTTPClient),
+
+    fn matches(this, hostname: string, port: u16, ssl_config: any?): bool {
+        return this.port == port && this.ssl_config == ssl_config && bun.strings.eqlLong(this.hostname, hostname, true);
     }
 
-    pub fn unregisterFrom(*this, ctx: *NewHTTPContext(true)): void {
-        zig {
-            const list = &ctx.pending_h2_connects;
-            for (list.items, 0..) |p, i| {
-                if (p == self) {
-                    _ = list.swapRemove(i);
-                    return;
-                }
+    fn unregisterFrom(*this, ctx: *HTTPContextTLS): void {
+        const list = &ctx.pending_h2_connects;
+        let i: usize = 0;
+        while (i < list.items.len) {
+            if (list.items[i] == this) {
+                list.swapRemove(i);
+                return;
             }
+            i += 1;
         }
     }
 
-    pub fn deinit(*this): void {
-        zig {
-            bun.default_allocator.free(self.hostname);
-            self.waiters.deinit(bun.default_allocator);
-            bun.destroy(self);
-        }
+    fn release(*this): void {
+        bun.default_allocator.free(this.hostname);
+        this.waiters.deinit(bun.default_allocator);
+        bun.destroy(this);
+    }
+
+    fn deinit(*this): void {
+        this.release();
     }
 }

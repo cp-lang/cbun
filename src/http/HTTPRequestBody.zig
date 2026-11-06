@@ -2,33 +2,36 @@
 const std = @import("std");
 const string = []const u8;
 
-const SendFile = @import("./SendFile.zig");
-const ThreadSafeStreamBuffer = @import("./ThreadSafeStreamBuffer.zig");
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
+pub const SendFile = @import("./SendFile.zig").SendFile;
+pub const ThreadSafeStreamBuffer = @import("./ThreadSafeStreamBuffer.zig").ThreadSafeStreamBuffer;
 pub const HTTPRequestBody = union(enum) {
     bytes: []const u8,
     sendfile: SendFile,
     stream: StreamBody,
 
-    pub fn isStream(self: *HTTPRequestBody) bool {
-        return (self.* == .stream);
+pub fn isStream(self: *HTTPRequestBody) bool {
+            return (self.* == .stream);
     }
 
-    pub fn deinit(self: *HTTPRequestBody) void {
-        switch (self.*) {
-            .sendfile, .bytes => {},
-            .stream => {
-                _ = self.stream.detach();
-            },
-        }
+pub fn deinit(self: *HTTPRequestBody) void {
+            switch (self.*) {
+.sendfile, .bytes => {
+
+},
+.stream => {
+_ = self.stream.detach();
+},
+}
     }
 
-    pub fn len(self: *HTTPRequestBody) usize {
-        return (switch (self.*) {
-            .bytes => self.bytes.len,
-            .sendfile => self.sendfile.content_size,
-            .stream => std.math.maxInt(usize),
-        });
+pub fn len(self: *HTTPRequestBody) usize {
+            return (switch (self.*) {
+.bytes => self.bytes.len,
+.sendfile => self.sendfile.content_size,
+.stream => (~@as(usize, 0)),
+});
     }
 };
 
@@ -36,10 +39,11 @@ pub const StreamBody = struct {
     buffer: ?*ThreadSafeStreamBuffer = null,
     ended: bool = false,
 
-    pub fn detach(self: *StreamBody) void {
-        if (self.buffer) |buf| {
-            self.buffer = null;
-            _ = buf.deref();
-        }
+pub fn detach(self: *StreamBody) void {
+            if (self.buffer) |buf| {
+                self.buffer = null;
+                _ = buf.deref();
+            }
     }
 };
+

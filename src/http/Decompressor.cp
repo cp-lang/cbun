@@ -2,22 +2,18 @@
 // HTTP stream decompressor in CP language
 
 zig {
-    const Zlib = @import("../zlib/zlib.zig");
-    const Encoding = @import("../http_types/Encoding.zig").Encoding;
-
     const bun = @import("bun");
-    const Brotli = bun.brotli;
-    const MutableString = bun.MutableString;
-    const zstd = bun.zstd;
 }
 
-export enum Decompressor {
-    zlib(*Zlib.ZlibReaderArrayList),
-    brotli(*Brotli.BrotliReaderArrayList),
-    zstd(*zstd.ZstdReaderArrayList),
-    none(void),
+import { Encoding } from "../http_types/Encoding.cp";
 
-    pub fn deinit(*this): void {
+export enum Decompressor {
+    zlib: *bun.zlib.ZlibReaderArrayList,
+    brotli: *bun.brotli.BrotliReaderArrayList,
+    zstd: *bun.zstd.ZstdReaderArrayList,
+    none: void,
+
+    pub fn release(*this): void {
         switch (this.*) {
             .brotli(that) => {
                 that.deinit();
@@ -35,7 +31,11 @@ export enum Decompressor {
         }
     }
 
-    pub fn updateBuffers(*this, encoding: Encoding, buffer: string, body_out_str: *MutableString)! {
+    pub fn deinit(*this): void {
+        this.release();
+    }
+
+    pub fn updateBuffers(*this, encoding: Encoding, buffer: string, body_out_str: *bun.MutableString): !void {
         if (!encoding.isCompressed()) {
             return;
         }
@@ -43,13 +43,13 @@ export enum Decompressor {
         if (this.* == .none) {
             switch (encoding) {
                 .gzip, .deflate => {
-                    let windowBits: i32 = 0 - Zlib.MAX_WBITS;
+                    let mut windowBits: i32 = 0 - bun.zlib.MAX_WBITS;
                     if (encoding == Encoding.gzip) {
-                        windowBits = Zlib.MAX_WBITS | 16;
+                        windowBits = bun.zlib.MAX_WBITS | 16;
                     } else if (buffer.len > 1 && buffer[0] == 120) {
                         windowBits = 0;
                     }
-                    const reader = Zlib.ZlibReaderArrayList.initWithOptionsAndListAllocator(
+                    const reader = bun.zlib.ZlibReaderArrayList.initWithOptionsAndListAllocator(
                         buffer,
                         *body_out_str.list,
                         body_out_str.allocator,
@@ -62,7 +62,7 @@ export enum Decompressor {
                     return;
                 },
                 .brotli => {
-                    const reader = Brotli.BrotliReaderArrayList.newWithOptions(
+                    const reader = bun.brotli.BrotliReaderArrayList.newWithOptions(
                         buffer,
                         *body_out_str.list,
                         body_out_str.allocator,
@@ -72,7 +72,7 @@ export enum Decompressor {
                     return;
                 },
                 .zstd => {
-                    const reader = zstd.ZstdReaderArrayList.initWithListAllocator(
+                    const reader = bun.zstd.ZstdReaderArrayList.initWithListAllocator(
                         buffer,
                         *body_out_str.list,
                         body_out_str.allocator,
@@ -122,7 +122,7 @@ export enum Decompressor {
         }
     }
 
-    pub fn readAll(*this, is_done: bool)! {
+    pub fn readAll(*this, is_done: bool): !void {
         switch (this.*) {
             .zlib(zlib) => zlib.readAll(is_done)?,
             .brotli(brotli) => brotli.readAll(is_done)?,

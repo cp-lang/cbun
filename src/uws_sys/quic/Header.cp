@@ -1,26 +1,24 @@
 import bun from "bun";
 
-zig {
-    pub const ManyU8 = [*]const u8;
-}
-
 export @extern @value class Header {
-    name: ManyU8,
+    name: [*]u8!,
     name_len: u32,
-    value: ManyU8,
+    value: [*]u8!,
     value_len: u32,
     qpack_index: i32 = -1,
 
     pub static fn init(name_: string, value_: string, idx: Qpack?): Header {
-        zig {
-            return .{
-                .name = name_.ptr,
-                .name_len = @intCast(name_.len),
-                .value = value_.ptr,
-                .value_len = @intCast(value_.len),
-                .qpack_index = if (idx) |i| @intFromEnum(i) else -1,
-            };
+        let qidx: i32 = -1;
+        if (idx != null) {
+            qidx = idx as i32;
         }
+        return Header {
+            name: name_.ptr,
+            name_len: name_.len as u32,
+            value: value_.ptr,
+            value_len: value_.len as u32,
+            qpack_index: qidx,
+        };
     }
 }
 

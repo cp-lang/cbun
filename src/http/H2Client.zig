@@ -2,18 +2,34 @@
 const std = @import("std");
 const string = []const u8;
 
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 pub var live_sessions = std.atomic.Value(i32).init(0);
-pub var live_streams = std.atomic.Value(i32).init(0);
-
+    pub var live_streams = std.atomic.Value(i32).init(0);
 pub const Stream = @import("./h2_client/Stream.zig");
-pub const ClientSession = @import("./h2_client/ClientSession.zig");
-pub const PendingConnect = @import("./h2_client/PendingConnect.zig");
-
-pub const TestingAPIs = @import("../http_jsc/headers_jsc.zig").H2TestingAPIs;
+    pub const ClientSession = @import("./h2_client/ClientSession.zig");
+    pub const PendingConnect = @import("./h2_client/PendingConnect.zig");
+    pub const TestingAPIs = @import("../http_jsc/headers_jsc.zig").H2TestingAPIs;
 pub const local_initial_window_size: u31 = cp_shl(1, 24);
 pub const local_max_header_list_size: u32 = (256 * 1024);
 pub const write_buffer_high_water: usize = (256 * 1024);
 pub const write_buffer_control_limit: usize = (1024 * 1024);
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
     const T = @TypeOf(val);
     if (comptime @typeInfo(T) == .comptime_int) return val << shift;
@@ -32,3 +48,5 @@ fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
     }
     return val >> shift;
 }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+

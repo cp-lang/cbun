@@ -1,53 +1,57 @@
 import { Header } from "./Header.cp";
 import { Socket } from "./Socket.cp";
 
-zig {
-    const c = struct {
-        extern fn us_quic_stream_socket(s: *Stream) ?*Socket;
-        extern fn us_quic_stream_shutdown(s: *Stream) void;
-        extern fn us_quic_stream_close(s: *Stream) void;
-        extern fn us_quic_stream_reset(s: *Stream) void;
-        extern fn us_quic_stream_header_count(s: *Stream) c_uint;
-        extern fn us_quic_stream_header(s: *Stream, i: c_uint) ?*const Header;
-        extern fn us_quic_stream_ext(s: *Stream) *anyopaque;
-        extern fn us_quic_stream_write(s: *Stream, data: [*]const u8, len: c_uint) c_int;
-        extern fn us_quic_stream_want_write(s: *Stream, want: c_int) void;
-        extern fn us_quic_stream_send_headers(s: *Stream, h: [*]const Header, n: c_uint, end_stream: c_int) c_int;
-    };
+@c {
+    fn us_quic_stream_socket(s: *Stream): *Socket?!;
+    fn us_quic_stream_shutdown(s: *Stream): void;
+    fn us_quic_stream_close(s: *Stream): void;
+    fn us_quic_stream_reset(s: *Stream): void;
+    fn us_quic_stream_header_count(s: *Stream): u32;
+    fn us_quic_stream_header(s: *Stream, i: u32): *const Header?!;
+    fn us_quic_stream_ext(s: *Stream): *any!;
+    fn us_quic_stream_write(s: *Stream, data: [*]u8!, len: u32): i32;
+    fn us_quic_stream_want_write(s: *Stream, want: i32): void;
+    fn us_quic_stream_send_headers(s: *Stream, h: [*]const Header!, n: u32, end_stream: i32): i32;
 }
 
 export @opaque class Stream {
-    zig {
-        pub const socket = c.us_quic_stream_socket;
-        pub const shutdown = c.us_quic_stream_shutdown;
-        pub const close = c.us_quic_stream_close;
-        pub const reset = c.us_quic_stream_reset;
-        pub const headerCount = c.us_quic_stream_header_count;
-        pub const header = c.us_quic_stream_header;
+    pub fn socket(*this): *Socket?! {
+        return us_quic_stream_socket(this);
     }
 
-    zig {
-        pub fn ext(self: *Stream, comptime T: type) *?*T {
-            const PtrT: type = *?*T;
-            return @as(PtrT, @ptrCast(@alignCast(c.us_quic_stream_ext(self))));
-        }
+    pub fn shutdown(*this): void {
+        us_quic_stream_shutdown(this);
+    }
+
+    pub fn close(*this): void {
+        us_quic_stream_close(this);
+    }
+
+    pub fn reset(*this): void {
+        us_quic_stream_reset(this);
+    }
+
+    pub fn headerCount(*this): u32 {
+        return us_quic_stream_header_count(this);
+    }
+
+    pub fn header(*this, i: u32): *const Header?! {
+        return us_quic_stream_header(this, i);
+    }
+
+    pub fn ext<T>(*this): *T?! {
+        return us_quic_stream_ext(this) as *T?!;
     }
 
     pub fn write(*this, data: string): i32 {
-        zig {
-            return c.us_quic_stream_write(self, data.ptr, @intCast(data.len));
-        }
+        return us_quic_stream_write(this, data.ptr, data.len as u32);
     }
 
     pub fn wantWrite(*this, want: bool): void {
-        zig {
-            c.us_quic_stream_want_write(self, @intFromBool(want));
-        }
+        us_quic_stream_want_write(this, if (want) 1 else 0);
     }
 
-    pub fn sendHeaders(*this, headers: anytype, end_stream: bool): i32 {
-        zig {
-            return c.us_quic_stream_send_headers(self, headers.ptr, @intCast(headers.len), @intFromBool(end_stream));
-        }
+    pub fn sendHeaders(*this, headers: Header[], end_stream: bool): i32 {
+        return us_quic_stream_send_headers(this, headers.ptr, headers.len as u32, if (end_stream) 1 else 0);
     }
 }

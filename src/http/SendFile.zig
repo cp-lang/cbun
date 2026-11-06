@@ -2,15 +2,32 @@
 const std = @import("std");
 const string = []const u8;
 
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 const bun = @import("bun");
-const Environment = bun.Environment;
-const FeatureFlags = bun.FeatureFlags;
-const NewHTTPContext = bun.http.NewHTTPContext;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
+pub const HTTPContext = @import("./HTTPContext.zig").HTTPContext;
 pub const Status = union(enum) {
-    done: void,
+    done,
     err: anyerror,
-    again: void,
+    again,
 };
 
 pub const SendFile = @This();
@@ -21,80 +38,89 @@ offset: usize = 0,
 content_size: usize = 0,
 
 pub fn isEligible(url: bun.URL) bool {
-    if ((Environment.isWindows or (!FeatureFlags.streaming_file_uploads_for_http_client))) {
-        return false;
-    }
-    return (url.isHTTP() and (url.href.len > 0));
+        if ((bun.Environment.isWindows or (!bun.FeatureFlags.streaming_file_uploads_for_http_client))) {
+            return false;
+        }
+        return (url.isHTTP() and (url.href.len > 0));
 }
 
-pub fn write(self: *SendFile, socket: NewHTTPContext(false).HTTPSocket) Status {
-    const adjusted_count_temporary = @min(@as(u64, self.remain), @as(u63, std.math.maxInt(u63)));
-    const adjusted_count = @as(u63, @intCast(adjusted_count_temporary));
-    _ = &adjusted_count;
-    const this = self;
-    if (Environment.isLinux) {
-        var signed_offset = @as(i64, @intCast(this.offset));
-        const begin = this.offset;
-        const val =
-            // this does the syscall directly, without libc
-            std.os.linux.sendfile(socket.fd().cast(), this.fd.cast(), &signed_offset, this.remain);
-        this.offset = @as(u64, @intCast(signed_offset));
-
-        const errcode = bun.sys.getErrno(val);
-
-        this.remain -|= @as(u64, @intCast(this.offset -| begin));
-
-        if (errcode != .SUCCESS or this.remain == 0 or val == 0) {
-            if (errcode == .SUCCESS) {
-                return .{ .done = {} };
+pub fn write(self: *SendFile, socket: anytype) Status {
+        const adjusted_count_temporary = @min(@as(u64, self.remain), @as(u63, std.math.maxInt(u63)));
+        _ = &adjusted_count_temporary;
+        const adjusted_count = @as(u63, @intCast(adjusted_count_temporary));
+        _ = &adjusted_count;
+        if (bun.Environment.isLinux) {
+            var signed_offset: i64 = @intCast(self.offset);
+            _ = &signed_offset;
+            const begin = self.offset;
+            _ = &begin;
+            const val = std.os.linux.sendfile(socket.fd().cast(), self.fd.cast(), (&signed_offset), self.remain);
+            _ = &val;
+            self.offset = @as(u64, @intCast(signed_offset));
+            const errcode = bun.sys.getErrno(val);
+            _ = &errcode;
+            var diff: usize = 0;
+            _ = &diff;
+            if ((self.offset > begin)) {
+                diff = (self.offset - begin);
             }
-
-            return .{ .err = bun.errnoToZigErr(errcode) };
-        }
-    } else if (Environment.isFreeBSD) {
-        var sbytes: std.posix.off_t = 0;
-        const signed_offset = @as(i64, @bitCast(@as(u64, this.offset)));
-        // FreeBSD: sendfile(fd, s, offset, nbytes, hdtr, *sbytes, flags)
-        const errcode = bun.sys.getErrno(std.c.sendfile(
-            this.fd.cast(),
-            socket.fd().cast(),
-            signed_offset,
-            adjusted_count,
-            null,
-            &sbytes,
-            0,
-        ));
-        const wrote = @as(u64, @intCast(sbytes));
-        this.offset +|= wrote;
-        this.remain -|= wrote;
-        if (errcode != .AGAIN or this.remain == 0 or sbytes == 0) {
-            if (errcode == .SUCCESS) {
-                return .{ .done = {} };
+            if ((self.remain > diff)) {
+                self.remain = (self.remain - diff);
+            } else {
+                self.remain = 0;
             }
-            return .{ .err = bun.errnoToZigErr(errcode) };
-        }
-    } else if (Environment.isPosix) {
-        var sbytes: std.posix.off_t = adjusted_count;
-        const signed_offset = @as(i64, @bitCast(@as(u64, this.offset)));
-        const errcode = bun.sys.getErrno(std.c.sendfile(
-            this.fd.cast(),
-            socket.fd().cast(),
-            signed_offset,
-            &sbytes,
-            null,
-            0,
-        ));
-        const wrote = @as(u64, @intCast(sbytes));
-        this.offset +|= wrote;
-        this.remain -|= wrote;
-        if (errcode != .AGAIN or this.remain == 0 or sbytes == 0) {
-            if (errcode == .SUCCESS) {
-                return .{ .done = {} };
+            if ((((errcode != .SUCCESS) or (self.remain == 0)) or (val == 0))) {
+                if ((errcode == .SUCCESS)) {
+                    return .done;
+                }
+                return .{ .err = bun.errnoToZigErr(errcode) };
             }
-
-            return .{ .err = bun.errnoToZigErr(errcode) };
+        } else {
+            if (bun.Environment.isFreeBSD) {
+                var sbytes: *anyopaque = 0;
+                _ = &sbytes;
+                const signed_offset: i64 = @bitCast(@as(u64, self.offset));
+                _ = &signed_offset;
+                const errcode = bun.sys.getErrno(std.c.sendfile(self.fd.cast(), socket.fd().cast(), signed_offset, adjusted_count, null, (&sbytes), 0));
+                _ = &errcode;
+                const wrote = @as(u64, @intCast(sbytes));
+                _ = &wrote;
+                self.offset = (self.offset + wrote);
+                if ((self.remain > wrote)) {
+                    self.remain = (self.remain - wrote);
+                } else {
+                    self.remain = 0;
+                }
+                if ((((errcode != .AGAIN) or (self.remain == 0)) or (sbytes == 0))) {
+                    if ((errcode == .SUCCESS)) {
+                        return .done;
+                    }
+                    return .{ .err = bun.errnoToZigErr(errcode) };
+                }
+            } else {
+                if (bun.Environment.isPosix) {
+                    var sbytes: *anyopaque = adjusted_count;
+                    _ = &sbytes;
+                    const signed_offset: i64 = @bitCast(@as(u64, self.offset));
+                    _ = &signed_offset;
+                    const errcode = bun.sys.getErrno(std.c.sendfile(self.fd.cast(), socket.fd().cast(), signed_offset, (&sbytes), null, 0));
+                    _ = &errcode;
+                    const wrote = @as(u64, @intCast(sbytes));
+                    _ = &wrote;
+                    self.offset = (self.offset + wrote);
+                    if ((self.remain > wrote)) {
+                        self.remain = (self.remain - wrote);
+                    } else {
+                        self.remain = 0;
+                    }
+                    if ((((errcode != .AGAIN) or (self.remain == 0)) or (sbytes == 0))) {
+                        if ((errcode == .SUCCESS)) {
+                            return .done;
+                        }
+                        return .{ .err = bun.errnoToZigErr(errcode) };
+                    }
+                }
+            }
         }
-    }
-
-    return .{ .again = {} };
+        return .again;
 }

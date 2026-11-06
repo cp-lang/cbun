@@ -2,21 +2,33 @@
 const std = @import("std");
 const string = []const u8;
 
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 const bun = @import("bun");
-const FeatureFlags = bun.FeatureFlags;
-const MutableString = bun.MutableString;
-const Output = bun.Output;
-const picohttp = bun.picohttp;
+    const MutableString = bun.MutableString;
+    pub const HTTPResponseMetadata = @import("./http.zig").HTTPResponseMetadata;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
-const HTTPClient = bun.http;
-const CertificateInfo = HTTPClient.CertificateInfo;
-const Decompressor = HTTPClient.Decompressor;
-const Encoding = HTTPClient.Encoding;
-const HTTPRequestBody = HTTPClient.HTTPRequestBody;
-const HTTPResponseMetadata = HTTPClient.HTTPResponseMetadata;
-
-const log = Output.scoped(.HTTPInternalState, .hidden);
-
+pub const CertificateInfo = @import("./CertificateInfo.zig").CertificateInfo;
+pub const Decompressor = @import("./Decompressor.zig").Decompressor;
+pub const Encoding = @import("../http_types/Encoding.zig").Encoding;
+pub const HTTPRequestBody = @import("./HTTPRequestBody.zig").HTTPRequestBody;
 pub const HTTPStage = enum {
     pending,
     opened,
@@ -49,18 +61,18 @@ pub const InternalStateFlags = packed struct(u8) {
 
 pub const InternalState = @This();
 
-response_message_buffer: MutableString = undefined,
-pending_response: ?picohttp.Response = null,
+response_message_buffer: bun.MutableString = undefined,
+pending_response: ?bun.picohttp.Response = null,
 cloned_metadata: ?HTTPResponseMetadata = null,
 flags: InternalStateFlags = .{},
 transfer_encoding: Encoding = Encoding.identity,
 encoding: Encoding = Encoding.identity,
-content_encoding_i: u8 = std.math.maxInt(u8),
-chunked_decoder: picohttp.phr_chunked_decoder = .{},
-decompressor: Decompressor = .{ .none = {} },
+content_encoding_i: u8 = 255,
+chunked_decoder: bun.picohttp.phr_chunked_decoder = .{},
+decompressor: Decompressor = .none,
 stage: Stage = Stage.pending,
-body_out_str: ?*MutableString = null,
-compressed_body: MutableString = undefined,
+body_out_str: ?*bun.MutableString = null,
+compressed_body: bun.MutableString = undefined,
 content_length: ?usize = null,
 total_body_received: usize = 0,
 request_body: []const u8 = "",
@@ -71,165 +83,148 @@ request_stage: HTTPStage = .pending,
 response_stage: HTTPStage = .pending,
 certificate_info: ?CertificateInfo = null,
 
-pub fn init(body: HTTPRequestBody, body_out_str: *MutableString) InternalState {
-    var req_body: []const u8 = "";
-    _ = &req_body;
-    if ((body == .bytes)) {
-        req_body = body.bytes;
-    }
-    return .{ .original_request_body = body, .request_body = req_body, .compressed_body = MutableString{ .allocator = bun.http.default_allocator, .list = .{} }, .response_message_buffer = MutableString{ .allocator = bun.http.default_allocator, .list = .{} }, .body_out_str = body_out_str, .stage = Stage.pending, .pending_response = null };
+pub fn init(body: HTTPRequestBody, body_out_str: *bun.MutableString) InternalState {
+        var req_body: []const u8 = "";
+        _ = &req_body;
+        if ((body == .bytes)) {
+            req_body = body.bytes;
+        }
+        return InternalState{ .original_request_body = body, .request_body = req_body, .compressed_body = MutableString{ .allocator = bun.http.default_allocator, .list = .{} }, .response_message_buffer = MutableString{ .allocator = bun.http.default_allocator, .list = .{} }, .body_out_str = body_out_str, .stage = Stage.pending, .pending_response = null };
 }
 
 pub fn isChunkedEncoding(self: *InternalState) bool {
-    return (self.transfer_encoding == Encoding.chunked);
+        return (self.transfer_encoding == Encoding.chunked);
 }
 
 pub fn reset(self: *InternalState, allocator: std.mem.Allocator) void {
-    _ = self.compressed_body.deinit();
-    _ = self.response_message_buffer.deinit();
-    const body_msg = self.body_out_str;
-    _ = &body_msg;
-    if (body_msg) |body| {
-        _ = body.reset();
-    }
-    _ = self.decompressor.deinit();
-    if (self.cloned_metadata != null) {
-        self.cloned_metadata.?.deinit(allocator);
-        self.cloned_metadata = null;
-    }
+        _ = self.compressed_body.deinit();
+        _ = self.response_message_buffer.deinit();
+        const body_msg = self.body_out_str;
+        _ = &body_msg;
+        if (body_msg) |body| {
+            _ = &body;
+            _ = body.reset();
+        }
+        _ = self.decompressor.deinit();
+        if (self.cloned_metadata) |*cloned_meta| {
+                cloned_meta.deinit(allocator);
+                self.cloned_metadata = null;
+            }
 
-    if (self.certificate_info) |info| {
-        self.certificate_info = null;
-        _ = info.deinit(bun.default_allocator);
-    }
-    _ = self.original_request_body.deinit();
-    self.* = .{ .body_out_str = body_msg, .compressed_body = MutableString{ .allocator = bun.http.default_allocator, .list = .{} }, .response_message_buffer = MutableString{ .allocator = bun.http.default_allocator, .list = .{} }, .original_request_body = .{ .bytes = "" }, .request_body = "", .certificate_info = null, .flags = .{}, .total_body_received = 0 };
+        if (self.certificate_info) |info| {
+            _ = &info;
+            self.certificate_info = null;
+            _ = info.deinit(bun.default_allocator);
+        }
+        _ = self.original_request_body.deinit();
+        self.* = .{ .body_out_str = body_msg, .compressed_body = MutableString{ .allocator = bun.http.default_allocator, .list = .{} }, .response_message_buffer = MutableString{ .allocator = bun.http.default_allocator, .list = .{} }, .original_request_body = .{ .bytes = "" }, .request_body = "", .certificate_info = null, .flags = .{}, .total_body_received = 0 };
 }
 
-pub fn getBodyBuffer(self: *InternalState) *MutableString {
-    if (self.encoding.isCompressed()) {
-        return (&self.compressed_body);
-    }
-    if (self.body_out_str) |body_out| {
-        return body_out;
-    }
-    _ = @panic("body_out_str is null");
+pub fn getBodyBuffer(self: *InternalState) *bun.MutableString {
+        if (self.encoding.isCompressed()) {
+            return (&self.compressed_body);
+        }
+        if (self.body_out_str) |body_out| {
+            _ = &body_out;
+            return body_out;
+        }
+        _ = @panic("body_out_str is null");
 }
 
 pub fn isDone(self: *InternalState) bool {
-    if (self.isChunkedEncoding()) {
+        if (self.isChunkedEncoding()) {
+            return self.flags.received_last_chunk;
+        }
+        if (self.content_length) |cl| {
+            _ = &cl;
+            return (self.total_body_received >= cl);
+        }
         return self.flags.received_last_chunk;
-    }
-    if (self.content_length) |cl| {
-        return (self.total_body_received >= cl);
-    }
-    return self.flags.received_last_chunk;
 }
 
-pub fn decompressBytes(self: *InternalState, buffer: []const u8, body_out: *MutableString, is_final_chunk: bool) !void {
-    defer {
+pub fn decompressBytes(self: *InternalState, buffer: []const u8, body_out: *bun.MutableString, is_final_chunk: bool) !void {
+        defer {
         _ = self.compressed_body.reset();
-    }
-    var gzip_timer: std.time.Timer = undefined;
-    _ = &gzip_timer;
-    if (bun.http.extremely_verbose) {
-        gzip_timer = std.time.Timer.start() catch @panic("Timer failure");
-    }
-
-    var still_needs_to_decompress = true;
-    _ = &still_needs_to_decompress;
-    if (FeatureFlags.isLibdeflateEnabled()) {
-        if ((((is_final_chunk and (!self.flags.is_libdeflate_fast_path_disabled)) and self.encoding.canUseLibDeflate()) and self.isDone())) {
-            self.flags.is_libdeflate_fast_path_disabled = true;
-            _ = log("Decompressing {d} bytes with libdeflate\n", .{buffer.len});
-            var deflater = bun.http.http_thread.deflater();
-            _ = &deflater;
-            var handled = false;
-            _ = &handled;
-            if ((((self.encoding == Encoding.gzip) and (buffer.len > 16)) and (buffer.len < ((1024 * 1024) * 1024)))) {
-                var estimated_size: u32 = 0;
-                _ = &estimated_size;
-                estimated_size = @bitCast(buffer[buffer.len - 4 ..][0..4].*);
-
-                if (((estimated_size > deflater.shared_buffer.len) and (estimated_size < ((32 * 1024) * 1024)))) {
-                    _ = try body_out.list.ensureTotalCapacityPrecise(body_out.allocator, estimated_size);
-                    const result = deflater.decompressor.decompress(buffer, body_out.list.allocatedSlice(), .gzip);
+        }
+        var still_needs_to_decompress = true;
+        _ = &still_needs_to_decompress;
+        if (bun.FeatureFlags.isLibdeflateEnabled()) {
+            if ((((is_final_chunk and (!self.flags.is_libdeflate_fast_path_disabled)) and self.encoding.canUseLibDeflate()) and self.isDone())) {
+                self.flags.is_libdeflate_fast_path_disabled = true;
+                var deflater = bun.http.http_thread.deflater();
+                _ = &deflater;
+                var handled = false;
+                _ = &handled;
+                if ((((self.encoding == Encoding.gzip) and (buffer.len > 16)) and (buffer.len < ((1024 * 1024) * 1024)))) {
+                    var estimated_size: u32 = std.mem.readInt(u32, buffer[(buffer.len - 4)..][0..4], .little);
+                    _ = &estimated_size;
+                    if (((estimated_size > deflater.shared_buffer.len) and (estimated_size < ((32 * 1024) * 1024)))) {
+                        _ = try body_out.list.ensureTotalCapacityPrecise(body_out.allocator, estimated_size);
+                        const result = deflater.decompressor.decompress(buffer, body_out.list.allocatedSlice(), .gzip);
+                        _ = &result;
+                        if ((result.status == .success)) {
+                            body_out.list.items.len = result.written;
+                            still_needs_to_decompress = false;
+                        }
+                        handled = true;
+                    }
+                }
+                if ((!handled)) {
+                    var enc: bun.libdeflate.Encoding = .deflate;
+                    _ = &enc;
+                    if ((self.encoding == .gzip)) {
+                        enc = .gzip;
+                    }
+                    const result = deflater.decompressor.decompress(buffer, (&deflater.shared_buffer), enc);
                     _ = &result;
                     if ((result.status == .success)) {
-                        body_out.list.items.len = result.written;
+                        _ = try body_out.list.ensureTotalCapacityPrecise(body_out.allocator, result.written);
+                        _ = body_out.list.appendSliceAssumeCapacity(deflater.shared_buffer[0..result.written]);
                         still_needs_to_decompress = false;
                     }
-                    handled = true;
-                }
-            }
-            if ((!handled)) {
-                const result = deflater.decompressor.decompress(buffer, &deflater.shared_buffer, switch (self.encoding) {
-                    .gzip => .gzip,
-                    .deflate => .deflate,
-                    else => unreachable,
-                });
-
-                if (result.status == .success) {
-                    try body_out.list.ensureTotalCapacityPrecise(body_out.allocator, result.written);
-                    body_out.list.appendSliceAssumeCapacity(deflater.shared_buffer[0..result.written]);
-                    still_needs_to_decompress = false;
                 }
             }
         }
-    }
-    if (still_needs_to_decompress) {
-        _ = log("Decompressing {d} bytes\n", .{buffer.len});
-        if ((body_out.list.capacity == 0)) {
-            const min = @min(@ceil((@as(f64, @floatFromInt(buffer.len)) * 1.5)), @as(f64, ((1024 * 1024) * 2)));
-            _ = &min;
-            _ = try body_out.growBy(@max(@as(usize, @intFromFloat(min)), 32));
+        if (still_needs_to_decompress) {
+            if ((body_out.list.capacity == 0)) {
+                const min = @min(@ceil((@as(f64, @floatFromInt(buffer.len)) * 1.5)), @as(f64, ((1024 * 1024) * 2)));
+                _ = &min;
+                _ = try body_out.growBy(@max(@as(usize, @intFromFloat(min)), 32));
+            }
+            _ = try self.decompressor.updateBuffers(self.encoding, buffer, body_out);
+            _ = (blk_catch_4: { break :blk_catch_4 ((self.decompressor.readAll(self.isDone())) catch |err| { _ = &err; if ((self.isDone() or (error.ShortRead != err))) {
+                _ = bun.Output.prettyErrorln("<r><red>Decompression error: {s}<r>", .{ bun.asByteSlice(@errorName(err)) });
+                _ = bun.Output.flush();
+                return err;
+            } }); });
         }
-        _ = try self.decompressor.updateBuffers(self.encoding, buffer, body_out);
-        _ = (blk_catch_3: {
-            break :blk_catch_3 (self.decompressor.readAll(self.isDone())) catch |err| {
-                _ = &err;
-                if ((self.isDone() or (error.ShortRead != err))) {
-                    _ = Output.prettyErrorln("<r><red>Decompression error: {s}<r>", .{bun.asByteSlice(@errorName(err))});
-                    _ = Output.flush();
-                    return err;
-                }
-            };
-        });
-    }
-    if (bun.http.extremely_verbose) {
-        self.gzip_elapsed = gzip_timer.read();
-    }
 }
 
-pub fn decompress(self: *InternalState, buffer: MutableString, body_out: *MutableString, is_final_chunk: bool) !void {
-    _ = try self.decompressBytes(buffer.list.items, body_out, is_final_chunk);
+pub fn decompress(self: *InternalState, buffer: bun.MutableString, body_out: *bun.MutableString, is_final_chunk: bool) !void {
+        _ = try self.decompressBytes(buffer.list.items, body_out, is_final_chunk);
 }
 
-pub fn processBodyBuffer(self: *InternalState, buffer: MutableString, is_final_chunk: bool) !bool {
-    if (self.flags.is_redirect_pending) {
+pub fn processBodyBuffer(self: *InternalState, buffer: bun.MutableString, is_final_chunk: bool) !bool {
+        if (self.flags.is_redirect_pending) {
+            return false;
+        }
+        const body_msg = self.body_out_str;
+        _ = &body_msg;
+        if (body_msg) |body_out| {
+            _ = &body_out;
+            switch (self.encoding) {
+Encoding.brotli, Encoding.gzip, Encoding.deflate, Encoding.zstd => {
+_ = try self.decompress(buffer, body_out, is_final_chunk);
+},
+else => {
+if ((!body_out.owns(buffer.list.items))) {
+                _ = (blk_catch_7: { break :blk_catch_7 ((body_out.append(buffer.list.items)) catch |err| { _ = &err; _ = bun.Output.prettyErrorln("<r><red>Failed to append to body buffer: {s}<r>", .{ bun.asByteSlice(@errorName(err)) });
+                _ = bun.Output.flush();
+                return err; }); });
+            }
+},
+}
+            return (body_out.list.items.len > 0);
+        }
         return false;
-    }
-    const body_msg = self.body_out_str;
-    _ = &body_msg;
-    if (body_msg) |body_out| {
-        switch (self.encoding) {
-            Encoding.brotli, Encoding.gzip, Encoding.deflate, Encoding.zstd => {
-                _ = try self.decompress(buffer, body_out, is_final_chunk);
-            },
-            else => {
-                if ((!body_out.owns(buffer.list.items))) {
-                    _ = (blk_catch_6: {
-                        break :blk_catch_6 (body_out.append(buffer.list.items)) catch |err| {
-                            _ = &err;
-                            _ = Output.prettyErrorln("<r><red>Failed to append to body buffer: {s}<r>", .{bun.asByteSlice(@errorName(err))});
-                            _ = Output.flush();
-                            return err;
-                        };
-                    });
-                }
-            },
-        }
-        return (body_out.list.items.len > 0);
-    }
-    return false;
 }

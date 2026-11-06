@@ -2,29 +2,38 @@
 const std = @import("std");
 const string = []const u8;
 
-const bun = @import("bun");
-const std = @import("std");
-const Zlib = @import("../zlib/zlib.zig");
-const MutableString = bun.MutableString;
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
-fn initMutableString(allocator: std.mem.Allocator) anyerror!MutableString {
-    return MutableString.initEmpty(allocator);
+pub const ZlibBufferPool = struct {
+
+pub fn initMutableString(allocator: *anyopaque) !*anyopaque {
+            return bun.MutableString.initEmpty(allocator);
+    }
+
+pub fn get(allocator: *anyopaque) *anyopaque {
+            return (&cp_opt_unwrap(bun.ObjectPool(bun.MutableString, initMutableString, false, 4).get(allocator)).data);
+    }
+
+pub fn put(mutable: *anyopaque) void {
+            _ = mutable.reset();
+            var node: *anyopaque = @fieldParentPtr("data", mutable);
+            _ = &node;
+            _ = (if (comptime @typeInfo(@TypeOf(node)) == .pointer) (node) else &(node)).release();
+    }
+};
+
+
+pub fn get(allocator: *anyopaque) *anyopaque {
+        return ZlibBufferPool.get(allocator);
 }
 
-const BufferPool = bun.ObjectPool(MutableString, initMutableString, false, 4);
-
-pub fn get(allocator: std.mem.Allocator) *MutableString {
-    return (&cp_opt_unwrap(BufferPool.get(allocator)).data);
+pub fn put(mutable: *anyopaque) void {
+        _ = ZlibBufferPool.put(mutable);
 }
 
-pub fn put(mutable: *MutableString) void {
-    _ = mutable.reset();
-    var node: BufferPool.Node = @fieldParentPtr("data", mutable);
-    _ = node.release();
-}
-
-pub fn decompress(compressed_data: []const u8, output: *MutableString, allocator: std.mem.Allocator) Zlib.ZlibError!void {
-    var reader = try Zlib.ZlibReaderArrayList.initWithOptionsAndListAllocator(compressed_data, (&output.list), output.allocator, allocator, .{ .windowBits = (15 + 32) });
-    _ = try reader.readAll(true);
-    _ = reader.deinit();
+pub fn decompress(compressed_data: []const u8, output: *anyopaque, allocator: *anyopaque) !void {
+        var reader = try bun.zlib.ZlibReaderArrayList.initWithOptionsAndListAllocator(compressed_data, (&output.list), output.allocator, allocator, .{ .windowBits = (15 + 32) });
+        _ = &reader;
+        _ = try reader.readAll(true);
+        _ = reader.deinit();
 }

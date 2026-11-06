@@ -2,26 +2,45 @@
 const std = @import("std");
 const string = []const u8;
 
-const ClientSession = @import("./ClientSession.zig");
-const H2 = @import("../H2Client.zig");
-const wire = @import("../H2FrameParser.zig");
-
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 const bun = @import("bun");
-const HTTPClient = bun.http;
-const picohttp = bun.picohttp;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
-const ByteList = std.ArrayListUnmanaged(u8);
-const HeaderList = std.ArrayListUnmanaged(picohttp.Header);
+pub const ClientSession = @import("./ClientSession.zig").ClientSession;
+pub const H2FrameParser = @import("../H2FrameParser.zig");
+pub const State = enum(u2) {
+    open,
+    half_closed_local,
+    half_closed_remote,
+    closed,
+};
 
 pub const Stream = @This();
 
 id: u31,
 session: *ClientSession,
-client: ?*HTTPClient,
-header_block: ByteList = .{},
-body_buffer: ByteList = .{},
-decoded_bytes: ByteList = .{},
-decoded_headers: HeaderList = .{},
+client: ?*bun.http.HTTPClient = null,
+header_block: std.ArrayListUnmanaged(u8) = .{},
+body_buffer: std.ArrayListUnmanaged(u8) = .{},
+decoded_bytes: std.ArrayListUnmanaged(u8) = .{},
+decoded_headers: std.ArrayListUnmanaged(bun.picohttp.Header) = .{},
 status_code: u32 = 0,
 state: State = .open,
 rst_done: bool = false,
@@ -34,59 +53,51 @@ data_bytes_received: u64 = 0,
 send_window: i32,
 pending_body: []const u8 = "",
 
-pub fn deinit(self: *Stream) void {
-    _ = &self;
-    _ = H2.live_streams.fetchSub(1, .monotonic);
-    self.header_block.deinit(bun.default_allocator);
-    self.body_buffer.deinit(bun.default_allocator);
-    self.decoded_bytes.deinit(bun.default_allocator);
-    self.decoded_headers.deinit(bun.default_allocator);
-    bun.destroy(self);
+pub fn release(self: *Stream) void {
+        _ = bun.http.H2.live_streams.fetchSub(1, .monotonic);
+        _ = self.header_block.deinit(bun.default_allocator);
+        _ = self.body_buffer.deinit(bun.default_allocator);
+        _ = self.decoded_bytes.deinit(bun.default_allocator);
+        _ = self.decoded_headers.deinit(bun.default_allocator);
+        _ = bun.destroy(self);
 }
 
-pub fn rst(self: *Stream, code: wire.ErrorCode) void {
-    _ = &self;
-    if ((self.rst_done or (self.state == .closed))) {
-        return;
-    }
-    self.rst_done = true;
-    self.state = .closed;
-    var value: u32 = @byteSwap(@intFromEnum(code));
-    self.session.writeFrame(.HTTP_FRAME_RST_STREAM, 0, self.id, std.mem.asBytes(&value));
+pub fn deinit(self: *Stream) void {
+        _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
+}
+
+pub fn rst(self: *Stream, code: H2FrameParser.ErrorCode) void {
+        if ((self.rst_done or (self.state == .closed))) {
+            return;
+        }
+        self.rst_done = true;
+        self.state = .closed;
+        const value: u32 = @byteSwap(@intFromEnum(code));
+        _ = &value;
+        _ = self.session.writeFrame(.HTTP_FRAME_RST_STREAM, 0, self.id, std.mem.asBytes((&value)));
 }
 
 pub fn sentEndStream(self: *Stream) void {
-    _ = &self;
-    self.state = switch (self.state) {
-        .open => .half_closed_local,
-        .half_closed_remote => .closed,
-        else => self.state,
-    };
+        self.state = (switch (self.state) {
+.open => .half_closed_local,
+.half_closed_remote => .closed,
+else => self.state,
+});
 }
 
 pub fn recvEndStream(self: *Stream) void {
-    _ = &self;
-    self.state = switch (self.state) {
-        .open => .half_closed_remote,
-        .half_closed_local => .closed,
-        else => self.state,
-    };
+        self.state = (switch (self.state) {
+.open => .half_closed_remote,
+.half_closed_local => .closed,
+else => self.state,
+});
 }
 
 pub inline fn localClosed(self: *const Stream) bool {
-    _ = &self;
-    return ((self.state == .half_closed_local) or (self.state == .closed));
+        return ((self.state == .half_closed_local) or (self.state == .closed));
 }
 
 pub inline fn remoteClosed(self: *const Stream) bool {
-    _ = &self;
-    return ((self.state == .half_closed_remote) or (self.state == .closed));
+        return ((self.state == .half_closed_remote) or (self.state == .closed));
 }
-pub const new = bun.TrivialNew(@This());
-
-pub const State = enum(u2) {
-    open,
-    half_closed_local,
-    half_closed_remote,
-    closed,
-};
+pub const new = bun.TrivialNew(Stream);

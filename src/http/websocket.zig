@@ -2,9 +2,26 @@
 const std = @import("std");
 const string = []const u8;
 
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 const bun = @import("bun");
-const Environment = bun.Environment;
-const Array2U8 = [2]u8;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const Opcode = enum(u4) {
     Continue = 0,
@@ -23,10 +40,10 @@ pub const Opcode = enum(u4) {
     ResD = 13,
     ResE = 14,
     ResF = 15,
-
-    pub fn isControl(opcode: Opcode) bool {
-        return ((@intFromEnum(opcode) & 8) != 0);
-    }
+    
+    pub fn isControl(self: Opcode) bool {
+                return (@intFromEnum(self) & 0x8) != 0;
+            }
 };
 
 pub const WebsocketHeader = packed struct(u16) {
@@ -37,113 +54,40 @@ pub const WebsocketHeader = packed struct(u16) {
     compressed: bool = false,
     final: bool = true,
 
-    pub fn init(self: *WebsocketHeader, len: u7, mask: bool, opcode: Opcode, rsv: u2, compressed: bool, final: bool) void {
-        var __len_moved = false;
-        _ = &__len_moved;
-        defer if (!__len_moved) {
-            const T = @TypeOf(len);
-            if (@typeInfo(T) == .pointer) {
-                const Child = @typeInfo(T).pointer.child;
-                if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) {
-                    const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?;
-                    if (@typeInfo(RType) == .error_union) {
-                        _ = len.release() catch {};
-                    } else {
-                        len.release();
-                    }
-                }
-            } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) {
-                len.release();
+pub fn packLength(length: usize) u7 {
+            return (switch (length) {
+0...125 => @as(u7, @truncate(length)),
+126...65535 => 126,
+else => 127,
+});
+    }
+
+pub fn lengthByteCount(byte_length: usize) usize {
+            return (switch (byte_length) {
+0...125 => 0,
+126...65535 => @sizeOf(u16),
+else => @sizeOf(u64),
+});
+    }
+
+pub fn frameSize(byte_length: usize) usize {
+            return ((2 + byte_length) + lengthByteCount(byte_length));
+    }
+
+pub fn frameSizeIncludingMask(byte_length: usize) usize {
+            return (frameSize(byte_length) + 4);
+    }
+
+pub fn slice(header: WebsocketHeader) [2]u8 {
+            return @bitCast(@byteSwap(@as(u16, @bitCast(header))));
+    }
+
+pub fn fromSlice(bytes: [2]u8) WebsocketHeader {
+            return @bitCast(@byteSwap(@as(u16, @bitCast(bytes))));
+    }
+    pub fn writeHeader(header: WebsocketHeader, writer: anytype, n: usize) !void {
+                try writer.writeInt(u16, @as(u16, @bitCast(header)), .big);
+                bun.assert(header.len == packLength(n));
             }
-        };
-        var __opcode_moved = false;
-        _ = &__opcode_moved;
-        defer if (!__opcode_moved) {
-            const T = @TypeOf(opcode);
-            if (@typeInfo(T) == .pointer) {
-                const Child = @typeInfo(T).pointer.child;
-                if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) {
-                    const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?;
-                    if (@typeInfo(RType) == .error_union) {
-                        _ = opcode.release() catch {};
-                    } else {
-                        opcode.release();
-                    }
-                }
-            } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) {
-                opcode.release();
-            }
-        };
-        var __rsv_moved = false;
-        _ = &__rsv_moved;
-        defer if (!__rsv_moved) {
-            const T = @TypeOf(rsv);
-            if (@typeInfo(T) == .pointer) {
-                const Child = @typeInfo(T).pointer.child;
-                if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) {
-                    const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?;
-                    if (@typeInfo(RType) == .error_union) {
-                        _ = rsv.release() catch {};
-                    } else {
-                        rsv.release();
-                    }
-                }
-            } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) {
-                rsv.release();
-            }
-        };
-        self.len = len;
-        self.mask = mask;
-        self.opcode = opcode;
-        self.rsv = rsv;
-        self.compressed = compressed;
-        self.final = final;
-    }
-
-    pub fn writeHeader(header: WebsocketHeader, writer: anytype, n: usize) anyerror!void {
-        if (comptime Environment.allow_assert) {
-            var buf_ = [2]u8{ 0, 0 };
-            var stream = std.io.fixedBufferStream(&buf_);
-            stream.writer().writeInt(u16, @as(u16, @bitCast(header)), .big) catch unreachable;
-            stream.pos = 0;
-            const casted = stream.reader().readInt(u16, .big) catch unreachable;
-            bun.assert(casted == @as(u16, @bitCast(header)));
-            bun.assert(std.meta.eql(@as(WebsocketHeader, @bitCast(casted)), header));
-        }
-
-        _ = try writer.writeInt(u16, @as(u16, @bitCast(header)), .big);
-        _ = bun.assert((header.len == packLength(n)));
-    }
-
-    pub fn packLength(length: usize) u7 {
-        return (switch (length) {
-            0...125 => @as(u7, @truncate(length)),
-            126...65535 => 126,
-            else => 127,
-        });
-    }
-
-    pub fn lengthByteCount(byte_length: usize) usize {
-        return (switch (byte_length) {
-            0...125 => 0,
-            126...65535 => @sizeOf(u16),
-            else => @sizeOf(u64),
-        });
-    }
-
-    pub fn frameSize(byte_length: usize) usize {
-        return ((2 + byte_length) + lengthByteCount(byte_length));
-    }
-
-    pub fn frameSizeIncludingMask(byte_length: usize) usize {
-        return (frameSize(byte_length) + 4);
-    }
-
-    pub fn slice(header: WebsocketHeader) Array2U8 {
-        return @as(Array2U8, @bitCast(@byteSwap(@as(u16, @bitCast(header)))));
-    }
-
-    pub fn fromSlice(bytes: Array2U8) WebsocketHeader {
-        return @as(WebsocketHeader, @bitCast(@byteSwap(@as(u16, @bitCast(bytes)))));
-    }
 };
+

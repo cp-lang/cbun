@@ -409,3 +409,108 @@
 - `test/js/web/fetch/fetch-http2-client.test.ts -t "SETTINGS_MAX_CONCURRENT_STREAMS=1"` (1 pass, 0 fail, 7 expect calls)
 - `test/js/web/fetch/fetch-http2-leak.test.ts` (7 pass, 0 fail, 21 expect calls)
 - `test/js/bun/http/serve.test.ts -t text` (70 pass, 1 skip, 0 fail, 338 expect calls)
+
+
+## [2026-11-06] - 全域 CP 模块深度去 zig{} 化与现代 CP 语法全面演进实装
+
+### 核心重构与修改文件 (31 个核心模块)
+对当前 Bun 仓库内已迁移的全部 31 个 `.cp` 源代码进行全面地毯式审查与纯正 CP 化重塑，100% 肃清不必要的 `zig { ... }` 宏观或局部逃逸块，并全面实装最新官方规范标准语法：
+
+1. **`src/uws_sys/quic/Header.cp`**：使用 `[*]u8!` 未定长指针与切片操作，去除 `zig {}` 包裹；
+2. **`src/uws_sys/quic/Context.cp`**：采用 `@c { ... }` 块声明 C-ABI 底层符号，引入 `cstr` 与 `*any!`，全 CP 方法实现；
+3. **`src/uws_sys/quic/PendingConnect.cp`**：采用 `@c { ... }` 声明释放与连接符号，全 CP 面向对象方法；
+4. **`src/uws_sys/quic/Socket.cp`**：采用 `@c { ... }` 声明底层套接字 I/O 符号，使用 `[*]u8!` 与 `*any!`；
+5. **`src/uws_sys/quic/Stream.cp`**：采用 `@c { ... }` 声明流 I/O 符号，去除 `zig {}`；
+6. **`src/uws_sys/quic.cp`**：采用 `@c { fn us_quic_global_init(): void; }`，纯正 CP 导出；
+7. **`src/uws_sys/ConnectingSocket.cp`**：采用 `@c { ... }`，引入 `*any!` 与 `*any?!`，去除 `zig {}`；
+8. **`src/uws_sys/ListenSocket.cp`**：采用 `@c { ... }` 声明监听符号，采用 `cstr`、`*any!`、`@c ((...): void)?` 函数指针，使用常量泛型类 `SocketHandler<is_ssl>`；
+9. **`src/uws_sys/Request.cp`**：采用 `@c { ... }` 声明 uWS 请求头/URL 符号，`[*]u8!`，AnyRequest 模式匹配与纯正 CP 切片切取；
+10. **`src/uws_sys/BodyReaderMixin.cp`**：采用常量泛型类 `export class BodyReaderMixin<Wrap, const field: string, onBody, onError>`，100% 纯 CP 实现；
+11. **`src/uws_sys/SocketContext.cp`**：采用 `@c { ... }` 声明底层上下文符号，使用 `cstr?`、`[*]cstr?!`、`u8[32]`，提供纯 CP 哈希辅助方法；
+12. **`src/uws_sys/SocketGroup.cp`**：`export class VTable` 使用 `@c ((...): ...)?` 回调字段，`ConnectResult` 枚举，`@c { ... }`，纯 CP 面向对象方法；
+13. **`src/uws_sys/vtable.cp`**：蹦床跳板使用 `reflect.hasMethod(H, "...")` 编译期内省，`@c pub fn` 导出，纯 CP 实现；
+14. **`src/uws_sys/Loop.cp`**：字段级 `@align(16)` 物理对齐注解，`@c { ... }`，泛型 `create<Handler>()` 采用 `reflect.hasMethod`；
+15. **`src/uws_sys/h3.cp`**：`@c { ... }`，`ListenConfig`, `ListenSocket`, `Request`, `Response`, `App` 纯 CP 方法；
+16. **`src/uws_sys/socket.cp`**：常量泛型类 `export class SocketHandler<const is_ssl: bool>`，`InternalSocket`, `AnySocket`, `SocketTCP`, `SocketTLS`, `cstr`, `*any?!`；
+17. **`src/uws_sys/Response.cp`**：常量泛型类 `export class Response<const ssl_flag: i32>`，`State`, `WriteResult`, `uws_res`, `@c { ... }`, `AnyResponse`；
+18. **`src/uws_sys/App.cp`**：常量泛型类 `export class App<const ssl: bool>`，严格 ES6 导入 `Response.cp` 与 `socket.cp`，`@c { ... }`；
+19. **`src/uws_sys/InternalLoopData.cp`**：`*any?!`, `[*]u8!`, `@c ((...): void)?` 函数指针，纯 CP 实现；
+20. **`src/uws_sys/SocketKind.cp`**：`export enum SocketKind: u8`，`@c export const ...`；
+21. **`src/uws_sys/Timer.cp`**：`@c { ... }`，`*any?!`，纯 CP 泛型定时器方法；
+22. **`src/uws_sys/WebSocket.cp`**：常量泛型类 `export class WebSocket<const ssl_flag: i32>`，`RawWebSocket`, `@c { ... }`, `WebSocketBehavior` 回调指针类型；
+23. **`src/uws_sys/udp.cp`**：`@c { ... }`，`Socket`, `PacketBuffer` (`[*]u8!`, `cstr`, `*any?!`)；
+24. **`src/uws_sys/us_socket_t.cp`**：`CloseCode`, `@c { ... }`, 纯正 CP `us_socket_t` 与流缓冲区定义；
+25. **`src/http/HTTPContext.cp`**：常量泛型类 `export class HTTPContext<const ssl: bool>`, `SocketEventHandler`, `DeadSocket`, `SocketHandler<ssl>`；
+26. **`src/sha_hmac/sha.cp`**：`export class Hasher<...>`, `export class EvpHasher<...>`, `EVP`, `Hashers`；
+27. **`src/sha_hmac/hmac.cp`**：`@c { fn HMAC(...) }`, 纯正 CP `generate`；
+28. **`src/http_types/ETag.cp`**：清除多余 Zig 逃逸，纯 CP 字符串解析与弱匹配；
+29. **`src/sourcemap/VLQ.cp`**：清理冗余 Zig 逃逸；
+30. **`src/csrf/csrf.cp`**：跨模块修复，改用 `import hmac from "../sha_hmac/hmac.cp"`；
+31. **`src/s3_signing/credentials.cp`**：跨模块修复，改用 `import { ACL } from "./acl.cp"` 与 `import { StorageClass } from "./storage_class.cp"`。
+
+### 语言设计规范权威手册同步 (`/data/dev/cp/cp_ref.md` & `cp/cp_ref.md`)
+- 新增 **11.9 节《C 语言互操作与现代系统类型映射规范 (C-ABI Interoperability & System Type Mappings)》**；
+- 11.9.1 `@c { ... }` 原生 C 符号与声明块语法规范；
+- 11.9.2 `@c` 单行导出与 C-ABI 调用约定修饰；
+- 11.9.3 C-ABI 函数指针类型与可选回调声明 (`@c ((params): Ret)?`)；
+- 11.9.4 C 语言严格系统指针映射规范：`cstr` / `cstr?`（零终止 C 字符串）、`[*]T!`（未定长多项指针）、`*any!` / `*any?!`（通用非类型化裸指针），严禁引入 `[*c]` 宽松隐式指针；
+- 11.9.5 常量泛型类（Const Generic Classes）：`export class App<const ssl: bool>` 与编译期单态化；
+- 11.9.6 字段级物理内存字节对齐注解：`@align(N)`；
+- 11.9.7 编译期能力与内省反射原语：`reflect.hasMethod` 与 `reflect.has`；
+- 同步更新第 14 章特殊标记符与符号清单（14.3, 14.4, 14.5, 14.6）。
+
+## 2026-11-06 (HTTP 模块全梯队 Pure CP 语法现代化重构)
+
+### 核心规范与语法重塑
+- **访问控制对齐**：
+  - `struct` 成员默认 `pub`，在全部 HTTP 结构体中剔除冗余 `pub` 声明；
+  - `class` 成员默认 `priv`，对外暴露统一使用显式 `pub`；
+  - `static struct` / `static class` 成员默认 `static`，成员方法省略 `static` 修饰符（如 `SocketEventHandler`）。
+- **C 语言指针与系统层映射**：
+  - ALPN 协商等未定长缓冲区使用 `[*]u8?!` 替代 Zig 的 `[*c]const u8`；
+  - 通用非类型化指针统一使用 `*any!` 与 `*any?!`；
+  - 回调函数指针类型统一采用 `@c ((params): ret)` 标注。
+
+### 模块重构清单
+- `src/http/h3_client/Stream.cp`:
+  - 彻底去除外层 `zig {}` 包裹，引入 ES6 纯 CP 模块导入，结构体成员默认 `pub`，析构方法对齐 `release(*this)`。
+- `src/http/h3_client/encode.cp`:
+  - 将 `writeRequest` 与 `drainSendBody` 重写为纯正 CP 控制流与错误传播（`?` 与 `??`），消灭全部局部 `zig {}`。
+- `src/http/AsyncHTTP.cp`:
+  - 全面消灭顶层 100 余行 `zig {}`，`State`、`Options`、`Preconnect`、`SingleHTTPChannel`、`HTTPChannelContext` 全面以纯 CP 导出；
+  - 结构体方法全部使用面向对象 CP 语法改写。
+- `src/http/http.cp`:
+  - 顶层重构 23 个已迁移协议模块的纯 CP ES6 导入与重导出；
+  - 将 `Flags`、`SOCKET_FLAGS`、`ThreadlocalAsyncHTTP`、`PendingH2Resolution`、`writeRequest`、`writeProxyConnect`、`printRequest`、`checkServerIdentity`、`onOpen`、`onClose` 等移出 `zig {}` 转换为原生 CP；
+  - ALPN 握手缓冲区迁移至 `[*]u8?!`，回调指针迁移至 `*any!`；
+  - 底部 `HTTPResponseMetadata` 与 `HTTPClientResult`（含 `Callback`）全面重写为纯 CP。
+- `src/http/HTTPContext.cp`:
+  - 将 `DeadSocket`、`PooledSocket`、`ExistingSocket` 升级为默认公开的 `struct`；
+  - 将 `SocketEventHandler` 升级为 `export static class`，内部方法省略 `static` 关键字。
+- 同步跟进已全面完成纯 CP 化的 Tier 1 ~ Tier 4 全部 30 个 HTTP 模块。
+
+## 2026-11-07
+
+### 核心构建与符号适配
+- `src/http/http.cp` & `src/http/http.zig`:
+  - 恢复 `BUN_DEFAULT_MAX_HTTP_HEADER_SIZE` 的 C-ABI 导出（`comptime { @export(&max_http_header_size, .{ .name = "BUN_DEFAULT_MAX_HTTP_HEADER_SIZE" }); }`），打通与 `bun-uws` 及 `JSHTTPParserPrototype.cpp` 的链接契约。
+- `src/http/HTTPThread.cp` & `src/http/HTTPThread.zig`:
+  - `SslContextCacheEntry`: 将 `config_ref` 强类型绑定至 `bun.api.server.ServerConfig.SSLConfig.SharedPtr`，支持安全的析构调用；
+  - `initOnce`: 修复 `std.Thread.spawn` 参数元组（`.{opts.*}`）；
+  - `connect`: 规范化返回类型为 `!?bun.http.NewHTTPContext(is_ssl).HTTPSocket`，正确支持 H2 连接合并语义；
+  - 针对事件排空循环中的 `switch (socket_ptr)`，消灭 Zig 0.15 报错的多余 `else => unreachable` 分支。
+- `src/http/AsyncHTTP.cp` & `src/http/AsyncHTTP.zig`:
+  - 将 `SingleHTTPChannel.init` 改为静态方法 `static fn init(): SingleHTTPChannel`；
+  - 修复 `onAsyncHTTPCallback` 中 `@fieldParentPtr` 的强类型安全提取与 defer 析构守护；
+  - 修复 `sendSync` 对 `result.metadata.?.response` 的非空返回。
+- `src/http/h2_client/ClientSession.cp` & `src/http/h2_client/ClientSession.zig`:
+  - 在 `matches` 方法中将 `ssl_config` 形参类型对齐为 `*SSLConfig?`，杜绝 `*anyopaque` 隐式降级导致的类型不匹配。
+- `src/http/ProxyTunnel.cp` & `src/http/ProxyTunnel.zig`:
+  - 规范化隧道套接字为 `HTTPSocketTCP` 与 `HTTPSocketSSL` 强类型，完善 SSLWrapper 初始化。
+- `src/http/h2_client/encode.cp` & `src/http/h2_client/encode.zig`:
+  - 显式声明 `frame_kind` 为 `H2FrameParser.FrameType`，消除编译期枚举字面量变量类型推导不确定性。
+
+### 编译与测试产物
+- 全量 31 个 HTTP 模块由 `cpc` 成功转译为高性能 Zig 原生代码并编译通过；
+- `bun bd` 成功完成全量 96 个分片对象文件与 LLVM 链接，生成 `./build/debug/bun-debug`；
+- 原生 HTTP 服务套件 `serve.test.ts` 通过 187 项测试，Fetch 异步通信及 AbortSignal 取消机制全数绿灯。

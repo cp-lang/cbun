@@ -1,16 +1,14 @@
 // src/http/HTTPRequestBody.cp
 // HTTP Request body payload representation in CP language
 
-zig {
-    const SendFile = @import("./SendFile.zig");
-    const ThreadSafeStreamBuffer = @import("./ThreadSafeStreamBuffer.zig");
-}
+import { SendFile } from "./SendFile.cp";
+import { ThreadSafeStreamBuffer } from "./ThreadSafeStreamBuffer.cp";
 
 export @value struct StreamBody {
     buffer: *ThreadSafeStreamBuffer? = null,
     ended: bool = false,
 
-    pub fn detach(*this): void {
+    fn detach(*this): void {
         if (buf := this.buffer) {
             this.buffer = null;
             buf.deref();
@@ -38,7 +36,7 @@ export enum HTTPRequestBody {
         return switch (this.*) {
             .bytes => this.bytes.len,
             .sendfile => this.sendfile.content_size,
-            .stream => std.math.maxInt(usize),
+            .stream => ~(@as(usize, 0)),
         };
     }
 }

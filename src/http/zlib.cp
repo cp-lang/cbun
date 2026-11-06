@@ -1,31 +1,32 @@
 // src/http/zlib.cp
 // Zlib buffer pool and decompression helpers in CP language
 
-zig {
-    const bun = @import("bun");
-    const std = @import("std");
-    const Zlib = @import("../zlib/zlib.zig");
-    const MutableString = bun.MutableString;
-
-    fn initMutableString(allocator: std.mem.Allocator) anyerror!MutableString {
-        return MutableString.initEmpty(allocator);
+export static class ZlibBufferPool {
+    fn initMutableString(allocator: any): !any {
+        return bun.MutableString.initEmpty(allocator);
     }
 
-    const BufferPool = bun.ObjectPool(MutableString, initMutableString, false, 4);
+    fn get(allocator: any): any {
+        return &bun.ObjectPool(bun.MutableString, initMutableString, false, 4).get(allocator).data;
+    }
+
+    fn put(mutable: any): void {
+        mutable.reset();
+        let node: any = @fieldParentPtr("data", mutable);
+        node.release();
+    }
 }
 
-pub fn get(allocator: std.mem.Allocator): *MutableString {
-    return &BufferPool.get(allocator).data;
+export fn get(allocator: any): any {
+    return ZlibBufferPool.get(allocator);
 }
 
-pub fn put(mutable: *MutableString): void {
-    mutable.reset();
-    let node: BufferPool.Node = @fieldParentPtr("data", mutable);
-    node.release();
+export fn put(mutable: any): void {
+    ZlibBufferPool.put(mutable);
 }
 
-pub fn decompress(compressed_data: string, output: *MutableString, allocator: std.mem.Allocator)!Zlib.ZlibError {
-    let reader = Zlib.ZlibReaderArrayList.initWithOptionsAndListAllocator(
+export fn decompress(compressed_data: string, output: any, allocator: any): !void {
+    let reader = bun.zlib.ZlibReaderArrayList.initWithOptionsAndListAllocator(
         compressed_data,
         &output.list,
         output.allocator,

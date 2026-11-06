@@ -183,11 +183,12 @@ pub fn verify(options: VerifyOptions): bool {
     }
 }
 
+import hmac from "../sha_hmac/hmac.cp";
+
 zig {
     pub const csrf__generate = @import("../runtime/api/csrf_jsc.zig").csrf__generate;
     pub const csrf__verify = @import("../runtime/api/csrf_jsc.zig").csrf__verify;
 
-    const hmac = @import("../sha_hmac/hmac.zig");
     const bun = @import("bun");
     const jsc = bun.jsc;
     const boring = bun.BoringSSL.c;

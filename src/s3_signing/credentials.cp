@@ -1,7 +1,8 @@
+import { ACL } from "./acl.cp";
+import { StorageClass } from "./storage_class.cp";
+
 zig {
-    const ACL = @import("./acl.zig").ACL;
     const MultiPartUploadOptions = @import("../runtime/webcore/s3/multipart_options.zig").MultiPartUploadOptions;
-    const StorageClass = @import("./storage_class.zig").StorageClass;
 
     const bun = @import("bun");
     const jsc = bun.jsc;

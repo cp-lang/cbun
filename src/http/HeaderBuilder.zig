@@ -2,50 +2,72 @@
 const std = @import("std");
 const string = []const u8;
 
-const HTTPClient = @import("./http.zig");
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 const bun = @import("bun");
-const StringBuilder = bun.StringBuilder;
-const Headers = bun.http.Headers;
-const api = bun.schema.api;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
+pub const Headers = @import("./Headers.zig").Headers;
 pub const HeaderBuilder = @This();
 
-content: StringBuilder = .{},
+content: bun.StringBuilder = .{},
 header_count: u64 = 0,
 entries: Headers.Entry.List = .empty,
 
 pub fn count(self: *HeaderBuilder, name: []const u8, value: []const u8) void {
-    self.header_count = (self.header_count + 1);
-    _ = self.content.count(name);
-    _ = self.content.count(value);
+        self.header_count = (self.header_count + 1);
+        _ = self.content.count(name);
+        _ = self.content.count(value);
 }
 
 pub fn allocate(self: *HeaderBuilder, allocator: std.mem.Allocator) !void {
-    _ = try self.content.allocate(allocator);
-    _ = try self.entries.ensureTotalCapacity(allocator, self.header_count);
+        _ = try self.content.allocate(allocator);
+        _ = try self.entries.ensureTotalCapacity(allocator, self.header_count);
 }
 
 pub fn append(self: *HeaderBuilder, name: []const u8, value: []const u8) void {
-    const name_ptr: api.StringPointer = .{ .offset = @as(u32, @truncate(self.content.len)), .length = @as(u32, @truncate(name.len)) };
-    _ = self.content.append(name);
-    const value_ptr: api.StringPointer = .{ .offset = @as(u32, @truncate(self.content.len)), .length = @as(u32, @truncate(value.len)) };
-    _ = self.content.append(value);
-    _ = self.entries.appendAssumeCapacity(.{ .name = name_ptr, .value = value_ptr });
+        const name_ptr: bun.schema.api.StringPointer = .{ .offset = @as(u32, @truncate(self.content.len)), .length = @as(u32, @truncate(name.len)) };
+        _ = &name_ptr;
+        _ = self.content.append(name);
+        const value_ptr: bun.schema.api.StringPointer = .{ .offset = @as(u32, @truncate(self.content.len)), .length = @as(u32, @truncate(value.len)) };
+        _ = &value_ptr;
+        _ = self.content.append(value);
+        _ = self.entries.appendAssumeCapacity(.{ .name = name_ptr, .value = value_ptr });
 }
 
 pub fn appendFmt(self: *HeaderBuilder, name: []const u8, comptime fmt: []const u8, args: anytype) void {
-    const name_ptr: api.StringPointer = .{ .offset = @as(u32, @truncate(self.content.len)), .length = @as(u32, @truncate(name.len)) };
-    _ = self.content.append(name);
-    const value = self.content.fmt(fmt, args);
-    const value_ptr: api.StringPointer = .{ .offset = @as(u32, @truncate((self.content.len - value.len))), .length = @as(u32, @truncate(value.len)) };
-    _ = self.entries.appendAssumeCapacity(.{ .name = name_ptr, .value = value_ptr });
+        const name_ptr: bun.schema.api.StringPointer = .{ .offset = @as(u32, @truncate(self.content.len)), .length = @as(u32, @truncate(name.len)) };
+        _ = &name_ptr;
+        _ = self.content.append(name);
+        const value = self.content.fmt(fmt, args);
+        _ = &value;
+        const value_ptr: bun.schema.api.StringPointer = .{ .offset = @as(u32, @truncate((self.content.len - value.len))), .length = @as(u32, @truncate(value.len)) };
+        _ = &value_ptr;
+        _ = self.entries.appendAssumeCapacity(.{ .name = name_ptr, .value = value_ptr });
 }
 
-pub fn apply(self: *HeaderBuilder, client: *HTTPClient) void {
-    client.header_entries = self.entries;
-    if (self.content.ptr) |ptr| {
-        client.header_buf = ptr[0..self.content.len];
-    } else {
-        client.header_buf = "";
-    }
+pub fn apply(self: *HeaderBuilder, client: *anyopaque) void {
+        client.header_entries = self.entries;
+        if (self.content.ptr) |ptr| {
+            _ = &ptr;
+            client.header_buf = ptr[0..self.content.len];
+        } else {
+            client.header_buf = "";
+        }
 }

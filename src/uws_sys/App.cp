@@ -4,408 +4,271 @@
 import bun from "bun";
 import { ListenSocket } from "./ListenSocket.cp";
 import { Request } from "./Request.cp";
+import { Response, uws_res } from "./Response.cp";
 import { BunSocketContextOptions } from "./SocketContext.cp";
+import { us_socket_t } from "./us_socket_t.cp";
+import { SocketHandler } from "./socket.cp";
 
-zig {
-    const std = @import("std");
-    const uws = bun.uws;
-    const Opcode = bun.uws.Opcode;
-    const WebSocketBehavior = bun.uws.WebSocketBehavior;
-    const us_socket_t = bun.uws.us_socket_t;
+export @opaque class uws_app_s {}
+export type uws_app_t = uws_app_s;
+
+export @extern @value class uws_app_listen_config_t {
+    port: i32,
+    host: cstr? = null,
+    options: i32 = 0,
 }
 
-pub fn NewApp(@comptime ssl: bool): type {
-    zig {
-        return struct {
-            pub const is_ssl = ssl;
-            const ssl_flag: i32 = @intFromBool(ssl);
-            const ThisApp = @This();
+@c {
+    fn uws_create_app(ssl: i32, opts: BunSocketContextOptions): *uws_app_t?!;
+    fn uws_app_destroy(ssl: i32, app: *uws_app_s): void;
+    fn uws_app_close(ssl: i32, app: *uws_app_s): void;
+    fn uws_app_close_idle(ssl: i32, app: *uws_app_s): void;
+    fn uws_app_set_on_clienterror(ssl: i32, app: *uws_app_s, handler: @c ((data: *any!, code: i32, socket: *us_socket_t, err_code: u8, raw_pkt: [*]u8?!, len: i32): void), user_data: *any!): void;
+    fn uws_app_get(ssl: i32, app: *uws_app_t, pattern: [*]const u8!, pattern_length: usize, handler: @c ((res: *uws_res, req: *Request, ud: *any?!): void)?, user_data: *any?!): void;
+    fn uws_app_post(ssl: i32, app: *uws_app_t, pattern: [*]const u8!, pattern_length: usize, handler: @c ((res: *uws_res, req: *Request, ud: *any?!): void)?, user_data: *any?!): void;
+    fn uws_app_put(ssl: i32, app: *uws_app_t, pattern: [*]const u8!, pattern_length: usize, handler: @c ((res: *uws_res, req: *Request, ud: *any?!): void)?, user_data: *any?!): void;
+    fn uws_app_delete(ssl: i32, app: *uws_app_t, pattern: [*]const u8!, pattern_length: usize, handler: @c ((res: *uws_res, req: *Request, ud: *any?!): void)?, user_data: *any?!): void;
+    fn uws_app_patch(ssl: i32, app: *uws_app_t, pattern: [*]const u8!, pattern_length: usize, handler: @c ((res: *uws_res, req: *Request, ud: *any?!): void)?, user_data: *any?!): void;
+    fn uws_app_head(ssl: i32, app: *uws_app_t, pattern: [*]const u8!, pattern_length: usize, handler: @c ((res: *uws_res, req: *Request, ud: *any?!): void)?, user_data: *any?!): void;
+    fn uws_app_options(ssl: i32, app: *uws_app_t, pattern: [*]const u8!, pattern_length: usize, handler: @c ((res: *uws_res, req: *Request, ud: *any?!): void)?, user_data: *any?!): void;
+    fn uws_app_connect(ssl: i32, app: *uws_app_t, pattern: [*]const u8!, pattern_length: usize, handler: @c ((res: *uws_res, req: *Request, ud: *any?!): void)?, user_data: *any?!): void;
+    fn uws_app_trace(ssl: i32, app: *uws_app_t, pattern: [*]const u8!, pattern_length: usize, handler: @c ((res: *uws_res, req: *Request, ud: *any?!): void)?, user_data: *any?!): void;
+    fn uws_app_any(ssl: i32, app: *uws_app_t, pattern: [*]const u8!, pattern_length: usize, handler: @c ((res: *uws_res, req: *Request, ud: *any?!): void)?, user_data: *any?!): void;
+    fn uws_app_run(ssl: i32, app: *uws_app_t): void;
+    fn uws_app_domain(ssl: i32, app: *uws_app_t, domain: cstr): void;
+    fn uws_app_set_flags(ssl: i32, app: *uws_app_t, require_host: bool, strict_method: bool): void;
+    fn uws_app_set_max_http_header_size(ssl: i32, app: *uws_app_t, max_sz: u64): void;
+    fn uws_app_listen(ssl: i32, app: *uws_app_t, host: cstr?, port: i32, options: i32, handler: @c ((socket: *ListenSocket?!, conf: uws_app_listen_config_t, data: *any?!): void), user_data: *any?!): void;
+    fn uws_app_listen_with_config(ssl: i32, app: *uws_app_t, host: cstr?, port: u16, options: i32, handler: @c ((socket: *ListenSocket?!, data: *any?!): void), user_data: *any?!): void;
+    fn uws_constructor_failed(ssl: i32, app: *uws_app_t): bool;
+    fn uws_num_subscribers(ssl: i32, app: *uws_app_t, topic: [*]const u8!, len: usize): u32;
+    fn uws_publish(ssl: i32, app: *uws_app_t, topic: [*]const u8!, tl: usize, msg: [*]const u8!, ml: usize, op: bun.uws.Opcode, compress: bool): bool;
+    fn uws_get_native_handle(ssl: i32, app: *any!): *any?!;
+    fn uws_remove_server_name(ssl: i32, app: *uws_app_t, pattern: cstr): void;
+    fn uws_add_server_name(ssl: i32, app: *uws_app_t, pattern: cstr): void;
+    fn uws_add_server_name_with_options(ssl: i32, app: *uws_app_t, pattern: cstr, opts: BunSocketContextOptions): i32;
+    fn uws_app_clear_routes(ssl: i32, app: *uws_app_t): void;
+    fn uws_app_listen_domain_with_options(ssl: i32, app: *uws_app_t, domain: cstr, pathlen: usize, flags: i32, cb: @c ((ls: *ListenSocket, domain: cstr, flags: i32, data: *any!): void), ud: *any?!): void;
+}
 
-            pub fn close(this: *ThisApp) void {
-                return c.uws_app_close(ssl_flag, @as(*uws_app_s, @ptrCast(this)));
+export class App<const ssl: bool> {
+    pub const is_ssl: bool = ssl;
+    pub const ssl_flag: i32 = if (ssl) 1 else 0;
+
+    pub type ResponseType = Response<if (ssl) 1 else 0>;
+
+    pub fn close(*this): void {
+        uws_app_close(ssl_flag, this as *uws_app_s);
+    }
+
+    pub fn closeIdleConnections(*this): void {
+        uws_app_close_idle(ssl_flag, this as *uws_app_s);
+    }
+
+    pub static fn create(opts: BunSocketContextOptions): App<ssl>? {
+        let app = uws_create_app(ssl_flag, opts);
+        if (app == null) return null;
+        return app! as App<ssl>;
+    }
+
+    pub fn destroy(*this): void {
+        uws_app_destroy(ssl_flag, this as *uws_app_s);
+    }
+
+    pub fn setFlags(*this, require_host_header: bool, use_strict_method_validation: bool): void {
+        uws_app_set_flags(ssl_flag, this as *uws_app_t, require_host_header, use_strict_method_validation);
+    }
+
+    pub fn setMaxHTTPHeaderSize(*this, max_header_size: u64): void {
+        uws_app_set_max_http_header_size(ssl_flag, this as *uws_app_t, max_header_size);
+    }
+
+    pub fn clearRoutes(*this): void {
+        uws_app_clear_routes(ssl_flag, this as *uws_app_t);
+    }
+
+    pub fn publish(*this, topic: string, message: string, opcode: bun.uws.Opcode, compress: bool): bool {
+        return uws_publish(
+            ssl_flag,
+            this as *uws_app_t,
+            topic.ptr,
+            topic.len,
+            message.ptr,
+            message.len,
+            opcode,
+            compress,
+        );
+    }
+
+    fn route<UD>(
+        *this,
+        f: @c ((ssl: i32, app: *uws_app_t, pattern: [*]const u8!, len: usize, handler: @c ((res: *uws_res, req: *Request, ud: *any?!): void)?, ud: *any?!): void),
+        pattern: string,
+        ud: *UD,
+        handler: fn(*UD, *Request, *ResponseType): void,
+    ): void {
+        let Handler = struct {
+            @c pub fn handle(res: *uws_res, req: *Request, user_data: *any?!): void {
+                handler(user_data as *UD, req, res as *ResponseType);
             }
-
-            pub fn closeIdleConnections(this: *ThisApp) void {
-                return c.uws_app_close_idle(ssl_flag, @as(*uws_app_s, @ptrCast(this)));
-            }
-
-            pub fn create(opts: BunSocketContextOptions) ?*ThisApp {
-                return @ptrCast(c.uws_create_app(ssl_flag, opts));
-            }
-
-            pub fn destroy(app: *ThisApp) void {
-                return c.uws_app_destroy(ssl_flag, @as(*uws_app_s, @ptrCast(app)));
-            }
-
-            pub fn setFlags(this: *ThisApp, require_host_header: bool, use_strict_method_validation: bool) void {
-                return c.uws_app_set_flags(ssl_flag, @as(*uws_app_t, @ptrCast(this)), require_host_header, use_strict_method_validation);
-            }
-
-            pub fn setMaxHTTPHeaderSize(this: *ThisApp, max_header_size: u64) void {
-                return c.uws_app_set_max_http_header_size(ssl_flag, @as(*uws_app_t, @ptrCast(this)), max_header_size);
-            }
-
-            pub fn clearRoutes(app: *ThisApp) void {
-                return c.uws_app_clear_routes(ssl_flag, @as(*uws_app_t, @ptrCast(app)));
-            }
-
-            pub fn publish(app: *ThisApp, topic: []const u8, message: []const u8, opcode: Opcode, compress: bool) bool {
-                return c.uws_publish(
-                    @intFromBool(ssl),
-                    @ptrCast(app),
-                    topic.ptr,
-                    topic.len,
-                    message.ptr,
-                    message.len,
-                    opcode,
-                    compress,
-                );
-            }
-            pub const publishWithOptions = publish;
-
-            pub const ListenSocket = opaque {
-                pub inline fn close(this: *ThisApp.ListenSocket) void {
-                    return @as(*uws.ListenSocket, @ptrCast(this)).close();
-                }
-                pub inline fn getLocalPort(this: *ThisApp.ListenSocket) i32 {
-                    return @as(*uws.ListenSocket, @ptrCast(this)).getLocalPort();
-                }
-
-                pub fn socket(this: *ThisApp.ListenSocket) uws.NewSocketHandler(ssl) {
-                    return uws.NewSocketHandler(ssl).from(@ptrCast(this));
-                }
-            };
-
-            fn RouteHandler(comptime UserDataType: type, comptime handler: fn (UserDataType, *Request, *Response) void) type {
-                return struct {
-                    pub fn handle(res: *uws.uws_res, req: *Request, user_data: ?*anyopaque) callconv(.c) void {
-                        if (comptime UserDataType == void) {
-                            return @call(
-                                bun.callmod_inline,
-                                handler,
-                                .{
-                                    {},
-                                    req,
-                                    @as(*Response, @ptrCast(@alignCast(res))),
-                                },
-                            );
-                        } else {
-                            return @call(
-                                bun.callmod_inline,
-                                handler,
-                                .{
-                                    @as(UserDataType, @ptrCast(@alignCast(user_data.?))),
-                                    req,
-                                    @as(*Response, @ptrCast(@alignCast(res))),
-                                },
-                            );
-                        }
-                    }
-                };
-            }
-
-            fn route(
-                comptime which: @TypeOf(.x),
-                this: *ThisApp,
-                pattern: []const u8,
-                comptime UserDataType: type,
-                user_data: UserDataType,
-                comptime handler: fn (UserDataType, *Request, *Response) void,
-            ) void {
-                const Handler = RouteHandler(UserDataType, handler);
-                const f = switch (which) {
-                    .get => c.uws_app_get,
-                    .post => c.uws_app_post,
-                    .put => c.uws_app_put,
-                    .delete => c.uws_app_delete,
-                    .patch => c.uws_app_patch,
-                    .head => c.uws_app_head,
-                    .options => c.uws_app_options,
-                    .connect => c.uws_app_connect,
-                    .trace => c.uws_app_trace,
-                    .any => c.uws_app_any,
-                    else => unreachable,
-                };
-                f(
-                    ssl_flag,
-                    @as(*uws_app_t, @ptrCast(this)),
-                    pattern.ptr,
-                    pattern.len,
-                    Handler.handle,
-                    if (comptime UserDataType == void)
-                        null
-                    else
-                        user_data,
-                );
-            }
-
-            pub fn get(this: *ThisApp, pattern: []const u8, comptime UserDataType: type, user_data: UserDataType, comptime handler: fn (UserDataType, *Request, *Response) void) void {
-                route(.get, this, pattern, UserDataType, user_data, handler);
-            }
-
-            pub fn post(this: *ThisApp, pattern: []const u8, comptime UserDataType: type, user_data: UserDataType, comptime handler: fn (UserDataType, *Request, *Response) void) void {
-                route(.post, this, pattern, UserDataType, user_data, handler);
-            }
-
-            pub fn put(this: *ThisApp, pattern: []const u8, comptime UserDataType: type, user_data: UserDataType, comptime handler: fn (UserDataType, *Request, *Response) void) void {
-                route(.put, this, pattern, UserDataType, user_data, handler);
-            }
-
-            pub fn delete(this: *ThisApp, pattern: []const u8, comptime UserDataType: type, user_data: UserDataType, comptime handler: fn (UserDataType, *Request, *Response) void) void {
-                route(.delete, this, pattern, UserDataType, user_data, handler);
-            }
-
-            pub fn patch(this: *ThisApp, pattern: []const u8, comptime UserDataType: type, user_data: UserDataType, comptime handler: fn (UserDataType, *Request, *Response) void) void {
-                route(.patch, this, pattern, UserDataType, user_data, handler);
-            }
-
-            pub fn head(this: *ThisApp, pattern: []const u8, comptime UserDataType: type, user_data: UserDataType, comptime handler: fn (UserDataType, *Request, *Response) void) void {
-                route(.head, this, pattern, UserDataType, user_data, handler);
-            }
-
-            pub fn options(this: *ThisApp, pattern: []const u8, comptime UserDataType: type, user_data: UserDataType, comptime handler: fn (UserDataType, *Request, *Response) void) void {
-                route(.options, this, pattern, UserDataType, user_data, handler);
-            }
-
-            pub fn any(this: *ThisApp, pattern: []const u8, comptime UserDataType: type, user_data: UserDataType, comptime handler: fn (UserDataType, *Request, *Response) void) void {
-                route(.any, this, pattern, UserDataType, user_data, handler);
-            }
-
-            pub fn method(
-                this: *ThisApp,
-                m: bun.http.Method,
-                pattern: []const u8,
-                comptime UserDataType: type,
-                user_data: UserDataType,
-                comptime handler: fn (UserDataType, *Request, *Response) void,
-            ) void {
-                switch (m) {
-                    .GET => this.get(pattern, UserDataType, user_data, handler),
-                    .POST => this.post(pattern, UserDataType, user_data, handler),
-                    .PUT => this.put(pattern, UserDataType, user_data, handler),
-                    .DELETE => this.delete(pattern, UserDataType, user_data, handler),
-                    .PATCH => this.patch(pattern, UserDataType, user_data, handler),
-                    .OPTIONS => this.options(pattern, UserDataType, user_data, handler),
-                    .HEAD => this.head(pattern, UserDataType, user_data, handler),
-                    .CONNECT => route(.connect, this, pattern, UserDataType, user_data, handler),
-                    .TRACE => route(.trace, this, pattern, UserDataType, user_data, handler),
-                    else => {},
-                }
-            }
-
-            pub fn domain(app: *ThisApp, pattern: [:0]const u8) void {
-                c.uws_app_domain(ssl_flag, @as(*uws_app_t, @ptrCast(app)), pattern);
-            }
-            pub fn run(app: *ThisApp) void {
-                return c.uws_app_run(ssl_flag, @as(*uws_app_t, @ptrCast(app)));
-            }
-            pub fn constructorFailed(app: *ThisApp) bool {
-                return c.uws_constructor_failed(ssl_flag, app);
-            }
-
-            pub fn numSubscribers(app: *ThisApp, topic: []const u8) u32 {
-                return c.uws_num_subscribers(ssl_flag, @as(*uws_app_t, @ptrCast(app)), topic.ptr, topic.len);
-            }
-
-            pub fn getNativeHandle(app: *ThisApp) ?*anyopaque {
-                return c.uws_get_native_handle(ssl_flag, app);
-            }
-
-            pub fn removeServerName(app: *ThisApp, hostname_pattern: [*:0]const u8) void {
-                return c.uws_remove_server_name(ssl_flag, @as(*uws_app_t, @ptrCast(app)), hostname_pattern);
-            }
-
-            pub fn addServerName(app: *ThisApp, hostname_pattern: [*:0]const u8) void {
-                return c.uws_add_server_name(ssl_flag, @as(*uws_app_t, @ptrCast(app)), hostname_pattern);
-            }
-
-            pub fn addServerNameWithOptions(app: *ThisApp, hostname_pattern: [*:0]const u8, opts: BunSocketContextOptions) !void {
-                if (c.uws_add_server_name_with_options(ssl_flag, @as(*uws_app_t, @ptrCast(app)), hostname_pattern, opts) != 0) {
-                    return error.FailedToAddServerName;
-                }
-            }
-
-            pub fn missingServerName(app: *ThisApp, handler: c.uws_missing_server_handler, user_data: ?*anyopaque) void {
-                return c.uws_missing_server_name(ssl_flag, @as(*uws_app_t, @ptrCast(app)), handler, user_data);
-            }
-
-            pub fn filter(app: *ThisApp, handler: c.uws_filter_handler, user_data: ?*anyopaque) void {
-                return c.uws_filter(ssl_flag, @as(*uws_app_t, @ptrCast(app)), handler, user_data);
-            }
-
-            pub fn listen(
-                app: *ThisApp,
-                port: i32,
-                comptime UserData: type,
-                user_data: UserData,
-                comptime handler: fn (UserData, ?*ThisApp.ListenSocket, c.uws_app_listen_config_t) void,
-            ) void {
-                const Wrapper = struct {
-                    pub fn handle(socket: ?*uws.ListenSocket, conf: c.uws_app_listen_config_t, data: ?*anyopaque) callconv(.c) void {
-                        if (comptime UserData == void) {
-                            @call(bun.callmod_inline, handler, .{ {}, @as(?*ThisApp.ListenSocket, @ptrCast(socket)), conf });
-                        } else {
-                            @call(bun.callmod_inline, handler, .{
-                                @as(UserData, @ptrCast(@alignCast(data.?))),
-                                @as(?*ThisApp.ListenSocket, @ptrCast(socket)),
-                                conf,
-                            });
-                        }
-                    }
-                };
-                return c.uws_app_listen(ssl_flag, @as(*uws_app_t, @ptrCast(app)), port, Wrapper.handle, user_data);
-            }
-
-            pub fn onClientError(
-                app: *ThisApp,
-                comptime UserData: type,
-                user_data: UserData,
-                comptime handler: fn (data: UserData, socket: *us_socket_t, error_code: u8, rawPacket: []const u8) void,
-            ) void {
-                const Wrapper = struct {
-                    pub fn handle(data: *anyopaque, _: c_int, socket: *us_socket_t, error_code: u8, raw_packet: ?[*]u8, raw_packet_length: c_int) callconv(.c) void {
-                        @call(bun.callmod_inline, handler, .{
-                            @as(UserData, @ptrCast(@alignCast(data))),
-                            socket,
-                            error_code,
-                            if (raw_packet) |bytes| bytes[0..(@max(raw_packet_length, 0))] else "",
-                        });
-                    }
-                };
-                return c.uws_app_set_on_clienterror(ssl_flag, @ptrCast(app), Wrapper.handle, @ptrCast(user_data));
-            }
-
-            pub fn listenWithConfig(
-                app: *ThisApp,
-                comptime UserData: type,
-                user_data: UserData,
-                comptime handler: fn (UserData, ?*ThisApp.ListenSocket) void,
-                config: c.uws_app_listen_config_t,
-            ) void {
-                const Wrapper = struct {
-                    pub fn handle(socket: ?*uws.ListenSocket, data: ?*anyopaque) callconv(.c) void {
-                        if (comptime UserData == void) {
-                            @call(bun.callmod_inline, handler, .{ {}, @as(?*ThisApp.ListenSocket, @ptrCast(socket)) });
-                        } else {
-                            @call(bun.callmod_inline, handler, .{
-                                @as(UserData, @ptrCast(@alignCast(data.?))),
-                                @as(?*ThisApp.ListenSocket, @ptrCast(socket)),
-                            });
-                        }
-                    }
-                };
-                return c.uws_app_listen_with_config(ssl_flag, @as(*uws_app_t, @ptrCast(app)), config.host, @as(u16, @intCast(config.port)), config.options, Wrapper.handle, user_data);
-            }
-
-            pub fn listenOnUnixSocket(
-                app: *ThisApp,
-                comptime UserData: type,
-                user_data: UserData,
-                comptime handler: fn (UserData, ?*ThisApp.ListenSocket) void,
-                domain_name: [:0]const u8,
-                flags: i32,
-            ) void {
-                const Wrapper = struct {
-                    pub fn handle(socket: ?*uws.ListenSocket, _: [*:0]const u8, _: i32, data: *anyopaque) callconv(.c) void {
-                        if (comptime UserData == void) {
-                            @call(bun.callmod_inline, handler, .{ {}, @as(?*ThisApp.ListenSocket, @ptrCast(socket)) });
-                        } else {
-                            @call(bun.callmod_inline, handler, .{
-                                @as(UserData, @ptrCast(@alignCast(data))),
-                                @as(?*ThisApp.ListenSocket, @ptrCast(socket)),
-                            });
-                        }
-                    }
-                };
-                return c.uws_app_listen_domain_with_options(
-                    ssl_flag,
-                    @as(*uws_app_t, @ptrCast(app)),
-                    domain_name.ptr,
-                    domain_name.len,
-                    flags,
-                    Wrapper.handle,
-                    user_data,
-                );
-            }
-
-            pub fn ws(app: *ThisApp, pattern: []const u8, ctx: *anyopaque, id: usize, behavior_: WebSocketBehavior) void {
-                var behavior = behavior_;
-                uws_ws(ssl_flag, @as(*uws_app_t, @ptrCast(app)), ctx, pattern.ptr, pattern.len, id, &behavior);
-            }
-
-            pub const Response = @import("./Response.zig").NewResponse(ssl_flag);
-            pub const WebSocket = @import("./WebSocket.zig").NewWebSocket(ssl_flag);
-            const uws_ws = @import("./WebSocket.zig").c.uws_ws;
         };
+        f(ssl_flag, this as *uws_app_t, pattern.ptr, pattern.len, Handler.handle, ud as *any?!);
+    }
+
+    pub fn get<UD>(*this, pattern: string, ud: *UD, handler: fn(*UD, *Request, *ResponseType): void): void {
+        this.route(uws_app_get, pattern, ud, handler);
+    }
+
+    pub fn post<UD>(*this, pattern: string, ud: *UD, handler: fn(*UD, *Request, *ResponseType): void): void {
+        this.route(uws_app_post, pattern, ud, handler);
+    }
+
+    pub fn put<UD>(*this, pattern: string, ud: *UD, handler: fn(*UD, *Request, *ResponseType): void): void {
+        this.route(uws_app_put, pattern, ud, handler);
+    }
+
+    pub fn delete<UD>(*this, pattern: string, ud: *UD, handler: fn(*UD, *Request, *ResponseType): void): void {
+        this.route(uws_app_delete, pattern, ud, handler);
+    }
+
+    pub fn patch<UD>(*this, pattern: string, ud: *UD, handler: fn(*UD, *Request, *ResponseType): void): void {
+        this.route(uws_app_patch, pattern, ud, handler);
+    }
+
+    pub fn head<UD>(*this, pattern: string, ud: *UD, handler: fn(*UD, *Request, *ResponseType): void): void {
+        this.route(uws_app_head, pattern, ud, handler);
+    }
+
+    pub fn options<UD>(*this, pattern: string, ud: *UD, handler: fn(*UD, *Request, *ResponseType): void): void {
+        this.route(uws_app_options, pattern, ud, handler);
+    }
+
+    pub fn any<UD>(*this, pattern: string, ud: *UD, handler: fn(*UD, *Request, *ResponseType): void): void {
+        this.route(uws_app_any, pattern, ud, handler);
+    }
+
+    pub fn method<UD>(
+        *this,
+        m: bun.http.Method,
+        pattern: string,
+        ud: *UD,
+        handler: fn(*UD, *Request, *ResponseType): void,
+    ): void {
+        switch (m) {
+            .GET => this.get(pattern, ud, handler),
+            .POST => this.post(pattern, ud, handler),
+            .PUT => this.put(pattern, ud, handler),
+            .DELETE => this.delete(pattern, ud, handler),
+            .PATCH => this.patch(pattern, ud, handler),
+            .OPTIONS => this.options(pattern, ud, handler),
+            .HEAD => this.head(pattern, ud, handler),
+            .CONNECT => this.route(uws_app_connect, pattern, ud, handler),
+            .TRACE => this.route(uws_app_trace, pattern, ud, handler),
+            else => {},
+        }
+    }
+
+    pub fn domain(*this, pattern: cstr): void {
+        uws_app_domain(ssl_flag, this as *uws_app_t, pattern);
+    }
+
+    pub fn run(*this): void {
+        uws_app_run(ssl_flag, this as *uws_app_t);
+    }
+
+    pub fn constructorFailed(*this): bool {
+        return uws_constructor_failed(ssl_flag, this as *uws_app_t);
+    }
+
+    pub fn numSubscribers(*this, topic: string): u32 {
+        return uws_num_subscribers(ssl_flag, this as *uws_app_t, topic.ptr, topic.len);
+    }
+
+    pub fn getNativeHandle(*this): *any?! {
+        return uws_get_native_handle(ssl_flag, this as *any!);
+    }
+
+    pub fn removeServerName(*this, hostname_pattern: cstr): void {
+        uws_remove_server_name(ssl_flag, this as *uws_app_t, hostname_pattern);
+    }
+
+    pub fn addServerName(*this, hostname_pattern: cstr): void {
+        uws_add_server_name(ssl_flag, this as *uws_app_t, hostname_pattern);
+    }
+
+    pub fn addServerNameWithOptions(*this, hostname_pattern: cstr, opts: BunSocketContextOptions): ?void {
+        if (uws_add_server_name_with_options(ssl_flag, this as *uws_app_t, hostname_pattern, opts) != 0) {
+            return error.FailedToAddServerName;
+        }
+    }
+
+    pub fn listen<UserData>(
+        *this,
+        port: i32,
+        user_data: *UserData,
+        handler: fn(*UserData, *ListenSocket?, uws_app_listen_config_t): void,
+    ): void {
+        let Wrapper = struct {
+            @c pub fn handle(socket: *ListenSocket?!, conf: uws_app_listen_config_t, data: *any?!): void {
+                handler(data as *UserData, socket, conf);
+            }
+        };
+        uws_app_listen(ssl_flag, this as *uws_app_t, null, port, 0, Wrapper.handle, user_data as *any?!);
+    }
+
+    pub fn onClientError<UserData>(
+        *this,
+        user_data: *UserData,
+        handler: fn(*UserData, *us_socket_t, u8, string): void,
+    ): void {
+        let Wrapper = struct {
+            @c pub fn handle(data: *any!, code: i32, socket: *us_socket_t, error_code: u8, raw_packet: [*]u8?!, raw_packet_length: i32): void {
+                let bytes = if (raw_packet != null && raw_packet_length > 0) raw_packet![0..(raw_packet_length as usize)] else "";
+                handler(data as *UserData, socket, error_code, bytes);
+            }
+        };
+        uws_app_set_on_clienterror(ssl_flag, this as *uws_app_s, Wrapper.handle, user_data as *any!);
+    }
+
+    pub fn listenWithConfig<UserData>(
+        *this,
+        user_data: *UserData,
+        handler: fn(*UserData, *ListenSocket?): void,
+        config: uws_app_listen_config_t,
+    ): void {
+        let Wrapper = struct {
+            @c pub fn handle(socket: *ListenSocket?!, data: *any?!): void {
+                handler(data as *UserData, socket);
+            }
+        };
+        uws_app_listen_with_config(ssl_flag, this as *uws_app_t, config.host, config.port as u16, config.options, Wrapper.handle, user_data as *any?!);
+    }
+
+    pub fn listenOnUnixSocket<UserData>(
+        *this,
+        user_data: *UserData,
+        handler: fn(*UserData, *ListenSocket?): void,
+        domain_name: string,
+        flags: i32,
+    ): void {
+        let Wrapper = struct {
+            @c pub fn handle(socket: *ListenSocket, domain: cstr, fl: i32, data: *any!): void {
+                handler(data as *UserData, socket);
+            }
+        };
+        let domainZ: cstr = bun.handleOom(bun.default_allocator.dupeZ(u8, domain_name));
+        defer bun.default_allocator.free(domainZ);
+        uws_app_listen_domain_with_options(
+            ssl_flag,
+            this as *uws_app_t,
+            domainZ,
+            domain_name.len,
+            flags,
+            Wrapper.handle,
+            user_data as *any?!,
+        );
     }
 }
 
-zig {
-    pub const AppTCP = NewApp(false);
-    pub const AppTLS = NewApp(true);
-    pub const uws_app_s = opaque {};
-    pub const uws_app_t = uws_app_s;
-
-    const c = struct {
-        pub const uws_listen_handler = *const (fn (?*ListenSocket, ?*anyopaque) callconv(.c) void);
-        pub const uws_missing_server_handler = *const (fn ([*c]const u8, ?*anyopaque) callconv(.c) void);
-        pub const uws_filter_handler = *const (fn (*uws.uws_res, c_int, ?*anyopaque) callconv(.c) void);
-
-        pub extern fn uws_create_app(ssl: i32, opts: BunSocketContextOptions) ?*uws_app_t;
-        pub extern fn uws_app_destroy(ssl: i32, app: *uws_app_s) void;
-        pub extern fn uws_app_close(ssl: i32, app: *uws_app_s) void;
-        pub extern fn uws_app_close_idle(ssl: i32, app: *uws_app_s) void;
-        pub extern fn uws_app_set_on_clienterror(ssl: c_int, app: *uws_app_s, handler: *const fn (*anyopaque, c_int, *us_socket_t, u8, ?[*]u8, c_int) callconv(.c) void, user_data: *anyopaque) void;
-        pub extern fn uws_app_get(ssl: i32, app: *uws_app_t, pattern: [*c]const u8, pattern_length: usize, handler: *const (fn (*uws.uws_res, *Request, ?*anyopaque) callconv(.c) void), user_data: ?*anyopaque) void;
-        pub extern fn uws_app_post(ssl: i32, app: *uws_app_t, pattern: [*c]const u8, pattern_length: usize, handler: *const (fn (*uws.uws_res, *Request, ?*anyopaque) callconv(.c) void), user_data: ?*anyopaque) void;
-        pub extern fn uws_app_put(ssl: i32, app: *uws_app_t, pattern: [*c]const u8, pattern_length: usize, handler: *const (fn (*uws.uws_res, *Request, ?*anyopaque) callconv(.c) void), user_data: ?*anyopaque) void;
-        pub extern fn uws_app_delete(ssl: i32, app: *uws_app_t, pattern: [*c]const u8, pattern_length: usize, handler: *const (fn (*uws.uws_res, *Request, ?*anyopaque) callconv(.c) void), user_data: ?*anyopaque) void;
-        pub extern fn uws_app_patch(ssl: i32, app: *uws_app_t, pattern: [*c]const u8, pattern_length: usize, handler: *const (fn (*uws.uws_res, *Request, ?*anyopaque) callconv(.c) void), user_data: ?*anyopaque) void;
-        pub extern fn uws_app_head(ssl: i32, app: *uws_app_t, pattern: [*c]const u8, pattern_length: usize, handler: *const (fn (*uws.uws_res, *Request, ?*anyopaque) callconv(.c) void), user_data: ?*anyopaque) void;
-        pub extern fn uws_app_options(ssl: i32, app: *uws_app_t, pattern: [*c]const u8, pattern_length: usize, handler: *const (fn (*uws.uws_res, *Request, ?*anyopaque) callconv(.c) void), user_data: ?*anyopaque) void;
-        pub extern fn uws_app_connect(ssl: i32, app: *uws_app_t, pattern: [*c]const u8, pattern_length: usize, handler: *const (fn (*uws.uws_res, *Request, ?*anyopaque) callconv(.c) void), user_data: ?*anyopaque) void;
-        pub extern fn uws_app_trace(ssl: i32, app: *uws_app_t, pattern: [*c]const u8, pattern_length: usize, handler: *const (fn (*uws.uws_res, *Request, ?*anyopaque) callconv(.c) void), user_data: ?*anyopaque) void;
-        pub extern fn uws_app_any(ssl: i32, app: *uws_app_t, pattern: [*c]const u8, pattern_length: usize, handler: *const (fn (*uws.uws_res, *Request, ?*anyopaque) callconv(.c) void), user_data: ?*anyopaque) void;
-        pub extern fn uws_app_run(ssl: i32, *uws_app_t) void;
-        pub extern fn uws_app_domain(ssl: i32, app: *uws_app_t, domain: [*c]const u8) void;
-        pub extern fn uws_app_set_flags(ssl: i32, app: *uws_app_t, require_host_header: bool, use_strict_method_validation: bool) void;
-        pub extern fn uws_app_set_max_http_header_size(ssl: i32, app: *uws_app_t, max_header_size: u64) void;
-        pub extern fn uws_app_listen(ssl: i32, app: *uws_app_t, host: ?[*c]const u8, port: c_int, options: c_int, handler: uws_listen_handler, user_data: ?*anyopaque) void;
-        pub extern fn uws_app_listen_with_config(
-            ssl: i32,
-            app: *uws_app_t,
-            host: [*c]const u8,
-            port: u16,
-            options: i32,
-            handler: uws_listen_handler,
-            user_data: ?*anyopaque,
-        ) void;
-        pub extern fn uws_constructor_failed(ssl: i32, app: *uws_app_t) bool;
-        pub extern fn uws_num_subscribers(ssl: i32, app: *uws_app_t, topic: [*c]const u8, topic_length: usize) c_uint;
-        pub extern fn uws_publish(ssl: i32, app: *uws_app_t, topic: [*c]const u8, topic_length: usize, message: [*c]const u8, message_length: usize, opcode: Opcode, compress: bool) bool;
-        pub extern fn uws_get_native_handle(ssl: i32, app: *anyopaque) ?*anyopaque;
-        pub extern fn uws_remove_server_name(ssl: i32, app: *uws_app_t, hostname_pattern: [*c]const u8) void;
-        pub extern fn uws_add_server_name(ssl: i32, app: *uws_app_t, hostname_pattern: [*c]const u8) void;
-        pub extern fn uws_add_server_name_with_options(ssl: i32, app: *uws_app_t, hostname_pattern: [*c]const u8, options: BunSocketContextOptions) i32;
-        pub extern fn uws_missing_server_name(ssl: i32, app: *uws_app_t, handler: uws_missing_server_handler, user_data: ?*anyopaque) void;
-        pub extern fn uws_filter(ssl: i32, app: *uws_app_t, handler: uws_filter_handler, user_data: ?*anyopaque) void;
-
-        pub const uws_app_listen_config_t = extern struct {
-            port: c_int,
-            host: ?[*:0]const u8 = null,
-            options: c_int = 0,
-        };
-
-        pub extern fn uws_app_listen_domain_with_options(
-            ssl_flag: c_int,
-            app: *uws_app_t,
-            domain: [*:0]const u8,
-            pathlen: usize,
-            i32,
-            *const (fn (*ListenSocket, domain: [*:0]const u8, i32, *anyopaque) callconv(.c) void),
-            ?*anyopaque,
-        ) void;
-
-        pub extern fn uws_app_clear_routes(ssl_flag: c_int, app: *uws_app_t) void;
-    };
-}
+pub type AppTCP = App<false>;
+pub type AppTLS = App<true>;

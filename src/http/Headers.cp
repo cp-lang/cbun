@@ -3,37 +3,33 @@
 
 zig {
     const bun = @import("bun");
-    const picohttp = bun.picohttp;
-    const api = bun.schema.api;
-    const Blob = bun.webcore.Blob;
-    const FetchHeaders = bun.webcore.FetchHeaders;
+}
+
+import { toFetchHeaders } from "../http_jsc/headers_jsc.zig";
+
+export struct Entry {
+    name: bun.schema.api.StringPointer,
+    value: bun.schema.api.StringPointer,
+
+    zig {
+        pub const List = bun.MultiArrayList(Entry);
+    }
+}
+
+export struct Options {
+    body: *const bun.webcore.Blob.Any? = null,
 }
 
 export @root @value struct Headers {
-    zig {
-        pub const Entry = struct {
-            name: api.StringPointer,
-            value: api.StringPointer,
-
-            pub const List = bun.MultiArrayList(Entry);
-        };
-
-        pub const toFetchHeaders = @import("../http_jsc/headers_jsc.zig").toFetchHeaders;
-
-        pub const Options = struct {
-            body: ?*const Blob.Any = null,
-        };
-    }
-
     entries: Entry.List = {},
     buf: std.ArrayListUnmanaged(u8) = {},
     allocator: std.mem.Allocator,
 
-    pub fn memoryCost(this): usize {
+    fn memoryCost(this): usize {
         return this.buf.items.len + this.entries.memoryCost();
     }
 
-    pub fn clone(*this): Headers! {
+    fn clone(*this): Headers! {
         return {
             entries: this.entries.clone(this.allocator)?,
             buf: this.buf.clone(this.allocator)?,
@@ -41,7 +37,7 @@ export @root @value struct Headers {
         };
     }
 
-    pub fn get(this, name: string): string? {
+    fn get(this, name: string): string? {
         const entries = this.entries.slice();
         const names = entries.items(.name);
         const values = entries.items(.value);
@@ -55,10 +51,10 @@ export @root @value struct Headers {
         return null;
     }
 
-    pub fn append(*this, name: string, value: string)! {
-        let offset: u32 = @truncate(this.buf.items.len);
+    fn append(*this, name: string, value: string): !void {
+        let mut offset: u32 = @truncate(this.buf.items.len);
         this.buf.ensureUnusedCapacity(this.allocator, name.len + value.len)?;
-        const name_ptr: api.StringPointer = {
+        const name_ptr: bun.schema.api.StringPointer = {
             offset: offset,
             length: @truncate(name.len),
         };
@@ -66,7 +62,7 @@ export @root @value struct Headers {
         offset = @truncate(this.buf.items.len);
         this.buf.appendSliceAssumeCapacity(value);
 
-        const value_ptr: api.StringPointer = {
+        const value_ptr: bun.schema.api.StringPointer = {
             offset: offset,
             length: @truncate(value.len),
         };
@@ -76,24 +72,28 @@ export @root @value struct Headers {
         })?;
     }
 
-    pub fn deinit(*this): void {
+    fn release(*this): void {
         this.entries.deinit(this.allocator);
         this.buf.clearAndFree(this.allocator);
     }
 
-    pub fn getContentDisposition(this): string? {
+    fn deinit(*this): void {
+        this.release();
+    }
+
+    fn getContentDisposition(this): string? {
         return this.get("content-disposition");
     }
 
-    pub fn getContentEncoding(this): string? {
+    fn getContentEncoding(this): string? {
         return this.get("content-encoding");
     }
 
-    pub fn getContentType(this): string? {
+    fn getContentType(this): string? {
         return this.get("content-type");
     }
 
-    pub fn asStr(this, ptr: api.StringPointer): string {
+    fn asStr(this, ptr: bun.schema.api.StringPointer): string {
         if (ptr.offset + ptr.length <= this.buf.items.len) {
             return this.buf.items[ptr.offset..][0..ptr.length];
         } else {
@@ -101,16 +101,16 @@ export @root @value struct Headers {
         }
     }
 
-    pub static fn fromPicoHttpHeaders(headers: picohttp.Header[], allocator: std.mem.Allocator): Headers! {
+    static fn fromPicoHttpHeaders(headers: bun.picohttp.Header[], allocator: std.mem.Allocator): Headers! {
         const header_count = headers.len;
-        let result: Headers = {
+        let mut result: Headers = {
             entries: {},
             buf: {},
             allocator: allocator,
         };
 
-        let buf_len: usize = 0;
-        let j: usize = 0;
+        let mut buf_len: usize = 0;
+        let mut j: usize = 0;
         while (j < headers.len) {
             buf_len += headers[j].name.len + headers[j].value.len;
             j += 1;
@@ -119,8 +119,8 @@ export @root @value struct Headers {
         result.entries.len = headers.len;
         bun.handleOom(result.buf.ensureTotalCapacityPrecise(allocator, buf_len));
         result.buf.items.len = buf_len;
-        let offset: u32 = 0;
-        let i: usize = 0;
+        let mut offset: u32 = 0;
+        let mut i: usize = 0;
         while (i < headers.len) {
             const header = headers[i];
             const name_offset = offset;
@@ -145,21 +145,21 @@ export @root @value struct Headers {
         return result;
     }
 
-    pub static fn from(fetch_headers_ref: *FetchHeaders?, allocator: std.mem.Allocator, options: Options): Headers! {
-        let header_count: u32 = 0;
-        let buf_len: u32 = 0;
+    static fn from(fetch_headers_ref: *bun.webcore.FetchHeaders?, allocator: std.mem.Allocator, options: Options): Headers! {
+        let mut header_count: u32 = 0;
+        let mut buf_len: u32 = 0;
         if (headers_ref := fetch_headers_ref) {
             headers_ref.count(*header_count, *buf_len);
         }
-        let headers: Headers = {
+        let mut headers: Headers = {
             entries: {},
             buf: {},
             allocator: allocator,
         };
         const buf_len_before_content_type = buf_len;
-        let needs_content_type = false;
+        let mut needs_content_type = false;
         if (body := options.body) {
-            let has_ct = false;
+            let mut has_ct = false;
             if (headers_ref2 := fetch_headers_ref) {
                 has_ct = headers_ref2.fastHas(.ContentType);
             }

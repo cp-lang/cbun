@@ -2,32 +2,54 @@
 const std = @import("std");
 const string = []const u8;
 
-fn cp_cast_int(comptime Dest: type, val: anytype) Dest {
-    const Src = @TypeOf(val);
-    if (comptime Src == Dest) return val;
-    if (comptime Src == comptime_int) {
-        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val));
-    }
-    const src_bits = @typeInfo(Src).int.bits;
-    const dest_bits = @typeInfo(Dest).int.bits;
-    if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {
-        if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val);
-    }
-    if (comptime @typeInfo(Src).int.signedness == .signed) {
-        const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val);
-        const u: u128 = @bitCast(s);
-        if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u);
-    } else {
-        const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val);
-        const s: i128 = @bitCast(u);
-        if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s);
-    }
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
 }
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
-const picohttp = bun.picohttp;
-const api = bun.schema.api;
-const Blob = bun.webcore.Blob;
-const FetchHeaders = bun.webcore.FetchHeaders;
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+
+pub const toFetchHeaders = @import("../http_jsc/headers_jsc.zig").toFetchHeaders;
+pub const Entry = struct {
+    name: bun.schema.api.StringPointer,
+    value: bun.schema.api.StringPointer,
+    
+pub fn _create(allocator: std.mem.Allocator) !*Entry { const self_ptr = try allocator.create(Entry); self_ptr.* = undefined; return self_ptr; }
+
+pub fn init(self: *Entry, name: bun.schema.api.StringPointer, value: bun.schema.api.StringPointer) void {
+        var __name_moved = false; _ = &__name_moved;
+        defer if (!__name_moved) { const T = @TypeOf(name); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = name.release() catch {}; } else { name.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { name.release(); } };
+        var __value_moved = false; _ = &__value_moved;
+        defer if (!__value_moved) { const T = @TypeOf(value); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = value.release() catch {}; } else { value.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { value.release(); } };
+            self.name = name;
+            self.value = value;
+    }
+    pub const List = bun.MultiArrayList(Entry);
+};
+
+pub const Options = struct {
+    body: ?*const bun.webcore.Blob.Any = null,
+    
+pub fn _create(allocator: std.mem.Allocator) !*Options { const self_ptr = try allocator.create(Options); self_ptr.* = undefined; return self_ptr; }
+
+pub fn init(self: *Options, body: ?*const bun.webcore.Blob.Any) void {
+            self.body = body;
+    }
+};
 
 pub const Headers = @This();
 
@@ -36,141 +58,168 @@ buf: std.ArrayListUnmanaged(u8) = .{},
 allocator: std.mem.Allocator,
 
 pub fn memoryCost(self: Headers) usize {
-    return (self.buf.items.len + self.entries.memoryCost());
+        return (self.buf.items.len + self.entries.memoryCost());
 }
 
 pub fn clone(self: *Headers) !Headers {
-    return .{ .entries = try self.entries.clone(self.allocator), .buf = try self.buf.clone(self.allocator), .allocator = self.allocator };
+        return .{ .entries = try self.entries.clone(self.allocator), .buf = try self.buf.clone(self.allocator), .allocator = self.allocator };
 }
 
 pub fn get(self: Headers, name: []const u8) ?[]const u8 {
-    const entries = self.entries.slice();
-    const names = entries.items(.name);
-    const values = entries.items(.value);
-    var i: usize = 0;
-    while ((i < names.len)) {
-        if (bun.strings.eqlCaseInsensitiveASCII(self.asStr(names[@as(usize, @intCast(i))]), name, true)) {
-            return self.asStr(values[@as(usize, @intCast(i))]);
+        const entries = self.entries.slice();
+        var __entries_moved = false; _ = &__entries_moved;
+        defer if (!__entries_moved) { const T = @TypeOf(entries); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = entries.release() catch {}; } else { entries.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { entries.release(); } };
+        const names = entries.items(.name);
+        var __names_moved = false; _ = &__names_moved;
+        defer if (!__names_moved) { const T = @TypeOf(names); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = names.release() catch {}; } else { names.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { names.release(); } };
+        const values = entries.items(.value);
+        var __values_moved = false; _ = &__values_moved;
+        defer if (!__values_moved) { const T = @TypeOf(values); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = values.release() catch {}; } else { values.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { values.release(); } };
+        var i: usize = 0;
+        _ = &i;
+        while ((i < names.len)) {
+            if (bun.strings.eqlCaseInsensitiveASCII(self.asStr(names[@as(usize, @intCast(i))]), name, true)) {
+                return self.asStr(values[@as(usize, @intCast(i))]);
+            }
+            i = (i + 1);
         }
-        i = (i + 1);
-    }
-    return null;
+        return null;
 }
 
 pub fn append(self: *Headers, name: []const u8, value: []const u8) !void {
-    var offset: u32 = @truncate(self.buf.items.len);
-    _ = try self.buf.ensureUnusedCapacity(self.allocator, (name.len + value.len));
-    const name_ptr: api.StringPointer = .{ .offset = offset, .length = @truncate(name.len) };
-    _ = self.buf.appendSliceAssumeCapacity(name);
-    offset = @truncate(self.buf.items.len);
-    _ = self.buf.appendSliceAssumeCapacity(value);
-    const value_ptr: api.StringPointer = .{ .offset = offset, .length = @truncate(value.len) };
-    _ = try self.entries.append(self.allocator, .{ .name = name_ptr, .value = value_ptr });
+        var offset: u32 = @truncate(self.buf.items.len);
+        _ = &offset;
+        _ = try self.buf.ensureUnusedCapacity(self.allocator, (name.len + value.len));
+        const name_ptr: bun.schema.api.StringPointer = .{ .offset = offset, .length = @truncate(name.len) };
+        _ = &name_ptr;
+        _ = self.buf.appendSliceAssumeCapacity(name);
+        offset = @truncate(self.buf.items.len);
+        _ = self.buf.appendSliceAssumeCapacity(value);
+        const value_ptr: bun.schema.api.StringPointer = .{ .offset = offset, .length = @truncate(value.len) };
+        _ = &value_ptr;
+        _ = try self.entries.append(self.allocator, .{ .name = name_ptr, .value = value_ptr });
+}
+
+pub fn release(self: *Headers) void {
+        _ = self.entries.deinit(self.allocator);
+        _ = self.buf.clearAndFree(self.allocator);
 }
 
 pub fn deinit(self: *Headers) void {
-    _ = self.entries.deinit(self.allocator);
-    _ = self.buf.clearAndFree(self.allocator);
+        _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
 }
 
 pub fn getContentDisposition(self: Headers) ?[]const u8 {
-    return self.get("content-disposition");
+        return self.get("content-disposition");
 }
 
 pub fn getContentEncoding(self: Headers) ?[]const u8 {
-    return self.get("content-encoding");
+        return self.get("content-encoding");
 }
 
 pub fn getContentType(self: Headers) ?[]const u8 {
-    return self.get("content-type");
+        return self.get("content-type");
 }
 
-pub fn asStr(self: Headers, ptr: api.StringPointer) []const u8 {
-    if (((ptr.offset + ptr.length) <= self.buf.items.len)) {
-        return self.buf.items[ptr.offset..][0..ptr.length];
-    } else {
-        return "";
-    }
-}
-
-pub fn fromPicoHttpHeaders(headers: []const picohttp.Header, allocator: std.mem.Allocator) !Headers {
-    const header_count = headers.len;
-    var result: Headers = .{ .entries = .{}, .buf = .{}, .allocator = allocator };
-    var buf_len: usize = 0;
-    var j: usize = 0;
-    while ((j < headers.len)) {
-        buf_len = (buf_len + (headers[@as(usize, @intCast(j))].name.len + headers[@as(usize, @intCast(j))].value.len));
-        j = (j + 1);
-    }
-    _ = bun.handleOom(result.entries.ensureTotalCapacity(allocator, header_count));
-    result.entries.len = headers.len;
-    _ = bun.handleOom(result.buf.ensureTotalCapacityPrecise(allocator, buf_len));
-    result.buf.items.len = buf_len;
-    var offset: u32 = 0;
-    var i: usize = 0;
-    while ((i < headers.len)) {
-        const header = headers[@as(usize, @intCast(i))];
-        const name_offset = offset;
-        _ = bun.copy(u8, result.buf.items[offset..][0..header.name.len], header.name);
-        offset = (offset + @as(u32, @truncate(header.name.len)));
-        const value_offset = offset;
-        _ = bun.copy(u8, result.buf.items[offset..][0..header.value.len], header.value);
-        offset = (offset + @as(u32, @truncate(header.value.len)));
-        _ = result.entries.set(i, .{ .name = .{ .offset = name_offset, .length = @truncate(header.name.len) }, .value = .{ .offset = value_offset, .length = @truncate(header.value.len) } });
-        i = (i + 1);
-    }
-    return result;
-}
-
-pub fn from(fetch_headers_ref: ?*FetchHeaders, allocator: std.mem.Allocator, options: Options) !Headers {
-    var header_count: u32 = 0;
-    var buf_len: u32 = 0;
-    if (fetch_headers_ref) |headers_ref| {
-        _ = headers_ref.count((&header_count), (&buf_len));
-    }
-    var headers: Headers = .{ .entries = .{}, .buf = .{}, .allocator = allocator };
-    const buf_len_before_content_type = buf_len;
-    var needs_content_type = false;
-    if (options.body) |body| {
-        var has_ct = false;
-        if (fetch_headers_ref) |headers_ref2| {
-            has_ct = headers_ref2.fastHas(.ContentType);
+pub fn asStr(self: Headers, ptr: bun.schema.api.StringPointer) []const u8 {
+        if (((ptr.offset + ptr.length) <= self.buf.items.len)) {
+            return self.buf.items[ptr.offset..][0..ptr.length];
+        } else {
+            return "";
         }
-        if ((body.hasContentTypeFromUser() and (!has_ct))) {
-            header_count = (header_count + 1);
-            buf_len = (buf_len + @as(u32, @truncate((body.contentType().len + "Content-Type".len))));
-            needs_content_type = true;
-        }
-    }
-    _ = bun.handleOom(headers.entries.ensureTotalCapacity(allocator, header_count));
-    headers.entries.len = header_count;
-    _ = bun.handleOom(headers.buf.ensureTotalCapacityPrecise(allocator, buf_len));
-    headers.buf.items.len = buf_len;
-    var sliced = headers.entries.slice();
-    var names = sliced.items(.name);
-    var values = sliced.items(.value);
-    if (fetch_headers_ref) |headers_ref| {
-        _ = headers_ref.copyTo(names.ptr, values.ptr, headers.buf.items.ptr);
-    }
-    if (needs_content_type) {
-        _ = bun.copy(u8, headers.buf.items[buf_len_before_content_type..], "Content-Type");
-        names[cp_cast_int(usize, (header_count - 1))] = .{ .offset = buf_len_before_content_type, .length = "Content-Type".len };
-        if (options.body) |b| {
-            _ = bun.copy(u8, headers.buf.items[(buf_len_before_content_type + "Content-Type".len)..], b.contentType());
-            values[cp_cast_int(usize, (header_count - 1))] = .{ .offset = (buf_len_before_content_type + @as(u32, "Content-Type".len)), .length = @as(u32, @truncate(b.contentType().len)) };
-        }
-    }
-    return headers;
 }
-pub const Entry = struct {
-    name: api.StringPointer,
-    value: api.StringPointer,
 
-    pub const List = bun.MultiArrayList(Entry);
-};
+pub fn fromPicoHttpHeaders(headers: []const bun.picohttp.Header, allocator: std.mem.Allocator) !Headers {
+        const header_count = headers.len;
+        _ = &header_count;
+        var result: Headers = .{ .entries = .{}, .buf = .{}, .allocator = allocator };
+        var __result_moved = false; _ = &__result_moved;
+        defer if (!__result_moved) { const T = @TypeOf(result); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = result.release() catch {}; } else { result.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { result.release(); } };
+        var buf_len: usize = 0;
+        _ = &buf_len;
+        var j: usize = 0;
+        _ = &j;
+        while ((j < headers.len)) {
+            buf_len = (buf_len + (headers[@as(usize, @intCast(j))].name.len + headers[@as(usize, @intCast(j))].value.len));
+            j = (j + 1);
+        }
+        _ = bun.handleOom(result.entries.ensureTotalCapacity(allocator, header_count));
+        result.entries.len = headers.len;
+        _ = bun.handleOom(result.buf.ensureTotalCapacityPrecise(allocator, buf_len));
+        result.buf.items.len = buf_len;
+        var offset: u32 = 0;
+        _ = &offset;
+        var i: usize = 0;
+        _ = &i;
+        while ((i < headers.len)) {
+            const header = headers[@as(usize, @intCast(i))];
+            _ = &header;
+            const name_offset = offset;
+            _ = &name_offset;
+            _ = bun.copy(u8, result.buf.items[offset..][0..header.name.len], header.name);
+            offset = (offset + @as(u32, @truncate(header.name.len)));
+            const value_offset = offset;
+            _ = &value_offset;
+            _ = bun.copy(u8, result.buf.items[offset..][0..header.value.len], header.value);
+            offset = (offset + @as(u32, @truncate(header.value.len)));
+            _ = result.entries.set(i, .{ .name = .{ .offset = name_offset, .length = @truncate(header.name.len) }, .value = .{ .offset = value_offset, .length = @truncate(header.value.len) } });
+            i = (i + 1);
+        }
+        __result_moved = true;
+        return result;
+}
 
-pub const toFetchHeaders = @import("../http_jsc/headers_jsc.zig").toFetchHeaders;
-
-pub const Options = struct {
-    body: ?*const Blob.Any = null,
-};
+pub fn from(fetch_headers_ref: ?*bun.webcore.FetchHeaders, allocator: std.mem.Allocator, options: Options) !Headers {
+        var header_count: u32 = 0;
+        _ = &header_count;
+        var buf_len: u32 = 0;
+        _ = &buf_len;
+        if (fetch_headers_ref) |headers_ref| {
+            _ = headers_ref.count((&header_count), (&buf_len));
+        }
+        var headers: Headers = .{ .entries = .{}, .buf = .{}, .allocator = allocator };
+        var __headers_moved = false; _ = &__headers_moved;
+        defer if (!__headers_moved) { const T = @TypeOf(headers); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = headers.release() catch {}; } else { headers.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { headers.release(); } };
+        const buf_len_before_content_type = buf_len;
+        _ = &buf_len_before_content_type;
+        var needs_content_type = false;
+        _ = &needs_content_type;
+        if (options.body) |body| {
+            var has_ct = false;
+            _ = &has_ct;
+            if (fetch_headers_ref) |headers_ref2| {
+                has_ct = headers_ref2.fastHas(.ContentType);
+            }
+            if ((body.hasContentTypeFromUser() and (!has_ct))) {
+                header_count = (header_count + 1);
+                buf_len = (buf_len + @as(u32, @truncate((body.contentType().len + "Content-Type".len))));
+                needs_content_type = true;
+            }
+        }
+        _ = bun.handleOom(headers.entries.ensureTotalCapacity(allocator, header_count));
+        headers.entries.len = header_count;
+        _ = bun.handleOom(headers.buf.ensureTotalCapacityPrecise(allocator, buf_len));
+        headers.buf.items.len = buf_len;
+        var sliced = headers.entries.slice();
+        var __sliced_moved = false; _ = &__sliced_moved;
+        defer if (!__sliced_moved) { const T = @TypeOf(sliced); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = sliced.release() catch {}; } else { sliced.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { sliced.release(); } };
+        var names = sliced.items(.name);
+        var __names_moved = false; _ = &__names_moved;
+        defer if (!__names_moved) { const T = @TypeOf(names); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = names.release() catch {}; } else { names.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { names.release(); } };
+        var values = sliced.items(.value);
+        var __values_moved = false; _ = &__values_moved;
+        defer if (!__values_moved) { const T = @TypeOf(values); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = values.release() catch {}; } else { values.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { values.release(); } };
+        if (fetch_headers_ref) |headers_ref| {
+            _ = headers_ref.copyTo(names.ptr, values.ptr, headers.buf.items.ptr);
+        }
+        if (needs_content_type) {
+            _ = bun.copy(u8, headers.buf.items[buf_len_before_content_type..], "Content-Type");
+            names[cp_cast_int(usize, (header_count - 1))] = .{ .offset = buf_len_before_content_type, .length = "Content-Type".len };
+            if (options.body) |b| {
+                _ = bun.copy(u8, headers.buf.items[(buf_len_before_content_type + "Content-Type".len)..], b.contentType());
+                values[cp_cast_int(usize, (header_count - 1))] = .{ .offset = (buf_len_before_content_type + @as(u32, "Content-Type".len)), .length = @as(u32, @truncate(b.contentType().len)) };
+            }
+        }
+        __headers_moved = true;
+        return headers;
+}

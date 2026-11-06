@@ -2,209 +2,185 @@
 const std = @import("std");
 const string = []const u8;
 
-fn cp_cast_int(comptime Dest: type, val: anytype) Dest {
-    const Src = @TypeOf(val);
-    if (comptime Src == Dest) return val;
-    if (comptime Src == comptime_int) {
-        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val));
-    }
-    const src_bits = @typeInfo(Src).int.bits;
-    const dest_bits = @typeInfo(Dest).int.bits;
-    if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {
-        if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val);
-    }
-    if (comptime @typeInfo(Src).int.signedness == .signed) {
-        const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val);
-        const u: u128 = @bitCast(s);
-        if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u);
-    } else {
-        const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val);
-        const s: i128 = @bitCast(u);
-        if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s);
-    }
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
 }
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
-const strings = bun.strings;
-const log = bun.Output.scoped(.h3_client, .hidden);
-
-var cache: bun.StringHashMapUnmanaged(Record) = .{};
+pub fn key(buf: []u8, hostname: []const u8, port: u16) []const u8 {
+        return std.fmt.bufPrint(buf, "{s}:{d}", .{ hostname, port }) catch "";
+    }
+pub var cache: bun.StringHashMapUnmanaged(Record) = .{};
 pub const max_entries: usize = 256;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const Entry = struct {
     port: u16,
     ma: u32 = 86400,
+    
+pub fn _create(allocator: std.mem.Allocator) !*Entry { const self_ptr = try allocator.create(Entry); self_ptr.* = undefined; return self_ptr; }
 
-    pub fn _create(allocator: std.mem.Allocator) !*Entry {
-        const self_ptr = try allocator.create(Entry);
-        self_ptr.* = undefined;
-        return self_ptr;
-    }
-
-    pub fn init(self: *Entry, port: u16, ma: u32) void {
-        self.port = port;
-        self.ma = ma;
+pub fn init(self: *Entry, port: u16, ma: u32) void {
+            self.port = port;
+            self.ma = ma;
     }
 };
 
 pub const Record = struct {
     h3_port: u16,
     expires_at: i64,
+    
+pub fn _create(allocator: std.mem.Allocator) !*Record { const self_ptr = try allocator.create(Record); self_ptr.* = undefined; return self_ptr; }
 
-    pub fn _create(allocator: std.mem.Allocator) !*Record {
-        const self_ptr = try allocator.create(Record);
-        self_ptr.* = undefined;
-        return self_ptr;
-    }
-
-    pub fn init(self: *Record, h3_port: u16, expires_at: i64) void {
-        self.h3_port = h3_port;
-        self.expires_at = expires_at;
+pub fn init(self: *Record, h3_port: u16, expires_at: i64) void {
+            self.h3_port = h3_port;
+            self.expires_at = expires_at;
     }
 };
 
-pub fn parse(field_value: []const u8) !?Entry {
-    var value = strings.trim(field_value, " \t");
-    _ = &value;
-    if ((value.len == 0)) {
-        return null;
-    }
-    if (std.ascii.eqlIgnoreCase(value, "clear")) {
-        return error.Clear;
-    }
-    var entries = std.mem.splitScalar(u8, value, 44);
-    _ = &entries;
-    while (entries.next()) |raw_entry| {
-        var entry = strings.trim(raw_entry, " \t");
-        _ = &entry;
-        if ((entry.len == 0)) {
-            continue;
-        }
-        var params = std.mem.splitScalar(u8, entry, 59);
-        _ = &params;
-        var alternative = strings.trim(params.first(), " \t");
-        _ = &alternative;
-        if (strings.indexOfChar(alternative, 61)) |eq| {
-            var proto = alternative[0..eq];
-            _ = &proto;
-            if ((!std.ascii.eqlIgnoreCase(proto, "h3"))) {
-                continue;
-            }
-            var auth = strings.trim(alternative[(eq + 1)..], " \t");
-            _ = &auth;
-            if ((((auth.len >= 2) and (auth[0] == 34)) and (auth[@as(usize, @intCast((auth.len - 1)))] == 34))) {
-                auth = auth[1..(auth.len - 1)];
-            }
-            if (std.mem.lastIndexOfScalar(u8, auth, 58)) |colon| {
-                if ((colon != 0)) {
-                    continue;
-                }
-                var port = (blk_catch_0: {
-                    break :blk_catch_0 (std.fmt.parseInt(u16, auth[(colon + 1)..], 10)) catch |__ce_0| {
-                        _ = &__ce_0;
-                        continue;
-                    };
-                });
-                _ = &port;
-                if ((port == 0)) {
-                    continue;
-                }
-                var result = Entry{ .port = port };
-                _ = &result;
-                while (params.next()) |raw_param| {
-                    var param = strings.trim(raw_param, " \t");
-                    _ = &param;
-                    if (strings.indexOfChar(param, 61)) |peq| {
-                        if (std.ascii.eqlIgnoreCase(param[0..peq], "ma")) {
-                            result.ma = (blk_catch_1: {
-                                break :blk_catch_1 (std.fmt.parseInt(u32, param[(peq + 1)..], 10)) catch |__ce_1| {
-                                    _ = &__ce_1;
-                                    break :blk_catch_1 result.ma;
-                                };
-                            });
-                        }
-                    }
-                }
-                return result;
-            }
-        }
-    }
-    return null;
-}
-
-pub fn key(buf: []u8, hostname: []const u8, port: u16) []const u8 {
-    return std.fmt.bufPrint(buf, "{s}:{d}", .{ hostname, port }) catch unreachable;
-}
 
 pub fn sweepExpired(now: i64) void {
-    var it = cache.iterator();
-    _ = &it;
-    while (it.next()) |kv| {
-        if ((now >= kv.value_ptr.expires_at)) {
-            const owned = kv.key_ptr.*;
-            _ = &owned;
-            _ = cache.removeByPtr(kv.key_ptr);
-            _ = bun.default_allocator.free(owned);
-            it = cache.iterator();
+        var it = cache.iterator();
+        _ = &it;
+        while (it.next()) |kv| {
+            if ((now >= kv.value_ptr.expires_at)) {
+                const owned = kv.key_ptr.*;
+                _ = &owned;
+                _ = cache.removeByPtr(kv.key_ptr);
+                _ = bun.default_allocator.free(owned);
+                it = cache.iterator();
+            }
         }
-    }
+}
+
+pub fn parse(field_value: []const u8) !?Entry {
+        const value = bun.strings.trim(field_value, " \t");
+        _ = &value;
+        if ((value.len == 0)) {
+            return null;
+        }
+        if (std.ascii.eqlIgnoreCase(value, "clear")) {
+            return error.Clear;
+        }
+        var entries = std.mem.splitScalar(u8, value, 44);
+        _ = &entries;
+        while (entries.next()) |raw_entry| {
+            const entry = bun.strings.trim(raw_entry, " \t");
+            _ = &entry;
+            if ((entry.len == 0)) {
+                continue;
+            }
+            var params = std.mem.splitScalar(u8, entry, 59);
+            _ = &params;
+            const alternative = bun.strings.trim(params.first(), " \t");
+            _ = &alternative;
+            if (bun.strings.indexOfChar(alternative, 61)) |eq| {
+                _ = &eq;
+                const proto = alternative[0..eq];
+                _ = &proto;
+                if ((!std.ascii.eqlIgnoreCase(proto, "h3"))) {
+                    continue;
+                }
+                var auth = bun.strings.trim(alternative[(eq + 1)..], " \t");
+                _ = &auth;
+                if ((((auth.len >= 2) and (auth[0] == 34)) and (auth[@as(usize, @intCast((auth.len - 1)))] == 34))) {
+                    auth = auth[1..(auth.len - 1)];
+                }
+                if (std.mem.lastIndexOfScalar(u8, auth, 58)) |colon| {
+                    _ = &colon;
+                    if ((colon != 0)) {
+                        continue;
+                    }
+                    const port = (blk_catch_0: { break :blk_catch_0 ((std.fmt.parseInt(u16, auth[(colon + 1)..], 10)) catch |__ce_0| { _ = &__ce_0; continue; }); });
+                    _ = &port;
+                    if ((port == 0)) {
+                        continue;
+                    }
+                    var result = Entry{ .port = port };
+                    _ = &result;
+                    while (params.next()) |raw_param| {
+                        const param = bun.strings.trim(raw_param, " \t");
+                        _ = &param;
+                        if (bun.strings.indexOfChar(param, 61)) |peq| {
+                            _ = &peq;
+                            if (std.ascii.eqlIgnoreCase(param[0..peq], "ma")) {
+                                result.ma = (blk_catch_1: { break :blk_catch_1 ((std.fmt.parseInt(u32, param[(peq + 1)..], 10)) catch |__ce_1| { _ = &__ce_1; break :blk_catch_1 result.ma; }); });
+                            }
+                        }
+                    }
+                    return result;
+                }
+            }
+        }
+        return null;
 }
 
 pub fn record(origin_host: []const u8, origin_port: u16, field_value: []const u8) void {
-    var buf: [264]u8 = undefined;
-    _ = &buf;
-    if ((origin_host.len > 256)) {
-        return;
-    }
-    const k = key((&buf), origin_host, origin_port);
-    _ = &k;
-    const entry_opt = (blk_catch_2: {
-        break :blk_catch_2 (parse(field_value)) catch |__ce_2| {
-            _ = &__ce_2;
-            if (cache.fetchRemove(k)) |kv| {
-                _ = bun.default_allocator.free(kv.key);
-            }
-            log("alt-svc clear {s}", .{k});
-
+        var buf: [264]u8 = undefined;
+        _ = &buf;
+        if ((origin_host.len > 256)) {
             return;
-        };
-    });
-    _ = &entry_opt;
-    if (entry_opt) |entry| {
-        const now = std.time.timestamp();
-        _ = &now;
-        if (((cache.count() >= max_entries) and (!cache.contains(k)))) {
-            _ = sweepExpired(now);
-            if ((cache.count() >= max_entries)) {
-                return;
+        }
+        const k = key((&buf), origin_host, origin_port);
+        _ = &k;
+        const entry_opt = (blk_catch_2: { break :blk_catch_2 ((parse(field_value)) catch |__ce_2| { _ = &__ce_2; if (cache.fetchRemove(k)) |kv| {
+            _ = &kv;
+            _ = bun.default_allocator.free(kv.key);
+        }
+        return; }); });
+        _ = &entry_opt;
+        if (entry_opt) |entry| {
+            _ = &entry;
+            const now = std.time.timestamp();
+            _ = &now;
+            if (((cache.count() >= max_entries) and (!cache.contains(k)))) {
+                _ = sweepExpired(now);
+                if ((cache.count() >= max_entries)) {
+                    return;
+                }
             }
+            const gop = bun.handleOom(cache.getOrPut(bun.default_allocator, k));
+            _ = &gop;
+            if ((!gop.found_existing)) {
+                gop.key_ptr.* = bun.handleOom(bun.default_allocator.dupe(u8, k));
+            }
+            gop.value_ptr.* = .{ .h3_port = entry.port, .expires_at = (now + cp_cast_int(i64, entry.ma)) };
         }
-        const gop = bun.handleOom(cache.getOrPut(bun.default_allocator, k));
-        _ = &gop;
-        if ((!gop.found_existing)) {
-            gop.key_ptr.* = bun.handleOom(bun.default_allocator.dupe(u8, k));
-        }
-        gop.value_ptr.* = .{ .h3_port = entry.port, .expires_at = (now + cp_cast_int(i64, entry.ma)) };
-        log("alt-svc h3 {s} -> :{d} ma={d}", .{ k, entry.port, entry.ma });
-    }
 }
 
 pub fn lookup(origin_host: []const u8, origin_port: u16) ?u16 {
-    var buf: [264]u8 = undefined;
-    _ = &buf;
-    if ((origin_host.len > 256)) {
-        return null;
-    }
-    const k = key((&buf), origin_host, origin_port);
-    _ = &k;
-    const rec = ((cache.get(k)) orelse {
-        return null;
-    });
-    _ = &rec;
-    if ((std.time.timestamp() >= rec.expires_at)) {
-        if (cache.fetchRemove(k)) |kv| {
-            _ = bun.default_allocator.free(kv.key);
+        var buf: [264]u8 = undefined;
+        _ = &buf;
+        if ((origin_host.len > 256)) {
+            return null;
+        }
+        const k = key((&buf), origin_host, origin_port);
+        _ = &k;
+        if (cache.get(k)) |rec| {
+            _ = &rec;
+            if ((std.time.timestamp() >= rec.expires_at)) {
+                if (cache.fetchRemove(k)) |kv| {
+                    _ = &kv;
+                    _ = bun.default_allocator.free(kv.key);
+                }
+                return null;
+            }
+            return rec.h3_port;
         }
         return null;
-    }
-    return rec.h3_port;
 }

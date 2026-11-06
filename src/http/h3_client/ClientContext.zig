@@ -2,130 +2,128 @@
 const std = @import("std");
 const string = []const u8;
 
-const log = bun.Output.scoped(.h3_client, .hidden);
-
-const ClientSession = @import("./ClientSession.zig");
-const H3 = @import("../H3Client.zig");
-const PendingConnect = @import("./PendingConnect.zig");
-const Stream = @import("./Stream.zig");
-const callbacks = @import("./callbacks.zig");
-
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 const bun = @import("bun");
-const HTTPClient = bun.http;
+    const uws = bun.uws;
+    const quic = uws.quic;
+    var instance: ?*ClientContext = null;
+    var lsquic_init_once = bun.once(quic.globalInit);
 
-const uws = bun.uws;
-const quic = uws.quic;
+    pub fn get() ?*ClientContext {
+        return instance;
+    }
 
-var instance: ?*ClientContext = null;
-var lsquic_init_once = bun.once(quic.globalInit);
+    pub fn getOrCreate(loop: *uws.Loop) ?*ClientContext {
+        if (instance) |i| return i;
+        lsquic_init_once.call(.{});
+        const qctx = quic.Context.createClient(
+            loop,
+            0,
+            @sizeOf(*ClientSession),
+            @sizeOf(*Stream),
+        ) orelse return null;
+        callbacks.register(qctx);
+        const self = bun.handleOom(bun.default_allocator.create(ClientContext));
+        self.* = .{ .qctx = qctx };
+        instance = self;
+        return self;
+    }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
+pub const ClientSession = @import("./ClientSession.zig").ClientSession;
+pub const PendingConnect = @import("./PendingConnect.zig").PendingConnect;
+pub const Stream = @import("./Stream.zig").Stream;
+pub const callbacks = @import("./callbacks.zig");
 pub const ClientContext = @This();
 
-qctx: *quic.Context,
+qctx: *bun.uws.quic.Context,
 sessions: std.ArrayListUnmanaged(*ClientSession) = .{},
 
-pub fn get() ?*ClientContext {
-    return instance;
-}
-
-pub fn getOrCreate(loop: *uws.Loop) ?*ClientContext {
-    if (instance) |i| {
-        _ = &i;
-        return i;
-    }
-    lsquic_init_once.call(.{});
-    const qctx = quic.Context.createClient(
-        loop,
-        0,
-        @sizeOf(*ClientSession),
-        @sizeOf(*Stream),
-    ) orelse return null;
-    callbacks.register(qctx);
-
-    const self = bun.handleOom(bun.default_allocator.create(ClientContext));
-    self.* = .{ .qctx = qctx };
-    instance = self;
-    return self;
-}
-
-pub fn connect(self: *ClientContext, client: *HTTPClient, hostname: []const u8, port: u16) bool {
-    _ = &self;
-    const reject = client.flags.reject_unauthorized;
-    _ = &reject;
-    for (self.sessions.items) |s| {
-        _ = &s;
-        if ((s.matches(hostname, port, reject) and s.hasHeadroom())) {
-            log("reuse session {s}:{d}", .{ hostname, port });
-
-            _ = s.enqueue(client);
-            return true;
-        }
-    }
-    const host_z = bun.handleOom(bun.default_allocator.dupeZ(u8, hostname));
-    const session = ClientSession.new(.{
-        .qsocket = null,
-        .hostname = host_z,
-        .port = port,
-        .reject_unauthorized = reject,
-    });
-    _ = H3.live_sessions.fetchAdd(1, .monotonic);
-    session.registry_index = @intCast(self.sessions.items.len);
-    bun.handleOom(self.sessions.append(bun.default_allocator, session));
-    session.enqueue(client);
-
-    switch (self.qctx.connect(host_z.ptr, port, host_z.ptr, reject, session)) {
-        .socket => |qs| {
-            session.qsocket = qs;
-            qs.ext(ClientSession).* = session;
-            log("connect {s}:{d} (sync)", .{ hostname, port });
-        },
-        .pending => |pending| {
-            log("connect {s}:{d} (dns pending)", .{ hostname, port });
-            PendingConnect.register(session, pending, self.qctx.loop());
-        },
-        .err => {
-            log("connect {s}:{d} failed", .{ hostname, port });
-            self.unregister(session);
-            PendingConnect.failSession(session, error.ConnectionRefused);
-            return false;
-        },
-    }
-    return true;
-}
-
-pub fn unregister(self: *ClientContext, session: *ClientSession) void {
-    _ = &self;
-    const i = session.registry_index;
-    _ = &i;
-    if (((i >= self.sessions.items.len) or (self.sessions.items[@as(usize, @intCast(i))] != session))) {
-        return;
-    }
-    _ = self.sessions.swapRemove(i);
-    if ((i < self.sessions.items.len)) {
-        self.sessions.items[@as(usize, @intCast(i))].registry_index = i;
-    }
-    session.registry_index = std.math.maxInt(u32);
-}
-
-pub fn abortByHttpId(async_http_id: u32) bool {
-    if (instance) |this_inst| {
-        _ = &this_inst;
-        for (this_inst.sessions.items) |s| {
+pub fn connect(self: *ClientContext, client: *bun.http.HTTPClient, hostname: []const u8, port: u16) bool {
+        const reject = client.flags.reject_unauthorized;
+        _ = &reject;
+        for (self.sessions.items) |s| {
             _ = &s;
-            if (s.abortByHttpId(async_http_id)) {
+            if ((s.matches(hostname, port, reject) and s.hasHeadroom())) {
+                _ = s.enqueue(client);
                 return true;
             }
         }
-    }
-    return false;
+        const host_z = bun.handleOom(bun.default_allocator.dupeZ(u8, hostname));
+        _ = &host_z;
+        const session = ClientSession.new(.{ .qsocket = null, .hostname = host_z, .port = port, .reject_unauthorized = reject });
+        _ = &session;
+        _ = bun.http.H3.live_sessions.fetchAdd(1, .monotonic);
+        session.registry_index = @intCast(self.sessions.items.len);
+        _ = bun.handleOom(self.sessions.append(bun.default_allocator, session));
+        _ = session.enqueue(client);
+        switch (self.qctx.connect(host_z.ptr, port, host_z.ptr, reject, session)) {
+                .socket => |qs| {
+                    session.qsocket = qs;
+                    qs.ext(ClientSession).* = session;
+                },
+                .pending => |pending| {
+                    PendingConnect.register(session, pending, self.qctx.loop());
+                },
+                .err => {
+                    self.unregister(session);
+                    PendingConnect.failSession(session, error.ConnectionRefused);
+                    return false;
+                },
+            }
+
+        return true;
+}
+
+pub fn unregister(self: *ClientContext, session: *ClientSession) void {
+        const i = session.registry_index;
+        _ = &i;
+        if (((i >= self.sessions.items.len) or (self.sessions.items[@as(usize, @intCast(i))] != session))) {
+            return;
+        }
+        _ = self.sessions.swapRemove(i);
+        if ((i < self.sessions.items.len)) {
+            self.sessions.items[@as(usize, @intCast(i))].registry_index = i;
+        }
+        session.registry_index = std.math.maxInt(u32);
+}
+
+pub fn abortByHttpId(async_http_id: u32) bool {
+        if (instance) |this_inst| {
+            _ = &this_inst;
+            for (this_inst.sessions.items) |s| {
+                _ = &s;
+                if (s.abortByHttpId(async_http_id)) {
+                    return true;
+                }
+            }
+        }
+        return false;
 }
 
 pub fn streamBodyByHttpId(async_http_id: u32, ended: bool) void {
-    if (instance) |this_inst| {
-        _ = &this_inst;
-        for (this_inst.sessions.items) |s| {
-            _ = &s;
-            _ = s.streamBodyByHttpId(async_http_id, ended);
+        if (instance) |this_inst| {
+            _ = &this_inst;
+            for (this_inst.sessions.items) |s| {
+                _ = &s;
+                _ = s.streamBodyByHttpId(async_http_id, ended);
+            }
         }
-    }
 }

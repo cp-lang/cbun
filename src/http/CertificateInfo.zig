@@ -2,8 +2,9 @@
 const std = @import("std");
 const string = []const u8;
 
-const HTTPCertError = @import("./HTTPCertError.zig");
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
+pub const HTTPCertError = @import("./HTTPCertError.zig").HTTPCertError;
 pub const CertificateInfo = @This();
 
 cert: []const u8,
@@ -11,8 +12,8 @@ cert_error: HTTPCertError,
 hostname: []const u8,
 
 pub fn deinit(self: *const CertificateInfo, allocator: std.mem.Allocator) void {
-    _ = allocator.free(self.cert);
-    _ = allocator.free(self.cert_error.code);
-    _ = allocator.free(self.cert_error.reason);
-    _ = allocator.free(self.hostname);
+        _ = allocator.free(self.cert);
+        _ = allocator.free(self.cert_error.code);
+        _ = allocator.free(self.cert_error.reason);
+        _ = allocator.free(self.hostname);
 }

@@ -2,67 +2,105 @@
 const std = @import("std");
 const string = []const u8;
 
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 const bun = @import("bun");
-const mimalloc = bun.mimalloc;
-
-const lshpack_header = extern struct {
-    name: [*]const u8 = undefined,
-    name_len: usize = 0,
-    value: [*]const u8 = undefined,
-    value_len: usize = 0,
-    never_index: bool = false,
-    hpack_index: u16 = 255,
-};
-
-const lshpack_wrapper_alloc = ?*const fn (size: usize) callconv(.c) ?*anyopaque;
-const lshpack_wrapper_free = ?*const fn (ptr: ?*anyopaque) callconv(.c) void;
-extern fn lshpack_wrapper_init(alloc: lshpack_wrapper_alloc, free: lshpack_wrapper_free, capacity: usize) ?*HPACK;
-extern fn lshpack_wrapper_enc_set_max_capacity(self: *HPACK, max_capacity: c_uint) void;
-extern fn lshpack_wrapper_deinit(self: *HPACK) void;
-extern fn lshpack_wrapper_decode(self: *HPACK, src: [*]const u8, src_len: usize, output: *lshpack_header) usize;
-extern fn lshpack_wrapper_encode(self: *HPACK, name: [*]const u8, name_len: usize, value: [*]const u8, value_len: usize, never_index: c_int, buffer: [*]u8, buffer_len: usize, buffer_offset: usize) usize;
-
-pub const HPACK = extern struct {
-    self: *anyopaque,
-
-    pub fn init(max_capacity: u32) *HPACK {
-        return ((lshpack_wrapper_init(mimalloc.mi_malloc, mimalloc.mi_free, max_capacity)) orelse (bun.outOfMemory()));
-    }
-
-    pub fn decode(self: *HPACK, src: []const u8) !DecodeResult {
-        var header: lshpack_header = .{};
-        const offset = lshpack_wrapper_decode(self, src.ptr, src.len, (&header));
-        if ((offset == 0)) {
-            return error.UnableToDecode;
-        }
-        if ((header.name_len == 0)) {
-            return error.EmptyHeaderName;
-        }
-        return .{ .name = header.name[0..header.name_len], .value = header.value[0..header.value_len], .next = offset, .never_index = header.never_index, .well_know = header.hpack_index };
-    }
-
-    pub fn encode(self: *HPACK, name: []const u8, value: []const u8, never_index: bool, dst_buffer: []u8, dst_buffer_offset: usize) !usize {
-        const offset = lshpack_wrapper_encode(self, name.ptr, name.len, value.ptr, value.len, @intFromBool(never_index), dst_buffer.ptr, dst_buffer.len, dst_buffer_offset);
-        if ((offset <= 0)) {
-            return error.UnableToEncode;
-        }
-        return offset;
-    }
-
-    pub fn setEncoderMaxCapacity(self: *HPACK, max_capacity: u32) void {
-        _ = lshpack_wrapper_enc_set_max_capacity(self, max_capacity);
-    }
-
-    pub fn deinit(self: *HPACK) void {
-        _ = lshpack_wrapper_deinit(self);
-    }
-    pub const DecodeResult = struct {
-        name: []const u8,
-        value: []const u8,
-        never_index: bool,
-        well_know: u16,
-        next: usize,
-    };
 
     pub const LSHPACK_MAX_HEADER_SIZE: usize = 65536;
-};
+
+    pub const lshpack_header = extern struct {
+        name: ?[*]u8 = null,
+        name_len: usize = 0,
+        value: ?[*]u8 = null,
+        value_len: usize = 0,
+        never_index: bool = false,
+        hpack_index: u16 = 255,
+    };
+
+    pub extern "c" fn lshpack_wrapper_init(
+        alloc: ?*const fn (usize) callconv(.c) ?*anyopaque,
+        free: ?*const fn (?*anyopaque) callconv(.c) void,
+        capacity: usize,
+    ) ?*HPACK;
+    pub extern "c" fn lshpack_wrapper_enc_set_max_capacity(self: *HPACK, max_capacity: u32) void;
+    pub extern "c" fn lshpack_wrapper_deinit(self: *HPACK) void;
+    pub extern "c" fn lshpack_wrapper_decode(self: *HPACK, src: [*]const u8, src_len: usize, output: *lshpack_header) usize;
+    pub extern "c" fn lshpack_wrapper_encode(self: *HPACK, name: [*]const u8, name_len: usize, value: [*]const u8, value_len: usize, never_index: i32, buffer: [*]u8, buffer_len: usize, buffer_offset: usize) usize;
+
+    pub const HPACK = struct {
+        self: *anyopaque,
+
+        pub const DecodeResult = struct {
+            name: []const u8,
+            value: []const u8,
+            never_index: bool,
+            well_know: u16,
+            next: usize,
+        };
+
+        pub fn init(max_capacity: u32) *HPACK {
+            return lshpack_wrapper_init(bun.mimalloc.mi_malloc, bun.mimalloc.mi_free, max_capacity) orelse bun.outOfMemory();
+        }
+
+        pub fn decode(self: *HPACK, src: []const u8) !DecodeResult {
+            var header: lshpack_header = .{};
+            const offset = lshpack_wrapper_decode(self, src.ptr, src.len, &header);
+            if (offset == 0) return error.UnableToDecode;
+            if (header.name_len == 0) return error.EmptyHeaderName;
+
+            return DecodeResult{
+                .name = header.name.?[0..header.name_len],
+                .value = header.value.?[0..header.value_len],
+                .next = offset,
+                .never_index = header.never_index,
+                .well_know = header.hpack_index,
+            };
+        }
+
+        pub fn encode(self: *HPACK, name: []const u8, value: []const u8, never_index: bool, dst_buffer: []u8, dst_buffer_offset: usize) !usize {
+            const never_flag: i32 = if (never_index) 1 else 0;
+            const offset = lshpack_wrapper_encode(
+                self,
+                name.ptr,
+                name.len,
+                value.ptr,
+                value.len,
+                never_flag,
+                dst_buffer.ptr,
+                dst_buffer.len,
+                dst_buffer_offset,
+            );
+            if (offset <= 0) return error.UnableToEncode;
+            return offset;
+        }
+
+        pub fn setEncoderMaxCapacity(self: *HPACK, max_capacity: u32) void {
+            lshpack_wrapper_enc_set_max_capacity(self, max_capacity);
+        }
+
+        pub fn release(self: *HPACK) void {
+            lshpack_wrapper_deinit(self);
+        }
+
+        pub fn deinit(self: *HPACK) void {
+            lshpack_wrapper_deinit(self);
+        }
+    };
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+

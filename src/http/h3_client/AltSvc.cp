@@ -3,47 +3,70 @@
 
 zig {
     const bun = @import("bun");
-    const strings = bun.strings;
-    const log = bun.Output.scoped(.h3_client, .hidden);
-
-    var cache: bun.StringHashMapUnmanaged(Record) = .{};
 }
+
+let cache: bun.StringHashMapUnmanaged(Record) = {};
 
 export struct Entry {
-    pub port: u16,
-    pub ma: u32 = 86400,
+    port: u16,
+    ma: u32 = 86400,
 }
 
-pub fn parse(field_value: string): Entry?! {
-    let value = strings.trim(field_value, " \t");
+struct Record {
+    h3_port: u16,
+    expires_at: i64,
+}
+
+const max_entries: usize = 256;
+
+zig {
+    pub fn key(buf: []u8, hostname: []const u8, port: u16) []const u8 {
+        return std.fmt.bufPrint(buf, "{s}:{d}", .{ hostname, port }) catch "";
+    }
+}
+
+fn sweepExpired(now: i64): void {
+    let it = cache.iterator();
+    while (kv := it.next()) {
+        if (now >= kv.value_ptr.expires_at) {
+            const owned = kv.key_ptr.*;
+            cache.removeByPtr(kv.key_ptr);
+            bun.default_allocator.free(owned);
+            it = cache.iterator();
+        }
+    }
+}
+
+export fn parse(field_value: string): Entry?! {
+    const value = bun.strings.trim(field_value, " \t");
     if (value.len == 0) return null;
     if (std.ascii.eqlIgnoreCase(value, "clear")) return error.Clear;
 
-    let mut entries = std.mem.splitScalar(u8, value, ',');
+    let entries = std.mem.splitScalar(u8, value, ',');
     while (raw_entry := entries.next()) {
-        let entry = strings.trim(raw_entry, " \t");
+        const entry = bun.strings.trim(raw_entry, " \t");
         if (entry.len == 0) continue;
 
-        let mut params = std.mem.splitScalar(u8, entry, ';');
-        let alternative = strings.trim(params.first(), " \t");
+        let params = std.mem.splitScalar(u8, entry, ';');
+        const alternative = bun.strings.trim(params.first(), " \t");
 
-        if (eq := strings.indexOfChar(alternative, '=')) {
-            let proto = alternative[0..eq];
+        if (eq := bun.strings.indexOfChar(alternative, '=')) {
+            const proto = alternative[0..eq];
             if (!std.ascii.eqlIgnoreCase(proto, "h3")) continue;
 
-            let mut auth = strings.trim(alternative[eq + 1..], " \t");
+            let auth = bun.strings.trim(alternative[eq + 1..], " \t");
             if (auth.len >= 2 && auth[0] == '"' && auth[auth.len - 1] == '"') {
                 auth = auth[1..auth.len - 1];
             }
             if (colon := std.mem.lastIndexOfScalar(u8, auth, ':')) {
                 if (colon != 0) continue;
-                let port = std.fmt.parseInt(u16, auth[colon + 1..], 10) catch { continue; };
+                const port = std.fmt.parseInt(u16, auth[colon + 1..], 10) catch { continue; };
                 if (port == 0) continue;
 
-                let mut result = Entry { port: port };
+                let result = Entry { port: port };
                 while (raw_param := params.next()) {
-                    let param = strings.trim(raw_param, " \t");
-                    if (peq := strings.indexOfChar(param, '=')) {
+                    const param = bun.strings.trim(raw_param, " \t");
+                    if (peq := bun.strings.indexOfChar(param, '=')) {
                         if (std.ascii.eqlIgnoreCase(param[0..peq], "ma")) {
                             result.ma = std.fmt.parseInt(u32, param[peq + 1..], 10) catch result.ma;
                         }
@@ -56,42 +79,14 @@ pub fn parse(field_value: string): Entry?! {
     return null;
 }
 
-struct Record {
-    pub h3_port: u16,
-    pub expires_at: i64,
-}
-
-const max_entries: usize = 256;
-
-fn key(buf: *u8[], hostname: string, port: u16): string {
-    zig {
-        return std.fmt.bufPrint(buf, "{s}:{d}", .{ hostname, port }) catch unreachable;
-    }
-}
-
-fn sweepExpired(now: i64): void {
-    let mut it = cache.iterator();
-    while (kv := it.next()) {
-        if (now >= kv.value_ptr.expires_at) {
-            const owned = kv.key_ptr.*;
-            cache.removeByPtr(kv.key_ptr);
-            bun.default_allocator.free(owned);
-            it = cache.iterator();
-        }
-    }
-}
-
-pub fn record(origin_host: string, origin_port: u16, field_value: string): void {
-    let mut buf: u8[264] = undefined;
+export fn record(origin_host: string, origin_port: u16, field_value: string): void {
+    let buf: [u8; 264] = undefined;
     if (origin_host.len > 256) return;
     const k = key(&buf, origin_host, origin_port);
 
     const entry_opt = parse(field_value) catch {
         if (kv := cache.fetchRemove(k)) {
             bun.default_allocator.free(kv.key);
-        }
-        zig {
-            log("alt-svc clear {s}", .{k});
         }
         return;
     };
@@ -109,22 +104,21 @@ pub fn record(origin_host: string, origin_port: u16, field_value: string): void 
             h3_port: entry.port,
             expires_at: now + (entry.ma as i64),
         };
-        zig {
-            log("alt-svc h3 {s} -> :{d} ma={d}", .{ k, entry.port, entry.ma });
-        }
     }
 }
 
-pub fn lookup(origin_host: string, origin_port: u16): u16? {
-    let mut buf: u8[264] = undefined;
+export fn lookup(origin_host: string, origin_port: u16): u16? {
+    let buf: [u8; 264] = undefined;
     if (origin_host.len > 256) return null;
     const k = key(&buf, origin_host, origin_port);
-    const rec = cache.get(k) ? return null;
-    if (std.time.timestamp() >= rec.expires_at) {
-        if (kv := cache.fetchRemove(k)) {
-            bun.default_allocator.free(kv.key);
+    if (rec := cache.get(k)) {
+        if (std.time.timestamp() >= rec.expires_at) {
+            if (kv := cache.fetchRemove(k)) {
+                bun.default_allocator.free(kv.key);
+            }
+            return null;
         }
-        return null;
+        return rec.h3_port;
     }
-    return rec.h3_port;
+    return null;
 }

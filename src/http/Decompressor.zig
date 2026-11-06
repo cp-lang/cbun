@@ -2,120 +2,162 @@
 const std = @import("std");
 const string = []const u8;
 
-const Zlib = @import("../zlib/zlib.zig");
-const Encoding = @import("../http_types/Encoding.zig").Encoding;
-
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 const bun = @import("bun");
-const Brotli = bun.brotli;
-const MutableString = bun.MutableString;
-const zstd = bun.zstd;
+fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@"struct".fields.len; return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
+pub fn CpUnpackSliceType(comptime T: type, comptime start_offset: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start_offset < fields.len) fields[start_offset].type else fields[0].type; return []const CpValType(Elem); }
+pub fn cp_unpack_slice(v: anytype, comptime start_offset: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_offset) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_offset + suffix_len) { return m.array[start_offset .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_offset + suffix_len) { return v.array[start_offset .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_offset .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_offset .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_offset .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_offset .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start_offset) end - start_offset else 0; const Elem = if (start_offset < fields.len) CpValType(fields[start_offset].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_offset..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
+pub const Encoding = @import("../http_types/Encoding.zig").Encoding;
 pub const Decompressor = union(enum) {
-    zlib: *Zlib.ZlibReaderArrayList,
-    brotli: *Brotli.BrotliReaderArrayList,
-    zstd: *zstd.ZstdReaderArrayList,
+    zlib: *bun.zlib.ZlibReaderArrayList,
+    brotli: *bun.brotli.BrotliReaderArrayList,
+    zstd: *bun.zstd.ZstdReaderArrayList,
     none: void,
 
-    pub fn deinit(self: *Decompressor) void {
-        switch (self.*) {
-            .brotli => |that| {
-                _ = that.deinit();
-                self.* = .none;
-            },
-            .zlib => |that| {
-                _ = that.deinit();
-                self.* = .none;
-            },
-            .zstd => |that| {
-                _ = that.deinit();
-                self.* = .none;
-            },
-            .none => {},
-        }
+pub fn release(self: *Decompressor) void {
+            switch (self.*) {
+.brotli => |that| {
+_ = that.deinit();
+            self.* = .none;
+},
+.zlib => |that| {
+_ = that.deinit();
+            self.* = .none;
+},
+.zstd => |that| {
+_ = that.deinit();
+            self.* = .none;
+},
+.none => {
+
+},
+}
     }
 
-    pub fn updateBuffers(self: *Decompressor, encoding: Encoding, buffer: []const u8, body_out_str: *MutableString) !void {
-        if ((!encoding.isCompressed())) {
-            return;
-        }
-        if ((self.* == .none)) {
-            switch (encoding) {
-                .gzip, .deflate => {
-                    var windowBits: i32 = (0 - Zlib.MAX_WBITS);
-                    if ((encoding == Encoding.gzip)) {
-                        windowBits = (Zlib.MAX_WBITS | 16);
-                    } else {
-                        if (((buffer.len > 1) and (buffer[0] == 120))) {
-                            windowBits = 0;
-                        }
-                    }
-                    const reader = try Zlib.ZlibReaderArrayList.initWithOptionsAndListAllocator(buffer, (&body_out_str.list), body_out_str.allocator, bun.http.default_allocator, .{ .windowBits = windowBits });
-                    self.* = .{ .zlib = reader };
-                    return;
-                },
-                .brotli => {
-                    const reader = try Brotli.BrotliReaderArrayList.newWithOptions(buffer, (&body_out_str.list), body_out_str.allocator, .{});
-                    self.* = .{ .brotli = reader };
-                    return;
-                },
-                .zstd => {
-                    const reader = try zstd.ZstdReaderArrayList.initWithListAllocator(buffer, (&body_out_str.list), body_out_str.allocator, bun.http.default_allocator);
-                    self.* = .{ .zstd = reader };
-                    return;
-                },
-                else => {
-                    _ = @panic("Invalid encoding. This code should not be reachable");
-                },
+pub fn deinit(self: *Decompressor) void {
+            _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
+    }
+
+pub fn updateBuffers(self: *Decompressor, encoding: Encoding, buffer: []const u8, body_out_str: *bun.MutableString) !void {
+            if ((!encoding.isCompressed())) {
+                return;
             }
-        }
-        switch (self.*) {
-            .zlib => |reader| {
-                _ = bun.assert((reader.zlib.avail_in == 0));
-                reader.zlib.next_in = buffer.ptr;
-                reader.zlib.avail_in = @as(u32, @truncate(buffer.len));
-                const initial = body_out_str.list.items.len;
-                _ = body_out_str.list.expandToCapacity();
-                if ((body_out_str.list.capacity == initial)) {
-                    _ = try body_out_str.list.ensureUnusedCapacity(body_out_str.allocator, 4096);
-                    _ = body_out_str.list.expandToCapacity();
+            if ((self.* == .none)) {
+                switch (encoding) {
+.gzip, .deflate => {
+var windowBits: i32 = (0 - bun.zlib.MAX_WBITS);
+                _ = &windowBits;
+                if ((encoding == Encoding.gzip)) {
+                    windowBits = (bun.zlib.MAX_WBITS | 16);
+                } else {
+                    if (((buffer.len > 1) and (buffer[0] == 120))) {
+                        windowBits = 0;
+                    }
                 }
-                reader.list = body_out_str.list;
-                reader.zlib.next_out = @ptrCast((&body_out_str.list.items[@as(usize, @intCast(initial))]));
-                reader.zlib.avail_out = @as(u32, @truncate((body_out_str.list.capacity - initial)));
-                reader.zlib.total_out = @truncate(initial);
-            },
-            .brotli => |reader| {
-                reader.input = buffer;
-                reader.total_in = 0;
-                const initial = body_out_str.list.items.len;
-                reader.list = body_out_str.list;
-                reader.total_out = @truncate(initial);
-            },
-            .zstd => |reader| {
-                reader.input = buffer;
-                reader.total_in = 0;
-                const initial = body_out_str.list.items.len;
-                reader.list = body_out_str.list;
-                reader.total_out = @truncate(initial);
-            },
-            else => {
-                _ = @panic("Invalid encoding. This code should not be reachable");
-            },
-        }
+                const reader = try bun.zlib.ZlibReaderArrayList.initWithOptionsAndListAllocator(buffer, (&body_out_str.list), body_out_str.allocator, bun.http.default_allocator, .{ .windowBits = windowBits });
+                _ = &reader;
+                self.* = .{ .zlib = reader };
+                return;
+},
+.brotli => {
+const reader = try bun.brotli.BrotliReaderArrayList.newWithOptions(buffer, (&body_out_str.list), body_out_str.allocator, .{});
+                _ = &reader;
+                self.* = .{ .brotli = reader };
+                return;
+},
+.zstd => {
+const reader = try bun.zstd.ZstdReaderArrayList.initWithListAllocator(buffer, (&body_out_str.list), body_out_str.allocator, bun.http.default_allocator);
+                _ = &reader;
+                self.* = .{ .zstd = reader };
+                return;
+},
+else => {
+_ = @panic("Invalid encoding. This code should not be reachable");
+},
+}
+            }
+            switch (self.*) {
+.zlib => |reader| {
+_ = bun.assert((reader.zlib.avail_in == 0));
+            reader.zlib.next_in = buffer.ptr;
+            reader.zlib.avail_in = @as(u32, @truncate(buffer.len));
+            const initial = body_out_str.list.items.len;
+            _ = &initial;
+            _ = body_out_str.list.expandToCapacity();
+            if ((body_out_str.list.capacity == initial)) {
+                _ = try body_out_str.list.ensureUnusedCapacity(body_out_str.allocator, 4096);
+                _ = body_out_str.list.expandToCapacity();
+            }
+            reader.list = body_out_str.list;
+            reader.zlib.next_out = @ptrCast((&body_out_str.list.items[@as(usize, @intCast(initial))]));
+            reader.zlib.avail_out = @as(u32, @truncate((body_out_str.list.capacity - initial)));
+            reader.zlib.total_out = @truncate(initial);
+},
+.brotli => |reader| {
+reader.input = buffer;
+            reader.total_in = 0;
+            const initial = body_out_str.list.items.len;
+            _ = &initial;
+            reader.list = body_out_str.list;
+            reader.total_out = @truncate(initial);
+},
+.zstd => |reader| {
+reader.input = buffer;
+            reader.total_in = 0;
+            const initial = body_out_str.list.items.len;
+            _ = &initial;
+            reader.list = body_out_str.list;
+            reader.total_out = @truncate(initial);
+},
+else => {
+_ = @panic("Invalid encoding. This code should not be reachable");
+},
+}
     }
 
-    pub fn readAll(self: *Decompressor, is_done: bool) !void {
-        switch (self.*) {
-            .zlib => |zlib| {
-                _ = try zlib.readAll(is_done);
-            },
-            .brotli => |brotli| {
-                _ = try brotli.readAll(is_done);
-            },
-            .zstd => |reader| {
-                _ = try reader.readAll(is_done);
-            },
-            .none => {},
-        }
+pub fn readAll(self: *Decompressor, is_done: bool) !void {
+            switch (self.*) {
+.zlib => |zlib| {
+_ = try zlib.readAll(is_done);
+},
+.brotli => |brotli| {
+_ = try brotli.readAll(is_done);
+},
+.zstd => |reader| {
+_ = try reader.readAll(is_done);
+},
+.none => {
+
+},
+}
     }
 };
+

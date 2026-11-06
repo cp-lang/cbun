@@ -2,27 +2,32 @@
 // One in-flight request on a multiplexed HTTP/2 ClientSession in CP language
 
 zig {
-    const ClientSession = @import("./ClientSession.zig");
-    const H2 = @import("../H2Client.zig");
-    const wire = @import("../H2FrameParser.zig");
-
     const bun = @import("bun");
-    const HTTPClient = bun.http;
-    const picohttp = bun.picohttp;
+}
 
-    const ByteList = std.ArrayListUnmanaged(u8);
-    const HeaderList = std.ArrayListUnmanaged(picohttp.Header);
+import { ClientSession } from "./ClientSession.cp";
+import * as H2FrameParser from "../H2FrameParser.cp";
+
+export enum State: u2 {
+    open,
+    half_closed_local,
+    half_closed_remote,
+    closed,
 }
 
 export @root struct Stream {
+    zig {
+        pub const new = bun.TrivialNew(Stream);
+    }
+
     id: u31,
     session: *ClientSession,
-    client: *HTTPClient?,
+    client: *bun.http.HTTPClient? = null,
 
-    header_block: ByteList,
-    body_buffer: ByteList,
-    decoded_bytes: ByteList,
-    decoded_headers: HeaderList,
+    header_block: std.ArrayListUnmanaged(u8),
+    body_buffer: std.ArrayListUnmanaged(u8),
+    decoded_bytes: std.ArrayListUnmanaged(u8),
+    decoded_headers: std.ArrayListUnmanaged(bun.picohttp.Header),
     status_code: u32 = 0,
 
     state: State,
@@ -36,65 +41,50 @@ export @root struct Stream {
     send_window: i32,
     pending_body: string = "",
 
-    zig {
-        pub const new = bun.TrivialNew(@This());
-
-        pub const State = enum(u2) {
-            open,
-            half_closed_local,
-            half_closed_remote,
-            closed,
-        };
+    fn release(*this): void {
+        bun.http.H2.live_streams.fetchSub(1, .monotonic);
+        this.header_block.deinit(bun.default_allocator);
+        this.body_buffer.deinit(bun.default_allocator);
+        this.decoded_bytes.deinit(bun.default_allocator);
+        this.decoded_headers.deinit(bun.default_allocator);
+        bun.destroy(this);
     }
 
-    pub fn deinit(*this): void {
-        zig {
-            _ = H2.live_streams.fetchSub(1, .monotonic);
-            self.header_block.deinit(bun.default_allocator);
-            self.body_buffer.deinit(bun.default_allocator);
-            self.decoded_bytes.deinit(bun.default_allocator);
-            self.decoded_headers.deinit(bun.default_allocator);
-            bun.destroy(self);
-        }
+    fn deinit(*this): void {
+        this.release();
     }
 
-    pub fn rst(*this, code: wire.ErrorCode): void {
+    fn rst(*this, code: H2FrameParser.ErrorCode): void {
         if (this.rst_done || this.state == .closed) return;
         this.rst_done = true;
         this.state = .closed;
-        zig {
-            var value: u32 = @byteSwap(@intFromEnum(code));
-            self.session.writeFrame(.HTTP_FRAME_RST_STREAM, 0, self.id, std.mem.asBytes(&value));
-        }
+        const value: u32 = @byteSwap(@intFromEnum(code));
+        this.session.writeFrame(.HTTP_FRAME_RST_STREAM, 0, this.id, std.mem.asBytes(&value));
     }
 
-    pub fn sentEndStream(*this): void {
-        zig {
-            self.state = switch (self.state) {
-                .open => .half_closed_local,
-                .half_closed_remote => .closed,
-                else => self.state,
-            };
-        }
+    fn sentEndStream(*this): void {
+        this.state = switch (this.state) {
+            .open => .half_closed_local,
+            .half_closed_remote => .closed,
+            * => this.state,
+        };
     }
 
-    pub fn recvEndStream(*this): void {
-        zig {
-            self.state = switch (self.state) {
-                .open => .half_closed_remote,
-                .half_closed_local => .closed,
-                else => self.state,
-            };
-        }
+    fn recvEndStream(*this): void {
+        this.state = switch (this.state) {
+            .open => .half_closed_remote,
+            .half_closed_local => .closed,
+            * => this.state,
+        };
     }
 
     @inline
-    pub fn localClosed(this): bool {
+    fn localClosed(this): bool {
         return this.state == .half_closed_local || this.state == .closed;
     }
 
     @inline
-    pub fn remoteClosed(this): bool {
+    fn remoteClosed(this): bool {
         return this.state == .half_closed_remote || this.state == .closed;
     }
 }

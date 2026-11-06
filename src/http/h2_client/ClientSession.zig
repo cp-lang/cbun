@@ -2,101 +2,56 @@
 const std = @import("std");
 const string = []const u8;
 
-const Stream = @import("./Stream.zig");
-const dispatch = @import("./dispatch.zig");
-const encode = @import("./encode.zig");
-const lshpack = @import("../lshpack.zig");
-const wire = @import("../H2FrameParser.zig");
-
-const H2 = @import("../H2Client.zig");
-const local_initial_window_size = H2.local_initial_window_size;
-
-const bun = @import("bun");
-const picohttp = bun.picohttp;
-const strings = bun.strings;
-const SSLConfig = bun.api.server.ServerConfig.SSLConfig;
-
-const HTTPClient = bun.http;
-const NewHTTPContext = HTTPClient.NewHTTPContext;
-const HeaderResult = enum { has_body, finished };
-fn is_string_like(comptime T: type) bool {
-    if (T == []const u8 or T == []u8) return true;
-    if (@typeInfo(T) == .pointer) {
-        const Child = @typeInfo(T).pointer.child;
-        if (Child == u8) return true;
-        if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true;
-    }
-    return false;
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
 }
-fn to_string_slice(v: anytype) []const u8 {
-    const T = @TypeOf(v);
-    if (comptime (T == []const u8 or T == []u8)) {
-        return v;
-    } else {
-        const cp_str_slice: []const u8 = v;
-        return cp_str_slice;
-    }
-}
-fn CpValType(comptime T: type) type {
-    if (is_string_like(T)) return []const u8;
-    if (T == comptime_int) return i32;
-    if (T == comptime_float) return f32;
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
     return T;
 }
-fn cp_val(v: anytype) CpValType(@TypeOf(v)) {
+fn cp_opt_is_null(v: anytype) bool {
     const T = @TypeOf(v);
-    if (comptime is_string_like(T)) {
-        return to_string_slice(v);
-    } else if (comptime T == comptime_int) {
-        return @as(i32, v);
-    } else if (comptime T == comptime_float) {
-        return @as(f32, v);
-    } else {
-        return v;
-    }
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
 }
-fn CpNullCoalesceReturn(comptime TOpt: type, comptime TFb: type) type {
-    if (@typeInfo(TOpt) == .optional) {
-        const Child = @typeInfo(TOpt).optional.child;
-        if (is_string_like(Child)) return []const u8;
-        return Child;
-    }
-    return CpValType(TFb);
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
 }
-fn cp_null_coalesce(opt_val: anytype, fallback: anytype) CpNullCoalesceReturn(@TypeOf(opt_val), @TypeOf(fallback)) {
-    const TOpt = @TypeOf(opt_val);
-    const RType = CpNullCoalesceReturn(TOpt, @TypeOf(fallback));
-    if (comptime @typeInfo(TOpt) == .optional) {
-        if (opt_val) |v| {
-            if (comptime is_string_like(RType)) {
-                return to_string_slice(v);
-            } else {
-                return v;
-            }
-        } else {
-            if (comptime is_string_like(RType)) {
-                return to_string_slice(fallback);
-            } else {
-                return fallback;
-            }
-        }
-    }
-    return cp_val(fallback);
-}
+const bun = @import("bun");
+    pub const HTTPContextTLS = @import("../HTTPContext.zig").NewHTTPContext(true);
+    pub const Socket = HTTPContextTLS.HTTPSocket;
+    pub const HTTPClient = bun.http.HTTPClient;
+    pub const SSLConfig = bun.api.server.ServerConfig.SSLConfig;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+
+pub const Stream = @import("./Stream.zig").Stream;
+pub const dispatch = @import("./dispatch.zig");
+pub const encode = @import("./encode.zig");
+pub const HPACK = @import("../lshpack.zig").HPACK;
+pub const H2FrameParser = @import("../H2FrameParser.zig");
+pub const HTTPContext = @import("../HTTPContext.zig").HTTPContext;
+pub const NewHTTPContext = @import("../HTTPContext.zig").NewHTTPContext;
+pub const HeaderResult = enum {
+    has_body,
+    finished,
+};
 
 pub const ClientSession = @This();
 
 ref_count: RefCount = .init(),
-hpack: *lshpack.HPACK,
+hpack: *HPACK,
 socket: Socket,
-ctx: *NewHTTPContext(true),
+ctx: *HTTPContextTLS,
 hostname: []const u8,
 port: u16,
-ssl_config: ?SSLConfig.SharedPtr,
+ssl_config: ?bun.api.server.ServerConfig.SSLConfig.SharedPtr = null,
 did_have_handshaking_error: bool,
 write_buffer: bun.io.StreamBuffer = .{},
 read_buffer: std.ArrayListUnmanaged(u8) = .{},
-streams: std.AutoArrayHashMapUnmanaged(u31, *Stream) = .{},
+streams: std.AutoArrayHashMapUnmanaged(u31,*Stream) = .{},
 next_stream_id: u31 = 1,
 expecting_continuation: u31 = 0,
 pending_attach: std.ArrayListUnmanaged(*HTTPClient) = .{},
@@ -110,782 +65,706 @@ goaway_last_stream_id: u31 = 0,
 fatal_error: ?anyerror = null,
 orphan_header_block: std.ArrayListUnmanaged(u8) = .{},
 encode_scratch: std.ArrayListUnmanaged(u8) = .{},
-remote_max_frame_size: u24 = wire.DEFAULT_MAX_FRAME_SIZE,
+remote_max_frame_size: u24 = H2FrameParser.DEFAULT_MAX_FRAME_SIZE,
 remote_max_concurrent_streams: u32 = 100,
-remote_initial_window_size: u32 = wire.DEFAULT_WINDOW_SIZE,
+remote_initial_window_size: u32 = H2FrameParser.DEFAULT_WINDOW_SIZE,
 pending_hpack_enc_capacity: ?u32 = null,
-conn_send_window: i32 = wire.DEFAULT_WINDOW_SIZE,
+conn_send_window: i32 = H2FrameParser.DEFAULT_WINDOW_SIZE,
 conn_unacked_bytes: u32 = 0,
 registry_index: u32 = 4294967295,
 
-pub fn create(ctx: *NewHTTPContext(true), socket: Socket, client: *HTTPClient) *ClientSession {
-    const session = ClientSession.new(.{
-        .ref_count = .init(),
-        .hpack = lshpack.HPACK.init(4096),
-        .socket = socket,
-        .ctx = ctx,
-        .hostname = bun.handleOom(bun.default_allocator.dupe(u8, client.connected_url.hostname)),
-        .port = client.connected_url.getPortAuto(),
-        .ssl_config = if (client.tls_props) |p| p.clone() else null,
-        .did_have_handshaking_error = client.flags.did_have_handshaking_error,
-    });
-    _ = H2.live_sessions.fetchAdd(1, .monotonic);
-    ctx.registerH2(session);
-    return session;
+pub fn release(self: *ClientSession) void {
+        _ = bun.http.H2.live_sessions.fetchSub(1, .monotonic);
+        _ = bun.debugAssert((self.registry_index == std.math.maxInt(u32)));
+        _ = self.hpack.deinit();
+        _ = self.write_buffer.deinit();
+        _ = self.read_buffer.deinit(bun.default_allocator);
+        var it = self.streams.iterator();
+        var __it_moved = false; _ = &__it_moved;
+        defer if (!__it_moved) { const T = @TypeOf(it); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = it.release() catch {}; } else { it.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { it.release(); } };
+        while (it.next()) |e| {
+            _ = e.value_ptr.*.deinit();
+        }
+        _ = self.streams.deinit(bun.default_allocator);
+        _ = self.pending_attach.deinit(bun.default_allocator);
+        _ = self.orphan_header_block.deinit(bun.default_allocator);
+        _ = self.encode_scratch.deinit(bun.default_allocator);
+        _ = bun.default_allocator.free(self.hostname);
+        if (self.ssl_config) |*s| s.deinit();
+
+        _ = bun.destroy(self);
+}
+
+pub fn deinit(self: *ClientSession) void {
+        _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
+}
+
+pub fn create(ctx: *HTTPContextTLS, socket: Socket, client: *HTTPClient) *ClientSession {
+        var ssl_config: ?bun.api.server.ServerConfig.SSLConfig.SharedPtr = null;
+        _ = &ssl_config;
+        if (client.tls_props) |p| {
+            _ = &p;
+            ssl_config = p.clone();
+        }
+        const session = ClientSession.new(.{ .ref_count = RefCount.init(), .hpack = HPACK.init(4096), .socket = socket, .ctx = ctx, .hostname = bun.handleOom(bun.default_allocator.dupe(u8, client.connected_url.hostname)), .port = client.connected_url.getPortAuto(), .ssl_config = ssl_config, .did_have_handshaking_error = client.flags.did_have_handshaking_error });
+        var __session_moved = false; _ = &__session_moved;
+        defer if (!__session_moved) { const T = @TypeOf(session); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = session.release() catch {}; } else { session.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { session.release(); } };
+        _ = bun.http.H2.live_sessions.fetchAdd(1, .monotonic);
+        _ = ctx.registerH2(session);
+        __session_moved = true;
+        return session;
 }
 
 pub fn hasHeadroom(self: *const ClientSession) bool {
-    _ = &self;
-    return (((((!self.goaway_received) and (!self.encoder_poisoned)) and (self.fatal_error == null)) and (self.streams.count() < self.remote_max_concurrent_streams)) and (self.next_stream_id < wire.MAX_STREAM_ID));
+        return (((((!self.goaway_received) and (!self.encoder_poisoned)) and (self.fatal_error == null)) and (self.streams.count() < self.remote_max_concurrent_streams)) and (self.next_stream_id < H2FrameParser.MAX_STREAM_ID));
 }
 
 pub fn matches(self: *const ClientSession, hostname: []const u8, port: u16, ssl_config: ?*SSLConfig) bool {
-    _ = &self;
-    return (((self.port == port) and (SSLConfig.rawPtr(self.ssl_config) == ssl_config)) and strings.eqlLong(self.hostname, hostname, true));
+        return (((self.port == port) and (bun.api.server.ServerConfig.SSLConfig.rawPtr(self.ssl_config) == ssl_config)) and bun.strings.eqlLong(self.hostname, hostname, true));
 }
 
 pub fn adopt(self: *ClientSession, client: *HTTPClient) void {
-    _ = &self;
-    _ = client.registerAbortTracker(true, self.socket);
-    if ((self.delivering or (!self.settings_received))) {
-        _ = bun.handleOom(self.pending_attach.append(bun.default_allocator, client));
-        _ = self.rearmTimeout();
-        return;
-    }
-    if ((!self.hasHeadroom())) {
-        _ = client.retryAfterH2Coalesce();
-        _ = self.maybeRelease();
-        return;
-    }
-    _ = self.attach(client);
-    if (self.encoder_poisoned) {
-        _ = self.maybeRelease();
-    }
+        _ = client.registerAbortTracker(true, self.socket);
+        if ((self.delivering or (!self.settings_received))) {
+            _ = bun.handleOom(self.pending_attach.append(bun.default_allocator, client));
+            _ = self.rearmTimeout();
+            return;
+        }
+        if ((!self.hasHeadroom())) {
+            _ = client.retryAfterH2Coalesce();
+            _ = self.maybeRelease();
+            return;
+        }
+        _ = self.attach(client);
+        if (self.encoder_poisoned) {
+            _ = self.maybeRelease();
+        }
 }
 
 pub fn enqueue(self: *ClientSession, client: *HTTPClient) void {
-    _ = &self;
-    _ = client.registerAbortTracker(true, self.socket);
-    _ = bun.handleOom(self.pending_attach.append(bun.default_allocator, client));
-    _ = self.rearmTimeout();
+        _ = client.registerAbortTracker(true, self.socket);
+        _ = bun.handleOom(self.pending_attach.append(bun.default_allocator, client));
+        _ = self.rearmTimeout();
 }
 
 pub fn drainPending(self: *ClientSession) void {
-    _ = &self;
-    if (((!self.settings_received) or (self.pending_attach.items.len == 0))) {
-        return;
-    }
-    var waiters = self.pending_attach;
-    _ = &waiters;
-    self.pending_attach = .{};
-    defer {
+        if (((!self.settings_received) or (self.pending_attach.items.len == 0))) {
+            return;
+        }
+        var waiters = self.pending_attach;
+        _ = &waiters;
+        self.pending_attach = .{};
+        defer {
         _ = waiters.deinit(bun.default_allocator);
-    }
-    for (waiters.items) |client| {
-        _ = &client;
-        if (self.fatal_error) |err| {
-            _ = &err;
-            _ = client.failFromH2(err);
-        } else {
-            if (client.signals.get(.aborted)) {
-                _ = client.failFromH2(error.Aborted);
+        }
+        for (waiters.items) |client| {
+            _ = &client;
+            if (self.fatal_error) |err| {
+                _ = &err;
+                _ = client.failFromH2(err);
             } else {
-                if (self.hasHeadroom()) {
-                    _ = self.attach(client);
+                if (client.signals.get(.aborted)) {
+                    _ = client.failFromH2(error.Aborted);
                 } else {
-                    _ = client.retryAfterH2Coalesce();
+                    if (self.hasHeadroom()) {
+                        _ = self.attach(client);
+                    } else {
+                        _ = client.retryAfterH2Coalesce();
+                    }
                 }
             }
         }
-    }
 }
 
 pub fn canPool(self: *const ClientSession) bool {
-    _ = &self;
-    return (((((((((self.streams.count() == 0) and (!self.goaway_received)) and (!self.encoder_poisoned)) and (self.fatal_error == null)) and (self.expecting_continuation == 0)) and (self.read_buffer.items.len == 0)) and self.write_buffer.isEmpty()) and (self.remote_max_concurrent_streams > 0)) and (self.next_stream_id < wire.MAX_STREAM_ID));
+        return (((((((((self.streams.count() == 0) and (!self.goaway_received)) and (!self.encoder_poisoned)) and (self.fatal_error == null)) and (self.expecting_continuation == 0)) and (self.read_buffer.items.len == 0)) and self.write_buffer.isEmpty()) and (self.remote_max_concurrent_streams > 0)) and (self.next_stream_id < H2FrameParser.MAX_STREAM_ID));
 }
 
 pub fn queue(self: *ClientSession, bytes: []const u8) void {
-    _ = &self;
-    _ = bun.handleOom(self.write_buffer.write(bytes));
+        _ = bun.handleOom(self.write_buffer.write(bytes));
 }
 
-pub fn writeFrame(self: *ClientSession, frame_type: wire.FrameType, flags: u8, stream_id: u32, payload: []const u8) void {
-    _ = &self;
-    var header: wire.FrameHeader = .{
-        .type = @intFromEnum(frame_type),
-        .flags = flags,
-        .streamIdentifier = stream_id,
-        .length = @intCast(payload.len),
-    };
-    std.mem.byteSwapAllFields(wire.FrameHeader, &header);
-    self.queue(std.mem.asBytes(&header)[0..wire.FrameHeader.byteSize]);
-    self.queue(payload);
+pub fn writeFrame(self: *ClientSession, frame_type: H2FrameParser.FrameType, flags: u8, stream_id: u32, payload: []const u8) void {
+        var header: H2FrameParser.FrameHeader = .{ .type = @intFromEnum(frame_type), .flags = flags, .streamIdentifier = stream_id, .length = @intCast(payload.len) };
+        _ = &header;
+        _ = std.mem.byteSwapAllFields(H2FrameParser.FrameHeader, (&header));
+        _ = self.queue(std.mem.asBytes((&header))[0..H2FrameParser.FrameHeader.byteSize]);
+        _ = self.queue(payload);
 }
 
 pub fn attach(self: *ClientSession, client: *HTTPClient) void {
-    _ = &self;
-    _ = bun.debugAssert(self.hasHeadroom());
-    const stream = Stream.new(.{
-        .id = self.next_stream_id,
-        .session = self,
-        .client = client,
-        .send_window = @intCast(@min(self.remote_initial_window_size, @as(u32, wire.MAX_WINDOW_SIZE))),
-    });
-    _ = H2.live_streams.fetchAdd(1, .monotonic);
-    self.next_stream_id +|= 2;
-    bun.handleOom(self.streams.put(bun.default_allocator, stream.id, stream));
-    client.h2 = stream;
-    client.flags.protocol = .http2;
-    client.allow_retry = false;
-
-    if (!self.preface_sent) encode.writePreface(self);
-
-    self.rearmTimeout();
-    const request = client.buildRequest(client.state.original_request_body.len());
-    encode.writeRequest(self, client, stream, request) catch |err| {
-        self.encoder_poisoned = true;
+        _ = bun.debugAssert(self.hasHeadroom());
+        const stream = Stream.new(.{ .id = self.next_stream_id, .session = self, .client = client, .send_window = @intCast(@min(self.remote_initial_window_size, @as(u32, H2FrameParser.MAX_WINDOW_SIZE))) });
+        var __stream_moved = false; _ = &__stream_moved;
+        defer if (!__stream_moved) { const T = @TypeOf(stream); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = stream.release() catch {}; } else { stream.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { stream.release(); } };
+        _ = bun.http.H2.live_streams.fetchAdd(1, .monotonic);
+        self.next_stream_id = (self.next_stream_id + 2);
+        _ = bun.handleOom(self.streams.put(bun.default_allocator, stream.id, stream));
+        client.h2 = stream;
+        client.flags.protocol = .http2;
+        client.allow_retry = false;
+        if ((!self.preface_sent)) {
+            _ = encode.writePreface(self);
+        }
+        _ = self.rearmTimeout();
+        const request = client.buildRequest(client.state.original_request_body.len());
+        var __request_moved = false; _ = &__request_moved;
+        defer if (!__request_moved) { const T = @TypeOf(request); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = request.release() catch {}; } else { request.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { request.release(); } };
+        _ = (blk_catch_0: { break :blk_catch_0 ((encode.writeRequest(self, client, stream, request)) catch |err| { _ = &err; self.encoder_poisoned = true;
         _ = self.streams.swapRemove(stream.id);
-        stream.deinit();
+        _ = stream.deinit();
         client.h2 = null;
-        client.failFromH2(err);
-        for (self.pending_attach.items) |c| c.retryAfterH2Coalesce();
-        self.pending_attach.clearRetainingCapacity();
-        _ = self.flush() catch {};
-        return;
-    };
-    if (client.verbose != .none) {
-        HTTPClient.printRequest(.http2, request, client.url.href, !client.flags.reject_unauthorized, client.state.request_body, client.verbose == .curl);
-    }
-    client.state.request_stage = if (stream.localClosed()) .done else .body;
-    client.state.response_stage = .headers;
-
-    _ = self.flush() catch |err| {
-        self.failAll(err);
-        return;
-    };
-
-    if (client.flags.is_streaming_request_body) {
-        client.progressUpdate(true, self.ctx, self.socket);
-    }
+        _ = client.failFromH2(err);
+        for (self.pending_attach.items) |c| {
+            _ = &c;
+            _ = c.retryAfterH2Coalesce();
+        }
+        _ = self.pending_attach.clearRetainingCapacity();
+        _ = (blk_catch_1: { break :blk_catch_1 ((self.flush()) catch |__ce_1| { _ = &__ce_1;  }); });
+        return; }); });
+        if ((client.verbose != .none)) {
+            _ = bun.http.printRequest(.http2, request, client.url.href, (!client.flags.reject_unauthorized), client.state.request_body, (client.verbose == .curl));
+        }
+        if (stream.localClosed()) {
+            client.state.request_stage = .done;
+        } else {
+            client.state.request_stage = .body;
+        }
+        client.state.response_stage = .headers;
+        _ = (blk_catch_2: { break :blk_catch_2 ((self.flush()) catch |err| { _ = &err; _ = self.failAll(err);
+        return; }); });
+        if (client.flags.is_streaming_request_body) {
+            _ = client.progressUpdate(true, self.ctx, self.socket);
+        }
 }
 
 pub fn removeStream(self: *ClientSession, stream: *Stream) void {
-    _ = &self;
-    if ((self.expecting_continuation == stream.id)) {
-        _ = self.orphan_header_block.deinit(bun.default_allocator);
-        self.orphan_header_block = stream.header_block;
-        stream.header_block = .{};
-    }
-    _ = self.streams.swapRemove(stream.id);
-    _ = stream.deinit();
+        if ((self.expecting_continuation == stream.id)) {
+            _ = self.orphan_header_block.deinit(bun.default_allocator);
+            self.orphan_header_block = stream.header_block;
+            stream.header_block = .{};
+        }
+        _ = self.streams.swapRemove(stream.id);
+        _ = stream.deinit();
 }
 
 pub fn detachWithFailure(self: *ClientSession, stream: *Stream, err: anyerror) void {
-    _ = &self;
-    _ = stream.rst(.CANCEL);
-    _ = (blk_catch_0: {
-        break :blk_catch_0 (self.flush()) catch |__ce_0| {
-            _ = &__ce_0;
-        };
-    });
-    const client = stream.client;
-    _ = &client;
-    stream.client = null;
-    if (client) |c| {
-        _ = &c;
-        c.h2 = null;
-    }
-    _ = self.removeStream(stream);
-    if (client) |c| {
-        _ = &c;
-        _ = c.failFromH2(err);
-    }
-}
-
-pub fn rearmTimeout(self: *ClientSession) void {
-    _ = &self;
-    var want = false;
-    _ = &want;
-    for (self.streams.values()) |s| {
-        _ = &s;
-        if (s.client) |c| {
-            _ = &c;
-            if ((!c.flags.disable_timeout)) {
-                want = true;
-                break;
-            }
-        }
-    }
-    if ((!want)) {
-        for (self.pending_attach.items) |c| {
-            _ = &c;
-            if ((!c.flags.disable_timeout)) {
-                want = true;
-                break;
-            }
-        }
-    }
-    var timeout: u32 = 0;
-    _ = &timeout;
-    if (want) {
-        timeout = HTTPClient.idle_timeout_seconds;
-    }
-    _ = self.socket.setTimeout(timeout);
-}
-
-pub fn drainResponseBodyByHttpId(self: *ClientSession, async_http_id: u32) void {
-    _ = &self;
-    _ = self.ref();
-    defer {
-        _ = self.deref();
-    }
-    for (self.streams.values()) |stream| {
-        _ = &stream;
-        if (stream.client) |client| {
-            _ = &client;
-            if ((client.async_http_id != async_http_id)) {
-                continue;
-            }
-            _ = client.drainResponseBody(true, self.socket);
-            return;
-        }
-    }
-}
-
-pub fn streamBodyByHttpId(self: *ClientSession, async_http_id: u32, ended: bool) void {
-    _ = &self;
-    _ = self.ref();
-    defer {
-        _ = self.deref();
-    }
-    for (self.streams.values()) |stream| {
-        _ = &stream;
-        if (stream.client) |client| {
-            _ = &client;
-            if ((client.async_http_id != async_http_id)) {
-                continue;
-            }
-            if ((client.state.original_request_body != .stream)) {
-                return;
-            }
-            client.state.original_request_body.stream.ended = ended;
-            _ = self.rearmTimeout();
-            _ = encode.drainSendBody(self, stream, std.math.maxInt(usize));
-            _ = (blk_catch_1: {
-                break :blk_catch_1 (self.flush()) catch |err| {
-                    _ = &err;
-                    _ = self.failAll(err);
-                    return;
-                };
-            });
-            return;
-        }
-    }
-}
-
-pub fn writeWindowUpdate(self: *ClientSession, stream_id: u32, increment: u31) void {
-    _ = &self;
-    var value: u32 = @byteSwap(@as(u32, increment));
-    self.writeFrame(.HTTP_FRAME_WINDOW_UPDATE, 0, stream_id, std.mem.asBytes(&value));
-}
-
-pub fn replenishWindow(self: *ClientSession) void {
-    _ = &self;
-    const threshold = (local_initial_window_size / 2);
-    _ = &threshold;
-    if ((self.conn_unacked_bytes >= threshold)) {
-        _ = self.writeWindowUpdate(0, @intCast(self.conn_unacked_bytes));
-        self.conn_unacked_bytes = 0;
-    }
-    var it = self.streams.iterator();
-    _ = &it;
-    while (it.next()) |e| {
-        _ = &e;
-        const s = e.value_ptr.*;
-        _ = &s;
-        if (((s.unacked_bytes >= threshold) and (!s.remoteClosed()))) {
-            _ = self.writeWindowUpdate(s.id, @intCast(s.unacked_bytes));
-            s.unacked_bytes = 0;
-        }
-    }
-}
-
-pub fn flush(self: *ClientSession) !bool {
-    _ = &self;
-    const pending = self.write_buffer.slice();
-    _ = &pending;
-    if ((pending.len == 0)) {
-        return false;
-    }
-    var remaining = pending;
-    _ = &remaining;
-    var total: usize = 0;
-    _ = &total;
-    while ((remaining.len > 0)) {
-        const wrote = self.socket.write(remaining);
-        _ = &wrote;
-        if ((wrote < 0)) {
-            return error.WriteFailed;
-        }
-        const n: usize = @intCast(wrote);
-        _ = &n;
-        total = (total + n);
-        remaining = remaining[n..];
-        if ((n == 0)) {
-            break;
-        }
-    }
-    _ = self.write_buffer.wrote(total);
-    if (self.write_buffer.isEmpty()) {
-        _ = self.write_buffer.reset();
-        return false;
-    }
-    return true;
-}
-
-pub fn onData(self: *ClientSession, incoming: []const u8) void {
-    _ = &self;
-    _ = self.ref();
-    defer {
-        _ = self.deref();
-    }
-    self.stream_progressed = false;
-    if ((self.read_buffer.items.len == 0)) {
-        const consumed = dispatch.parseFrames(self, incoming);
-        _ = &consumed;
-        if (((consumed < incoming.len) and (self.fatal_error == null))) {
-            _ = bun.handleOom(self.read_buffer.appendSlice(bun.default_allocator, incoming[consumed..]));
-        }
-    } else {
-        _ = bun.handleOom(self.read_buffer.appendSlice(bun.default_allocator, incoming));
-        const consumed = dispatch.parseFrames(self, self.read_buffer.items);
-        _ = &consumed;
-        const tail = (self.read_buffer.items.len - consumed);
-        _ = &tail;
-        if (((tail > 0) and (consumed > 0))) {
-            std.mem.copyForwards(u8, self.read_buffer.items[0..tail], self.read_buffer.items[consumed..]);
-        }
-        self.read_buffer.items.len = tail;
-    }
-    _ = (blk_catch_2: {
-        break :blk_catch_2 (self.flush()) catch |__ce_2| {
-            _ = &__ce_2;
-            self.fatal_error = error.WriteFailed;
-            break :blk_catch_2 @as(bool, false);
-        };
-    });
-    if (self.fatal_error) |err| {
-        _ = &err;
-        _ = self.failAll(err);
-        return;
-    }
-    _ = self.drainPending();
-    if ((self.fatal_error != null)) {
-        return;
-    }
-    _ = encode.drainSendBodies(self);
-    _ = (blk_catch_3: {
-        break :blk_catch_3 (self.flush()) catch |err| {
-            _ = &err;
-            _ = self.failAll(err);
-            return;
-        };
-    });
-    self.delivering = true;
-    var i: usize = 0;
-    _ = &i;
-    var rst_any = false;
-    _ = &rst_any;
-    while ((i < self.streams.count())) {
-        const stream = self.streams.values()[@as(usize, @intCast(i))];
-        _ = &stream;
-        if (self.deliverStream(stream)) {
-            if ((stream.state != .closed)) {
-                _ = stream.rst(.CANCEL);
-                rst_any = true;
-            }
-            _ = self.removeStream(stream);
-        } else {
-            i = (i + 1);
-        }
-    }
-    self.delivering = false;
-    _ = self.replenishWindow();
-    if ((rst_any or self.write_buffer.isNotEmpty())) {
-        _ = (blk_catch_4: {
-            break :blk_catch_4 (self.flush()) catch |__ce_4| {
-                _ = &__ce_4;
-            };
-        });
-    }
-    if (self.stream_progressed) {
-        _ = self.rearmTimeout();
-    }
-    if ((self.pending_attach.items.len > 0)) {
-        _ = self.drainPending();
-        if ((self.fatal_error != null)) {
-            return;
-        }
-        _ = (blk_catch_5: {
-            break :blk_catch_5 (self.flush()) catch |err| {
-                _ = &err;
-                _ = self.failAll(err);
-                return;
-            };
-        });
-    }
-    _ = self.maybeRelease();
-}
-
-pub fn onWritable(self: *ClientSession) void {
-    _ = &self;
-    _ = self.ref();
-    defer {
-        _ = self.deref();
-    }
-    _ = (blk_catch_6: {
-        break :blk_catch_6 (self.flush()) catch |err| {
-            _ = &err;
-            _ = self.failAll(err);
-            return;
-        };
-    });
-    _ = encode.drainSendBodies(self);
-    _ = (blk_catch_7: {
-        break :blk_catch_7 (self.flush()) catch |err| {
-            _ = &err;
-            _ = self.failAll(err);
-            return;
-        };
-    });
-    _ = self.reapAborted();
-    _ = self.rearmTimeout();
-    _ = self.maybeRelease();
-}
-
-pub fn onIdleData(self: *ClientSession, incoming: []const u8) void {
-    _ = &self;
-    _ = bun.handleOom(self.read_buffer.appendSlice(bun.default_allocator, incoming));
-    const consumed = dispatch.parseFrames(self, self.read_buffer.items);
-    _ = &consumed;
-    const tail = (self.read_buffer.items.len - consumed);
-    _ = &tail;
-    if (((tail > 0) and (consumed > 0))) {
-        std.mem.copyForwards(u8, self.read_buffer.items[0..tail], self.read_buffer.items[consumed..]);
-    }
-    self.read_buffer.items.len = tail;
-    _ = (blk_catch_8: {
-        break :blk_catch_8 (self.flush()) catch |__ce_8| {
-            _ = &__ce_8;
-            self.fatal_error = error.WriteFailed;
-            break :blk_catch_8 @as(bool, false);
-        };
-    });
-}
-
-pub fn onClose(self: *ClientSession, err: anyerror) void {
-    _ = &self;
-    _ = self.ref();
-    defer {
-        _ = self.deref();
-    }
-    _ = self.ctx.unregisterH2(self);
-    for (self.pending_attach.items) |client| {
-        _ = &client;
-        _ = client.failFromH2(err);
-    }
-    _ = self.pending_attach.clearRetainingCapacity();
-    var it = self.streams.iterator();
-    _ = &it;
-    while (it.next()) |e| {
-        _ = &e;
-        const stream = e.value_ptr.*;
-        _ = &stream;
+        _ = stream.rst(.CANCEL);
+        _ = (blk_catch_3: { break :blk_catch_3 ((self.flush()) catch |__ce_3| { _ = &__ce_3;  }); });
         const client = stream.client;
-        _ = &client;
+        var __client_moved = false; _ = &__client_moved;
+        defer if (!__client_moved) { const T = @TypeOf(client); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = client.release() catch {}; } else { client.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { client.release(); } };
         stream.client = null;
         if (client) |c| {
             _ = &c;
             c.h2 = null;
         }
-        _ = stream.deinit();
+        _ = self.removeStream(stream);
         if (client) |c| {
             _ = &c;
             _ = c.failFromH2(err);
         }
-    }
-    _ = self.streams.clearRetainingCapacity();
-    _ = self.deref();
 }
 
-pub fn failAll(self: *ClientSession, err: anyerror) void {
-    _ = &self;
-    self.fatal_error = self.fatal_error orelse err;
-    const sock = self.socket;
-    if (!sock.isClosedOrHasError()) {
-        var goaway: [8]u8 = undefined;
-        std.mem.writeInt(u32, goaway[0..4], 0, .big);
-        std.mem.writeInt(u32, goaway[4..8], @intFromEnum(dispatch.errorCodeFor(err)), .big);
-        self.writeFrame(.HTTP_FRAME_GOAWAY, 0, 0, &goaway);
-        _ = self.flush() catch {};
-    }
-    NewHTTPContext(true).markSocketAsDead(sock);
-    self.onClose(err);
-    sock.close(.failure);
-}
-
-pub fn abortByHttpId(self: *ClientSession, async_http_id: u32) void {
-    _ = &self;
-    var i: usize = 0;
-    _ = &i;
-    while ((i < self.pending_attach.items.len)) {
-        const client = self.pending_attach.items[@as(usize, @intCast(i))];
-        _ = &client;
-        if ((client.async_http_id == async_http_id)) {
-            _ = self.pending_attach.swapRemove(i);
-            _ = client.failFromH2(error.Aborted);
-            _ = self.rearmTimeout();
-            _ = self.maybeRelease();
-            return;
+pub fn rearmTimeout(self: *ClientSession) void {
+        var want = false;
+        _ = &want;
+        for (self.streams.values()) |s| {
+            _ = &s;
+            if (s.client) |c| {
+                _ = &c;
+                if ((!c.flags.disable_timeout)) {
+                    want = true;
+                    break;
+                }
+            }
         }
-        i = (i + 1);
-    }
-    var it = self.streams.iterator();
-    _ = &it;
-    while (it.next()) |e| {
-        _ = &e;
-        const stream = e.value_ptr.*;
-        _ = &stream;
-        if (stream.client) |client| {
-            _ = &client;
-            if ((client.async_http_id == async_http_id)) {
-                _ = self.detachWithFailure(stream, error.Aborted);
+        if ((!want)) {
+            for (self.pending_attach.items) |c| {
+                _ = &c;
+                if ((!c.flags.disable_timeout)) {
+                    want = true;
+                    break;
+                }
+            }
+        }
+        var timeout: u32 = 0;
+        _ = &timeout;
+        if (want) {
+            timeout = bun.http.idle_timeout_seconds;
+        }
+        _ = self.socket.setTimeout(timeout);
+}
+
+pub fn drainResponseBodyByHttpId(self: *ClientSession, async_http_id: u32) void {
+        _ = self.ref();
+        defer {
+        _ = self.deref();
+        }
+        for (self.streams.values()) |stream| {
+            _ = &stream;
+            if (stream.client) |client| {
+                _ = &client;
+                if ((client.async_http_id != async_http_id)) {
+                    continue;
+                }
+                _ = client.drainResponseBody(true, self.socket);
+                return;
+            }
+        }
+}
+
+pub fn streamBodyByHttpId(self: *ClientSession, async_http_id: u32, ended: bool) void {
+        _ = self.ref();
+        defer {
+        _ = self.deref();
+        }
+        for (self.streams.values()) |stream| {
+            _ = &stream;
+            if (stream.client) |client| {
+                _ = &client;
+                if ((client.async_http_id != async_http_id)) {
+                    continue;
+                }
+                if ((client.state.original_request_body != .stream)) {
+                    return;
+                }
+                client.state.original_request_body.stream.ended = ended;
+                _ = self.rearmTimeout();
+                _ = encode.drainSendBody(self, stream, std.math.maxInt(usize));
+                _ = (blk_catch_4: { break :blk_catch_4 ((self.flush()) catch |err| { _ = &err; _ = self.failAll(err);
+                return; }); });
+                return;
+            }
+        }
+}
+
+pub fn writeWindowUpdate(self: *ClientSession, stream_id: u32, increment: u31) void {
+        const value: u32 = @byteSwap(@as(u32, increment));
+        _ = &value;
+        _ = self.writeFrame(.HTTP_FRAME_WINDOW_UPDATE, 0, stream_id, std.mem.asBytes((&value)));
+}
+
+pub fn replenishWindow(self: *ClientSession) void {
+        const threshold = (bun.http.H2.local_initial_window_size / 2);
+        _ = &threshold;
+        if ((self.conn_unacked_bytes >= threshold)) {
+            _ = self.writeWindowUpdate(0, @intCast(self.conn_unacked_bytes));
+            self.conn_unacked_bytes = 0;
+        }
+        var it = self.streams.iterator();
+        var __it_moved = false; _ = &__it_moved;
+        defer if (!__it_moved) { const T = @TypeOf(it); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = it.release() catch {}; } else { it.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { it.release(); } };
+        while (it.next()) |e| {
+            const s = e.value_ptr.*;
+            var __s_moved = false; _ = &__s_moved;
+            defer if (!__s_moved) { const T = @TypeOf(s); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = s.release() catch {}; } else { s.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { s.release(); } };
+            if (((s.unacked_bytes >= threshold) and (!s.remoteClosed()))) {
+                _ = self.writeWindowUpdate(s.id, @intCast(s.unacked_bytes));
+                s.unacked_bytes = 0;
+            }
+        }
+}
+
+pub fn flush(self: *ClientSession) !bool {
+        const pending = self.write_buffer.slice();
+        var __pending_moved = false; _ = &__pending_moved;
+        defer if (!__pending_moved) { const T = @TypeOf(pending); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = pending.release() catch {}; } else { pending.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { pending.release(); } };
+        if ((pending.len == 0)) {
+            return false;
+        }
+        var remaining = pending;
+        _ = &remaining;
+        var total: usize = 0;
+        _ = &total;
+        while ((remaining.len > 0)) {
+            const wrote = self.socket.write(remaining);
+            var __wrote_moved = false; _ = &__wrote_moved;
+            defer if (!__wrote_moved) { const T = @TypeOf(wrote); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = wrote.release() catch {}; } else { wrote.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { wrote.release(); } };
+            if ((wrote < 0)) {
+                return error.WriteFailed;
+            }
+            const n: usize = @intCast(wrote);
+            _ = &n;
+            total = (total + n);
+            remaining = remaining[n..];
+            if ((n == 0)) {
                 break;
             }
         }
-    }
-    _ = self.rearmTimeout();
-    _ = self.maybeRelease();
+        _ = self.write_buffer.wrote(total);
+        if (self.write_buffer.isEmpty()) {
+            _ = self.write_buffer.reset();
+            return false;
+        }
+        return true;
 }
 
-pub fn reapAborted(self: *ClientSession) void {
-    _ = &self;
-    var i: usize = 0;
-    _ = &i;
-    while ((i < self.streams.count())) {
-        const stream = self.streams.values()[@as(usize, @intCast(i))];
-        _ = &stream;
-        if (stream.client) |client| {
-            _ = &client;
-            if (client.signals.get(.aborted)) {
-                _ = self.detachWithFailure(stream, error.Aborted);
+pub fn onData(self: *ClientSession, incoming: []const u8) void {
+        _ = self.ref();
+        defer {
+        _ = self.deref();
+        }
+        self.stream_progressed = false;
+        if ((self.read_buffer.items.len == 0)) {
+            const consumed = dispatch.parseFrames(self, incoming);
+            var __consumed_moved = false; _ = &__consumed_moved;
+            defer if (!__consumed_moved) { const T = @TypeOf(consumed); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = consumed.release() catch {}; } else { consumed.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { consumed.release(); } };
+            if (((consumed < incoming.len) and (self.fatal_error == null))) {
+                _ = bun.handleOom(self.read_buffer.appendSlice(bun.default_allocator, incoming[consumed..]));
+            }
+        } else {
+            _ = bun.handleOom(self.read_buffer.appendSlice(bun.default_allocator, incoming));
+            const consumed = dispatch.parseFrames(self, self.read_buffer.items);
+            var __consumed_moved = false; _ = &__consumed_moved;
+            defer if (!__consumed_moved) { const T = @TypeOf(consumed); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = consumed.release() catch {}; } else { consumed.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { consumed.release(); } };
+            const tail = (self.read_buffer.items.len - consumed);
+            _ = &tail;
+            if (((tail > 0) and (consumed > 0))) {
+                _ = bun.copy(u8, self.read_buffer.items[0..tail], self.read_buffer.items[consumed..]);
+            }
+            self.read_buffer.items.len = tail;
+        }
+        _ = (blk_catch_5: { break :blk_catch_5 ((self.flush()) catch |__ce_5| { _ = &__ce_5; self.fatal_error = error.WriteFailed;
+        break :blk_catch_5 @as(bool, false); }); });
+        if (self.fatal_error) |err| {
+            _ = &err;
+            _ = self.failAll(err);
+            return;
+        }
+        _ = self.drainPending();
+        if ((self.fatal_error != null)) {
+            return;
+        }
+        _ = encode.drainSendBodies(self);
+        _ = (blk_catch_6: { break :blk_catch_6 ((self.flush()) catch |err| { _ = &err; _ = self.failAll(err);
+        return; }); });
+        self.delivering = true;
+        var i: usize = 0;
+        _ = &i;
+        var rst_any = false;
+        _ = &rst_any;
+        while ((i < self.streams.count())) {
+            const stream = self.streams.values()[@as(usize, @intCast(i))];
+            _ = &stream;
+            if (self.deliverStream(stream)) {
+                if ((stream.state != .closed)) {
+                    _ = stream.rst(.CANCEL);
+                    rst_any = true;
+                }
+                _ = self.removeStream(stream);
             } else {
                 i = (i + 1);
             }
-        } else {
+        }
+        self.delivering = false;
+        _ = self.replenishWindow();
+        if ((rst_any or self.write_buffer.isNotEmpty())) {
+            _ = (blk_catch_7: { break :blk_catch_7 ((self.flush()) catch |__ce_7| { _ = &__ce_7;  }); });
+        }
+        if (self.stream_progressed) {
+            _ = self.rearmTimeout();
+        }
+        if ((self.pending_attach.items.len > 0)) {
+            _ = self.drainPending();
+            if ((self.fatal_error != null)) {
+                return;
+            }
+            _ = (blk_catch_8: { break :blk_catch_8 ((self.flush()) catch |err| { _ = &err; _ = self.failAll(err);
+            return; }); });
+        }
+        _ = self.maybeRelease();
+}
+
+pub fn onWritable(self: *ClientSession) void {
+        _ = self.ref();
+        defer {
+        _ = self.deref();
+        }
+        _ = (blk_catch_9: { break :blk_catch_9 ((self.flush()) catch |err| { _ = &err; _ = self.failAll(err);
+        return; }); });
+        _ = encode.drainSendBodies(self);
+        _ = (blk_catch_10: { break :blk_catch_10 ((self.flush()) catch |err| { _ = &err; _ = self.failAll(err);
+        return; }); });
+        _ = self.reapAborted();
+        _ = self.rearmTimeout();
+        _ = self.maybeRelease();
+}
+
+pub fn onIdleData(self: *ClientSession, incoming: []const u8) void {
+        _ = bun.handleOom(self.read_buffer.appendSlice(bun.default_allocator, incoming));
+        const consumed = dispatch.parseFrames(self, self.read_buffer.items);
+        var __consumed_moved = false; _ = &__consumed_moved;
+        defer if (!__consumed_moved) { const T = @TypeOf(consumed); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = consumed.release() catch {}; } else { consumed.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { consumed.release(); } };
+        const tail = (self.read_buffer.items.len - consumed);
+        _ = &tail;
+        if (((tail > 0) and (consumed > 0))) {
+            _ = bun.copy(u8, self.read_buffer.items[0..tail], self.read_buffer.items[consumed..]);
+        }
+        self.read_buffer.items.len = tail;
+        _ = (blk_catch_11: { break :blk_catch_11 ((self.flush()) catch |__ce_11| { _ = &__ce_11; self.fatal_error = error.WriteFailed;
+        break :blk_catch_11 @as(bool, false); }); });
+}
+
+pub fn onClose(self: *ClientSession, err: anyerror) void {
+        _ = self.ref();
+        defer {
+        _ = self.deref();
+        }
+        _ = self.ctx.unregisterH2(self);
+        for (self.pending_attach.items) |client| {
+            _ = &client;
+            _ = client.failFromH2(err);
+        }
+        _ = self.pending_attach.clearRetainingCapacity();
+        var it = self.streams.iterator();
+        var __it_moved = false; _ = &__it_moved;
+        defer if (!__it_moved) { const T = @TypeOf(it); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = it.release() catch {}; } else { it.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { it.release(); } };
+        while (it.next()) |e| {
+            const stream = e.value_ptr.*;
+            var __stream_moved = false; _ = &__stream_moved;
+            defer if (!__stream_moved) { const T = @TypeOf(stream); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = stream.release() catch {}; } else { stream.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { stream.release(); } };
+            const client = stream.client;
+            var __client_moved = false; _ = &__client_moved;
+            defer if (!__client_moved) { const T = @TypeOf(client); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = client.release() catch {}; } else { client.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { client.release(); } };
+            stream.client = null;
+            if (client) |c| {
+                _ = &c;
+                c.h2 = null;
+            }
+            _ = stream.deinit();
+            if (client) |c| {
+                _ = &c;
+                _ = c.failFromH2(err);
+            }
+        }
+        _ = self.streams.clearRetainingCapacity();
+        _ = self.deref();
+}
+
+pub fn failAll(self: *ClientSession, err: anyerror) void {
+        self.fatal_error = ((self.fatal_error) orelse (err));
+        const sock = self.socket;
+        _ = &sock;
+        if ((!sock.isClosedOrHasError())) {
+            var goaway: [8]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
+            _ = &goaway;
+            _ = std.mem.writeInt(u32, goaway[0..4], 0, .big);
+            _ = std.mem.writeInt(u32, goaway[4..8], @intFromEnum(dispatch.errorCodeFor(err)), .big);
+            _ = self.writeFrame(.HTTP_FRAME_GOAWAY, 0, 0, (&goaway));
+            _ = (blk_catch_12: { break :blk_catch_12 ((self.flush()) catch |__ce_12| { _ = &__ce_12;  }); });
+        }
+        _ = HTTPContextTLS.markSocketAsDead(sock);
+        _ = self.onClose(err);
+        _ = sock.close(.failure);
+}
+
+pub fn abortByHttpId(self: *ClientSession, async_http_id: u32) void {
+        var i: usize = 0;
+        _ = &i;
+        while ((i < self.pending_attach.items.len)) {
+            const client = self.pending_attach.items[@as(usize, @intCast(i))];
+            _ = &client;
+            if ((client.async_http_id == async_http_id)) {
+                _ = self.pending_attach.swapRemove(i);
+                _ = client.failFromH2(error.Aborted);
+                _ = self.rearmTimeout();
+                _ = self.maybeRelease();
+                return;
+            }
             i = (i + 1);
         }
-    }
+        var it = self.streams.iterator();
+        var __it_moved = false; _ = &__it_moved;
+        defer if (!__it_moved) { const T = @TypeOf(it); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = it.release() catch {}; } else { it.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { it.release(); } };
+        while (it.next()) |e| {
+            const stream = e.value_ptr.*;
+            var __stream_moved = false; _ = &__stream_moved;
+            defer if (!__stream_moved) { const T = @TypeOf(stream); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = stream.release() catch {}; } else { stream.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { stream.release(); } };
+            if (stream.client) |client| {
+                _ = &client;
+                if ((client.async_http_id == async_http_id)) {
+                    _ = self.detachWithFailure(stream, error.Aborted);
+                    break;
+                }
+            }
+        }
+        _ = self.rearmTimeout();
+        _ = self.maybeRelease();
+}
+
+pub fn reapAborted(self: *ClientSession) void {
+        var i: usize = 0;
+        _ = &i;
+        while ((i < self.streams.count())) {
+            const stream = self.streams.values()[@as(usize, @intCast(i))];
+            _ = &stream;
+            if (stream.client) |client| {
+                _ = &client;
+                if (client.signals.get(.aborted)) {
+                    _ = self.detachWithFailure(stream, error.Aborted);
+                } else {
+                    i = (i + 1);
+                }
+            } else {
+                i = (i + 1);
+            }
+        }
 }
 
 pub fn maybeRelease(self: *ClientSession) void {
-    _ = &self;
-    if (((self.streams.count() > 0) or (self.pending_attach.items.len > 0))) {
-        return;
-    }
-    if ((self.registry_index == 4294967295)) {
-        return;
-    }
-    _ = self.ctx.unregisterH2(self);
-    if ((self.canPool() and (!self.socket.isClosedOrHasError()))) {
-        _ = self.ctx.releaseSocket(self.socket, self.did_have_handshaking_error, self.hostname, self.port, self.ssl_config, null, "", 0, 0, self);
-    } else {
-        NewHTTPContext(true).closeSocket(self.socket);
-
-        _ = self.deref();
-    }
+        if (((self.streams.count() > 0) or (self.pending_attach.items.len > 0))) {
+            return;
+        }
+        if ((self.registry_index == 4294967295)) {
+            return;
+        }
+        _ = self.ctx.unregisterH2(self);
+        if ((self.canPool() and (!self.socket.isClosedOrHasError()))) {
+            _ = self.ctx.releaseSocket(self.socket, self.did_have_handshaking_error, self.hostname, self.port, self.ssl_config, null, "", 0, 0, self);
+        } else {
+            _ = HTTPContextTLS.closeSocket(self.socket);
+            _ = self.deref();
+        }
 }
 
 pub fn deliverStream(self: *ClientSession, stream: *Stream) bool {
-    _ = &self;
-    const client = ((stream.client) orelse {
-        return true;
-    });
-    _ = &client;
-    if (client.signals.get(.aborted)) {
-        _ = stream.rst(.CANCEL);
-        _ = (blk_catch_10: {
-            break :blk_catch_10 (self.flush()) catch |__ce_10| {
-                _ = &__ce_10;
-            };
-        });
-        stream.client = null;
-        client.h2 = null;
-        _ = client.failFromH2(error.Aborted);
-        return true;
-    }
-    if (stream.fatal_error) |err| {
-        _ = &err;
-        stream.client = null;
-        client.h2 = null;
-        if (((((err == error.HTTP2RefusedStream) and (stream.status_code == 0)) and (client.h2_retries < HTTPClient.max_h2_retries)) and (client.state.original_request_body == .bytes))) {
-            _ = client.retryFromH2();
-        } else {
-            _ = client.failFromH2(err);
-        }
-        return true;
-    }
-    if (stream.headers_ready) {
-        stream.headers_ready = false;
-        const result = (blk_catch_11: {
-            break :blk_catch_11 (self.applyHeaders(stream, client)) catch |err| {
-                _ = &err;
-                _ = stream.rst(.CANCEL);
-                _ = (blk_catch_12: {
-                    break :blk_catch_12 (self.flush()) catch |__ce_12| {
-                        _ = &__ce_12;
-                    };
-                });
-                stream.client = null;
-                client.h2 = null;
-                _ = client.failFromH2(err);
-                return true;
-            };
-        });
-        _ = &result;
-        if (client.state.flags.is_redirect_pending) {
-            _ = stream.rst(.CANCEL);
-            _ = (blk_catch_13: {
-                break :blk_catch_13 (self.flush()) catch |__ce_13| {
-                    _ = &__ce_13;
-                };
-            });
-            stream.client = null;
-            client.h2 = null;
-            _ = client.doRedirect(true, self.ctx, self.socket);
+        if ((stream.client == null)) {
             return true;
         }
-        if (((result == .finished) or (stream.remoteClosed() and (stream.body_buffer.items.len == 0)))) {
+        const client = stream.client.?;
+        var __client_moved = false; _ = &__client_moved;
+        defer if (!__client_moved) { const T = @TypeOf(client); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = client.release() catch {}; } else { client.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { client.release(); } };
+        if (client.signals.get(.aborted)) {
+            _ = stream.rst(.CANCEL);
+            _ = (blk_catch_13: { break :blk_catch_13 ((self.flush()) catch |__ce_13| { _ = &__ce_13;  }); });
             stream.client = null;
             client.h2 = null;
-            _ = client.cloneMetadata();
-            client.state.flags.received_last_chunk = true;
-            if ((result == .finished)) {
-                client.state.content_length = 0;
-            }
-            return self.finishStream(stream, client);
+            _ = client.failFromH2(error.Aborted);
+            return true;
         }
-        _ = client.cloneMetadata();
-        if (client.signals.get(.header_progress)) {
-            _ = client.progressUpdate(true, self.ctx, self.socket);
-        }
-    }
-    if ((client.state.response_stage != .body)) {
-        return false;
-    }
-    if ((stream.body_buffer.items.len > 0)) {
-        const terminal = stream.remoteClosed();
-        _ = &terminal;
-        if (terminal) {
-            client.state.flags.received_last_chunk = true;
+        if (stream.fatal_error) |err| {
+            _ = &err;
             stream.client = null;
             client.h2 = null;
-        }
-        const report = (blk_catch_14: {
-            break :blk_catch_14 (client.handleResponseBody(stream.body_buffer.items, false)) catch |err| {
-                _ = &err;
-                _ = stream.body_buffer.clearRetainingCapacity();
-                _ = stream.rst(.CANCEL);
-                _ = (blk_catch_15: {
-                    break :blk_catch_15 (self.flush()) catch |__ce_15| {
-                        _ = &__ce_15;
-                    };
-                });
-                if ((!terminal)) {
-                    stream.client = null;
-                    client.h2 = null;
-                }
+            if (((((err == error.HTTP2RefusedStream) and (stream.status_code == 0)) and (client.h2_retries < bun.http.max_h2_retries)) and (client.state.original_request_body == .bytes))) {
+                _ = client.retryFromH2();
+            } else {
                 _ = client.failFromH2(err);
-                return true;
-            };
-        });
-        _ = &report;
-        _ = stream.body_buffer.clearRetainingCapacity();
-        if (terminal) {
-            return self.finishStream(stream, client);
+            }
+            return true;
         }
-        if (report) {
-            if (client.state.isDone()) {
+        if (stream.headers_ready) {
+            stream.headers_ready = false;
+            const result = (blk_catch_14: { break :blk_catch_14 ((self.applyHeaders(stream, client)) catch |err| { _ = &err; _ = stream.rst(.CANCEL);
+            _ = (blk_catch_15: { break :blk_catch_15 ((self.flush()) catch |__ce_15| { _ = &__ce_15;  }); });
+            stream.client = null;
+            client.h2 = null;
+            _ = client.failFromH2(err);
+            return true; }); });
+            _ = &result;
+            if (client.state.flags.is_redirect_pending) {
+                _ = stream.rst(.CANCEL);
+                _ = (blk_catch_16: { break :blk_catch_16 ((self.flush()) catch |__ce_16| { _ = &__ce_16;  }); });
                 stream.client = null;
                 client.h2 = null;
-                _ = client.progressUpdate(true, self.ctx, self.socket);
+                _ = client.doRedirect(true, self.ctx, self.socket);
                 return true;
             }
-            _ = client.progressUpdate(true, self.ctx, self.socket);
+            if (((result == .finished) or (stream.remoteClosed() and (stream.body_buffer.items.len == 0)))) {
+                stream.client = null;
+                client.h2 = null;
+                _ = client.cloneMetadata();
+                client.state.flags.received_last_chunk = true;
+                if ((result == .finished)) {
+                    client.state.content_length = 0;
+                }
+                return self.finishStream(stream, client);
+            }
+            _ = client.cloneMetadata();
+            if (client.signals.get(.header_progress)) {
+                _ = client.progressUpdate(true, self.ctx, self.socket);
+            }
+        }
+        if ((client.state.response_stage != .body)) {
+            return false;
+        }
+        if ((stream.body_buffer.items.len > 0)) {
+            const terminal = stream.remoteClosed();
+            var __terminal_moved = false; _ = &__terminal_moved;
+            defer if (!__terminal_moved) { const T = @TypeOf(terminal); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = terminal.release() catch {}; } else { terminal.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { terminal.release(); } };
+            if (terminal) {
+                client.state.flags.received_last_chunk = true;
+                stream.client = null;
+                client.h2 = null;
+            }
+            const report = (blk_catch_17: { break :blk_catch_17 ((client.handleResponseBody(stream.body_buffer.items, false)) catch |err| { _ = &err; _ = stream.body_buffer.clearRetainingCapacity();
+            _ = stream.rst(.CANCEL);
+            _ = (blk_catch_18: { break :blk_catch_18 ((self.flush()) catch |__ce_18| { _ = &__ce_18;  }); });
+            if ((!terminal)) {
+                stream.client = null;
+                client.h2 = null;
+            }
+            _ = client.failFromH2(err);
+            return true; }); });
+            var __report_moved = false; _ = &__report_moved;
+            defer if (!__report_moved) { const T = @TypeOf(report); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = report.release() catch {}; } else { report.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { report.release(); } };
+            _ = stream.body_buffer.clearRetainingCapacity();
+            if (terminal) {
+                return self.finishStream(stream, client);
+            }
+            if (report) {
+                if (client.state.isDone()) {
+                    stream.client = null;
+                    client.h2 = null;
+                    _ = client.progressUpdate(true, self.ctx, self.socket);
+                    return true;
+                }
+                _ = client.progressUpdate(true, self.ctx, self.socket);
+            }
+            return false;
+        }
+        if (stream.remoteClosed()) {
+            stream.client = null;
+            client.h2 = null;
+            client.state.flags.received_last_chunk = true;
+            return self.finishStream(stream, client);
         }
         return false;
-    }
-    if (stream.remoteClosed()) {
-        stream.client = null;
-        client.h2 = null;
-        client.state.flags.received_last_chunk = true;
-        return self.finishStream(stream, client);
-    }
-    return false;
 }
 
 pub fn finishStream(self: *ClientSession, stream: *Stream, client: *HTTPClient) bool {
-    _ = &self;
-    if (client.state.content_length) |cl| {
-        _ = &cl;
-        if ((stream.data_bytes_received != cl)) {
-            _ = client.failFromH2(error.HTTP2ContentLengthMismatch);
-            return true;
+        if (client.state.content_length) |cl| {
+            _ = &cl;
+            if ((stream.data_bytes_received != cl)) {
+                _ = client.failFromH2(error.HTTP2ContentLengthMismatch);
+                return true;
+            }
         }
-    }
-    _ = client.progressUpdate(true, self.ctx, self.socket);
-    return true;
+        _ = client.progressUpdate(true, self.ctx, self.socket);
+        return true;
 }
 
 pub fn applyHeaders(self: *ClientSession, stream: *Stream, client: *HTTPClient) !HeaderResult {
     _ = &self;
-    var response = picohttp.Response{
-        .minor_version = 0,
-        .status_code = stream.status_code,
-        .status = "",
-        .headers = .{ .list = stream.decoded_headers.items },
-        .bytes_read = 0,
-    };
-    client.state.pending_response = response;
-
-    const should_continue = try client.handleResponseMetadata(&response);
-    client.state.pending_response = response;
-    client.state.transfer_encoding = .identity;
-    if (client.state.response_stage == .body_chunk) client.state.response_stage = .body;
-    client.state.flags.allow_keepalive = true;
-
-    return if (should_continue == .finished) .finished else .has_body;
+        var response: bun.picohttp.Response = .{ .minor_version = 0, .status_code = stream.status_code, .status = "", .headers = .{ .list = stream.decoded_headers.items }, .bytes_read = 0 };
+        _ = &response;
+        client.state.pending_response = response;
+        const should_continue = try client.handleResponseMetadata((&response));
+        var __should_continue_moved = false; _ = &__should_continue_moved;
+        defer if (!__should_continue_moved) { const T = @TypeOf(should_continue); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = should_continue.release() catch {}; } else { should_continue.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { should_continue.release(); } };
+        client.state.pending_response = response;
+        client.state.transfer_encoding = .identity;
+        if ((client.state.response_stage == .body_chunk)) {
+            client.state.response_stage = .body;
+        }
+        client.state.flags.allow_keepalive = true;
+        if ((should_continue == .finished)) {
+            return .finished;
+        }
+        return .has_body;
 }
 pub const new = bun.TrivialNew(@This());
-const RefCount = bun.ptr.RefCount(@This(), "ref_count", deinit, .{});
-pub const ref = RefCount.ref;
-pub const deref = RefCount.deref;
-pub const Socket = NewHTTPContext(true).HTTPSocket;
-
-fn deinit(this: *ClientSession) void {
-    _ = H2.live_sessions.fetchSub(1, .monotonic);
-    bun.debugAssert(this.registry_index == std.math.maxInt(u32));
-    this.hpack.deinit();
-    this.write_buffer.deinit();
-    this.read_buffer.deinit(bun.default_allocator);
-    var it = this.streams.iterator();
-    while (it.next()) |e| e.value_ptr.*.deinit();
-    this.streams.deinit(bun.default_allocator);
-    this.pending_attach.deinit(bun.default_allocator);
-    this.orphan_header_block.deinit(bun.default_allocator);
-    this.encode_scratch.deinit(bun.default_allocator);
-    bun.default_allocator.free(this.hostname);
-    if (this.ssl_config) |*s| s.deinit();
-    bun.destroy(this);
-}
+        pub const RefCount = bun.ptr.RefCount(@This(), "ref_count", deinit, .{});
+        pub const ref = RefCount.ref;
+        pub const deref = RefCount.deref;

@@ -2,38 +2,36 @@
 // Fast HTTP Request Header Builder in CP language
 
 zig {
-    const HTTPClient = @import("./http.zig");
     const bun = @import("bun");
-    const StringBuilder = bun.StringBuilder;
-    const Headers = bun.http.Headers;
-    const api = bun.schema.api;
 }
 
+import { Headers } from "./Headers.cp";
+
 export @root struct HeaderBuilder {
-    content: StringBuilder = {},
+    content: bun.StringBuilder = {},
     header_count: u64 = 0,
     entries: Headers.Entry.List = .empty,
 
-    pub fn count(*this, name: string, value: string): void {
+    fn count(*this, name: string, value: string): void {
         this.header_count += 1;
         this.content.count(name);
         this.content.count(value);
     }
 
-    pub fn allocate(*this, allocator: std.mem.Allocator)! {
+    fn allocate(*this, allocator: std.mem.Allocator): !void {
         this.content.allocate(allocator)?;
         this.entries.ensureTotalCapacity(allocator, this.header_count)?;
     }
 
-    pub fn append(*this, name: string, value: string): void {
-        const name_ptr: api.StringPointer = {
+    fn append(*this, name: string, value: string): void {
+        const name_ptr: bun.schema.api.StringPointer = {
             offset: @as(u32, @truncate(this.content.len)),
             length: @as(u32, @truncate(name.len)),
         };
 
         this.content.append(name);
 
-        const value_ptr: api.StringPointer = {
+        const value_ptr: bun.schema.api.StringPointer = {
             offset: @as(u32, @truncate(this.content.len)),
             length: @as(u32, @truncate(value.len)),
         };
@@ -41,8 +39,8 @@ export @root struct HeaderBuilder {
         this.entries.appendAssumeCapacity({ name: name_ptr, value: value_ptr });
     }
 
-    pub fn appendFmt(*this, name: string, @comptime fmt: string, args: anytype): void {
-        const name_ptr: api.StringPointer = {
+    fn appendFmt(*this, name: string, @comptime fmt: string, args: anytype): void {
+        const name_ptr: bun.schema.api.StringPointer = {
             offset: @as(u32, @truncate(this.content.len)),
             length: @as(u32, @truncate(name.len)),
         };
@@ -51,7 +49,7 @@ export @root struct HeaderBuilder {
 
         const value = this.content.fmt(fmt, args);
 
-        const value_ptr: api.StringPointer = {
+        const value_ptr: bun.schema.api.StringPointer = {
             offset: @as(u32, @truncate(this.content.len - value.len)),
             length: @as(u32, @truncate(value.len)),
         };
@@ -59,7 +57,7 @@ export @root struct HeaderBuilder {
         this.entries.appendAssumeCapacity({ name: name_ptr, value: value_ptr });
     }
 
-    pub fn apply(*this, client: *HTTPClient): void {
+    fn apply(*this, *client: any): void {
         client.header_entries = this.entries;
         if (ptr := this.content.ptr) {
             client.header_buf = ptr[0..this.content.len];

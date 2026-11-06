@@ -2,41 +2,60 @@
 const std = @import("std");
 const string = []const u8;
 
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 const bun = @import("bun");
-const strings = bun.strings;
-const SSLConfig = bun.api.server.ServerConfig.SSLConfig;
-
-const HTTPClient = bun.http;
-const NewHTTPContext = HTTPClient.NewHTTPContext;
-const WaiterList = std.ArrayListUnmanaged(*HTTPClient);
+    pub const HTTPContextTLS = @import("../HTTPContext.zig").NewHTTPContext(true);
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const PendingConnect = @This();
 
 hostname: []const u8,
 port: u16,
-ssl_config: ?*SSLConfig,
-waiters: WaiterList = .{},
+ssl_config: ?*anyopaque = null,
+waiters: std.ArrayListUnmanaged(*bun.http.HTTPClient) = .{},
 
-pub fn matches(self: *const PendingConnect, hostname: []const u8, port: u16, ssl_config: ?*SSLConfig) bool {
-    _ = &self;
-    return (((self.port == port) and (self.ssl_config == ssl_config)) and strings.eqlLong(self.hostname, hostname, true));
+pub fn matches(self: *const PendingConnect, hostname: []const u8, port: u16, ssl_config: ?*anyopaque) bool {
+        return (((self.port == port) and (self.ssl_config == ssl_config)) and bun.strings.eqlLong(self.hostname, hostname, true));
 }
 
-pub fn unregisterFrom(self: *PendingConnect, ctx: *NewHTTPContext(true)) void {
-    _ = &self;
-    const list = &ctx.pending_h2_connects;
-    for (list.items, 0..) |p, i| {
-        if (p == self) {
-            _ = list.swapRemove(i);
-            return;
+pub fn unregisterFrom(self: *PendingConnect, ctx: *HTTPContextTLS) void {
+        const list = (&ctx.pending_h2_connects);
+        _ = &list;
+        var i: usize = 0;
+        _ = &i;
+        while ((i < list.items.len)) {
+            if ((list.items[@as(usize, @intCast(i))] == self)) {
+                _ = list.swapRemove(i);
+                return;
+            }
+            i = (i + 1);
         }
-    }
+}
+
+pub fn release(self: *PendingConnect) void {
+        _ = bun.default_allocator.free(self.hostname);
+        _ = self.waiters.deinit(bun.default_allocator);
+        _ = bun.destroy(self);
 }
 
 pub fn deinit(self: *PendingConnect) void {
-    _ = &self;
-    bun.default_allocator.free(self.hostname);
-    self.waiters.deinit(bun.default_allocator);
-    bun.destroy(self);
+        _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
 }
 pub const new = bun.TrivialNew(@This());

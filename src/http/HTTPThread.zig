@@ -2,98 +2,119 @@
 const std = @import("std");
 const string = []const u8;
 
-    const bun = @import("bun");
-    const Environment = bun.Environment;
-    const Global = bun.Global;
-    const Output = bun.Output;
-    const jsc = bun.jsc;
-    const strings = bun.strings;
-    const Arena = bun.allocators.MimallocArena;
-    const Batch = bun.ThreadPool.Batch;
-    const UnboundedQueue = bun.threading.UnboundedQueue;
-    const SSLConfig = bun.api.server.ServerConfig.SSLConfig;
-
-    const HTTPClient = bun.http;
-    const AsyncHTTP = bun.http.AsyncHTTP;
-    const InitError = HTTPClient.InitError;
-    const NewHTTPContext = bun.http.NewHTTPContext;
-    const ProxyTunnel = @import("./ProxyTunnel.zig");
-
-    const log = Output.scoped(.HTTPThread, .visible);
-    const threadlog = Output.scoped(.HTTPThread, .hidden);
-    const stringZ = [:0]const u8;
-
-    pub const Queue = UnboundedQueue(AsyncHTTP, .next);
-    const request_body_send_stack_buffer_size = 32 * 1024;
-
-    pub const RequestBodyBuffer = union(enum) {
-        heap: *HeapRequestBodyBuffer,
-        stack: std.heap.StackFallbackAllocator(request_body_send_stack_buffer_size),
-
-        pub fn deinit(this: *@This()) void {
-            switch (this.*) {
-                .heap => |heap| heap.put(),
-                .stack => {},
-            }
-        }
-
-        pub fn allocatedSlice(this: *@This()) []u8 {
-            return switch (this.*) {
-                .heap => |heap| &heap.buffer,
-                .stack => |*stack| &stack.buffer,
-            };
-        }
-
-        pub fn allocator(this: *@This()) std.mem.Allocator {
-            return switch (this.*) {
-                .heap => |heap| heap.fixed_buffer_allocator.allocator(),
-                .stack => |*stack| stack.get(),
-            };
-        }
-
-        pub fn toArrayList(this: *@This()) std.array_list.Managed(u8) {
-            var arraylist = std.array_list.Managed(u8).fromOwnedSlice(this.allocator(), this.allocatedSlice());
-            arraylist.items.len = 0;
-            return arraylist;
-        }
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
+const bun = @import("bun");
+    pub const HTTPContextTCP = @import("./HTTPContext.zig").NewHTTPContext(false);
+    pub const HTTPContextTLS = @import("./HTTPContext.zig").NewHTTPContext(true);
+    pub const AsyncHTTP = @import("./AsyncHTTP.zig").AsyncHTTP;
+    pub const TaskQueue = bun.UnboundedQueue(AsyncHTTP, .next);
+    pub const request_body_send_stack_buffer_size = 32 * 1024;
+    pub const StackFallback = std.heap.StackFallbackAllocator(request_body_send_stack_buffer_size);
+    pub const ssl_context_cache_max_size = 60;
+    pub const ssl_context_cache_ttl_ns = 30 * std.time.ns_per_min;
+    pub const SSLConfigSharedPtr = bun.api.server.ServerConfig.SSLConfig.SharedPtr;
+pub const InitOpts = struct {
+        ca: []const [:0]const u8 = &.{},
+        abs_ca_file_name: [:0]const u8 = "",
+        for_install: bool = false,
+        onInitError: ?*const fn (error_val: InitError, opts: InitOpts) void = null,
     };
-
-    pub const SslContextCacheEntry = struct {
-        ctx: *NewHTTPContext(true),
-        last_used_ns: u64,
-        config_ref: SSLConfig.SharedPtr,
-    };
-
-    const ssl_context_cache_max_size = 60;
-    const ssl_context_cache_ttl_ns = 30 * std.time.ns_per_min;
-    var custom_ssl_context_map = std.AutoArrayHashMap(*SSLConfig, SslContextCacheEntry).init(bun.default_allocator);
-    var init_once = bun.once(initOnce);
 fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
 fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
 fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
 fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 fn cp_array_lit(comptime Elem: type, init_slice: []const Elem) []const Elem { const buf = std.heap.page_allocator.alloc(Elem, init_slice.len) catch unreachable; if (init_slice.len > 0) @memcpy(buf, init_slice); return buf; }
 fn CpArrayElemType(comptime PtrT: type) type { const S0 = @typeInfo(PtrT).pointer.child; const S1 = if (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one) @typeInfo(S0).pointer.child else S0; return @typeInfo(S1).pointer.child; }
 fn cp_array_push(arr_ptr: anytype, item: anytype) void { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const SliceT = @TypeOf(target_ptr.*); const Elem = @typeInfo(SliceT).pointer.child; const old_slice = target_ptr.*; const new_slice = std.heap.page_allocator.alloc(Elem, old_slice.len + 1) catch unreachable; if (old_slice.len > 0) @memcpy(new_slice[0..old_slice.len], old_slice); new_slice[old_slice.len] = @as(Elem, cp_val(item)); target_ptr.* = new_slice; }
 fn cp_array_pop(arr_ptr: anytype) ?CpArrayElemType(@TypeOf(arr_ptr)) { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const s = target_ptr.*; if (s.len == 0) return null; const last = s[s.len - 1]; target_ptr.* = s[0 .. s.len - 1]; return last; }
 fn cp_container_clear(ptr: anytype) void { const S0 = @TypeOf(ptr.*); if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one and @typeInfo(@typeInfo(S0).pointer.child) == .@"struct" and @hasDecl(@typeInfo(S0).pointer.child, "clear"))) { ptr.*.clear(); } else { const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) ptr.* else ptr; target_ptr.* = target_ptr.*[0..0]; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@"struct".fields.len; return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
+pub fn CpUnpackSliceType(comptime T: type, comptime start_offset: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start_offset < fields.len) fields[start_offset].type else fields[0].type; return []const CpValType(Elem); }
+pub fn cp_unpack_slice(v: anytype, comptime start_offset: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_offset) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_offset + suffix_len) { return m.array[start_offset .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_offset + suffix_len) { return v.array[start_offset .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_offset .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_offset .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_offset .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_offset .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start_offset) end - start_offset else 0; const Elem = if (start_offset < fields.len) CpValType(fields[start_offset].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_offset..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+
+pub const HTTPContext = @import("./HTTPContext.zig").HTTPContext;
+pub const InitError = @import("./InitError.zig").InitError;
+pub const ProxyTunnel = @import("./ProxyTunnel.zig").ProxyTunnel;
+pub const WriteMessageType = enum(u2) {
+    data = 0,
+    end = 1,
+};
+
+pub const RequestBodyBuffer = union(enum) {
+    heap: *HeapRequestBodyBuffer,
+    stack: StackFallback,
+
+pub fn release(self: *RequestBodyBuffer) void {
+            switch (self.*) {
+.heap => |heap| {
+_ = heap.put();
+},
+.stack => {
+
+},
+}
+    }
+
+pub fn deinit(self: *RequestBodyBuffer) void {
+            _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
+    }
+    
+    pub fn allocatedSlice(self: *RequestBodyBuffer) []u8 {
+                return switch (self.*) {
+                    .heap => |heap| &heap.buffer,
+                    .stack => |*stack| &stack.buffer,
+                };
+            }
+    
+            pub fn allocator(self: *RequestBodyBuffer) std.mem.Allocator {
+                return switch (self.*) {
+                    .heap => |heap| heap.fixed_buffer_allocator.allocator(),
+                    .stack => |*stack| stack.get(),
+                };
+            }
+    
+            pub fn toArrayList(self: *RequestBodyBuffer) std.array_list.Managed(u8) {
+                var list = std.array_list.Managed(u8).fromOwnedSlice(self.allocator(), self.allocatedSlice());
+                list.items.len = 0;
+                return list;
+            }
+};
 
 pub const WriteMessage = struct {
     async_http_id: u32,
-    message_type: Type,
+    message_type: WriteMessageType,
     
 pub fn _create(allocator: std.mem.Allocator) !*WriteMessage { const self_ptr = try allocator.create(WriteMessage); self_ptr.* = undefined; return self_ptr; }
 
-pub fn init(self: *WriteMessage, async_http_id: u32, message_type: Type) void {
+pub fn init(self: *WriteMessage, async_http_id: u32, message_type: WriteMessageType) void {
         var __message_type_moved = false; _ = &__message_type_moved;
         defer if (!__message_type_moved) { const T = @TypeOf(message_type); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = message_type.release() catch {}; } else { message_type.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { message_type.release(); } };
             self.async_http_id = async_http_id;
             self.message_type = message_type;
     }
-    pub const Type = enum(u2) {
-                data = 0,
-                end = 1,
-            };
 };
 
 pub const DrainMessage = struct {
@@ -122,8 +143,10 @@ pub const HeapRequestBodyBuffer = struct {
 
 pub fn init() *HeapRequestBodyBuffer {
             var this_ptr = HeapRequestBodyBuffer.new(.{ .fixed_buffer_allocator = undefined });
-            _ = &this_ptr;
+            var __this_ptr_moved = false; _ = &__this_ptr_moved;
+            defer if (!__this_ptr_moved) { const T = @TypeOf(this_ptr); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = this_ptr.release() catch {}; } else { this_ptr.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { this_ptr.release(); } };
             this_ptr.fixed_buffer_allocator = std.heap.FixedBufferAllocator.init((&this_ptr.buffer));
+            __this_ptr_moved = true;
             return this_ptr;
     }
 
@@ -143,19 +166,39 @@ pub const LibdeflateState = struct {
     decompressor: *bun.libdeflate.Decompressor = undefined,
     shared_buffer: [524288]u8 = undefined,
 
-pub fn deinit(self: *LibdeflateState) void {
+pub fn release(self: *LibdeflateState) void {
             _ = self.decompressor.deinit();
             _ = bun.TrivialDeinit(LibdeflateState)(self);
+    }
+
+pub fn deinit(self: *LibdeflateState) void {
+            _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
     }
     pub const new = bun.TrivialNew(@This());
 };
 
+pub const SslContextCacheEntry = struct {
+    ctx: *HTTPContextTLS,
+    last_used_ns: u64,
+    config_ref: SSLConfigSharedPtr,
+    
+pub fn _create(allocator: std.mem.Allocator) !*SslContextCacheEntry { const self_ptr = try allocator.create(SslContextCacheEntry); self_ptr.* = undefined; return self_ptr; }
+
+pub fn init(self: *SslContextCacheEntry, ctx: *HTTPContextTLS, last_used_ns: u64, config_ref: SSLConfigSharedPtr) void {
+        var __config_ref_moved = false; _ = &__config_ref_moved;
+        defer if (!__config_ref_moved) { const T = @TypeOf(config_ref); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = config_ref.release() catch {}; } else { config_ref.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { config_ref.release(); } };
+            self.ctx = ctx;
+            self.last_used_ns = last_used_ns;
+            self.config_ref = config_ref;
+    }
+};
+
 pub const HTTPThread = @This();
 
-loop: *jsc.MiniEventLoop,
-http_context: NewHTTPContext(false),
-https_context: NewHTTPContext(true),
-queued_tasks: Queue = .{},
+loop: *bun.jsc.MiniEventLoop,
+http_context: HTTPContextTCP,
+https_context: HTTPContextTLS,
+queued_tasks: TaskQueue = .{},
 deferred_tasks: std.ArrayListUnmanaged(*AsyncHTTP) = .{},
 has_pending_queued_abort: bool = false,
 queued_shutdowns: std.ArrayListUnmanaged(ShutdownMessage) = .{},
@@ -177,43 +220,100 @@ pub fn deflater(self: *HTTPThread) *LibdeflateState {
         return self.lazy_libdeflater.?;
 }
 
-pub fn getRequestBodySendBuffer(self: *HTTPThread, estimated_size: usize) RequestBodyBuffer {
-        if ((estimated_size >= request_body_send_stack_buffer_size)) {
-            if ((self.lazy_request_body_buffer == null)) {
-                _ = log("Allocating HeapRequestBodyBuffer due to {d} bytes request body", .{ estimated_size });
-                return .{ .heap = HeapRequestBodyBuffer.init() };
-            }
-            return .{ .heap = (bun.take((&self.lazy_request_body_buffer))).? };
-        }
-        return .{ .stack = std.heap.stackFallback(request_body_send_stack_buffer_size, bun.default_allocator) };
-}
-
 pub fn onInitErrorNoop(err: InitError, opts: InitOpts) noreturn {
         switch (err) {
 error.LoadCAFile => {
 if ((!bun.sys.existsZ(opts.abs_ca_file_name))) {
-            _ = Output.err("HTTPThread", "failed to find CA file: '{s}'", .{ opts.abs_ca_file_name });
+            _ = bun.Output.err("HTTPThread", "failed to find CA file: '{s}'", .{ opts.abs_ca_file_name });
         } else {
-            _ = Output.err("HTTPThread", "failed to load CA file: '{s}'", .{ opts.abs_ca_file_name });
+            _ = bun.Output.err("HTTPThread", "failed to load CA file: '{s}'", .{ opts.abs_ca_file_name });
         }
 },
 error.InvalidCAFile => {
-_ = Output.err("HTTPThread", "the CA file is invalid: '{s}'", .{ opts.abs_ca_file_name });
+_ = bun.Output.err("HTTPThread", "the CA file is invalid: '{s}'", .{ opts.abs_ca_file_name });
 },
 error.InvalidCA => {
-_ = Output.err("HTTPThread", "the provided CA is invalid", .{  });
+_ = bun.Output.err("HTTPThread", "the provided CA is invalid", .{  });
 },
 error.FailedToOpenSocket => {
-_ = Output.errGeneric("failed to start HTTP client thread", .{  });
+_ = bun.Output.errGeneric("failed to start HTTP client thread", .{  });
 },
 else => unreachable,
 }
-        _ = Global.crash();
+        _ = bun.Global.crash();
+}
+
+pub fn initOnce(opts: *const InitOpts) void {
+        bun.http.http_thread = .{
+                .loop = undefined,
+                .http_context = .{
+                    .ref_count = .init(),
+                    .pending_sockets = HTTPContextTCP.PooledSocketHiveAllocator.empty,
+                },
+                .https_context = .{
+                    .ref_count = .init(),
+                    .pending_sockets = HTTPContextTLS.PooledSocketHiveAllocator.empty,
+                },
+                .timer = std.time.Timer.start() catch @panic("Failed to start timer"),
+            };
+
+        _ = bun.libdeflate.load();
+        const thread = std.Thread.spawn(
+                .{
+                    .stack_size = bun.default_thread_stack_size,
+                },
+                onStart,
+                .{opts.*},
+            ) catch |err| {
+                bun.Output.panic("Failed to start HTTP Client thread: {s}", .{bun.asByteSlice(@errorName(err))});
+            };
+            thread.detach();
+
+}
+
+pub fn init(opts: *const InitOpts) void {
+        init_once.call(.{opts});
+
+}
+
+pub fn onStart(opts: InitOpts) void {
+        _ = bun.Output.Source.configureNamedThread("HTTP Client");
+        bun.http.default_arena = bun.allocators.MimallocArena.init();
+        bun.http.default_allocator = bun.http.default_arena.allocator();
+        const raw: u64 = @min(bun.env_var.BUN_CONFIG_HTTP_IDLE_TIMEOUT.get(), (239 * 60));
+        _ = &raw;
+        var timeout_val: u64 = raw;
+        _ = &timeout_val;
+        if ((raw > 240)) {
+            timeout_val = (((raw + 59) / 60) * 60);
+        }
+        bun.http.idle_timeout_seconds = @intCast(timeout_val);
+        const loop = bun.jsc.MiniEventLoop.initGlobal(null, null);
+        var __loop_moved = false; _ = &__loop_moved;
+        defer if (!__loop_moved) { const T = @TypeOf(loop); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = loop.release() catch {}; } else { loop.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { loop.release(); } };
+        if (bun.Environment.isWindows) {
+            const env_val = std.process.getenvW(bun.strings.w("SystemRoot"));
+            var __env_val_moved = false; _ = &__env_val_moved;
+            defer if (!__env_val_moved) { const T = @TypeOf(env_val); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = env_val.release() catch {}; } else { env_val.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { env_val.release(); } };
+            if ((env_val == null)) {
+                _ = bun.Output.errGeneric("The %SystemRoot% environment variable is not set. Bun needs this set in order for network requests to work.", .{  });
+                _ = bun.Global.crash();
+            }
+        }
+        bun.http.http_thread.loop = loop;
+        _ = bun.http.http_thread.http_context.init();
+        _ = (blk_catch_0: { break :blk_catch_0 ((bun.http.http_thread.https_context.initWithThreadOpts((&opts))) catch |err| { _ = &err; if (opts.onInitError) |cb| {
+            _ = &cb;
+            _ = cb(err, opts);
+        } }); });
+        _ = bun.http.http_thread.has_awoken.store(true, .monotonic);
+        _ = bun.http.http_thread.processEvents();
 }
 
 pub fn evictStaleSslContexts(self: *HTTPThread) void {
         const now = self.timer.read();
-        _ = &now;
+        var __now_moved = false; _ = &__now_moved;
+        defer if (!__now_moved) { const T = @TypeOf(now); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = now.release() catch {}; } else { now.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { now.release(); } };
         var i: usize = 0;
         _ = &i;
         while ((i < custom_ssl_context_map.count())) {
@@ -234,18 +334,24 @@ pub fn evictOldestSslContext() void {
             return;
         }
         var oldest_idx: usize = 0;
-            var oldest_time: u64 = std.math.maxInt(u64);
-            for (custom_ssl_context_map.values(), 0..) |entry, i| {
-                if (entry.last_used_ns < oldest_time) {
-                    oldest_time = entry.last_used_ns;
-                    oldest_idx = i;
-                }
+        _ = &oldest_idx;
+        var oldest_time: u64 = std.math.maxInt(u64);
+        _ = &oldest_time;
+        var i: usize = 0;
+        _ = &i;
+        for (custom_ssl_context_map.values()) |entry| {
+            _ = &entry;
+            if ((entry.last_used_ns < oldest_time)) {
+                oldest_time = entry.last_used_ns;
+                oldest_idx = i;
             }
-            var entry = custom_ssl_context_map.values()[oldest_idx];
-            _ = custom_ssl_context_map.swapRemoveAt(oldest_idx);
-            entry.ctx.deref();
-            entry.config_ref.deinit();
-
+            i = (i + 1);
+        }
+        var entry = custom_ssl_context_map.values()[@as(usize, @intCast(oldest_idx))];
+        _ = &entry;
+        _ = custom_ssl_context_map.swapRemoveAt(oldest_idx);
+        _ = entry.ctx.deref();
+        _ = entry.config_ref.deinit();
 }
 
 pub fn abortPendingH2Waiter(self: *HTTPThread, async_http_id: u32) bool {
@@ -274,13 +380,26 @@ pub fn drainQueuedShutdowns(self: *HTTPThread) void {
             for (queued_shutdowns.items) |http| {
                 _ = &http;
                 if (bun.http.socket_async_http_abort_tracker.fetchSwapRemove(http.async_http_id)) |socket_ptr| {
-                        switch (socket_ptr.value) {
-                            inline .SocketTLS, .SocketTCP => |socket, tag| {
-                                const is_tls = tag == .SocketTLS;
-                                const HTTPContext = NewHTTPContext(comptime is_tls);
-                                const tagged = HTTPContext.getTaggedFromSocket(socket);
-                                if (tagged.get(HTTPClient)) |client| {
-                                    client.closeAndAbort(comptime is_tls, socket);
+                    _ = &socket_ptr;
+                    switch (socket_ptr.value) {
+                            .SocketTLS => |socket| {
+                                const is_tls = true;
+                                const tagged = HTTPContextTLS.getTaggedFromSocket(socket);
+                                if (tagged.get(bun.http)) |client| {
+                                    client.closeAndAbort(is_tls, socket);
+                                    continue;
+                                }
+                                if (tagged.get(bun.http.H2.ClientSession)) |session| {
+                                    session.abortByHttpId(http.async_http_id);
+                                    continue;
+                                }
+                                socket.close(.failure);
+                            },
+                            .SocketTCP => |socket| {
+                                const is_tls = false;
+                                const tagged = HTTPContextTCP.getTaggedFromSocket(socket);
+                                if (tagged.get(bun.http)) |client| {
+                                    client.closeAndAbort(is_tls, socket);
                                     continue;
                                 }
                                 if (tagged.get(bun.http.H2.ClientSession)) |session| {
@@ -290,17 +409,20 @@ pub fn drainQueuedShutdowns(self: *HTTPThread) void {
                                 socket.close(.failure);
                             },
                         }
-                    } else {
-                        if (self.abortPendingH2Waiter(http.async_http_id)) continue;
-                        if (bun.http.H3.ClientContext.abortByHttpId(http.async_http_id)) continue;
-                        self.has_pending_queued_abort = true;
-                    }
 
+                } else {
+                    if (self.abortPendingH2Waiter(http.async_http_id)) {
+                        continue;
+                    }
+                    if (bun.http.H3.ClientContext.abortByHttpId(http.async_http_id)) {
+                        continue;
+                    }
+                    self.has_pending_queued_abort = true;
+                }
             }
             if ((queued_shutdowns.items.len == 0)) {
                 break;
             }
-            _ = threadlog("drained {d} queued shutdowns", .{ queued_shutdowns.items.len });
         }
 }
 
@@ -319,14 +441,28 @@ pub fn drainQueuedWrites(self: *HTTPThread) void {
                 const ended = (write.message_type == .end);
                 _ = &ended;
                 if (bun.http.socket_async_http_abort_tracker.get(write.async_http_id)) |socket_ptr| {
-                        switch (socket_ptr) {
-                            inline .SocketTLS, .SocketTCP => |socket, tag| {
-                                const is_tls = tag == .SocketTLS;
-                                if (socket.isClosed() or socket.isShutdown()) {
-                                    continue;
+                    _ = &socket_ptr;
+                    switch (socket_ptr) {
+                            .SocketTLS => |socket| {
+                                const is_tls = true;
+                                if (socket.isClosed() or socket.isShutdown()) continue;
+                                const tagged = HTTPContextTLS.getTaggedFromSocket(socket);
+                                if (tagged.get(bun.http)) |client| {
+                                    if (client.state.original_request_body == .stream) {
+                                        var stream = &client.state.original_request_body.stream;
+                                        stream.ended = ended;
+                                        client.flushStream(is_tls, socket);
+                                    }
                                 }
-                                const tagged = NewHTTPContext(comptime is_tls).getTaggedFromSocket(socket);
-                                if (tagged.get(HTTPClient)) |client| {
+                                if (tagged.get(bun.http.H2.ClientSession)) |session| {
+                                    session.streamBodyByHttpId(write.async_http_id, ended);
+                                }
+                            },
+                            .SocketTCP => |socket| {
+                                const is_tls = false;
+                                if (socket.isClosed() or socket.isShutdown()) continue;
+                                const tagged = HTTPContextTCP.getTaggedFromSocket(socket);
+                                if (tagged.get(bun.http)) |client| {
                                     if (client.state.original_request_body == .stream) {
                                         var stream = &client.state.original_request_body.stream;
                                         stream.ended = ended;
@@ -338,15 +474,14 @@ pub fn drainQueuedWrites(self: *HTTPThread) void {
                                 }
                             },
                         }
-                    } else {
-                        bun.http.H3.ClientContext.streamBodyByHttpId(write.async_http_id, ended);
-                    }
 
+                } else {
+                    _ = bun.http.H3.ClientContext.streamBodyByHttpId(write.async_http_id, ended);
+                }
             }
             if ((queued_writes.items.len == 0)) {
                 break;
             }
-            _ = threadlog("drained {d} queued writes", .{ queued_writes.items.len });
         }
 }
 
@@ -363,26 +498,35 @@ pub fn drainQueuedHTTPResponseBodyDrains(self: *HTTPThread) void {
             for (queued_response_body_drains.items) |drain| {
                 _ = &drain;
                 if (bun.http.socket_async_http_abort_tracker.get(drain.async_http_id)) |socket_ptr| {
-                        switch (socket_ptr) {
-                            inline .SocketTLS, .SocketTCP => |socket, tag| {
-                                const is_tls = tag == .SocketTLS;
-                                const HTTPContext = NewHTTPContext(comptime is_tls);
-                                const tagged = HTTPContext.getTaggedFromSocket(socket);
-                                if (tagged.get(HTTPClient)) |client| {
-                                    client.drainResponseBody(comptime is_tls, socket);
+                    _ = &socket_ptr;
+                    switch (socket_ptr) {
+                            .SocketTLS => |socket| {
+                                const is_tls = true;
+                                const tagged = HTTPContextTLS.getTaggedFromSocket(socket);
+                                if (tagged.get(bun.http)) |client| {
+                                    client.drainResponseBody(is_tls, socket);
+                                }
+                                if (tagged.get(bun.http.H2.ClientSession)) |session| {
+                                    session.drainResponseBodyByHttpId(drain.async_http_id);
+                                }
+                            },
+                            .SocketTCP => |socket| {
+                                const is_tls = false;
+                                const tagged = HTTPContextTCP.getTaggedFromSocket(socket);
+                                if (tagged.get(bun.http)) |client| {
+                                    client.drainResponseBody(is_tls, socket);
                                 }
                                 if (tagged.get(bun.http.H2.ClientSession)) |session| {
                                     session.drainResponseBodyByHttpId(drain.async_http_id);
                                 }
                             },
                         }
-                    }
 
+                }
             }
             if ((queued_response_body_drains.items.len == 0)) {
                 break;
             }
-            _ = threadlog("drained {d} queued drains", .{ queued_response_body_drains.items.len });
         }
 }
 
@@ -396,21 +540,12 @@ pub fn drainEvents(self: *HTTPThread) void {
             _ = http.deref();
         }
         _ = self.queued_threadlocal_proxy_derefs.clearRetainingCapacity();
-        var count: usize = 0;
-        _ = &count;
-        var active = AsyncHTTP.active_requests_count.load(.monotonic);
-        _ = &active;
-        const max = AsyncHTTP.max_simultaneous_requests.load(.monotonic);
-        _ = &max;
-        defer {
-        {
-            if (Environment.allow_assert) {
-                if ((count > 0)) {
-                    _ = log("Processed {d} tasks\n", .{ count });
-                }
-            }
-        }
-        }
+        var active = bun.http.AsyncHTTP.active_requests_count.load(.monotonic);
+        var __active_moved = false; _ = &__active_moved;
+        defer if (!__active_moved) { const T = @TypeOf(active); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = active.release() catch {}; } else { active.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { active.release(); } };
+        const max = bun.http.AsyncHTTP.max_simultaneous_requests.load(.monotonic);
+        var __max_moved = false; _ = &__max_moved;
+        defer if (!__max_moved) { const T = @TypeOf(max); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = max.release() catch {}; } else { max.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { max.release(); } };
         if (((active >= max) and (!self.has_pending_queued_abort))) {
             return;
         }
@@ -426,10 +561,7 @@ pub fn drainEvents(self: *HTTPThread) void {
                 _ = &http;
                 if ((http.client.signals.get(.aborted) or (active < max))) {
                     _ = HTTPThread.startQueuedTask(http);
-                    if (Environment.allow_assert) {
-                        count = (count + 1);
-                    }
-                    active = AsyncHTTP.active_requests_count.load(.monotonic);
+                    active = bun.http.AsyncHTTP.active_requests_count.load(.monotonic);
                 } else {
                     _ = bun.handleOom(self.deferred_tasks.append(bun.default_allocator, http));
                 }
@@ -441,16 +573,14 @@ pub fn drainEvents(self: *HTTPThread) void {
                 continue;
             }
             _ = HTTPThread.startQueuedTask(http);
-            if (Environment.allow_assert) {
-                count = (count + 1);
-            }
-            active = AsyncHTTP.active_requests_count.load(.monotonic);
+            active = bun.http.AsyncHTTP.active_requests_count.load(.monotonic);
         }
 }
 
 pub fn startQueuedTask(http: *AsyncHTTP) void {
         var cloned = bun.http.ThreadlocalAsyncHTTP.new(.{ .async_http = http.* });
-        _ = &cloned;
+        var __cloned_moved = false; _ = &__cloned_moved;
+        defer if (!__cloned_moved) { const T = @TypeOf(cloned); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = cloned.release() catch {}; } else { cloned.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { cloned.release(); } };
         cloned.async_http.real = http;
         cloned.async_http.next = null;
         cloned.async_http.task.node.next = null;
@@ -458,50 +588,18 @@ pub fn startQueuedTask(http: *AsyncHTTP) void {
 }
 
 pub fn processEvents(self: *HTTPThread) noreturn {
-        if (Environment.isPosix) {
+        if (bun.Environment.isPosix) {
             self.loop.loop.num_polls = @max(2, self.loop.loop.num_polls);
         } else {
-            if (Environment.isWindows) {
+            if (bun.Environment.isWindows) {
                 _ = self.loop.loop.inc();
-            } else {
-                _ = @compileError("TODO:");
             }
         }
         while (true) {
             _ = self.drainEvents();
-            if (comptime Environment.isDebug and bun.asan.enabled) {
-                    for (bun.http.socket_async_http_abort_tracker.keys(), bun.http.socket_async_http_abort_tracker.values()) |http_id, socket| {
-                        if (socket.socket().get()) |usocket| {
-                            _ = http_id;
-                            bun.asan.assertUnpoisoned(usocket);
-                        }
-                    }
-                }
-
-            var start_time: i128 = 0;
-            _ = &start_time;
-            if (Environment.isDebug) {
-                start_time = std.time.nanoTimestamp();
-            }
-            _ = Output.flush();
             _ = self.loop.loop.inc();
             _ = self.loop.loop.tick();
             _ = self.loop.loop.dec();
-            if (comptime Environment.isDebug and bun.asan.enabled) {
-                    for (bun.http.socket_async_http_abort_tracker.keys(), bun.http.socket_async_http_abort_tracker.values()) |http_id, socket| {
-                        if (socket.socket().get()) |usocket| {
-                            _ = http_id;
-                            bun.asan.assertUnpoisoned(usocket);
-                        }
-                    }
-                }
-
-            if (Environment.isDebug) {
-                const end = std.time.nanoTimestamp();
-                _ = &end;
-                _ = threadlog("Waited {D}\n", .{ @as(i64, @truncate((end - start_time))) });
-                _ = Output.flush();
-            }
         }
 }
 
@@ -519,7 +617,6 @@ pub fn scheduleResponseBodyDrain(self: *HTTPThread, async_http_id: u32) void {
 }
 
 pub fn scheduleShutdown(self: *HTTPThread, http: *AsyncHTTP) void {
-        _ = threadlog("scheduleShutdown {d}", .{ http.async_http_id });
         {
             _ = self.queued_shutdowns_lock.lock();
             defer {
@@ -532,7 +629,7 @@ pub fn scheduleShutdown(self: *HTTPThread, http: *AsyncHTTP) void {
         }
 }
 
-pub fn scheduleRequestWrite(self: *HTTPThread, http: *AsyncHTTP, messageType: WriteMessage.Type) void {
+pub fn scheduleRequestWrite(self: *HTTPThread, http: *AsyncHTTP, messageType: WriteMessageType) void {
         {
             _ = self.queued_writes_lock.lock();
             defer {
@@ -558,153 +655,101 @@ pub fn wakeup(self: *HTTPThread) void {
         }
 }
 
-pub fn schedule(self: *HTTPThread, batch: Batch) void {
+pub fn schedule(self: *HTTPThread, batch: bun.ThreadPool.Batch) void {
         if ((batch.len == 0)) {
             return;
         }
-        {
-            var batch_ = batch;
-            _ = &batch_;
-            while (batch_.pop()) |task| {
-                _ = &task;
+        var mut_batch = batch;
+            while (mut_batch.pop()) |task| {
                 const http: *AsyncHTTP = @fieldParentPtr("task", task);
-                    self.queued_tasks.push(http);
-
+                self.queued_tasks.push(http);
             }
-        }
+
         if (self.has_awoken.load(.monotonic)) {
             _ = self.loop.loop.wakeup();
         }
 }
-pub const InitOpts = struct {
-            ca: []stringZ = &.{},
-            abs_ca_file_name: stringZ = &.{},
-            for_install: bool = false,
-            onInitError: *const fn (err: InitError, opts: InitOpts) noreturn = &onInitErrorNoop,
-        };
-
-        pub fn initOnce(opts: *const InitOpts) void {
-            bun.http.http_thread = .{
-                .loop = undefined,
-                .http_context = .{
-                    .ref_count = .init(),
-                    .pending_sockets = NewHTTPContext(false).PooledSocketHiveAllocator.empty,
-                },
-                .https_context = .{
-                    .ref_count = .init(),
-                    .pending_sockets = NewHTTPContext(true).PooledSocketHiveAllocator.empty,
-                },
-                .timer = std.time.Timer.start() catch unreachable,
+pub var custom_ssl_context_map = std.AutoArrayHashMap(*anyopaque, SslContextCacheEntry).init(bun.default_allocator);
+        pub var init_once = bun.once(initOnce);
+pub inline fn getRequestBodySendBuffer(self: *HTTPThread, estimated_size: usize) RequestBodyBuffer {
+            if (estimated_size >= request_body_send_stack_buffer_size) {
+                if (self.lazy_request_body_buffer == null) {
+                    return .{
+                        .heap = HeapRequestBodyBuffer.init(),
+                    };
+                }
+                return .{ .heap = bun.take(&self.lazy_request_body_buffer).? };
+            }
+            return .{
+                .stack = std.heap.stackFallback(request_body_send_stack_buffer_size, bun.default_allocator),
             };
-            bun.libdeflate.load();
-            const thread = std.Thread.spawn(
-                .{
-                    .stack_size = bun.default_thread_stack_size,
-                },
-                onStart,
-                .{opts.*},
-            ) catch |err| Output.panic("Failed to start HTTP Client thread: {s}", .{@errorName(err)});
-            thread.detach();
+        }
+pub fn context(self: *HTTPThread, comptime is_ssl: bool) if (is_ssl) *HTTPContextTLS else *HTTPContextTCP {
+            if (is_ssl) return &self.https_context;
+            return &self.http_context;
         }
 
-        pub fn init(opts: *const InitOpts) void {
-            init_once.call(.{opts});
-        }
-
-        pub fn onStart(opts: InitOpts) void {
-            Output.Source.configureNamedThread("HTTP Client");
-            bun.http.default_arena = Arena.init();
-            bun.http.default_allocator = bun.http.default_arena.allocator();
-
-            const raw: u64 = @min(bun.env_var.BUN_CONFIG_HTTP_IDLE_TIMEOUT.get(), 239 * 60);
-            bun.http.idle_timeout_seconds = @intCast(if (raw > 240) ((raw + 59) / 60) * 60 else raw);
-
-            const loop = bun.jsc.MiniEventLoop.initGlobal(null, null);
-
-            if (Environment.isWindows) {
-                _ = std.process.getenvW(comptime bun.strings.w("SystemRoot")) orelse {
-                    bun.Output.errGeneric("The %SystemRoot% environment variable is not set. Bun needs this set in order for network requests to work.", .{});
-                    Global.crash();
-                };
-            }
-
-            bun.http.http_thread.loop = loop;
-            bun.http.http_thread.http_context.init();
-            bun.http.http_thread.https_context.initWithThreadOpts(&opts) catch |err| opts.onInitError(err, opts);
-            bun.http.http_thread.has_awoken.store(true, .monotonic);
-            bun.http.http_thread.processEvents();
-        }
-
-        pub fn context(this: *@This(), comptime is_ssl: bool) *NewHTTPContext(is_ssl) {
-            return if (is_ssl) &this.https_context else &this.http_context;
-        }
-
-        pub fn connect(this: *@This(), client: *HTTPClient, comptime is_ssl: bool) !?NewHTTPContext(is_ssl).HTTPSocket {
+        pub fn connect(self: *HTTPThread, comptime is_ssl: bool, client: *bun.http.HTTPClient) !?bun.http.NewHTTPContext(is_ssl).HTTPSocket {
             if (client.unix_socket_path.length() > 0) {
-                return try this.context(is_ssl).connectSocket(client, client.unix_socket_path.slice());
+                return try self.context(is_ssl).connectSocket(client, client.unix_socket_path.slice());
             }
 
-            if (comptime is_ssl) custom_ctx: {
-                if (client.tls_props) |tls| {
-                    if (!tls.get().requires_custom_request_ctx) break :custom_ctx;
-                    const requested_config = tls.get();
+            if (comptime is_ssl) {
+                if (client.tls_props) |*tls| {
+                    if (tls.get().requires_custom_request_ctx) {
+                        const requested_config = tls.get();
+                        self.evictStaleSslContexts();
 
-                    evictStaleSslContexts(this);
-
-                    if (custom_ssl_context_map.getPtr(requested_config)) |entry| {
-                        entry.last_used_ns = this.timer.read();
-                        client.setCustomSslCtx(entry.ctx);
-                        if (client.http_proxy) |url| {
-                            return try entry.ctx.connect(client, url.hostname, url.getPortAuto());
-                        } else {
-                            return try entry.ctx.connect(client, client.url.hostname, client.url.getPortAuto());
+                        if (custom_ssl_context_map.getPtr(requested_config)) |entry| {
+                            entry.last_used_ns = self.timer.read();
+                            client.setCustomSslCtx(entry.ctx);
+                            if (client.http_proxy) |url| {
+                                return try entry.ctx.connect(client, url.hostname, url.getPortAuto());
+                            } else {
+                                return try entry.ctx.connect(client, client.url.hostname, client.url.getPortAuto());
+                            }
                         }
-                    }
 
-                    var custom_context = try bun.default_allocator.create(NewHTTPContext(is_ssl));
-                    custom_context.* = .{
-                        .ref_count = .init(),
-                        .pending_sockets = NewHTTPContext(is_ssl).PooledSocketHiveAllocator.empty,
-                    };
-                    custom_context.initWithClientConfig(client) catch |err| {
-                        bun.default_allocator.destroy(custom_context);
-                        return switch (err) {
-                            error.FailedToOpenSocket => |e| e,
-                            error.InvalidCA => error.FailedToOpenSocket,
-                            error.InvalidCAFile => error.FailedToOpenSocket,
-                            error.LoadCAFile => error.FailedToOpenSocket,
+                        const custom_context = try bun.default_allocator.create(HTTPContextTLS);
+                        custom_context.* = .{
+                            .ref_count = .init(),
+                            .pending_sockets = HTTPContextTLS.PooledSocketHiveAllocator.empty,
                         };
-                    };
+                        custom_context.initWithClientConfig(client) catch {
+                            bun.default_allocator.destroy(custom_context);
+                            return error.FailedToOpenSocket;
+                        };
 
-                    const now = this.timer.read();
-                    bun.handleOom(custom_ssl_context_map.put(requested_config, .{
-                        .ctx = custom_context,
-                        .last_used_ns = now,
-                        .config_ref = tls.clone(),
-                    }));
+                        const now = self.timer.read();
+                        bun.handleOom(custom_ssl_context_map.put(requested_config, .{
+                            .ctx = custom_context,
+                            .last_used_ns = now,
+                            .config_ref = tls.clone(),
+                        }));
 
-                    if (custom_ssl_context_map.count() > ssl_context_cache_max_size) {
-                        evictOldestSslContext();
-                    }
-
-                    client.setCustomSslCtx(custom_context);
-                    if (client.http_proxy) |url| {
-                        if (url.protocol.len == 0 or strings.eqlComptime(url.protocol, "https") or strings.eqlComptime(url.protocol, "http")) {
-                            return try custom_context.connect(client, url.hostname, url.getPortAuto());
+                        if (custom_ssl_context_map.count() > ssl_context_cache_max_size) {
+                            HTTPThread.evictOldestSslContext();
                         }
-                        return error.UnsupportedProxyProtocol;
+
+                        client.setCustomSslCtx(custom_context);
+                        if (client.http_proxy) |url| {
+                            if (url.protocol.len == 0 or bun.strings.eqlComptime(url.protocol, "https") or bun.strings.eqlComptime(url.protocol, "http")) {
+                                return try custom_context.connect(client, url.hostname, url.getPortAuto());
+                            }
+                            return error.UnsupportedProxyProtocol;
+                        }
+                        return try custom_context.connect(client, client.url.hostname, client.url.getPortAuto());
                     }
-                    return try custom_context.connect(client, client.url.hostname, client.url.getPortAuto());
                 }
             }
 
             if (client.http_proxy) |url| {
                 if (url.href.len > 0) {
-                    if (url.protocol.len == 0 or strings.eqlComptime(url.protocol, "https") or strings.eqlComptime(url.protocol, "http")) {
-                        return try this.context(is_ssl).connect(client, url.hostname, url.getPortAuto());
+                    if (url.protocol.len == 0 or bun.strings.eqlComptime(url.protocol, "https") or bun.strings.eqlComptime(url.protocol, "http")) {
+                        return try self.context(is_ssl).connect(client, url.hostname, url.getPortAuto());
                     }
                     return error.UnsupportedProxyProtocol;
                 }
             }
-            return try this.context(is_ssl).connect(client, client.url.hostname, client.url.getPortAuto());
+            return try self.context(is_ssl).connect(client, client.url.hostname, client.url.getPortAuto());
         }

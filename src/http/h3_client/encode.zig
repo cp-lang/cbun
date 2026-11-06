@@ -2,129 +2,202 @@
 const std = @import("std");
 const string = []const u8;
 
-const ClientSession = @import("./ClientSession.zig");
-const Stream = @import("./Stream.zig");
-
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
-const HTTPClient = bun.http;
-const strings = bun.strings;
-const quic = bun.uws.quic;
+    const quic = bun.uws.quic;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+
+pub const ClientSession = @import("./ClientSession.zig").ClientSession;
+pub const Stream = @import("./Stream.zig").Stream;
+pub const HTTPClient = @import("../http.zig").HTTPClient;
 
 pub fn writeRequest(session: *ClientSession, stream: *Stream, qs: *quic.Stream) !void {
-    if (stream.client) |client| {
-        _ = &client;
-        const request = client.buildRequest(client.state.original_request_body.len());
-        _ = &request;
-        if ((client.verbose != .none)) {
-            _ = HTTPClient.printRequest(.http3, request, client.url.href, (!client.flags.reject_unauthorized), client.state.request_body, (client.verbose == .curl));
-        }
-        var sfa = std.heap.stackFallback(2048, bun.default_allocator);
-        const alloc = sfa.get();
-        var headers: std.ArrayListUnmanaged(quic.Header) = .{};
-        defer headers.deinit(alloc);
-        try headers.ensureTotalCapacityPrecise(alloc, request.headers.len + 4);
-
-        var name_bytes: usize = 0;
-        for (request.headers) |h| name_bytes += h.name.len;
-        const lower = try alloc.alloc(u8, name_bytes);
-        defer alloc.free(lower);
-        var lower_len: usize = 0;
-
-        var authority: []const u8 = client.url.host;
-        headers.items.len = 4;
-        for (request.headers) |h| {
-            if (quic.Qpack.classify(h.name)) |class| switch (class) {
-                .forbidden => {},
-                .host => authority = h.value,
-                .indexed => |i| headers.appendAssumeCapacity(.init(i.name, h.value, i.index)),
-            } else {
-                const dst = lower[lower_len..][0..h.name.len];
-                _ = strings.copyLowercase(h.name, dst);
-                lower_len += h.name.len;
-                headers.appendAssumeCapacity(.init(dst, h.value, null));
+        if (stream.client) |client| {
+            _ = &client;
+            const request = client.buildRequest(client.state.original_request_body.len());
+            _ = &request;
+            if ((client.verbose != .none)) {
+                _ = HTTPClient.printRequest(.http3, request, client.url.href, (!client.flags.reject_unauthorized), client.state.request_body, (client.verbose == .curl));
             }
-        }
-        if (authority.len == 0) authority = session.hostname;
-        headers.items[0] = .init(":method", request.method, .method_get);
-        headers.items[1] = .init(":scheme", "https", .scheme_https);
-        headers.items[2] = .init(":authority", authority, .authority);
-        headers.items[3] = .init(":path", if (request.path.len > 0) request.path else "/", .path);
+            var sfa = std.heap.stackFallback(2048, bun.default_allocator);
+            _ = &sfa;
+            const alloc = sfa.get();
+            _ = &alloc;
+            var headers: std.ArrayListUnmanaged(bun.uws.quic.Header) = .{};
+            _ = &headers;
+            defer {
+            _ = headers.deinit(alloc);
+            }
+            _ = try headers.ensureTotalCapacityPrecise(alloc, (request.headers.len + 4));
+            var name_bytes: usize = 0;
+            _ = &name_bytes;
+            for (cp_iter_slice(request.headers)) |h| {
+                _ = &h;
+                name_bytes = (name_bytes + h.name.len);
+            }
+            const lower = try cp_opt_unwrap(alloc).alloc(u8, name_bytes);
+            _ = &lower;
+            defer {
+            _ = cp_opt_unwrap(alloc).free(lower);
+            }
+            var lower_len: usize = 0;
+            _ = &lower_len;
+            var authority: []const u8 = client.url.host;
+            _ = &authority;
+            headers.items.len = 4;
+            for (cp_iter_slice(request.headers)) |h| {
+                _ = &h;
+                if (bun.uws.quic.Qpack.classify(h.name)) |qpack_class| {
+                    _ = &qpack_class;
+                    switch (qpack_class) {
+                        .forbidden => {},
+                        .host => authority = h.value,
+                        .indexed => |i| _ = headers.appendAssumeCapacity(bun.uws.quic.Header.init(i.name, h.value, i.index)),
+                    }
 
-        const body = client.state.request_body;
-        const has_inline_body = client.state.original_request_body == .bytes and body.len > 0;
-        const is_streaming = client.state.original_request_body == .stream;
-
-        const end_stream = !has_inline_body and !is_streaming;
-        if (qs.sendHeaders(headers.items, end_stream) != 0) {
-            return error.HTTP3HeaderEncodingError;
-        }
-
-        if (has_inline_body) {
-            stream.pending_body = body;
-            drainSendBody(stream, qs);
-        } else if (is_streaming) {
-            stream.is_streaming_body = true;
-            drainSendBody(stream, qs);
+                } else {
+                    const dst = lower[lower_len..(lower_len + h.name.len)];
+                    _ = &dst;
+                    _ = bun.strings.copyLowercase(h.name, dst);
+                    lower_len = (lower_len + h.name.len);
+                    _ = headers.appendAssumeCapacity(bun.uws.quic.Header.init(dst, h.value, null));
+                }
+            }
+            if ((authority.len == 0)) {
+                authority = session.hostname;
+            }
+            headers.items[cp_cast_int(usize, 0)] = bun.uws.quic.Header.init(":method", request.method, .method_get);
+            headers.items[cp_cast_int(usize, 1)] = bun.uws.quic.Header.init(":scheme", "https", .scheme_https);
+            headers.items[cp_cast_int(usize, 2)] = bun.uws.quic.Header.init(":authority", authority, .authority);
+            var req_path: []const u8 = "/";
+            _ = &req_path;
+            if ((request.path.len > 0)) {
+                req_path = request.path;
+            }
+            headers.items[cp_cast_int(usize, 3)] = bun.uws.quic.Header.init(":path", req_path, .path);
+            const body = client.state.request_body;
+            _ = &body;
+            const has_inline_body = ((client.state.original_request_body == .bytes) and (body.len > 0));
+            _ = &has_inline_body;
+            const is_streaming = (client.state.original_request_body == .stream);
+            _ = &is_streaming;
+            const end_stream = ((!has_inline_body) and (!is_streaming));
+            _ = &end_stream;
+            if ((qs.sendHeaders(headers.items, end_stream) != 0)) {
+                return error.HTTP3HeaderEncodingError;
+            }
+            if (has_inline_body) {
+                stream.pending_body = body;
+                _ = drainSendBody(stream, qs);
+            } else {
+                if (is_streaming) {
+                    stream.is_streaming_body = true;
+                    _ = drainSendBody(stream, qs);
+                } else {
+                    stream.request_body_done = true;
+                }
+            }
+            if (stream.request_body_done) {
+                client.state.request_stage = .done;
+            } else {
+                client.state.request_stage = .body;
+            }
+            client.state.response_stage = .headers;
+            if (is_streaming) {
+                _ = client.progressUpdateH3();
+            }
         } else {
-            stream.request_body_done = true;
+            return error.Aborted;
         }
-
-        client.state.request_stage = if (stream.request_body_done) .done else .body;
-        client.state.response_stage = .headers;
-
-        if (is_streaming) client.progressUpdateH3();
-    } else {
-        return error.Aborted;
-    }
 }
 
 pub fn drainSendBody(stream: *Stream, qs: *quic.Stream) void {
-    if (stream.request_body_done) {
-        return;
-    }
-    if (stream.client) |client| {
-        _ = &client;
-        if (stream.is_streaming_body) {
-            const body = &client.state.original_request_body.stream;
-            const sb = body.buffer orelse return;
-            const buffer = sb.acquire();
-            const data = buffer.slice();
-            var written: usize = 0;
-            while (written < data.len) {
-                const w = qs.write(data[written..]);
-                if (w <= 0) break;
-                written += @intCast(w);
-            }
-            buffer.cursor += written;
-            const drained = buffer.isEmpty();
-            if (drained) buffer.reset();
-            if (drained and body.ended) {
-                stream.request_body_done = true;
-                qs.shutdown();
-                client.state.request_stage = .done;
-            } else if (!drained) {
-                qs.wantWrite(true);
-            } else if (data.len > 0) {
-                sb.reportDrain();
-            }
-            sb.release();
-            if (stream.request_body_done) body.detach();
+        if (stream.request_body_done) {
             return;
         }
-        while ((stream.pending_body.len > 0)) {
-            const w = qs.write(stream.pending_body);
-            _ = &w;
-            if ((w <= 0)) {
-                break;
+        if (stream.client) |client| {
+            _ = &client;
+            if (stream.is_streaming_body) {
+                const body = (&client.state.original_request_body.stream);
+                _ = &body;
+                if (body.buffer) |sb| {
+                    _ = &sb;
+                    const buffer = sb.acquire();
+                    _ = &buffer;
+                    const data = buffer.slice();
+                    _ = &data;
+                    var written: usize = 0;
+                    _ = &written;
+                    while ((written < data.len)) {
+                        const w = qs.write(data[written..]);
+                        _ = &w;
+                        if ((w <= 0)) {
+                            break;
+                        }
+                        written = (written + @as(usize, @intCast(w)));
+                    }
+                    buffer.cursor = (buffer.cursor + written);
+                    const drained = buffer.isEmpty();
+                    _ = &drained;
+                    if (drained) {
+                        _ = buffer.reset();
+                    }
+                    if ((drained and body.ended)) {
+                        stream.request_body_done = true;
+                        _ = qs.shutdown();
+                        client.state.request_stage = .done;
+                    } else {
+                        if ((!drained)) {
+                            _ = qs.wantWrite(true);
+                        } else {
+                            if ((data.len > 0)) {
+                                _ = sb.reportDrain();
+                            }
+                        }
+                    }
+                    _ = (if (comptime @typeInfo(@TypeOf(sb)) == .pointer) (sb) else &(sb)).release();
+                    if (stream.request_body_done) {
+                        _ = body.detach();
+                    }
+                    return;
+                } else {
+                    return;
+                }
             }
-            stream.pending_body = stream.pending_body[@intCast(w)..];
+            while ((stream.pending_body.len > 0)) {
+                const w = qs.write(stream.pending_body);
+                _ = &w;
+                if ((w <= 0)) {
+                    break;
+                }
+                stream.pending_body = stream.pending_body[@as(usize, @intCast(w))..];
+            }
+            if ((stream.pending_body.len == 0)) {
+                stream.request_body_done = true;
+                _ = qs.shutdown();
+                client.state.request_stage = .done;
+            } else {
+                _ = qs.wantWrite(true);
+            }
         }
-        if ((stream.pending_body.len == 0)) {
-            stream.request_body_done = true;
-            _ = qs.shutdown();
-            client.state.request_stage = .done;
-        } else {
-            _ = qs.wantWrite(true);
-        }
-    }
 }

@@ -1,358 +1,257 @@
-zig {
-    const std = @import("std");
-    const bun = @import("bun");
-    const BoringSSL = bun.BoringSSL.c;
-    const uws = bun.uws;
-    const SocketGroup = uws.SocketGroup;
-    const SocketKind = uws.SocketKind;
+import bun from "bun";
+import { SocketGroup } from "./SocketGroup.cp";
+import { SocketKind } from "./SocketKind.cp";
 
-    const debug = bun.Output.scoped(.uws, .visible);
-    const max_i32 = std.math.maxInt(i32);
+export enum CloseCode : i32 {
+    normal = 0,
+    failure = 1,
+    fast_shutdown = 2,
+}
+
+@c {
+    fn us_socket_get_native_handle(s: *us_socket_t): *any?!;
+    fn us_socket_local_port(s: *us_socket_t): i32;
+    fn us_socket_remote_port(s: *us_socket_t): i32;
+    fn us_socket_remote_address(s: *us_socket_t, buf: [*]u8!, length: *i32): void;
+    fn us_socket_local_address(s: *us_socket_t, buf: [*]u8!, length: *i32): void;
+    fn us_socket_timeout(s: *us_socket_t, seconds: u32): void;
+    fn us_socket_long_timeout(s: *us_socket_t, minutes: u32): void;
+    fn us_socket_nodelay(s: *us_socket_t, enable: i32): void;
+    fn us_socket_keepalive(s: *us_socket_t, enable: i32, delay: u32): i32;
+    fn us_socket_ext(s: *us_socket_t): *any!;
+    fn us_socket_group(s: *us_socket_t): *SocketGroup;
+    fn us_socket_kind(s: *us_socket_t): u8;
+    fn us_socket_set_kind(s: *us_socket_t, kind: u8): void;
+    fn us_socket_set_ssl_raw_tap(s: *us_socket_t, enabled: i32): void;
+    fn us_socket_is_tls(s: *us_socket_t): i32;
+    fn us_socket_write(s: *us_socket_t, data: [*]const u8!, length: i32): i32;
+    fn us_socket_ipc_write_fd(s: *us_socket_t, data: [*]const u8!, length: i32, fd: i32): i32;
+    fn us_socket_write2(s: *us_socket_t, header: [*]const u8?!, len: usize, payload: [*]const u8?!, payload_len: usize): i32;
+    fn us_socket_raw_write(s: *us_socket_t, data: [*]const u8!, length: i32): i32;
+    fn us_socket_flush(s: *us_socket_t): void;
+    fn us_socket_open(s: *us_socket_t, is_client: i32, ip: [*]const u8?!, ip_length: i32): *us_socket_t?!;
+    fn us_socket_pause(s: *us_socket_t): void;
+    fn us_socket_resume(s: *us_socket_t): void;
+    fn us_socket_close(s: *us_socket_t, code: CloseCode, reason: *any?!): *us_socket_t?!;
+    fn us_socket_shutdown(s: *us_socket_t): void;
+    fn us_socket_is_closed(s: *us_socket_t): i32;
+    fn us_socket_shutdown_read(s: *us_socket_t): void;
+    fn us_socket_is_shut_down(s: *us_socket_t): i32;
+    fn us_socket_sendfile_needs_more(socket: *us_socket_t): void;
+    fn us_socket_get_fd(s: *us_socket_t): i32;
+    fn us_socket_verify_error(s: *us_socket_t): bun.uws.us_bun_verify_error_t;
+    fn us_socket_get_error(s: *us_socket_t): i32;
+    fn us_socket_is_established(s: *us_socket_t): i32;
+    fn us_socket_adopt(s: *us_socket_t, group: *SocketGroup, kind: u8, old_ext_size: i32, ext_size: i32): *us_socket_t?!;
+    fn us_socket_adopt_tls(s: *us_socket_t, group: *SocketGroup, kind: u8, ssl_ctx: *bun.uws.SslCtx, sni: cstr?, old_ext_size: i32, ext_size: i32): *us_socket_t?!;
+    fn us_socket_start_tls_handshake(s: *us_socket_t): void;
 }
 
 export @opaque class us_socket_t {
-    zig {
-        pub const CloseCode = enum(i32) {
-            normal = 0,
-            failure = 1,
-            fast_shutdown = 2,
-        };
-
-        pub fn open(this: *us_socket_t, is_client: bool, ip_addr: ?[]const u8) void {
-            debug("us_socket_open({p}, is_client: {})", .{ this, is_client });
-            if (ip_addr) |ip| {
-                bun.assert(ip.len < max_i32);
-                _ = c.us_socket_open(this, @intFromBool(is_client), ip.ptr, @intCast(@min(ip.len, max_i32)));
-            } else {
-                _ = c.us_socket_open(this, @intFromBool(is_client), null, 0);
-            }
+    pub fn open(*this, is_client: bool, ip_addr: string?): void {
+        if (ip_addr != null) {
+            let ip = ip_addr!;
+            us_socket_open(this, if (is_client) 1 else 0, ip.ptr, ip.len as i32);
+        } else {
+            us_socket_open(this, if (is_client) 1 else 0, null, 0);
         }
+    }
 
-        pub fn close(this: *us_socket_t, code: CloseCode) void {
-            debug("us_socket_close({p}, {s})", .{ this, @tagName(code) });
-            _ = c.us_socket_close(this, code, null);
-        }
+    pub fn close(*this, code: CloseCode): void {
+        us_socket_close(this, code, null);
+    }
 
-        pub fn localAddress(this: *us_socket_t, buf: []u8) ![]const u8 {
-            var length: i32 = @intCast(@min(buf.len, max_i32));
-            c.us_socket_local_address(this, buf.ptr, &length);
-            if (length < 0) {
-                const errno = bun.sys.getErrno(length);
-                bun.debugAssert(errno != .SUCCESS);
-                return bun.errnoToZigErr(errno);
-            }
-            bun.unsafeAssert(buf.len >= length);
-            return buf[0..@intCast(length)];
+    pub fn localAddress(*this, buf: u8[]): ?string {
+        let length: i32 = buf.len as i32;
+        us_socket_local_address(this, buf.ptr, &length);
+        if (length < 0) {
+            let errno = bun.sys.getErrno(length);
+            return bun.errnoToZigErr(errno)?;
         }
+        return buf[0..(length as usize)];
+    }
 
-        pub fn remoteAddress(this: *us_socket_t, buf: []u8) ![]const u8 {
-            var length: i32 = @intCast(@min(buf.len, max_i32));
-            c.us_socket_remote_address(this, buf.ptr, &length);
-            if (length < 0) {
-                const errno = bun.sys.getErrno(length);
-                bun.debugAssert(errno != .SUCCESS);
-                return bun.errnoToZigErr(errno);
-            }
-            bun.unsafeAssert(buf.len >= length);
-            return buf[0..@intCast(length)];
+    pub fn remoteAddress(*this, buf: u8[]): ?string {
+        let length: i32 = buf.len as i32;
+        us_socket_remote_address(this, buf.ptr, &length);
+        if (length < 0) {
+            let errno = bun.sys.getErrno(length);
+            return bun.errnoToZigErr(errno)?;
         }
+        return buf[0..(length as usize)];
+    }
 
-        pub fn ssl(this: *us_socket_t) ?*BoringSSL.SSL {
-            if (!this.isTLS()) return null;
-            return @ptrCast(c.us_socket_get_native_handle(this));
-        }
+    pub fn ssl(*this): *bun.BoringSSL.c.SSL?! {
+        if (!this.isTLS()) return null;
+        return us_socket_get_native_handle(this) as *bun.BoringSSL.c.SSL?!;
+    }
 
-        pub fn getNativeHandle(this: *us_socket_t) ?*anyopaque {
-            return c.us_socket_get_native_handle(this);
-        }
+    pub fn getNativeHandle(*this): *any?! {
+        return us_socket_get_native_handle(this);
+    }
 
-        pub fn ext(this: *us_socket_t, comptime T: type) *T {
-            @setRuntimeSafety(true);
-            return @ptrCast(@alignCast(c.us_socket_ext(this)));
-        }
+    pub fn ext<T>(*this): *T {
+        return us_socket_ext(this) as *T;
+    }
 
-        pub fn extPtr(this: *us_socket_t) [*]align(16) u8 {
-            return @ptrCast(@alignCast(c.us_socket_ext(this)));
-        }
+    pub fn group(*this): *SocketGroup {
+        return us_socket_group(this);
+    }
 
-        pub fn group(this: *us_socket_t) *SocketGroup {
-            @setRuntimeSafety(true);
-            return c.us_socket_group(this);
-        }
-        pub const rawGroup = group;
+    pub fn rawGroup(*this): *SocketGroup {
+        return this.group();
+    }
 
-        pub fn kind(this: *us_socket_t) SocketKind {
-            return @enumFromInt(c.us_socket_kind(this));
-        }
+    pub fn kind(*this): SocketKind {
+        return us_socket_kind(this) as SocketKind;
+    }
 
-        pub fn setKind(this: *us_socket_t, k: SocketKind) void {
-            c.us_socket_set_kind(this, @intFromEnum(k));
-        }
+    pub fn setKind(*this, k: SocketKind): void {
+        us_socket_set_kind(this, k as u8);
+    }
 
-        pub fn adopt(this: *us_socket_t, g: *SocketGroup, k: SocketKind, old_ext: i32, new_ext: i32) ?*us_socket_t {
-            return c.us_socket_adopt(this, g, @intFromEnum(k), old_ext, new_ext);
-        }
+    pub fn adopt(*this, g: *SocketGroup, k: SocketKind, old_ext: i32, new_ext: i32): *us_socket_t?! {
+        return us_socket_adopt(this, g, k as u8, old_ext, new_ext);
+    }
 
-        pub fn adoptTLS(
-            this: *us_socket_t,
-            g: *SocketGroup,
-            k: SocketKind,
-            ssl_ctx: *uws.SslCtx,
-            sni: ?[*:0]const u8,
-            old_ext: i32,
-            new_ext: i32,
-        ) ?*us_socket_t {
-            return c.us_socket_adopt_tls(this, g, @intFromEnum(k), ssl_ctx, sni, old_ext, new_ext);
-        }
+    pub fn adoptTLS(
+        *this,
+        g: *SocketGroup,
+        k: SocketKind,
+        ssl_ctx: *bun.uws.SslCtx,
+        sni: cstr?,
+        old_ext: i32,
+        new_ext: i32,
+    ): *us_socket_t?! {
+        return us_socket_adopt_tls(this, g, k as u8, ssl_ctx, sni, old_ext, new_ext);
+    }
 
-        pub fn write(this: *us_socket_t, data: []const u8) i32 {
-            const rc = c.us_socket_write(this, data.ptr, @intCast(@min(data.len, max_i32)));
-            debug("us_socket_write({p}, {d}) = {d}", .{ this, data.len, rc });
-            return rc;
-        }
+    pub fn write(*this, data: string): i32 {
+        return us_socket_write(this, data.ptr, data.len as i32);
+    }
 
-        pub fn writeFd(this: *us_socket_t, data: []const u8, file_descriptor: bun.FD) i32 {
-            if (bun.Environment.isWindows) @compileError("TODO: implement writeFd on Windows");
-            const rc = c.us_socket_ipc_write_fd(this, data.ptr, @intCast(@min(data.len, max_i32)), file_descriptor.native());
-            debug("us_socket_ipc_write_fd({p}, {d}, {d}) = {d}", .{ this, data.len, file_descriptor.native(), rc });
-            return rc;
-        }
+    pub fn writeFd(*this, data: string, file_descriptor: bun.FD): i32 {
+        return us_socket_ipc_write_fd(this, data.ptr, data.len as i32, file_descriptor.native());
+    }
 
-        pub fn write2(this: *us_socket_t, first: []const u8, second: []const u8) i32 {
-            const rc = c.us_socket_write2(this, first.ptr, first.len, second.ptr, second.len);
-            debug("us_socket_write2({p}, {d}, {d}) = {d}", .{ this, first.len, second.len, rc });
-            return rc;
-        }
+    pub fn write2(*this, first: string, second: string): i32 {
+        return us_socket_write2(this, first.ptr, first.len, second.ptr, second.len);
+    }
 
-        pub fn rawWrite(this: *us_socket_t, data: []const u8) i32 {
-            debug("us_socket_raw_write({p}, {d})", .{ this, data.len });
-            return c.us_socket_raw_write(this, data.ptr, @intCast(@min(data.len, max_i32)));
-        }
+    pub fn rawWrite(*this, data: string): i32 {
+        return us_socket_raw_write(this, data.ptr, data.len as i32);
+    }
 
-        pub fn getFd(this: *us_socket_t) bun.FD {
-            return .fromNative(c.us_socket_get_fd(this));
-        }
+    pub fn getFd(*this): bun.FD {
+        return bun.FD.fromNative(us_socket_get_fd(this));
+    }
 
-        pub fn getVerifyError(this: *us_socket_t) uws.us_bun_verify_error_t {
-            return c.us_socket_verify_error(this);
-        }
+    pub fn getVerifyError(*this): bun.uws.us_bun_verify_error_t {
+        return us_socket_verify_error(this);
     }
 
     pub fn pause(*this): void {
-        zig {
-            debug("us_socket_pause({p})", .{self});
-            c.us_socket_pause(self);
-        }
+        us_socket_pause(this);
     }
 
     pub fn resumeSocket(*this): void {
-        zig {
-            debug("us_socket_resume({p})", .{self});
-            c.us_socket_resume(self);
-        }
+        us_socket_resume(this);
     }
 
     pub fn shutdown(*this): void {
-        zig {
-            debug("us_socket_shutdown({p})", .{self});
-            c.us_socket_shutdown(self);
-        }
+        us_socket_shutdown(this);
     }
 
     pub fn shutdownRead(*this): void {
-        zig {
-            c.us_socket_shutdown_read(self);
-        }
+        us_socket_shutdown_read(this);
     }
 
     pub fn isClosed(*this): bool {
-        zig {
-            return c.us_socket_is_closed(self) > 0;
-        }
+        return us_socket_is_closed(this) > 0;
     }
 
     pub fn isShutdown(*this): bool {
-        zig {
-            return c.us_socket_is_shut_down(self) > 0;
-        }
+        return us_socket_is_shut_down(this) > 0;
     }
 
     pub fn isTLS(*this): bool {
-        zig {
-            return c.us_socket_is_tls(self) > 0;
-        }
+        return us_socket_is_tls(this) > 0;
     }
 
     pub fn localPort(*this): i32 {
-        zig {
-            return c.us_socket_local_port(self);
-        }
+        return us_socket_local_port(this);
     }
 
     pub fn remotePort(*this): i32 {
-        zig {
-            return c.us_socket_remote_port(self);
-        }
+        return us_socket_remote_port(this);
     }
 
     pub fn setTimeout(*this, seconds: u32): void {
-        zig {
-            c.us_socket_timeout(self, seconds);
-        }
+        us_socket_timeout(this, seconds);
     }
 
     pub fn setLongTimeout(*this, minutes: u32): void {
-        zig {
-            c.us_socket_long_timeout(self, minutes);
-        }
+        us_socket_long_timeout(this, minutes);
     }
 
     pub fn setNodelay(*this, enabled: bool): void {
-        zig {
-            c.us_socket_nodelay(self, @intFromBool(enabled));
-        }
+        us_socket_nodelay(this, if (enabled) 1 else 0);
     }
 
     pub fn setKeepalive(*this, enabled: bool, delay: u32): i32 {
-        zig {
-            return c.us_socket_keepalive(self, @intFromBool(enabled), delay);
-        }
+        return us_socket_keepalive(this, if (enabled) 1 else 0, delay);
     }
 
     pub fn startTLSHandshake(*this): void {
-        zig {
-            c.us_socket_start_tls_handshake(self);
-        }
+        us_socket_start_tls_handshake(this);
     }
 
     pub fn setSslRawTap(*this, enabled: bool): void {
-        zig {
-            c.us_socket_set_ssl_raw_tap(self, @intFromBool(enabled));
-        }
+        us_socket_set_ssl_raw_tap(this, if (enabled) 1 else 0);
     }
 
     pub fn flush(*this): void {
-        zig {
-            c.us_socket_flush(self);
-        }
+        us_socket_flush(this);
     }
 
     pub fn sendFileNeedsMore(*this): void {
-        zig {
-            c.us_socket_sendfile_needs_more(self);
-        }
+        us_socket_sendfile_needs_more(this);
     }
 
     pub fn getError(*this): i32 {
-        zig {
-            return c.us_socket_get_error(self);
-        }
+        return us_socket_get_error(this);
     }
 
     pub fn isEstablished(*this): bool {
-        zig {
-            return c.us_socket_is_established(self) > 0;
-        }
-    }
-
-    zig {
-        pub const @"resume" = resumeSocket;
+        return us_socket_is_established(this) > 0;
     }
 }
 
 export @extern @value class us_socket_stream_buffer_t {
-    zig {
-        list_ptr: ?[*]u8 = null,
-        list_cap: usize = 0,
-        list_len: usize = 0,
-        total_bytes_written: usize = 0,
-        cursor: usize = 0,
+    list_ptr: [*]u8?! = null,
+    list_cap: usize = 0,
+    list_len: usize = 0,
+    total_bytes_written: usize = 0,
+    cursor: usize = 0,
 
-        pub fn update(this: *us_socket_stream_buffer_t, stream_buffer: bun.io.StreamBuffer) void {
-            if (stream_buffer.list.capacity > 0) {
-                this.list_ptr = stream_buffer.list.items.ptr;
-            } else {
-                this.list_ptr = null;
-            }
-            this.list_len = stream_buffer.list.items.len;
-            this.list_cap = stream_buffer.list.capacity;
-            this.cursor = stream_buffer.cursor;
+    pub fn update(*this, stream_buffer: bun.io.StreamBuffer): void {
+        if (stream_buffer.list.capacity > 0) {
+            this.list_ptr = stream_buffer.list.items.ptr;
+        } else {
+            this.list_ptr = null;
         }
+        this.list_len = stream_buffer.list.items.len;
+        this.list_cap = stream_buffer.list.capacity;
+        this.cursor = stream_buffer.cursor;
+    }
 
-        pub fn wrote(this: *us_socket_stream_buffer_t, written: usize) void {
-            this.total_bytes_written +|= written;
-        }
-
-        pub fn toStreamBuffer(this: *us_socket_stream_buffer_t) bun.io.StreamBuffer {
-            return .{
-                .list = if (this.list_ptr) |buffer_ptr| .{
-                    .allocator = bun.default_allocator,
-                    .items = buffer_ptr[0..this.list_len],
-                    .capacity = this.list_cap,
-                } else .{
-                    .allocator = bun.default_allocator,
-                    .items = &.{},
-                    .capacity = 0,
-                },
-                .cursor = this.cursor,
-            };
-        }
-
-        pub fn deinit(this: *us_socket_stream_buffer_t) void {
-            if (this.list_ptr) |buffer| {
-                bun.default_allocator.free(buffer[0..this.list_cap]);
-            }
-        }
+    pub fn wrote(*this, written: usize): void {
+        this.total_bytes_written += written;
     }
 
     pub fn release(*this): void {
-        zig {
-            self.deinit();
+        if (this.list_ptr != null) {
+            bun.default_allocator.free(this.list_ptr![0..this.list_cap]);
         }
     }
-}
-
-zig {
-    pub export fn us_socket_free_stream_buffer(buffer: *us_socket_stream_buffer_t) void {
-        buffer.deinit();
-    }
-
-    const c = struct {
-        extern fn us_socket_get_native_handle(s: *us_socket_t) ?*anyopaque;
-        extern fn us_socket_local_port(s: *us_socket_t) i32;
-        extern fn us_socket_remote_port(s: *us_socket_t) i32;
-        extern fn us_socket_remote_address(s: *us_socket_t, buf: [*]u8, length: *i32) void;
-        extern fn us_socket_local_address(s: *us_socket_t, buf: [*]u8, length: *i32) void;
-        extern fn us_socket_timeout(s: *us_socket_t, seconds: c_uint) void;
-        extern fn us_socket_long_timeout(s: *us_socket_t, minutes: c_uint) void;
-        extern fn us_socket_nodelay(s: *us_socket_t, enable: c_int) void;
-        extern fn us_socket_keepalive(s: *us_socket_t, enable: c_int, delay: c_uint) c_int;
-        extern fn us_socket_ext(s: *us_socket_t) *anyopaque;
-        extern fn us_socket_group(s: *us_socket_t) *SocketGroup;
-        extern fn us_socket_kind(s: *us_socket_t) u8;
-        extern fn us_socket_set_kind(s: *us_socket_t, kind: u8) void;
-        extern fn us_socket_set_ssl_raw_tap(s: *us_socket_t, enabled: c_int) void;
-        extern fn us_socket_is_tls(s: *us_socket_t) i32;
-        extern fn us_socket_write(s: *us_socket_t, data: [*]const u8, length: i32) i32;
-        extern fn us_socket_ipc_write_fd(s: *us_socket_t, data: [*]const u8, length: i32, fd: i32) i32;
-        extern fn us_socket_write2(*us_socket_t, header: ?[*]const u8, len: usize, payload: ?[*]const u8, usize) i32;
-        extern fn us_socket_raw_write(s: *us_socket_t, data: [*]const u8, length: i32) i32;
-        extern fn us_socket_flush(s: *us_socket_t) void;
-        extern fn us_socket_open(s: *us_socket_t, is_client: i32, ip: ?[*]const u8, ip_length: i32) ?*us_socket_t;
-        extern fn us_socket_pause(s: *us_socket_t) void;
-        extern fn us_socket_resume(s: *us_socket_t) void;
-        extern fn us_socket_close(s: *us_socket_t, code: us_socket_t.CloseCode, reason: ?*anyopaque) ?*us_socket_t;
-        extern fn us_socket_shutdown(s: *us_socket_t) void;
-        extern fn us_socket_is_closed(s: *us_socket_t) i32;
-        extern fn us_socket_shutdown_read(s: *us_socket_t) void;
-        extern fn us_socket_is_shut_down(s: *us_socket_t) i32;
-        extern fn us_socket_sendfile_needs_more(socket: *us_socket_t) void;
-        extern fn us_socket_get_fd(s: *us_socket_t) uws.LIBUS_SOCKET_DESCRIPTOR;
-        extern fn us_socket_verify_error(s: *us_socket_t) uws.us_bun_verify_error_t;
-        extern fn us_socket_get_error(s: *us_socket_t) c_int;
-        extern fn us_socket_is_established(s: *us_socket_t) i32;
-        extern fn us_socket_adopt(s: *us_socket_t, group: *SocketGroup, kind: u8, old_ext_size: i32, ext_size: i32) ?*us_socket_t;
-        extern fn us_socket_adopt_tls(s: *us_socket_t, group: *SocketGroup, kind: u8, ssl_ctx: *uws.SslCtx, sni: ?[*:0]const u8, old_ext_size: i32, ext_size: i32) ?*us_socket_t;
-        extern fn us_socket_start_tls_handshake(s: *us_socket_t) void;
-    };
 }

@@ -2,756 +2,608 @@
 const std = @import("std");
 const string = []const u8;
 
-const log = bun.Output.scoped(.h2_client, .hidden);
-const ClientSession = @import("./ClientSession.zig");
-const Stream = @import("./Stream.zig");
-const wire = @import("../H2FrameParser.zig");
-
-const H2 = @import("../H2Client.zig");
-const local_max_header_list_size = H2.local_max_header_list_size;
-const write_buffer_control_limit = H2.write_buffer_control_limit;
-
-const bun = @import("bun");
-const strings = bun.strings;
-
-const forbidden_response_fields = bun.ComptimeStringMap(void, .{
-    .{ "connection", {} },
-    .{ "keep-alive", {} },
-    .{ "proxy-connection", {} },
-    .{ "te", {} },
-    .{ "transfer-encoding", {} },
-    .{ "upgrade", {} },
-});
-fn is_string_like(comptime T: type) bool {
-    if (T == []const u8 or T == []u8) return true;
-    if (@typeInfo(T) == .pointer) {
-        const Child = @typeInfo(T).pointer.child;
-        if (Child == u8) return true;
-        if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true;
-    }
-    return false;
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
 }
-fn to_string_slice(v: anytype) []const u8 {
-    const T = @TypeOf(v);
-    if (comptime (T == []const u8 or T == []u8)) {
-        return v;
-    } else {
-        const cp_str_slice: []const u8 = v;
-        return cp_str_slice;
-    }
-}
-fn CpValType(comptime T: type) type {
-    if (is_string_like(T)) return []const u8;
-    if (T == comptime_int) return i32;
-    if (T == comptime_float) return f32;
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
     return T;
 }
-fn cp_val(v: anytype) CpValType(@TypeOf(v)) {
+fn cp_opt_is_null(v: anytype) bool {
     const T = @TypeOf(v);
-    if (comptime is_string_like(T)) {
-        return to_string_slice(v);
-    } else if (comptime T == comptime_int) {
-        return @as(i32, v);
-    } else if (comptime T == comptime_float) {
-        return @as(f32, v);
-    } else {
-        return v;
-    }
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
 }
-fn CpNullCoalesceReturn(comptime TOpt: type, comptime TFb: type) type {
-    if (@typeInfo(TOpt) == .optional) {
-        const Child = @typeInfo(TOpt).optional.child;
-        if (is_string_like(Child)) return []const u8;
-        return Child;
-    }
-    return CpValType(TFb);
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
 }
-fn cp_null_coalesce(opt_val: anytype, fallback: anytype) CpNullCoalesceReturn(@TypeOf(opt_val), @TypeOf(fallback)) {
-    const TOpt = @TypeOf(opt_val);
-    const RType = CpNullCoalesceReturn(TOpt, @TypeOf(fallback));
-    if (comptime @typeInfo(TOpt) == .optional) {
-        if (opt_val) |v| {
-            if (comptime is_string_like(RType)) {
-                return to_string_slice(v);
-            } else {
-                return v;
-            }
-        } else {
-            if (comptime is_string_like(RType)) {
-                return to_string_slice(fallback);
-            } else {
-                return fallback;
-            }
-        }
-    }
-    return cp_val(fallback);
-}
-fn cp_array_lit(comptime Elem: type, init_slice: []const Elem) []const Elem {
-    const buf = std.heap.page_allocator.alloc(Elem, init_slice.len) catch unreachable;
-    if (init_slice.len > 0) @memcpy(buf, init_slice);
-    return buf;
-}
-fn CpArrayElemType(comptime PtrT: type) type {
-    const S0 = @typeInfo(PtrT).pointer.child;
-    const S1 = if (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one) @typeInfo(S0).pointer.child else S0;
-    return @typeInfo(S1).pointer.child;
-}
-fn cp_array_push(arr_ptr: anytype, item: anytype) void {
-    const S0 = @TypeOf(arr_ptr.*);
-    const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr;
-    const SliceT = @TypeOf(target_ptr.*);
-    const Elem = @typeInfo(SliceT).pointer.child;
-    const old_slice = target_ptr.*;
-    const new_slice = std.heap.page_allocator.alloc(Elem, old_slice.len + 1) catch unreachable;
-    if (old_slice.len > 0) @memcpy(new_slice[0..old_slice.len], old_slice);
-    new_slice[old_slice.len] = @as(Elem, cp_val(item));
-    target_ptr.* = new_slice;
-}
-fn cp_array_pop(arr_ptr: anytype) ?CpArrayElemType(@TypeOf(arr_ptr)) {
-    const S0 = @TypeOf(arr_ptr.*);
-    const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr;
-    const s = target_ptr.*;
-    if (s.len == 0) return null;
-    const last = s[s.len - 1];
-    target_ptr.* = s[0 .. s.len - 1];
-    return last;
-}
-fn cp_container_clear(ptr: anytype) void {
-    const S0 = @TypeOf(ptr.*);
-    if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one and @typeInfo(@typeInfo(S0).pointer.child) == .@"struct" and @hasDecl(@typeInfo(S0).pointer.child, "clear"))) {
-        ptr.*.clear();
-    } else {
-        const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) ptr.* else ptr;
-        target_ptr.* = target_ptr.*[0..0];
-    }
-}
-fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) {
-    .pointer => |p| switch (p.size) {
-        .slice => @TypeOf(val),
-        .one => switch (@typeInfo(p.child)) {
-            .array => []const @typeInfo(p.child).array.child,
-            .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val),
-            else => @TypeOf(val),
-        },
-        else => @TypeOf(val),
-    },
-    .array => []const @typeInfo(@TypeOf(val)).array.child,
-    else => @TypeOf(val),
-} {
-    const T = @TypeOf(val);
-    switch (@typeInfo(T)) {
-        .pointer => |p| switch (p.size) {
-            .slice => return val,
-            .one => switch (@typeInfo(p.child)) {
-                .array => return val[0..],
-                .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val,
-                else => return val,
-            },
-            else => return val,
-        },
-        .array => return val[0..],
-        else => return val,
-    }
-}
-fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) {
-    .array => []@typeInfo(@TypeOf(ptr.*)).array.child,
-    .pointer => |p| switch (p.size) {
-        .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child,
-        .one => switch (@typeInfo(p.child)) {
-            .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"),
-            else => @compileError("Cannot mutably iterate over non-collection"),
-        },
-        else => @compileError("Cannot mutably iterate over non-collection"),
-    },
-    else => @compileError("Cannot mutably iterate over non-collection"),
-} {
-    const ValT = @TypeOf(ptr.*);
-    switch (@typeInfo(ValT)) {
-        .array => return ptr[0..],
-        .pointer => |p| switch (p.size) {
-            .slice => return @constCast(ptr.*),
-            .one => return @constCast(ptr.*.*),
-            else => unreachable,
-        },
-        else => unreachable,
-    }
-}
+const bun = @import("bun");
+    const strings = bun.strings;
+    const log = bun.Output.scoped(.h2_client, .hidden);
+    const forbidden_response_fields = bun.ComptimeStringMap(void, .{
+        .{ "connection", {} },
+        .{ "keep-alive", {} },
+        .{ "proxy-connection", {} },
+        .{ "te", {} },
+        .{ "transfer-encoding", {} },
+        .{ "upgrade", {} },
+    });
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+
+pub const ClientSession = @import("./ClientSession.zig").ClientSession;
+pub const Stream = @import("./Stream.zig").Stream;
+pub const wire = @import("../H2FrameParser.zig");
+pub const local_max_header_list_size = @import("../H2Client.zig").local_max_header_list_size;
+pub const write_buffer_control_limit = @import("../H2Client.zig").write_buffer_control_limit;
 
 pub fn parseFrames(session: *ClientSession, buf: []const u8) usize {
-    var consumed: usize = 0;
-    _ = &consumed;
-    while (true) {
-        const remaining = buf[consumed..];
-        _ = &remaining;
-        if ((remaining.len < wire.FrameHeader.byteSize)) {
-            break;
+        var consumed: usize = 0;
+        _ = &consumed;
+        while (true) {
+            const remaining = buf[consumed..];
+            _ = &remaining;
+            if ((remaining.len < wire.FrameHeader.byteSize)) {
+                break;
+            }
+            var header: wire.FrameHeader = .{ .flags = 0 };
+            _ = &header;
+            _ = wire.FrameHeader.from((&header), remaining[0..wire.FrameHeader.byteSize], 0, true);
+            header.streamIdentifier = wire.UInt31WithReserved.from(header.streamIdentifier).uint31;
+            if ((header.length > wire.DEFAULT_MAX_FRAME_SIZE)) {
+                session.fatal_error = error.HTTP2FrameSizeError;
+                break;
+            }
+            const frame_len = (wire.FrameHeader.byteSize + @as(usize, header.length));
+            _ = &frame_len;
+            if ((remaining.len < frame_len)) {
+                break;
+            }
+            _ = dispatchFrame(session, header, remaining[wire.FrameHeader.byteSize..frame_len]);
+            consumed = (consumed + frame_len);
+            if ((session.fatal_error != null)) {
+                break;
+            }
         }
-        var header: wire.FrameHeader = .{ .flags = 0 };
-        _ = &header;
-        _ = wire.FrameHeader.from((&header), remaining[0..wire.FrameHeader.byteSize], 0, true);
-        header.streamIdentifier = wire.UInt31WithReserved.from(header.streamIdentifier).uint31;
-        if ((header.length > wire.DEFAULT_MAX_FRAME_SIZE)) {
-            session.fatal_error = error.HTTP2FrameSizeError;
-            break;
-        }
-        const frame_len = (wire.FrameHeader.byteSize + @as(usize, header.length));
-        _ = &frame_len;
-        if ((remaining.len < frame_len)) {
-            break;
-        }
-        _ = dispatchFrame(session, header, remaining[wire.FrameHeader.byteSize..frame_len]);
-        consumed = (consumed + frame_len);
-        if ((session.fatal_error != null)) {
-            break;
-        }
-    }
-    return consumed;
+        return consumed;
 }
 
 pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload: []const u8) void {
-    _ = log("frame type={d} len={d} flags={d} stream={d}", .{ header.type, header.length, header.flags, header.streamIdentifier });
-    if (((session.expecting_continuation != 0) and (header.type != @intFromEnum(wire.FrameType.HTTP_FRAME_CONTINUATION)))) {
-        session.fatal_error = error.HTTP2ProtocolError;
-        return;
-    }
-    if (((!session.settings_received) and (header.type != @intFromEnum(wire.FrameType.HTTP_FRAME_SETTINGS)))) {
-        session.fatal_error = error.HTTP2ProtocolError;
-        return;
-    }
-    switch (@as(wire.FrameType, @enumFromInt(header.type))) {
-        .HTTP_FRAME_SETTINGS => {
-            if ((header.streamIdentifier != 0)) {
+        _ = log("frame type={d} len={d} flags={d} stream={d}", .{ header.type, header.length, header.flags, header.streamIdentifier });
+        if (((session.expecting_continuation != 0) and (header.type != @intFromEnum(wire.FrameType.HTTP_FRAME_CONTINUATION)))) {
+            session.fatal_error = error.HTTP2ProtocolError;
+            return;
+        }
+        if (((!session.settings_received) and (header.type != @intFromEnum(wire.FrameType.HTTP_FRAME_SETTINGS)))) {
+            session.fatal_error = error.HTTP2ProtocolError;
+            return;
+        }
+        switch (@as(wire.FrameType, @enumFromInt(header.type))) {
+.HTTP_FRAME_SETTINGS => {
+if ((header.streamIdentifier != 0)) {
+            session.fatal_error = error.HTTP2ProtocolError;
+            return;
+        }
+        if (((header.flags & @intFromEnum(wire.SettingsFlags.ACK)) != 0)) {
+            if ((header.length != 0)) {
+                session.fatal_error = error.HTTP2FrameSizeError;
+            }
+            return;
+        }
+        if (((header.length % wire.SettingsPayloadUnit.byteSize) != 0)) {
+            session.fatal_error = error.HTTP2FrameSizeError;
+            return;
+        }
+        var i: usize = 0;
+        _ = &i;
+        while (((i + wire.SettingsPayloadUnit.byteSize) <= payload.len)) {
+            var unit: wire.SettingsPayloadUnit = undefined;
+            _ = &unit;
+            _ = wire.SettingsPayloadUnit.from((&unit), payload[i..(i + wire.SettingsPayloadUnit.byteSize)], 0, true);
+            switch (@as(wire.SettingsType, @enumFromInt(unit.type))) {
+.SETTINGS_MAX_FRAME_SIZE => {
+if (((unit.value < wire.DEFAULT_MAX_FRAME_SIZE) or (unit.value > wire.MAX_FRAME_SIZE))) {
                 session.fatal_error = error.HTTP2ProtocolError;
                 return;
             }
-            if (((header.flags & @intFromEnum(wire.SettingsFlags.ACK)) != 0)) {
-                if ((header.length != 0)) {
-                    session.fatal_error = error.HTTP2FrameSizeError;
-                }
+            session.remote_max_frame_size = @truncate(unit.value);
+},
+.SETTINGS_MAX_CONCURRENT_STREAMS => {
+session.remote_max_concurrent_streams = unit.value;
+},
+.SETTINGS_HEADER_TABLE_SIZE => {
+session.pending_hpack_enc_capacity = @min(((session.pending_hpack_enc_capacity) orelse (unit.value)), unit.value);
+},
+.SETTINGS_INITIAL_WINDOW_SIZE => {
+if ((unit.value > wire.MAX_WINDOW_SIZE)) {
+                session.fatal_error = error.HTTP2FlowControlError;
                 return;
             }
-            if (((header.length % wire.SettingsPayloadUnit.byteSize) != 0)) {
-                session.fatal_error = error.HTTP2FrameSizeError;
-                return;
-            }
-            var i: usize = 0;
-            _ = &i;
-            while (((i + wire.SettingsPayloadUnit.byteSize) <= payload.len)) {
-                var unit: wire.SettingsPayloadUnit = undefined;
-                _ = &unit;
-                _ = wire.SettingsPayloadUnit.from((&unit), payload[i..(i + wire.SettingsPayloadUnit.byteSize)], 0, true);
-                switch (@as(wire.SettingsType, @enumFromInt(unit.type))) {
-                    .SETTINGS_MAX_FRAME_SIZE => {
-                        if (((unit.value < wire.DEFAULT_MAX_FRAME_SIZE) or (unit.value > wire.MAX_FRAME_SIZE))) {
-                            session.fatal_error = error.HTTP2ProtocolError;
-                            return;
-                        }
-                        session.remote_max_frame_size = @truncate(unit.value);
-                    },
-                    .SETTINGS_MAX_CONCURRENT_STREAMS => {
-                        session.remote_max_concurrent_streams = unit.value;
-                    },
-                    .SETTINGS_HEADER_TABLE_SIZE => {
-                        session.pending_hpack_enc_capacity = @min(cp_null_coalesce(session.pending_hpack_enc_capacity, unit.value), unit.value);
-                    },
-                    .SETTINGS_INITIAL_WINDOW_SIZE => {
-                        if ((unit.value > wire.MAX_WINDOW_SIZE)) {
-                            session.fatal_error = error.HTTP2FlowControlError;
-                            return;
-                        }
-                        const delta = (@as(i64, unit.value) - @as(i64, session.remote_initial_window_size));
-                        _ = &delta;
-                        session.remote_initial_window_size = unit.value;
-                        for (session.streams.values()) |s| {
-                            _ = &s;
-                            const next = (@as(i64, s.send_window) + delta);
-                            _ = &next;
-                            if ((next > wire.MAX_WINDOW_SIZE)) {
-                                session.fatal_error = error.HTTP2FlowControlError;
-                                return;
-                            }
-                            s.send_window = @intCast(next);
-                        }
-                    },
-                    else => {},
-                }
-                i = (i + wire.SettingsPayloadUnit.byteSize);
-            }
-            if ((session.write_buffer.size() >= write_buffer_control_limit)) {
-                session.fatal_error = error.HTTP2EnhanceYourCalm;
-                return;
-            }
-            _ = session.writeFrame(.HTTP_FRAME_SETTINGS, @intFromEnum(wire.SettingsFlags.ACK), 0, "");
-            session.settings_received = true;
-        },
-        .HTTP_FRAME_WINDOW_UPDATE => {
-            if ((header.length != 4)) {
-                session.fatal_error = error.HTTP2FrameSizeError;
-                return;
-            }
-            const inc: i32 = @intCast(wire.UInt31WithReserved.fromBytes(payload[0..4]).uint31);
-            _ = &inc;
-            if ((header.streamIdentifier == 0)) {
-                if ((inc == 0)) {
-                    session.fatal_error = error.HTTP2ProtocolError;
-                    return;
-                }
-                const next = (@as(i64, session.conn_send_window) + inc);
+            const delta = (@as(i64, unit.value) - @as(i64, session.remote_initial_window_size));
+            _ = &delta;
+            session.remote_initial_window_size = unit.value;
+            for (session.streams.values()) |s| {
+                _ = &s;
+                const next = (@as(i64, s.send_window) + delta);
                 _ = &next;
                 if ((next > wire.MAX_WINDOW_SIZE)) {
                     session.fatal_error = error.HTTP2FlowControlError;
                     return;
                 }
-                session.conn_send_window = @intCast(next);
-                session.stream_progressed = true;
-            } else {
-                if (session.streams.get(@truncate((header.streamIdentifier & 2147483647)))) |stream| {
-                    _ = &stream;
-                    if ((inc == 0)) {
-                        _ = stream.rst(.PROTOCOL_ERROR);
-                        stream.fatal_error = error.HTTP2ProtocolError;
-                        return;
-                    }
-                    const next = (@as(i64, stream.send_window) + inc);
-                    _ = &next;
-                    if ((next > wire.MAX_WINDOW_SIZE)) {
-                        _ = stream.rst(.FLOW_CONTROL_ERROR);
-                        stream.fatal_error = error.HTTP2FlowControlError;
-                        return;
-                    }
-                    stream.send_window = @intCast(next);
-                    session.stream_progressed = true;
-                } else {
-                    const sid: u31 = @intCast(header.streamIdentifier);
-                    _ = &sid;
-                    if ((((sid & 1) == 0) or (sid >= session.next_stream_id))) {
-                        session.fatal_error = error.HTTP2ProtocolError;
-                        return;
-                    }
-                }
+                s.send_window = @intCast(next);
             }
-        },
-        .HTTP_FRAME_PING => {
-            if ((header.length != 8)) {
-                session.fatal_error = error.HTTP2FrameSizeError;
-                return;
-            }
-            if ((header.streamIdentifier != 0)) {
-                session.fatal_error = error.HTTP2ProtocolError;
-                return;
-            }
-            if (((header.flags & @intFromEnum(wire.PingFrameFlags.ACK)) == 0)) {
-                if ((session.write_buffer.size() >= write_buffer_control_limit)) {
-                    session.fatal_error = error.HTTP2EnhanceYourCalm;
-                    return;
-                }
-                _ = session.writeFrame(.HTTP_FRAME_PING, @intFromEnum(wire.PingFrameFlags.ACK), 0, payload[0..8]);
-            }
-        },
-        .HTTP_FRAME_PRIORITY => {
-            if ((header.streamIdentifier == 0)) {
-                session.fatal_error = error.HTTP2ProtocolError;
-                return;
-            }
-            if ((header.length != wire.StreamPriority.byteSize)) {
-                session.fatal_error = error.HTTP2FrameSizeError;
-                return;
-            }
-        },
-        .HTTP_FRAME_HEADERS => {
-            var fragment = payload;
-            _ = &fragment;
-            const stream_id: u31 = @intCast(header.streamIdentifier);
-            _ = &stream_id;
-            if (session.streams.get(stream_id)) |stream| {
-                _ = &stream;
-                session.stream_progressed = true;
-                if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.PADDED)) != 0)) {
-                    if (stripPadding(fragment)) |stripped| {
-                        _ = &stripped;
-                        fragment = stripped;
-                    } else {
-                        session.fatal_error = error.HTTP2ProtocolError;
-                        return;
-                    }
-                }
-                if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.PRIORITY)) != 0)) {
-                    if ((fragment.len < wire.StreamPriority.byteSize)) {
-                        session.fatal_error = error.HTTP2ProtocolError;
-                        return;
-                    }
-                    fragment = fragment[wire.StreamPriority.byteSize..];
-                }
-                if ((fragment.len > local_max_header_list_size)) {
-                    session.fatal_error = error.HTTP2HeaderListTooLarge;
-                    return;
-                }
-                _ = stream.header_block.clearRetainingCapacity();
-                _ = bun.handleOom(stream.header_block.appendSlice(bun.default_allocator, fragment));
-                stream.headers_end_stream = ((header.flags & @intFromEnum(wire.HeadersFrameFlags.END_STREAM)) != 0);
-                if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.END_HEADERS)) != 0)) {
-                    if (stream.headers_end_stream) {
-                        _ = stream.recvEndStream();
-                    }
-                    _ = decodeHeaderBlock(session, stream);
-                } else {
-                    session.expecting_continuation = stream.id;
-                }
-            } else {
-                if ((((stream_id == 0) or ((stream_id & 1) == 0)) or (stream_id >= session.next_stream_id))) {
-                    session.fatal_error = error.HTTP2ProtocolError;
-                    return;
-                }
-                if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.PADDED)) != 0)) {
-                    if (stripPadding(fragment)) |stripped| {
-                        _ = &stripped;
-                        fragment = stripped;
-                    } else {
-                        session.fatal_error = error.HTTP2ProtocolError;
-                        return;
-                    }
-                }
-                if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.PRIORITY)) != 0)) {
-                    if ((fragment.len < wire.StreamPriority.byteSize)) {
-                        session.fatal_error = error.HTTP2ProtocolError;
-                        return;
-                    }
-                    fragment = fragment[wire.StreamPriority.byteSize..];
-                }
-                if ((fragment.len > local_max_header_list_size)) {
-                    session.fatal_error = error.HTTP2HeaderListTooLarge;
-                    return;
-                }
-                _ = session.orphan_header_block.clearRetainingCapacity();
-                _ = bun.handleOom(session.orphan_header_block.appendSlice(bun.default_allocator, fragment));
-                if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.END_HEADERS)) != 0)) {
-                    _ = decodeDiscardOrphan(session);
-                } else {
-                    session.expecting_continuation = stream_id;
-                }
-            }
-        },
-        .HTTP_FRAME_CONTINUATION => {
-            if (((session.expecting_continuation == 0) or (header.streamIdentifier != session.expecting_continuation))) {
-                session.fatal_error = error.HTTP2ProtocolError;
-                return;
-            }
-            if (session.streams.get(session.expecting_continuation)) |stream| {
-                _ = &stream;
-                if (((stream.header_block.items.len + payload.len) > local_max_header_list_size)) {
-                    session.fatal_error = error.HTTP2HeaderListTooLarge;
-                    return;
-                }
-                _ = bun.handleOom(stream.header_block.appendSlice(bun.default_allocator, payload));
-                if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.END_HEADERS)) != 0)) {
-                    session.expecting_continuation = 0;
-                    if (stream.headers_end_stream) {
-                        _ = stream.recvEndStream();
-                    }
-                    _ = decodeHeaderBlock(session, stream);
-                }
-            } else {
-                if (((session.orphan_header_block.items.len + payload.len) > local_max_header_list_size)) {
-                    session.fatal_error = error.HTTP2HeaderListTooLarge;
-                    return;
-                }
-                _ = bun.handleOom(session.orphan_header_block.appendSlice(bun.default_allocator, payload));
-                if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.END_HEADERS)) != 0)) {
-                    session.expecting_continuation = 0;
-                    _ = decodeDiscardOrphan(session);
-                }
-            }
-        },
-        .HTTP_FRAME_DATA => {
-            session.conn_unacked_bytes +|= header.length;
+},
+else => {
 
-            const stream_id: u31 = @intCast(header.streamIdentifier);
-            _ = &stream_id;
-            if (session.streams.get(stream_id)) |stream| {
+},
+}
+            i = (i + wire.SettingsPayloadUnit.byteSize);
+        }
+        if ((session.write_buffer.size() >= write_buffer_control_limit)) {
+            session.fatal_error = error.HTTP2EnhanceYourCalm;
+            return;
+        }
+        _ = session.writeFrame(.HTTP_FRAME_SETTINGS, @intFromEnum(wire.SettingsFlags.ACK), 0, "");
+        session.settings_received = true;
+},
+.HTTP_FRAME_WINDOW_UPDATE => {
+if ((header.length != 4)) {
+            session.fatal_error = error.HTTP2FrameSizeError;
+            return;
+        }
+        const inc: i32 = @intCast(wire.UInt31WithReserved.fromBytes(payload[0..4]).uint31);
+        _ = &inc;
+        if ((header.streamIdentifier == 0)) {
+            if ((inc == 0)) {
+                session.fatal_error = error.HTTP2ProtocolError;
+                return;
+            }
+            const next = (@as(i64, session.conn_send_window) + inc);
+            _ = &next;
+            if ((next > wire.MAX_WINDOW_SIZE)) {
+                session.fatal_error = error.HTTP2FlowControlError;
+                return;
+            }
+            session.conn_send_window = @intCast(next);
+            session.stream_progressed = true;
+        } else {
+            if (session.streams.get(@truncate((header.streamIdentifier & 2147483647)))) |stream| {
                 _ = &stream;
-                session.stream_progressed = true;
-                if ((stream.status_code == 0)) {
+                if ((inc == 0)) {
                     _ = stream.rst(.PROTOCOL_ERROR);
                     stream.fatal_error = error.HTTP2ProtocolError;
                     return;
                 }
-                if (stream.remoteClosed()) {
-                    stream.fatal_error = cp_null_coalesce(stream.fatal_error, error.HTTP2ProtocolError);
+                const next = (@as(i64, stream.send_window) + inc);
+                _ = &next;
+                if ((next > wire.MAX_WINDOW_SIZE)) {
+                    _ = stream.rst(.FLOW_CONTROL_ERROR);
+                    stream.fatal_error = error.HTTP2FlowControlError;
                     return;
                 }
-                stream.unacked_bytes +|= header.length;
-
-                var fragment = payload;
-                _ = &fragment;
-                if (((header.flags & @intFromEnum(wire.DataFrameFlags.PADDED)) != 0)) {
-                    if (stripPadding(fragment)) |stripped| {
-                        _ = &stripped;
-                        fragment = stripped;
-                    } else {
-                        session.fatal_error = error.HTTP2ProtocolError;
-                        return;
-                    }
+                stream.send_window = @intCast(next);
+                session.stream_progressed = true;
+            } else {
+                const sid: u31 = @intCast(header.streamIdentifier);
+                _ = &sid;
+                if ((((sid & 1) == 0) or (sid >= session.next_stream_id))) {
+                    session.fatal_error = error.HTTP2ProtocolError;
+                    return;
                 }
-                if (((header.flags & @intFromEnum(wire.DataFrameFlags.END_STREAM)) != 0)) {
+            }
+        }
+},
+.HTTP_FRAME_PING => {
+if ((header.length != 8)) {
+            session.fatal_error = error.HTTP2FrameSizeError;
+            return;
+        }
+        if ((header.streamIdentifier != 0)) {
+            session.fatal_error = error.HTTP2ProtocolError;
+            return;
+        }
+        if (((header.flags & @intFromEnum(wire.PingFrameFlags.ACK)) == 0)) {
+            if ((session.write_buffer.size() >= write_buffer_control_limit)) {
+                session.fatal_error = error.HTTP2EnhanceYourCalm;
+                return;
+            }
+            _ = session.writeFrame(.HTTP_FRAME_PING, @intFromEnum(wire.PingFrameFlags.ACK), 0, payload[0..8]);
+        }
+},
+.HTTP_FRAME_PRIORITY => {
+if ((header.streamIdentifier == 0)) {
+            session.fatal_error = error.HTTP2ProtocolError;
+            return;
+        }
+        if ((header.length != wire.StreamPriority.byteSize)) {
+            session.fatal_error = error.HTTP2FrameSizeError;
+            return;
+        }
+},
+.HTTP_FRAME_HEADERS => {
+var fragment = payload;
+        _ = &fragment;
+        const stream_id: u31 = @intCast(header.streamIdentifier);
+        _ = &stream_id;
+        if (session.streams.get(stream_id)) |stream| {
+            _ = &stream;
+            session.stream_progressed = true;
+            if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.PADDED)) != 0)) {
+                if (stripPadding(fragment)) |stripped| {
+                    _ = &stripped;
+                    fragment = stripped;
+                } else {
+                    session.fatal_error = error.HTTP2ProtocolError;
+                    return;
+                }
+            }
+            if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.PRIORITY)) != 0)) {
+                if ((fragment.len < wire.StreamPriority.byteSize)) {
+                    session.fatal_error = error.HTTP2ProtocolError;
+                    return;
+                }
+                fragment = fragment[wire.StreamPriority.byteSize..];
+            }
+            if ((fragment.len > local_max_header_list_size)) {
+                session.fatal_error = error.HTTP2HeaderListTooLarge;
+                return;
+            }
+            _ = stream.header_block.clearRetainingCapacity();
+            _ = bun.handleOom(stream.header_block.appendSlice(bun.default_allocator, fragment));
+            stream.headers_end_stream = ((header.flags & @intFromEnum(wire.HeadersFrameFlags.END_STREAM)) != 0);
+            if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.END_HEADERS)) != 0)) {
+                if (stream.headers_end_stream) {
                     _ = stream.recvEndStream();
                 }
-                stream.data_bytes_received = (stream.data_bytes_received + fragment.len);
-                if ((fragment.len > 0)) {
-                    _ = bun.handleOom(stream.body_buffer.appendSlice(bun.default_allocator, fragment));
-                }
+                _ = decodeHeaderBlock(session, stream);
             } else {
-                if ((((stream_id == 0) or ((stream_id & 1) == 0)) or (stream_id >= session.next_stream_id))) {
-                    session.fatal_error = error.HTTP2ProtocolError;
-                }
-                return;
+                session.expecting_continuation = stream.id;
             }
-        },
-        .HTTP_FRAME_RST_STREAM => {
-            if ((header.length != 4)) {
-                session.fatal_error = error.HTTP2FrameSizeError;
-                return;
-            }
-            const stream_id: u31 = @intCast(header.streamIdentifier);
-            _ = &stream_id;
+        } else {
             if ((((stream_id == 0) or ((stream_id & 1) == 0)) or (stream_id >= session.next_stream_id))) {
                 session.fatal_error = error.HTTP2ProtocolError;
                 return;
             }
-            if (session.streams.get(stream_id)) |stream| {
-                _ = &stream;
-                const had_response = stream.remoteClosed();
-                _ = &had_response;
-                stream.rst_done = true;
-                stream.state = .closed;
-                const code: u32 = wire.u32FromBytes(payload[0..4]);
-                _ = &code;
-                if ((code == @intFromEnum(wire.ErrorCode.NO_ERROR))) {
-                    if (had_response) {
-                        stream.fatal_error = null;
-                    } else {
-                        stream.fatal_error = error.HTTP2StreamReset;
-                    }
+            if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.PADDED)) != 0)) {
+                if (stripPadding(fragment)) |stripped| {
+                    _ = &stripped;
+                    fragment = stripped;
                 } else {
-                    if ((code == @intFromEnum(wire.ErrorCode.REFUSED_STREAM))) {
-                        stream.fatal_error = error.HTTP2RefusedStream;
-                    } else {
-                        stream.fatal_error = error.HTTP2StreamReset;
-                    }
+                    session.fatal_error = error.HTTP2ProtocolError;
+                    return;
                 }
             }
-        },
-        .HTTP_FRAME_GOAWAY => {
-            if ((header.streamIdentifier != 0)) {
-                session.fatal_error = error.HTTP2ProtocolError;
-                return;
-            }
-            if ((header.length < 8)) {
-                session.fatal_error = error.HTTP2FrameSizeError;
-                return;
-            }
-            session.goaway_received = true;
-            session.goaway_last_stream_id = wire.UInt31WithReserved.fromBytes(payload[0..4]).uint31;
-            const code: u32 = wire.u32FromBytes(payload[4..8]);
-            _ = &code;
-            const graceful = (code == @intFromEnum(wire.ErrorCode.NO_ERROR));
-            _ = &graceful;
-            var it = session.streams.iterator();
-            _ = &it;
-            while (it.next()) |e| {
-                _ = &e;
-                const s = e.value_ptr.*;
-                _ = &s;
-                if ((s.id > session.goaway_last_stream_id)) {
-                    if (graceful) {
-                        s.fatal_error = error.HTTP2RefusedStream;
-                    } else {
-                        s.fatal_error = error.HTTP2GoAway;
-                    }
-                } else {
-                    if (((!graceful) and (!s.remoteClosed()))) {
-                        s.fatal_error = error.HTTP2GoAway;
-                    }
+            if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.PRIORITY)) != 0)) {
+                if ((fragment.len < wire.StreamPriority.byteSize)) {
+                    session.fatal_error = error.HTTP2ProtocolError;
+                    return;
                 }
+                fragment = fragment[wire.StreamPriority.byteSize..];
             }
-        },
-        .HTTP_FRAME_PUSH_PROMISE => {
+            if ((fragment.len > local_max_header_list_size)) {
+                session.fatal_error = error.HTTP2HeaderListTooLarge;
+                return;
+            }
+            _ = session.orphan_header_block.clearRetainingCapacity();
+            _ = bun.handleOom(session.orphan_header_block.appendSlice(bun.default_allocator, fragment));
+            if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.END_HEADERS)) != 0)) {
+                _ = decodeDiscardOrphan(session);
+            } else {
+                session.expecting_continuation = stream_id;
+            }
+        }
+},
+.HTTP_FRAME_CONTINUATION => {
+if (((session.expecting_continuation == 0) or (header.streamIdentifier != session.expecting_continuation))) {
             session.fatal_error = error.HTTP2ProtocolError;
-        },
-        else => {},
-    }
+            return;
+        }
+        if (session.streams.get(session.expecting_continuation)) |stream| {
+            _ = &stream;
+            if (((stream.header_block.items.len + payload.len) > local_max_header_list_size)) {
+                session.fatal_error = error.HTTP2HeaderListTooLarge;
+                return;
+            }
+            _ = bun.handleOom(stream.header_block.appendSlice(bun.default_allocator, payload));
+            if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.END_HEADERS)) != 0)) {
+                session.expecting_continuation = 0;
+                if (stream.headers_end_stream) {
+                    _ = stream.recvEndStream();
+                }
+                _ = decodeHeaderBlock(session, stream);
+            }
+        } else {
+            if (((session.orphan_header_block.items.len + payload.len) > local_max_header_list_size)) {
+                session.fatal_error = error.HTTP2HeaderListTooLarge;
+                return;
+            }
+            _ = bun.handleOom(session.orphan_header_block.appendSlice(bun.default_allocator, payload));
+            if (((header.flags & @intFromEnum(wire.HeadersFrameFlags.END_HEADERS)) != 0)) {
+                session.expecting_continuation = 0;
+                _ = decodeDiscardOrphan(session);
+            }
+        }
+},
+.HTTP_FRAME_DATA => {
+session.conn_unacked_bytes +|= header.length;
+
+        const stream_id: u31 = @intCast(header.streamIdentifier);
+        _ = &stream_id;
+        if (session.streams.get(stream_id)) |stream| {
+            _ = &stream;
+            session.stream_progressed = true;
+            if ((stream.status_code == 0)) {
+                _ = stream.rst(.PROTOCOL_ERROR);
+                stream.fatal_error = error.HTTP2ProtocolError;
+                return;
+            }
+            if (stream.remoteClosed()) {
+                stream.fatal_error = ((stream.fatal_error) orelse (error.HTTP2ProtocolError));
+                return;
+            }
+            stream.unacked_bytes +|= header.length;
+
+            var fragment = payload;
+            _ = &fragment;
+            if (((header.flags & @intFromEnum(wire.DataFrameFlags.PADDED)) != 0)) {
+                if (stripPadding(fragment)) |stripped| {
+                    _ = &stripped;
+                    fragment = stripped;
+                } else {
+                    session.fatal_error = error.HTTP2ProtocolError;
+                    return;
+                }
+            }
+            if (((header.flags & @intFromEnum(wire.DataFrameFlags.END_STREAM)) != 0)) {
+                _ = stream.recvEndStream();
+            }
+            stream.data_bytes_received = (stream.data_bytes_received + fragment.len);
+            if ((fragment.len > 0)) {
+                _ = bun.handleOom(stream.body_buffer.appendSlice(bun.default_allocator, fragment));
+            }
+        } else {
+            if ((((stream_id == 0) or ((stream_id & 1) == 0)) or (stream_id >= session.next_stream_id))) {
+                session.fatal_error = error.HTTP2ProtocolError;
+            }
+            return;
+        }
+},
+.HTTP_FRAME_RST_STREAM => {
+if ((header.length != 4)) {
+            session.fatal_error = error.HTTP2FrameSizeError;
+            return;
+        }
+        const stream_id: u31 = @intCast(header.streamIdentifier);
+        _ = &stream_id;
+        if ((((stream_id == 0) or ((stream_id & 1) == 0)) or (stream_id >= session.next_stream_id))) {
+            session.fatal_error = error.HTTP2ProtocolError;
+            return;
+        }
+        if (session.streams.get(stream_id)) |stream| {
+            _ = &stream;
+            const had_response = stream.remoteClosed();
+            _ = &had_response;
+            stream.rst_done = true;
+            stream.state = .closed;
+            const code: u32 = wire.u32FromBytes(payload[0..4]);
+            _ = &code;
+            if ((code == @intFromEnum(wire.ErrorCode.NO_ERROR))) {
+                if (had_response) {
+                    stream.fatal_error = null;
+                } else {
+                    stream.fatal_error = error.HTTP2StreamReset;
+                }
+            } else {
+                if ((code == @intFromEnum(wire.ErrorCode.REFUSED_STREAM))) {
+                    stream.fatal_error = error.HTTP2RefusedStream;
+                } else {
+                    stream.fatal_error = error.HTTP2StreamReset;
+                }
+            }
+        }
+},
+.HTTP_FRAME_GOAWAY => {
+if ((header.streamIdentifier != 0)) {
+            session.fatal_error = error.HTTP2ProtocolError;
+            return;
+        }
+        if ((header.length < 8)) {
+            session.fatal_error = error.HTTP2FrameSizeError;
+            return;
+        }
+        session.goaway_received = true;
+        session.goaway_last_stream_id = wire.UInt31WithReserved.fromBytes(payload[0..4]).uint31;
+        const code: u32 = wire.u32FromBytes(payload[4..8]);
+        _ = &code;
+        const graceful = (code == @intFromEnum(wire.ErrorCode.NO_ERROR));
+        _ = &graceful;
+        var it = session.streams.iterator();
+        _ = &it;
+        while (it.next()) |e| {
+            const s = e.value_ptr.*;
+            _ = &s;
+            if ((s.id > session.goaway_last_stream_id)) {
+                if (graceful) {
+                    s.fatal_error = error.HTTP2RefusedStream;
+                } else {
+                    s.fatal_error = error.HTTP2GoAway;
+                }
+            } else {
+                if (((!graceful) and (!s.remoteClosed()))) {
+                    s.fatal_error = error.HTTP2GoAway;
+                }
+            }
+        }
+},
+.HTTP_FRAME_PUSH_PROMISE => {
+session.fatal_error = error.HTTP2ProtocolError;
+},
+else => {
+
+},
+}
 }
 
 pub fn decodeDiscardOrphan(session: *ClientSession) void {
-    defer {
+        defer {
         _ = session.orphan_header_block.clearRetainingCapacity();
-    }
-    var offset: usize = 0;
-    _ = &offset;
-    while ((offset < session.orphan_header_block.items.len)) {
-        const result = (blk_catch_0: {
-            break :blk_catch_0 (session.hpack.decode(session.orphan_header_block.items[offset..])) catch |__ce_0| {
-                _ = &__ce_0;
-                session.fatal_error = error.HTTP2CompressionError;
-                return;
-            };
-        });
-        _ = &result;
-        offset = (offset + result.next);
-    }
+        }
+        var offset: usize = 0;
+        _ = &offset;
+        while ((offset < session.orphan_header_block.items.len)) {
+            const result = (blk_catch_0: { break :blk_catch_0 ((session.hpack.decode(session.orphan_header_block.items[offset..])) catch |__ce_0| { _ = &__ce_0; session.fatal_error = error.HTTP2CompressionError;
+            return; }); });
+            _ = &result;
+            offset = (offset + result.next);
+        }
 }
 
 pub fn decodeHeaderBlock(session: *ClientSession, stream: *Stream) void {
-    defer {
+        defer {
         _ = stream.header_block.clearRetainingCapacity();
-    }
-    var status: u32 = 0;
-    _ = &status;
-    var bounds: std.ArrayListUnmanaged([3]u32) = .{};
-    _ = &bounds;
-    defer {
+        }
+        var status: u32 = 0;
+        _ = &status;
+        var bounds: std.ArrayListUnmanaged([3]u32) = .{};
+        _ = &bounds;
+        defer {
         _ = bounds.deinit(bun.default_allocator);
-    }
-    const start_len = stream.decoded_bytes.items.len;
-    _ = &start_len;
-    var seen_regular = false;
-    _ = &seen_regular;
-    var seen_status = false;
-    _ = &seen_status;
-    var malformed = false;
-    _ = &malformed;
-    var offset: usize = 0;
-    _ = &offset;
-    while ((offset < stream.header_block.items.len)) {
-        const result = (blk_catch_1: {
-            break :blk_catch_1 (session.hpack.decode(stream.header_block.items[offset..])) catch |__ce_1| {
-                _ = &__ce_1;
-                session.fatal_error = error.HTTP2CompressionError;
-                return;
-            };
-        });
-        _ = &result;
-        offset = (offset + result.next);
-        if (((result.name.len > 0) and (result.name[0] == 58))) {
-            if (((((stream.status_code != 0) or seen_regular) or seen_status) or (!strings.eqlComptime(result.name, ":status")))) {
+        }
+        const start_len = stream.decoded_bytes.items.len;
+        _ = &start_len;
+        var seen_regular = false;
+        _ = &seen_regular;
+        var seen_status = false;
+        _ = &seen_status;
+        var malformed = false;
+        _ = &malformed;
+        var offset: usize = 0;
+        _ = &offset;
+        while ((offset < stream.header_block.items.len)) {
+            const result = (blk_catch_1: { break :blk_catch_1 ((session.hpack.decode(stream.header_block.items[offset..])) catch |__ce_1| { _ = &__ce_1; session.fatal_error = error.HTTP2CompressionError;
+            return; }); });
+            _ = &result;
+            offset = (offset + result.next);
+            if (((result.name.len > 0) and (result.name[0] == 58))) {
+                if (((((stream.status_code != 0) or seen_regular) or seen_status) or (!strings.eqlComptime(result.name, ":status")))) {
+                    malformed = true;
+                    continue;
+                }
+                seen_status = true;
+                if ((result.value.len == 3)) {
+                    status = (blk_catch_2: { break :blk_catch_2 ((std.fmt.parseInt(u32, result.value, 10)) catch |__ce_2| { _ = &__ce_2; break :blk_catch_2 0; }); });
+                } else {
+                    status = 0;
+                }
+                if (((status < 100) or (status > 999))) {
+                    malformed = true;
+                }
+                continue;
+            }
+            seen_regular = true;
+            if (((stream.status_code != 0) or malformed)) {
+                continue;
+            }
+            if (isMalformedResponseField(result.name)) {
                 malformed = true;
                 continue;
             }
-            seen_status = true;
-            if ((result.value.len == 3)) {
-                status = (blk_catch_2: {
-                    break :blk_catch_2 (std.fmt.parseInt(u32, result.value, 10)) catch |__ce_2| {
-                        _ = &__ce_2;
-                        break :blk_catch_2 0;
-                    };
-                });
-            } else {
-                status = 0;
+            if ((((stream.decoded_bytes.items.len + result.name.len) + result.value.len) > local_max_header_list_size)) {
+                session.fatal_error = error.HTTP2HeaderListTooLarge;
+                return;
             }
-            if (((status < 100) or (status > 999))) {
-                malformed = true;
-            }
-            continue;
+            const name_start: u32 = @intCast(stream.decoded_bytes.items.len);
+            _ = &name_start;
+            _ = bun.handleOom(stream.decoded_bytes.appendSlice(bun.default_allocator, result.name));
+            const value_start: u32 = @intCast(stream.decoded_bytes.items.len);
+            _ = &value_start;
+            _ = bun.handleOom(stream.decoded_bytes.appendSlice(bun.default_allocator, result.value));
+            _ = bun.handleOom(bounds.append(bun.default_allocator, .{ name_start, value_start, @intCast(stream.decoded_bytes.items.len) }));
         }
-        seen_regular = true;
-        if (((stream.status_code != 0) or malformed)) {
-            continue;
-        }
-        if (isMalformedResponseField(result.name)) {
-            malformed = true;
-            continue;
-        }
-        if ((((stream.decoded_bytes.items.len + result.name.len) + result.value.len) > local_max_header_list_size)) {
-            session.fatal_error = error.HTTP2HeaderListTooLarge;
+        if (malformed) {
+            stream.decoded_bytes.items.len = start_len;
+            _ = stream.rst(.PROTOCOL_ERROR);
+            stream.fatal_error = error.HTTP2ProtocolError;
             return;
         }
-        const name_start: u32 = @intCast(stream.decoded_bytes.items.len);
-        _ = &name_start;
-        _ = bun.handleOom(stream.decoded_bytes.appendSlice(bun.default_allocator, result.name));
-        const value_start: u32 = @intCast(stream.decoded_bytes.items.len);
-        _ = &value_start;
-        _ = bun.handleOom(stream.decoded_bytes.appendSlice(bun.default_allocator, result.value));
-        _ = bun.handleOom(bounds.append(bun.default_allocator, .{ name_start, value_start, @intCast(stream.decoded_bytes.items.len) }));
-    }
-    if (malformed) {
-        stream.decoded_bytes.items.len = start_len;
-        _ = stream.rst(.PROTOCOL_ERROR);
-        stream.fatal_error = error.HTTP2ProtocolError;
-        return;
-    }
-    if ((stream.status_code != 0)) {
-        if ((!stream.headers_end_stream)) {
-            stream.fatal_error = error.HTTP2ProtocolError;
+        if ((stream.status_code != 0)) {
+            if ((!stream.headers_end_stream)) {
+                stream.fatal_error = error.HTTP2ProtocolError;
+            }
+            return;
         }
-        return;
-    }
-    if ((status == 0)) {
-        stream.decoded_bytes.items.len = start_len;
-        stream.fatal_error = error.HTTP2ProtocolError;
-        return;
-    }
-    if (((status >= 100) and (status < 200))) {
-        stream.decoded_bytes.items.len = start_len;
-        if ((status == 100)) {
+        if ((status == 0)) {
+            stream.decoded_bytes.items.len = start_len;
+            stream.fatal_error = error.HTTP2ProtocolError;
+            return;
+        }
+        if (((status >= 100) and (status < 200))) {
+            stream.decoded_bytes.items.len = start_len;
+            if ((status == 100)) {
+                stream.awaiting_continue = false;
+            }
+            if (stream.remoteClosed()) {
+                stream.fatal_error = error.HTTP2ProtocolError;
+            }
+            return;
+        }
+        stream.status_code = status;
+        stream.headers_ready = true;
+        if (stream.awaiting_continue) {
             stream.awaiting_continue = false;
+            _ = session.writeFrame(.HTTP_FRAME_DATA, @intFromEnum(wire.DataFrameFlags.END_STREAM), stream.id, "");
+            _ = stream.sentEndStream();
         }
-        if (stream.remoteClosed()) {
-            stream.fatal_error = error.HTTP2ProtocolError;
+        const bytes = stream.decoded_bytes.items;
+        _ = &bytes;
+        _ = bun.handleOom(stream.decoded_headers.ensureTotalCapacityPrecise(bun.default_allocator, bounds.items.len));
+        for (bounds.items) |b| {
+            _ = &b;
+            _ = stream.decoded_headers.appendAssumeCapacity(.{ .name = bytes[b[0]..b[1]], .value = bytes[b[1]..b[2]] });
         }
-        return;
-    }
-    stream.status_code = status;
-    stream.headers_ready = true;
-    if (stream.awaiting_continue) {
-        stream.awaiting_continue = false;
-        _ = session.writeFrame(.HTTP_FRAME_DATA, @intFromEnum(wire.DataFrameFlags.END_STREAM), stream.id, "");
-        _ = stream.sentEndStream();
-    }
-    const bytes = stream.decoded_bytes.items;
-    _ = &bytes;
-    _ = bun.handleOom(stream.decoded_headers.ensureTotalCapacityPrecise(bun.default_allocator, bounds.items.len));
-    for (bounds.items) |b| {
-        _ = &b;
-        _ = stream.decoded_headers.appendAssumeCapacity(.{ .name = bytes[b[0]..b[1]], .value = bytes[b[1]..b[2]] });
-    }
 }
 
 pub fn stripPadding(payload: []const u8) ?[]const u8 {
-    if ((payload.len < 1)) {
-        return null;
-    }
-    const pad: usize = payload[0];
-    _ = &pad;
-    if ((pad >= payload.len)) {
-        return null;
-    }
-    return payload[1..(payload.len - pad)];
+        if ((payload.len < 1)) {
+            return null;
+        }
+        const pad: usize = payload[0];
+        _ = &pad;
+        if ((pad >= payload.len)) {
+            return null;
+        }
+        return payload[1..(payload.len - pad)];
 }
 
 pub fn isMalformedResponseField(name: []const u8) bool {
-    for (cp_iter_slice(name)) |c| {
-        _ = &c;
-        if (((c >= 65) and (c <= 90))) {
-            return true;
+        for (cp_iter_slice(name)) |c| {
+            _ = &c;
+            if (((c >= 65) and (c <= 90))) {
+                return true;
+            }
         }
-    }
-    return forbidden_response_fields.has(name);
+        return forbidden_response_fields.has(name);
 }
 
 pub fn errorCodeFor(err: anyerror) wire.ErrorCode {
-    if ((err == error.HTTP2ProtocolError)) {
-        return .PROTOCOL_ERROR;
-    }
-    if ((err == error.HTTP2FrameSizeError)) {
-        return .FRAME_SIZE_ERROR;
-    }
-    if ((err == error.HTTP2FlowControlError)) {
-        return .FLOW_CONTROL_ERROR;
-    }
-    if ((err == error.HTTP2CompressionError)) {
-        return .COMPRESSION_ERROR;
-    }
-    if (((err == error.HTTP2HeaderListTooLarge) or (err == error.HTTP2EnhanceYourCalm))) {
-        return .ENHANCE_YOUR_CALM;
-    }
-    return .INTERNAL_ERROR;
+        if ((err == error.HTTP2ProtocolError)) {
+            return .PROTOCOL_ERROR;
+        }
+        if ((err == error.HTTP2FrameSizeError)) {
+            return .FRAME_SIZE_ERROR;
+        }
+        if ((err == error.HTTP2FlowControlError)) {
+            return .FLOW_CONTROL_ERROR;
+        }
+        if ((err == error.HTTP2CompressionError)) {
+            return .COMPRESSION_ERROR;
+        }
+        if (((err == error.HTTP2HeaderListTooLarge) or (err == error.HTTP2EnhanceYourCalm))) {
+            return .ENHANCE_YOUR_CALM;
+        }
+        return .INTERNAL_ERROR;
 }

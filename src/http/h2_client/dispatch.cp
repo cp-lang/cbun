@@ -1,16 +1,15 @@
+// src/http/h2_client/dispatch.cp
+// HTTP/2 frame dispatcher in CP language
+
+import { ClientSession } from "./ClientSession.cp";
+import { Stream } from "./Stream.cp";
+import * as wire from "../H2FrameParser.cp";
+import { local_max_header_list_size, write_buffer_control_limit } from "../H2Client.cp";
+
 zig {
-    const log = bun.Output.scoped(.h2_client, .hidden);
-    const ClientSession = @import("./ClientSession.zig");
-    const Stream = @import("./Stream.zig");
-    const wire = @import("../H2FrameParser.zig");
-
-    const H2 = @import("../H2Client.zig");
-    const local_max_header_list_size = H2.local_max_header_list_size;
-    const write_buffer_control_limit = H2.write_buffer_control_limit;
-
     const bun = @import("bun");
     const strings = bun.strings;
-
+    const log = bun.Output.scoped(.h2_client, .hidden);
     const forbidden_response_fields = bun.ComptimeStringMap(void, .{
         .{ "connection", {} },
         .{ "keep-alive", {} },
@@ -22,14 +21,14 @@ zig {
 }
 
 pub fn parseFrames(session: *ClientSession, buf: string): usize {
-    let mut consumed: usize = 0;
+    let consumed: usize = 0;
     while (true) {
         const remaining = buf[consumed..];
         if (remaining.len < wire.FrameHeader.byteSize) {
             break;
         }
-        let mut header: wire.FrameHeader = { flags: 0 };
-        wire.FrameHeader.from(&mut header, remaining[0..wire.FrameHeader.byteSize], 0, true);
+        let header: wire.FrameHeader = { flags: 0 };
+        wire.FrameHeader.from(&header, remaining[0..wire.FrameHeader.byteSize], 0, true);
         header.streamIdentifier = wire.UInt31WithReserved.from(header.streamIdentifier).uint31;
         if (header.length > wire.DEFAULT_MAX_FRAME_SIZE) {
             session.fatal_error = error.HTTP2FrameSizeError;
@@ -76,10 +75,10 @@ pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload:
                 session.fatal_error = error.HTTP2FrameSizeError;
                 return;
             }
-            let mut i: usize = 0;
+            let i: usize = 0;
             while (i + wire.SettingsPayloadUnit.byteSize <= payload.len) {
-                let mut unit: wire.SettingsPayloadUnit = undefined;
-                wire.SettingsPayloadUnit.from(&mut unit, payload[i..(i + wire.SettingsPayloadUnit.byteSize)], 0, true);
+                let unit: wire.SettingsPayloadUnit = undefined;
+                wire.SettingsPayloadUnit.from(&unit, payload[i..(i + wire.SettingsPayloadUnit.byteSize)], 0, true);
                 switch (@as(wire.SettingsType, @enumFromInt(unit.type))) {
                     .SETTINGS_MAX_FRAME_SIZE => {
                         if (unit.value < wire.DEFAULT_MAX_FRAME_SIZE || unit.value > wire.MAX_FRAME_SIZE) {
@@ -189,7 +188,7 @@ pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload:
             }
         },
         .HTTP_FRAME_HEADERS => {
-            let mut fragment = payload;
+            let fragment = payload;
             const stream_id: u31 = @intCast(header.streamIdentifier);
             if (stream := session.streams.get(stream_id)) {
                 session.stream_progressed = true;
@@ -301,7 +300,7 @@ pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload:
                     return;
                 }
                 zig { stream.unacked_bytes +|= header.length; }
-                let mut fragment = payload;
+                let fragment = payload;
                 if ((header.flags & @intFromEnum(wire.DataFrameFlags.PADDED)) != 0) {
                     if (stripped := stripPadding(fragment)) {
                         fragment = stripped;
@@ -365,7 +364,7 @@ pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload:
             session.goaway_last_stream_id = wire.UInt31WithReserved.fromBytes(payload[0..4]).uint31;
             const code: u32 = wire.u32FromBytes(payload[4..8]);
             const graceful = code == @intFromEnum(wire.ErrorCode.NO_ERROR);
-            let mut it = session.streams.iterator();
+            let it = session.streams.iterator();
             while (e := it.next()) {
                 const s = e.value_ptr.*;
                 if (s.id > session.goaway_last_stream_id) {
@@ -388,7 +387,7 @@ pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload:
 
 pub fn decodeDiscardOrphan(session: *ClientSession): void {
     defer session.orphan_header_block.clearRetainingCapacity();
-    let mut offset: usize = 0;
+    let offset: usize = 0;
     while (offset < session.orphan_header_block.items.len) {
         const result = session.hpack.decode(session.orphan_header_block.items[offset..]) catch {
             session.fatal_error = error.HTTP2CompressionError;
@@ -401,15 +400,15 @@ pub fn decodeDiscardOrphan(session: *ClientSession): void {
 pub fn decodeHeaderBlock(session: *ClientSession, stream: *Stream): void {
     defer stream.header_block.clearRetainingCapacity();
 
-    let mut status: u32 = 0;
-    let mut bounds: std.ArrayListUnmanaged([3]u32) = {};
+    let status: u32 = 0;
+    let bounds: std.ArrayListUnmanaged([3]u32) = {};
     defer bounds.deinit(bun.default_allocator);
     const start_len = stream.decoded_bytes.items.len;
-    let mut seen_regular = false;
-    let mut seen_status = false;
-    let mut malformed = false;
+    let seen_regular = false;
+    let seen_status = false;
+    let malformed = false;
 
-    let mut offset: usize = 0;
+    let offset: usize = 0;
     while (offset < stream.header_block.items.len) {
         const result = session.hpack.decode(stream.header_block.items[offset..]) catch {
             session.fatal_error = error.HTTP2CompressionError;

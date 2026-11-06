@@ -1,13 +1,16 @@
 // src/uws_sys/quic.cp
-// Zig bindings for the lsquic-backed QUIC transport in packages/bun-usockets
+// CP bindings for the lsquic-backed QUIC transport in packages/bun-usockets
 
-import { Context } from "./quic/Context.cp";
-import { Socket } from "./quic/Socket.cp";
-import { Stream } from "./quic/Stream.cp";
-import { PendingConnect } from "./quic/PendingConnect.cp";
-import { Header, Qpack } from "./quic/Header.cp";
+export { Context } from "./quic/Context.cp";
+export { Socket } from "./quic/Socket.cp";
+export { Stream } from "./quic/Stream.cp";
+export { PendingConnect } from "./quic/PendingConnect.cp";
+export { Header, Qpack } from "./quic/Header.cp";
 
-zig {
-    pub extern fn us_quic_global_init() callconv(.c) void;
-    pub const globalInit = us_quic_global_init;
+@c {
+    fn us_quic_global_init(): void;
+}
+
+export fn globalInit(): void {
+    us_quic_global_init();
 }

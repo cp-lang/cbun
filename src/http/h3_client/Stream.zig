@@ -2,20 +2,37 @@
 const std = @import("std");
 const string = []const u8;
 
-const ClientSession = @import("./ClientSession.zig");
-const H3 = @import("../H3Client.zig");
-
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 const bun = @import("bun");
-const HTTPClient = bun.http;
-const picohttp = bun.picohttp;
-const quic = bun.uws.quic;
+    const quic = bun.uws.quic;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
+pub const ClientSession = @import("./ClientSession.zig").ClientSession;
+pub const H3Client = @import("../H3Client.zig").H3Client;
+pub const HTTPClient = @import("../http.zig").HTTPClient;
 pub const Stream = @This();
 
 session: *ClientSession,
 client: ?*HTTPClient,
 qstream: ?*quic.Stream = null,
-decoded_headers: std.ArrayListUnmanaged(picohttp.Header) = .{},
+decoded_headers: std.ArrayListUnmanaged(bun.picohttp.Header) = .{},
 body_buffer: std.ArrayListUnmanaged(u8) = .{},
 status_code: u16 = 0,
 pending_body: []const u8 = "",
@@ -23,19 +40,21 @@ request_body_done: bool = false,
 is_streaming_body: bool = false,
 headers_delivered: bool = false,
 
+pub fn release(self: *Stream) void {
+        _ = self.decoded_headers.deinit(bun.default_allocator);
+        _ = self.body_buffer.deinit(bun.default_allocator);
+        _ = bun.http.H3.live_streams.fetchSub(1, .monotonic);
+        _ = bun.destroy(self);
+}
+
 pub fn deinit(self: *Stream) void {
-    _ = &self;
-    _ = self.decoded_headers.deinit(bun.default_allocator);
-    _ = self.body_buffer.deinit(bun.default_allocator);
-    _ = H3.live_streams.fetchSub(1, .monotonic);
-    _ = bun.destroy(self);
+        _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
 }
 
 pub fn abort(self: *Stream) void {
-    _ = &self;
-    if (self.qstream) |qs| {
-        _ = &qs;
-        _ = qs.close();
-    }
+        if (self.qstream) |qs| {
+            _ = &qs;
+            _ = qs.close();
+        }
 }
-pub const new = bun.TrivialNew(@This());
+pub const new = bun.TrivialNew(Stream);

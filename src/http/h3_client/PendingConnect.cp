@@ -3,35 +3,31 @@
 
 zig {
     const bun = @import("bun");
-    const H3 = bun.http.H3;
-    const ClientSession = H3.ClientSession;
     const uws = bun.uws;
     const quic = uws.quic;
-
     var resolved_mutex: bun.Mutex = .{};
     var resolved_head: ?*PendingConnect = null;
 }
 
-export @root
-struct PendingConnect {
+import { ClientSession } from "./ClientSession.cp";
+
+export @root struct PendingConnect {
     session: *ClientSession,
     pc: *quic.PendingConnect,
     loop_ptr: *uws.Loop,
     next: *PendingConnect? = null,
 
-    pub static fn register(session: *ClientSession, pc: *quic.PendingConnect, l: *uws.Loop): void {
-        zig {
-            const self = bun.new(PendingConnect, .{ .session = session, .pc = pc, .loop_ptr = l });
-            session.ref();
-            bun.dns.internal.registerQuic(@ptrCast(@alignCast(pc.addrinfo())), self);
-        }
+    static fn register(session: *ClientSession, pc: *quic.PendingConnect, l: *uws.Loop): void {
+        const item = bun.new(PendingConnect, { session: session, pc: pc, loop_ptr: l });
+        session.ref();
+        bun.dns.internal.registerQuic(@ptrCast(@alignCast(pc.addrinfo())), item);
     }
 
-    pub fn loop(*this): *uws.Loop {
+    fn loop(*this): any {
         return this.loop_ptr;
     }
 
-    pub fn onDNSResolved(*this): void {
+    fn onDNSResolved(*this): void {
         const session = this.session;
         defer {
             session.deref();
@@ -55,7 +51,7 @@ struct PendingConnect {
         }
     }
 
-    pub fn onDNSResolvedThreadsafe(*this): void {
+    fn onDNSResolvedThreadsafe(*this): void {
         resolved_mutex.lock();
         this.next = resolved_head;
         resolved_head = this;
@@ -63,9 +59,9 @@ struct PendingConnect {
         this.loop_ptr.wakeup();
     }
 
-    pub static fn drainResolved(): void {
+    static fn drainResolved(): void {
         resolved_mutex.lock();
-        let mut head = resolved_head;
+        let head = resolved_head;
         resolved_head = null;
         resolved_mutex.unlock();
         while (pc := head) {
@@ -75,9 +71,9 @@ struct PendingConnect {
         }
     }
 
-    pub static fn failSession(session: *ClientSession, err: anyerror): void {
+    static fn failSession(session: *ClientSession, err: anyerror): void {
         session.closed = true;
-        if (ctx := H3.ClientContext.get()) {
+        if (ctx := bun.http.H3.ClientContext.get()) {
             ctx.unregister(session);
         }
         while (session.pending.items.len > 0) {
@@ -88,7 +84,7 @@ struct PendingConnect {
                 cl_.failFromH2(err);
             }
         }
-        _ = H3.live_sessions.fetchSub(1, .monotonic);
+        bun.http.H3.live_sessions.fetchSub(1, .monotonic);
         session.deref();
     }
 }

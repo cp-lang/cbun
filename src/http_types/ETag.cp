@@ -1,9 +1,7 @@
 // src/http_types/ETag.cp
 // Bun HTTP ETag and If-None-Match header evaluation in CP language
 
-zig {
-    const bun = @import("bun");
-}
+import bun from "bun";
 
 export struct ParsedETag {
     tag: string,
@@ -11,13 +9,13 @@ export struct ParsedETag {
 }
 
 fn parse(tag_str: string): ParsedETag {
-    let mut str = std.mem.trim(u8, tag_str, " \t");
+    let mut str = bun.strings.trim(tag_str, " \t");
 
     let mut is_weak = false;
     if (bun.strings.hasPrefix(str, "W/")) {
         is_weak = true;
         str = str[2..];
-        str = std.mem.trimLeft(u8, str, " \t");
+        str = bun.strings.trimLeft(str, " \t");
     }
 
     if (str.len >= 2 && str[0] == '"' && str[str.len - 1] == '"') {
@@ -31,26 +29,24 @@ fn parse(tag_str: string): ParsedETag {
 }
 
 fn weakMatch(tag1: string, is_weak1: bool, tag2: string, is_weak2: bool): bool {
-    return std.mem.eql(u8, tag1, tag2);
+    return tag1 == tag2;
 }
 
-pub fn appendToHeaders(bytes: string, headers: *bun.http.Headers)! {
-    zig {
-        const hash = std.hash.XxHash64.hash(0, bytes);
-        var etag_buf: [40]u8 = undefined;
-        const etag_str = std.fmt.bufPrint(&etag_buf, "\"{f}\"", .{bun.fmt.hexIntLower(hash)}) catch unreachable;
-        try headers.append("etag", etag_str);
-    }
+pub fn appendToHeaders(bytes: string, headers: *bun.http.Headers): ?void {
+    let hash = bun.hash.XxHash64.hash(0, bytes);
+    let etag_buf: u8[40] = undefined;
+    let etag_str = bun.fmt.bufPrint(&etag_buf, "\"{f}\"", (bun.fmt.hexIntLower(hash)));
+    headers.append("etag", etag_str)?;
 }
 
 pub fn ifNoneMatch(etag: string, if_none_match: string): bool {
     const our_parsed = parse(etag);
 
-    if (std.mem.eql(u8, std.mem.trim(u8, if_none_match, " \t"), "*")) {
+    if (bun.strings.trim(if_none_match, " \t") == "*") {
         return true;
     }
 
-    let mut iter = std.mem.splitScalar(u8, if_none_match, ',');
+    let mut iter = bun.strings.split(if_none_match, ",");
     while (tag_str := iter.next()) {
         const parsed = parse(tag_str);
         if (weakMatch(our_parsed.tag, our_parsed.is_weak, parsed.tag, parsed.is_weak)) {

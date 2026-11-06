@@ -2,134 +2,172 @@
 const std = @import("std");
 const string = []const u8;
 
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
+const bun = @import("bun");
+    pub const PercentEncoding = @import("../url/url.zig").PercentEncoding;
+pub const Channel8 = bun.threading.Channel(HTTPClientResult, .{ .Static = 8 });
+    pub const Channel1000 = bun.threading.Channel(HTTPClientResult, .{ .Static = 1000 });
+fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_array_lit(comptime Elem: type, init_slice: []const Elem) []const Elem { const buf = std.heap.page_allocator.alloc(Elem, init_slice.len) catch unreachable; if (init_slice.len > 0) @memcpy(buf, init_slice); return buf; }
+fn CpArrayElemType(comptime PtrT: type) type { const S0 = @typeInfo(PtrT).pointer.child; const S1 = if (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one) @typeInfo(S0).pointer.child else S0; return @typeInfo(S1).pointer.child; }
+fn cp_array_push(arr_ptr: anytype, item: anytype) void { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const SliceT = @TypeOf(target_ptr.*); const Elem = @typeInfo(SliceT).pointer.child; const old_slice = target_ptr.*; const new_slice = std.heap.page_allocator.alloc(Elem, old_slice.len + 1) catch unreachable; if (old_slice.len > 0) @memcpy(new_slice[0..old_slice.len], old_slice); new_slice[old_slice.len] = @as(Elem, cp_val(item)); target_ptr.* = new_slice; }
+fn cp_array_pop(arr_ptr: anytype) ?CpArrayElemType(@TypeOf(arr_ptr)) { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const s = target_ptr.*; if (s.len == 0) return null; const last = s[s.len - 1]; target_ptr.* = s[0 .. s.len - 1]; return last; }
+fn cp_container_clear(ptr: anytype) void { const S0 = @TypeOf(ptr.*); if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one and @typeInfo(@typeInfo(S0).pointer.child) == .@"struct" and @hasDecl(@typeInfo(S0).pointer.child, "clear"))) { ptr.*.clear(); } else { const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) ptr.* else ptr; target_ptr.* = target_ptr.*[0..0]; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
-    const bun = @import("bun");
-    const Environment = bun.Environment;
-    const FeatureFlags = bun.FeatureFlags;
-    const MutableString = bun.MutableString;
-    const assert = bun.assert;
-    const jsc = bun.jsc;
-    const picohttp = bun.picohttp;
-    const Channel = bun.threading.Channel;
-    const SSLConfig = bun.api.server.ServerConfig.SSLConfig;
+pub const Headers = @import("./Headers.zig").Headers;
+pub const HTTPThread = @import("./HTTPThread.zig").HTTPThread;
+pub const Encoding = @import("../http_types/Encoding.zig").Encoding;
+pub const HTTPClient = @import("./http.zig").HTTPClient;
+pub const HTTPClientResult = @import("./http.zig").HTTPClientResult;
+pub const FetchRedirect = @import("../http_types/FetchRedirect.zig").FetchRedirect;
+pub const State = enum(u32) {
+    pending = 0,
+    scheduled = 1,
+    sending = 2,
+    success = 3,
+    fail = 4,
+};
 
-    const ThreadPool = bun.ThreadPool;
-    const Batch = bun.ThreadPool.Batch;
-    const Task = ThreadPool.Task;
+pub const Options = struct {
+    http_proxy: ?bun.URL = null,
+    proxy_headers: ?Headers = null,
+    hostname: ?[]const u8 = null,
+    signals: ?HTTPClient.Signals = null,
+    unix_socket_path: ?bun.jsc.ZigString.Slice = null,
+    disable_timeout: ?bool = null,
+    verbose: ?HTTPClient.HTTPVerboseLevel = null,
+    disable_keepalive: ?bool = null,
+    disable_decompression: ?bool = null,
+    reject_unauthorized: ?bool = null,
+    tls_props: ?bun.api.server.ServerConfig.SSLConfig.SharedPtr = null,
+    
+pub fn _create(allocator: std.mem.Allocator) !*Options { const self_ptr = try allocator.create(Options); self_ptr.* = undefined; return self_ptr; }
 
-    const HTTPClient = bun.http;
-    const FetchRedirect = HTTPClient.FetchRedirect;
-    const HTTPClientResult = HTTPClient.HTTPClientResult;
-    const HTTPRequestBody = HTTPClient.HTTPRequestBody;
-    const HTTPVerboseLevel = HTTPClient.HTTPVerboseLevel;
-    const Method = HTTPClient.Method;
-    const Signals = HTTPClient.Signals;
+pub fn init(self: *Options, http_proxy: ?bun.URL, proxy_headers: ?Headers, hostname: ?[]const u8, signals: ?HTTPClient.Signals, unix_socket_path: ?bun.jsc.ZigString.Slice, disable_timeout: ?bool, verbose: ?HTTPClient.HTTPVerboseLevel, disable_keepalive: ?bool, disable_decompression: ?bool, reject_unauthorized: ?bool, tls_props: ?bun.api.server.ServerConfig.SSLConfig.SharedPtr) void {
+            self.http_proxy = http_proxy;
+            self.proxy_headers = proxy_headers;
+            self.hostname = hostname;
+            self.signals = signals;
+            self.unix_socket_path = unix_socket_path;
+            self.disable_timeout = disable_timeout;
+            self.verbose = verbose;
+            self.disable_keepalive = disable_keepalive;
+            self.disable_decompression = disable_decompression;
+            self.reject_unauthorized = reject_unauthorized;
+            self.tls_props = tls_props;
+    }
+};
 
-    const Loc = bun.logger.Loc;
-    const Log = bun.logger.Log;
+pub const Preconnect = struct {
+    async_http: AsyncHTTP,
+    response_buffer: bun.MutableString,
+    url: bun.URL,
+    is_url_owned: bool,
+    
+pub fn _create(allocator: std.mem.Allocator) !*Preconnect { const self_ptr = try allocator.create(Preconnect); self_ptr.* = undefined; return self_ptr; }
 
-    const DotEnv = @import("../dotenv/env_loader.zig");
-    const HTTPThread = @import("./HTTPThread.zig");
-    const Headers = @import("./Headers.zig");
-    const Encoding = @import("../http_types/Encoding.zig").Encoding;
-
-    const PercentEncoding = @import("../url/url.zig").PercentEncoding;
-    const URL = @import("../url/url.zig").URL;
-
-    const log = bun.Output.scoped(.AsyncHTTP, .visible);
-
-    pub const State = enum(u32) {
-        pending = 0,
-        scheduled = 1,
-        sending = 2,
-        success = 3,
-        fail = 4,
-    };
-    pub const AtomicState = std.atomic.Value(State);
-
-    pub const Options = struct {
-        http_proxy: ?URL = null,
-        proxy_headers: ?Headers = null,
-        hostname: ?[]u8 = null,
-        signals: ?Signals = null,
-        unix_socket_path: ?jsc.ZigString.Slice = null,
-        disable_timeout: ?bool = null,
-        verbose: ?HTTPVerboseLevel = null,
-        disable_keepalive: ?bool = null,
-        disable_decompression: ?bool = null,
-        reject_unauthorized: ?bool = null,
-        tls_props: ?SSLConfig.SharedPtr = null,
-    };
-
-    const Preconnect = struct {
-        async_http: AsyncHTTP,
-        response_buffer: MutableString,
-        url: bun.URL,
-        is_url_owned: bool,
-
-        pub const new = bun.TrivialNew(@This());
-
-        pub fn onResult(this: *Preconnect, _: *AsyncHTTP, _: HTTPClientResult) void {
-            this.response_buffer.deinit();
-            this.async_http.clearData();
-            this.async_http.client.deinit();
-            if (this.is_url_owned) {
-                bun.default_allocator.free(this.url.href);
-            }
-
-            bun.destroy(this);
-        }
-    };
-
-    const HTTPCallbackPair = .{ *AsyncHTTP, HTTPClientResult };
-    pub const HTTPChannel = Channel(HTTPCallbackPair, .{ .Static = 1000 });
-
-    const SingleHTTPChannel = struct {
-        const SingleHTTPCHannel_ = Channel(HTTPClientResult, .{ .Static = 8 });
-        channel: SingleHTTPCHannel_,
-        pub fn reset(_: *@This()) void {}
-        pub fn init() SingleHTTPChannel {
-            return SingleHTTPChannel{ .channel = SingleHTTPCHannel_.init() };
-        }
-    };
-
-    fn sendSyncCallback(this: *SingleHTTPChannel, async_http: *AsyncHTTP, result: HTTPClientResult) void {
-        async_http.real.?.* = async_http.*;
-        async_http.real.?.response_buffer = async_http.response_buffer;
-        this.channel.writeItem(result) catch unreachable;
+pub fn init(self: *Preconnect, async_http: AsyncHTTP, response_buffer: bun.MutableString, url: bun.URL, is_url_owned: bool) void {
+        var __async_http_moved = false; _ = &__async_http_moved;
+        defer if (!__async_http_moved) { const T = @TypeOf(async_http); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = async_http.release() catch {}; } else { async_http.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { async_http.release(); } };
+        var __response_buffer_moved = false; _ = &__response_buffer_moved;
+        defer if (!__response_buffer_moved) { const T = @TypeOf(response_buffer); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = response_buffer.release() catch {}; } else { response_buffer.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { response_buffer.release(); } };
+        var __url_moved = false; _ = &__url_moved;
+        defer if (!__url_moved) { const T = @TypeOf(url); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = url.release() catch {}; } else { url.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { url.release(); } };
+            self.async_http = async_http;
+            self.response_buffer = response_buffer;
+            self.url = url;
+            self.is_url_owned = is_url_owned;
     }
 
-    pub const HTTPChannelContext = struct {
-        http: AsyncHTTP = undefined,
-        channel: *HTTPChannel,
+pub fn onResult(self: *Preconnect, dummy_async: *AsyncHTTP, dummy_res: HTTPClientResult) void {
+        _ = dummy_async;
+        _ = dummy_res;
+            _ = self.response_buffer.deinit();
+            _ = self.async_http.clearData();
+            _ = self.async_http.client.deinit();
+            if (self.is_url_owned) {
+                _ = bun.default_allocator.free(self.url.href);
+            }
+            _ = bun.destroy(self);
+    }
+    pub const new = bun.TrivialNew(Preconnect);
+};
 
-        pub fn callback(data: HTTPCallbackPair) void {
-            var this: *HTTPChannelContext = @fieldParentPtr("http", data.@"0");
-            this.channel.writeItem(data) catch unreachable;
-        }
-    };
+pub const SingleHTTPChannel = struct {
+    channel: Channel8,
+    
+pub fn _create(allocator: std.mem.Allocator) !*SingleHTTPChannel { const self_ptr = try allocator.create(SingleHTTPChannel); self_ptr.* = undefined; return self_ptr; }
+
+pub fn reset(self: *SingleHTTPChannel) void {
+        _ = &self;
+    }
+
+pub fn init() SingleHTTPChannel {
+            return SingleHTTPChannel{ .channel = Channel8.init() };
+    }
+};
+
+pub const HTTPChannelContext = struct {
+    http: AsyncHTTP = undefined,
+    channel: *Channel1000,
+    
+pub fn _create(allocator: std.mem.Allocator) !*HTTPChannelContext { const self_ptr = try allocator.create(HTTPChannelContext); self_ptr.* = undefined; return self_ptr; }
+
+pub fn init(self: *HTTPChannelContext, http: AsyncHTTP, channel: *Channel1000) void {
+        var __http_moved = false; _ = &__http_moved;
+        defer if (!__http_moved) { const T = @TypeOf(http); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = http.release() catch {}; } else { http.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { http.release(); } };
+            self.http = http;
+            self.channel = channel;
+    }
+
+pub fn callback(self: *HTTPChannelContext, _async: *AsyncHTTP, result: HTTPClientResult) void {
+        _ = _async;
+            _ = (blk_catch_0: { break :blk_catch_0 ((self.channel.writeItem(result)) catch |__ce_0| { _ = &__ce_0; @panic("unreachable"); }); });
+    }
+};
 
 pub const AsyncHTTP = @This();
 
-request: ?picohttp.Request = null,
-response: ?picohttp.Response = null,
+request: ?bun.picohttp.Request = null,
+response: ?bun.picohttp.Response = null,
 request_headers: Headers.Entry.List = Headers.Entry.List.empty,
 response_headers: Headers.Entry.List = Headers.Entry.List.empty,
-response_buffer: *MutableString,
-request_body: HTTPRequestBody = .{ .bytes = "" },
+response_buffer: *bun.MutableString,
+request_body: HTTPClient.HTTPRequestBody = .{ .bytes = "" },
 allocator: std.mem.Allocator,
 request_header_buf: []const u8 = "",
-method: Method = Method.GET,
-url: URL,
-http_proxy: ?URL = null,
+method: HTTPClient.Method = .GET,
+url: bun.URL,
+http_proxy: ?bun.URL = null,
 real: ?*AsyncHTTP = null,
 next: ?*AsyncHTTP = null,
-task: Task = Task{ .callback = (&startAsyncHTTP) },
-state: AtomicState = AtomicState.init(State.pending),
+task: bun.ThreadPool.Task = .{ .callback = (&startAsyncHTTP) },
+state: std.atomic.Value(State) = std.atomic.Value(State).init(.pending),
 result_callback: HTTPClientResult.Callback = undefined,
 redirected: bool = false,
 response_encoding: Encoding = Encoding.identity,
-verbose: HTTPVerboseLevel = .none,
+verbose: HTTPClient.HTTPVerboseLevel = .none,
 client: HTTPClient = undefined,
 waitingDeffered: bool = false,
 finalized: bool = false,
@@ -137,35 +175,16 @@ err: ?anyerror = null,
 async_http_id: u32 = 0,
 elapsed: u64 = 0,
 gzip_elapsed: u64 = 0,
-signals: Signals = .{},
+signals: HTTPClient.Signals = .{},
 
-pub fn loadEnv(allocator: std.mem.Allocator, logger: *Log, env: *DotEnv.Loader) void {
-        const val_opt = env.get("BUN_CONFIG_MAX_HTTP_REQUESTS");
-        _ = &val_opt;
-        if (val_opt) |max_http_requests| {
+pub fn loadEnv(allocator: std.mem.Allocator, logger: anytype, env: anytype) void {
+        if (env.get("BUN_CONFIG_MAX_HTTP_REQUESTS")) |max_http_requests| {
             _ = &max_http_requests;
-            var max: u16 = 0;
+            const max = (blk_catch_1: { break :blk_catch_1 ((std.fmt.parseInt(u16, max_http_requests, 10)) catch |__ce_1| { _ = &__ce_1; _ = (blk_catch_2: { break :blk_catch_2 ((logger.addErrorFmt(null, bun.logger.Loc.Empty, allocator, "BUN_CONFIG_MAX_HTTP_REQUESTS value \"{s}\" is not a valid integer between 1 and 65535", .{ max_http_requests })) catch |__ce_2| { _ = &__ce_2; @panic("unreachable"); }); });
+            return; }); });
             _ = &max;
-            max = std.fmt.parseInt(u16, max_http_requests, 10) catch {
-                    logger.addErrorFmt(
-                        null,
-                        Loc.Empty,
-                        allocator,
-                        "BUN_CONFIG_MAX_HTTP_REQUESTS value \"{s}\" is not a valid integer between 1 and 65535",
-                        .{max_http_requests},
-                    ) catch unreachable;
-                    return;
-                };
-
             if ((max == 0)) {
-                logger.addWarningFmt(
-                        null,
-                        Loc.Empty,
-                        allocator,
-                        "BUN_CONFIG_MAX_HTTP_REQUESTS value must be a number between 1 and 65535",
-                        .{},
-                    ) catch unreachable;
-
+                _ = (blk_catch_3: { break :blk_catch_3 ((logger.addWarningFmt(null, bun.logger.Loc.Empty, allocator, "BUN_CONFIG_MAX_HTTP_REQUESTS value must be a number between 1 and 65535", .{  })) catch |__ce_3| { _ = &__ce_3; @panic("unreachable"); }); });
                 return;
             }
             _ = AsyncHTTP.max_simultaneous_requests.store(max, .monotonic);
@@ -173,15 +192,17 @@ pub fn loadEnv(allocator: std.mem.Allocator, logger: *Log, env: *DotEnv.Loader) 
 }
 
 pub fn signalHeaderProgress(self: *AsyncHTTP) void {
-        var progress = self.signals.header_progress orelse return;
-            progress.store(true, .release);
-
+        if (self.signals.header_progress) |progress| {
+            _ = &progress;
+            _ = progress.store(true, .release);
+        }
 }
 
 pub fn enableResponseBodyStreaming(self: *AsyncHTTP) void {
-        var stream = self.signals.response_body_streaming orelse return;
-            stream.store(true, .release);
-
+        if (self.signals.response_body_streaming) |stream| {
+            _ = &stream;
+            _ = stream.store(true, .release);
+        }
 }
 
 pub fn clearData(self: *AsyncHTTP) void {
@@ -190,122 +211,126 @@ pub fn clearData(self: *AsyncHTTP) void {
         self.request = null;
         self.response = null;
         _ = self.client.unix_socket_path.deinit();
-        self.client.unix_socket_path = jsc.ZigString.Slice.empty;
+        self.client.unix_socket_path = bun.jsc.ZigString.Slice.empty;
 }
 
-pub fn preconnect(url: URL, is_url_owned: bool) void {
-        if (!FeatureFlags.is_fetch_preconnect_supported) {
-                if (is_url_owned) {
-                    bun.default_allocator.free(url.href);
+pub fn preconnect(url: bun.URL, is_url_owned: bool) void {
+        if ((!bun.FeatureFlags.is_fetch_preconnect_supported)) {
+            if (is_url_owned) {
+                _ = bun.default_allocator.free(url.href);
+            }
+            return;
+        }
+        var preconnect_ptr = Preconnect.new(.{ .async_http = undefined, .response_buffer = MutableString{ .allocator = bun.http.default_allocator, .list = .{} }, .url = url, .is_url_owned = is_url_owned });
+        _ = &preconnect_ptr;
+        preconnect_ptr.async_http = AsyncHTTP.init(
+                bun.default_allocator,
+                .GET,
+                url,
+                .{},
+                "",
+                &preconnect_ptr.response_buffer,
+                "",
+                HTTPClientResult.Callback.New(*Preconnect, Preconnect.onResult).init(preconnect_ptr),
+                .manual,
+                .{},
+            );
+
+        preconnect_ptr.async_http.client.flags.is_preconnect_only = true;
+        _ = bun.http.http_thread.schedule(bun.ThreadPool.Batch.from((&preconnect_ptr.async_http.task)));
+}
+
+pub fn init(allocator: std.mem.Allocator, method: HTTPClient.Method, url: bun.URL, headers: Headers.Entry.List, headers_buf: []const u8, response_buffer: *bun.MutableString, request_body: []const u8, callback: HTTPClientResult.Callback, redirect_type: FetchRedirect, options: Options) AsyncHTTP {
+        var async_http_id: u32 = 0;
+        _ = &async_http_id;
+        if (((options.signals != null) and ((blk_om_4: { const __o_4 = options.signals; const __R_4 = CpOptType(@TypeOf(cp_opt_unwrap(__o_4).aborted)); if (cp_opt_is_null(__o_4)) break :blk_om_4 @as(__R_4, null); break :blk_om_4 @as(__R_4, cp_opt_unwrap(__o_4).aborted); }) != null))) {
+            async_http_id = bun.http.async_http_id_monotonic.fetchAdd(1, .monotonic);
+        }
+        var async_http = AsyncHTTP{ .allocator = allocator, .url = url, .method = method, .request_headers = headers, .request_header_buf = headers_buf, .request_body = .{ .bytes = request_body }, .response_buffer = response_buffer, .result_callback = callback, .http_proxy = options.http_proxy, .signals = ((options.signals) orelse (.{})), .async_http_id = async_http_id };
+        _ = &async_http;
+        async_http.client = .{ .allocator = allocator, .method = method, .url = url, .header_entries = headers, .header_buf = headers_buf, .hostname = options.hostname, .signals = ((options.signals) orelse (async_http.signals)), .async_http_id = async_http.async_http_id, .http_proxy = async_http.http_proxy, .proxy_headers = options.proxy_headers, .redirect_type = redirect_type };
+        if (options.unix_socket_path) |val| {
+            _ = &val;
+            _ = bun.assert((async_http.client.unix_socket_path.length() == 0));
+            async_http.client.unix_socket_path = val;
+        }
+        if (options.disable_timeout) |val| {
+            _ = &val;
+            async_http.client.flags.disable_timeout = val;
+        }
+        if (options.verbose) |val| {
+            _ = &val;
+            async_http.client.verbose = val;
+        }
+        if (options.disable_decompression) |val| {
+            _ = &val;
+            async_http.client.flags.disable_decompression = val;
+        }
+        if (options.disable_keepalive) |val| {
+            _ = &val;
+            async_http.client.flags.disable_keepalive = val;
+        }
+        if (options.reject_unauthorized) |val| {
+            _ = &val;
+            async_http.client.flags.reject_unauthorized = val;
+        }
+        if (options.tls_props) |val| {
+            _ = &val;
+            async_http.client.tls_props = val;
+        }
+        if (options.http_proxy) |proxy| {
+            _ = &proxy;
+            if ((proxy.username.len > 0)) {
+                var username_sfb = std.heap.stackFallback(4096, allocator);
+                _ = &username_sfb;
+                const username_alloc = username_sfb.get();
+                _ = &username_alloc;
+                const username = (blk_catch_5: { break :blk_catch_5 ((PercentEncoding.decodeAlloc(username_alloc, proxy.username)) catch |error_val| { _ = &error_val; _ = bun.Output.scoped(.AsyncHTTP, .visible)("failed to decode proxy username: {}", .{ error_val });
+                return async_http; }); });
+                _ = &username;
+                defer {
+                _ = cp_opt_unwrap(username_alloc).free(username);
                 }
-                return;
-            }
-
-            var preconnect_ptr = Preconnect.new(.{
-                .async_http = undefined,
-                .response_buffer = MutableString{ .allocator = bun.http.default_allocator, .list = .{} },
-                .url = url,
-                .is_url_owned = is_url_owned,
-            });
-
-            preconnect_ptr.async_http = AsyncHTTP.init(bun.default_allocator, .GET, url, .{}, "", &preconnect_ptr.response_buffer, "", HTTPClientResult.Callback.New(*Preconnect, Preconnect.onResult).init(preconnect_ptr), .manual, .{});
-            preconnect_ptr.async_http.client.flags.is_preconnect_only = true;
-
-            bun.http.http_thread.schedule(Batch.from(&preconnect_ptr.async_http.task));
-
-}
-
-pub fn init(allocator: std.mem.Allocator, method: Method, url: URL, headers: Headers.Entry.List, headers_buf: []const u8, response_buffer: *MutableString, request_body: []const u8, callback: HTTPClientResult.Callback, redirect_type: FetchRedirect, options: Options) AsyncHTTP {
-        var this = AsyncHTTP{
-                .allocator = allocator,
-                .url = url,
-                .method = method,
-                .request_headers = headers,
-                .request_header_buf = headers_buf,
-                .request_body = .{ .bytes = request_body },
-                .response_buffer = response_buffer,
-                .result_callback = callback,
-                .http_proxy = options.http_proxy,
-                .signals = options.signals orelse .{},
-                .async_http_id = if (options.signals != null and options.signals.?.aborted != null) bun.http.async_http_id_monotonic.fetchAdd(1, .monotonic) else 0,
-            };
-
-            this.client = .{
-                .allocator = allocator,
-                .method = method,
-                .url = url,
-                .header_entries = headers,
-                .header_buf = headers_buf,
-                .hostname = options.hostname,
-                .signals = options.signals orelse this.signals,
-                .async_http_id = this.async_http_id,
-                .http_proxy = this.http_proxy,
-                .proxy_headers = options.proxy_headers,
-                .redirect_type = redirect_type,
-            };
-            if (options.unix_socket_path) |val| {
-                assert(this.client.unix_socket_path.length() == 0);
-                this.client.unix_socket_path = val;
-            }
-            if (options.disable_timeout) |val| {
-                this.client.flags.disable_timeout = val;
-            }
-            if (options.verbose) |val| {
-                this.client.verbose = val;
-            }
-            if (options.disable_decompression) |val| {
-                this.client.flags.disable_decompression = val;
-            }
-            if (options.disable_keepalive) |val| {
-                this.client.flags.disable_keepalive = val;
-            }
-            if (options.reject_unauthorized) |val| {
-                this.client.flags.reject_unauthorized = val;
-            }
-            if (options.tls_props) |val| {
-                this.client.tls_props = val;
-            }
-
-            if (options.http_proxy) |proxy| {
-                if (proxy.username.len > 0) {
-                    var username_sfb = std.heap.stackFallback(4096, allocator);
-                    const username_alloc = username_sfb.get();
-                    const username = PercentEncoding.decodeAlloc(username_alloc, proxy.username) catch |err| {
-                        log("failed to decode proxy username: {}", .{err});
-                        return this;
-                    };
-                    defer username_alloc.free(username);
-
-                    if (proxy.password.len > 0) {
-                        var password_sfb = std.heap.stackFallback(4096, allocator);
-                        const password_alloc = password_sfb.get();
-                        const password = PercentEncoding.decodeAlloc(password_alloc, proxy.password) catch |err| {
-                            log("failed to decode proxy password: {}", .{err});
-                            return this;
-                        };
-                        defer password_alloc.free(password);
-
-                        const auth = std.fmt.allocPrint(allocator, "{s}:{s}", .{ username, password }) catch unreachable;
-                        defer allocator.free(auth);
-                        const size = std.base64.standard.Encoder.calcSize(auth.len);
-                        var buf = this.allocator.alloc(u8, size + "Basic ".len) catch unreachable;
-                        const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], auth);
-                        buf[0.."Basic ".len].* = "Basic ".*;
-                        this.client.proxy_authorization = buf[0 .. "Basic ".len + encoded.len];
-                    } else {
-                        const size = std.base64.standard.Encoder.calcSize(username.len);
-                        var buf = allocator.alloc(u8, size + "Basic ".len) catch unreachable;
-                        const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], username);
-                        buf[0.."Basic ".len].* = "Basic ".*;
-                        this.client.proxy_authorization = buf[0 .. "Basic ".len + encoded.len];
+                if ((proxy.password.len > 0)) {
+                    var password_sfb = std.heap.stackFallback(4096, allocator);
+                    _ = &password_sfb;
+                    const password_alloc = password_sfb.get();
+                    _ = &password_alloc;
+                    const password = (blk_catch_6: { break :blk_catch_6 ((PercentEncoding.decodeAlloc(password_alloc, proxy.password)) catch |error_val| { _ = &error_val; _ = bun.Output.scoped(.AsyncHTTP, .visible)("failed to decode proxy password: {}", .{ error_val });
+                    return async_http; }); });
+                    _ = &password;
+                    defer {
+                    _ = cp_opt_unwrap(password_alloc).free(password);
                     }
+                    const auth = (blk_catch_7: { break :blk_catch_7 ((std.fmt.allocPrint(allocator, "{s}:{s}", .{ username, password })) catch |__ce_7| { _ = &__ce_7; @panic("unreachable"); }); });
+                    _ = &auth;
+                    defer {
+                    _ = allocator.free(auth);
+                    }
+                    const size = std.base64.standard.Encoder.calcSize(auth.len);
+                    _ = &size;
+                    var buf = (blk_catch_8: { break :blk_catch_8 ((async_http.allocator.alloc(u8, (size + "Basic ".len))) catch |__ce_8| { _ = &__ce_8; @panic("unreachable"); }); });
+                    _ = &buf;
+                    const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], auth);
+                    _ = &encoded;
+                    (buf[0.."Basic ".len]).* = ("Basic ").*;
+                    async_http.client.proxy_authorization = buf[0..("Basic ".len + encoded.len)];
+                } else {
+                    const size = std.base64.standard.Encoder.calcSize(username.len);
+                    _ = &size;
+                    var buf = (blk_catch_9: { break :blk_catch_9 ((allocator.alloc(u8, (size + "Basic ".len))) catch |__ce_9| { _ = &__ce_9; @panic("unreachable"); }); });
+                    _ = &buf;
+                    const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], username);
+                    _ = &encoded;
+                    (buf[0.."Basic ".len]).* = ("Basic ").*;
+                    async_http.client.proxy_authorization = buf[0..("Basic ".len + encoded.len)];
                 }
             }
-            return this;
-
+        }
+        return async_http;
 }
 
-pub fn initSync(allocator: std.mem.Allocator, method: Method, url: URL, headers: Headers.Entry.List, headers_buf: []const u8, response_buffer: *MutableString, request_body: []const u8, http_proxy: ?URL, hostname: ?[]u8, redirect_type: FetchRedirect) AsyncHTTP {
+pub fn initSync(allocator: std.mem.Allocator, method: HTTPClient.Method, url: bun.URL, headers: Headers.Entry.List, headers_buf: []const u8, response_buffer: *bun.MutableString, request_body: []const u8, http_proxy: ?bun.URL, hostname: ?[]const u8, redirect_type: FetchRedirect) AsyncHTTP {
         var opts = Options{  };
         _ = &opts;
         opts.http_proxy = http_proxy;
@@ -315,76 +340,89 @@ pub fn initSync(allocator: std.mem.Allocator, method: Method, url: URL, headers:
 
 pub fn reset(self: *AsyncHTTP) !void {
         const aborted = self.client.aborted;
-            self.client = try HTTPClient.init(self.allocator, self.method, self.client.url, self.client.header_entries, self.client.header_buf, aborted);
-            self.client.http_proxy = self.http_proxy;
-
-            if (self.http_proxy) |proxy| {
-                self.client.flags.disable_keepalive = self.url.isHTTPS();
-                if (proxy.username.len > 0) {
-                    var username_sfb = std.heap.stackFallback(4096, self.allocator);
-                    const username_alloc = username_sfb.get();
-                    const username = PercentEncoding.decodeAlloc(username_alloc, proxy.username) catch |err| {
-                        log("failed to decode proxy username: {}", .{err});
-                        return;
-                    };
-                    defer username_alloc.free(username);
-
-                    if (proxy.password.len > 0) {
-                        var password_sfb = std.heap.stackFallback(4096, self.allocator);
-                        const password_alloc = password_sfb.get();
-                        const password = PercentEncoding.decodeAlloc(password_alloc, proxy.password) catch |err| {
-                            log("failed to decode proxy password: {}", .{err});
-                            return;
-                        };
-                        defer password_alloc.free(password);
-
-                        const auth = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ username, password }) catch unreachable;
-                        defer self.allocator.free(auth);
-                        const size = std.base64.standard.Encoder.calcSize(auth.len);
-                        var buf = self.allocator.alloc(u8, size + "Basic ".len) catch unreachable;
-                        const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], auth);
-                        buf[0.."Basic ".len].* = "Basic ".*;
-                        self.client.proxy_authorization = buf[0 .. "Basic ".len + encoded.len];
-                    } else {
-                        const size = std.base64.standard.Encoder.calcSize(username.len);
-                        var buf = self.allocator.alloc(u8, size + "Basic ".len) catch unreachable;
-                        const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], username);
-                        buf[0.."Basic ".len].* = "Basic ".*;
-                        self.client.proxy_authorization = buf[0 .. "Basic ".len + encoded.len];
+        _ = &aborted;
+        self.client = try HTTPClient.init(self.allocator, self.method, self.client.url, self.client.header_entries, self.client.header_buf, aborted);
+        self.client.http_proxy = self.http_proxy;
+        if (self.http_proxy) |proxy| {
+            _ = &proxy;
+            self.client.flags.disable_keepalive = self.url.isHTTPS();
+            if ((proxy.username.len > 0)) {
+                var username_sfb = std.heap.stackFallback(4096, self.allocator);
+                _ = &username_sfb;
+                const username_alloc = username_sfb.get();
+                _ = &username_alloc;
+                const username = (blk_catch_11: { break :blk_catch_11 ((PercentEncoding.decodeAlloc(username_alloc, proxy.username)) catch |error_val| { _ = &error_val; _ = bun.Output.scoped(.AsyncHTTP, .visible)("failed to decode proxy username: {}", .{ error_val });
+                return; }); });
+                _ = &username;
+                defer {
+                _ = cp_opt_unwrap(username_alloc).free(username);
+                }
+                if ((proxy.password.len > 0)) {
+                    var password_sfb = std.heap.stackFallback(4096, self.allocator);
+                    _ = &password_sfb;
+                    const password_alloc = password_sfb.get();
+                    _ = &password_alloc;
+                    const password = (blk_catch_12: { break :blk_catch_12 ((PercentEncoding.decodeAlloc(password_alloc, proxy.password)) catch |error_val| { _ = &error_val; _ = bun.Output.scoped(.AsyncHTTP, .visible)("failed to decode proxy password: {}", .{ error_val });
+                    return; }); });
+                    _ = &password;
+                    defer {
+                    _ = cp_opt_unwrap(password_alloc).free(password);
                     }
+                    const auth = (blk_catch_13: { break :blk_catch_13 ((std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ username, password })) catch |__ce_13| { _ = &__ce_13; @panic("unreachable"); }); });
+                    _ = &auth;
+                    defer {
+                    _ = self.allocator.free(auth);
+                    }
+                    const size = std.base64.standard.Encoder.calcSize(auth.len);
+                    _ = &size;
+                    var buf = (blk_catch_14: { break :blk_catch_14 ((self.allocator.alloc(u8, (size + "Basic ".len))) catch |__ce_14| { _ = &__ce_14; @panic("unreachable"); }); });
+                    _ = &buf;
+                    const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], auth);
+                    _ = &encoded;
+                    (buf[0.."Basic ".len]).* = ("Basic ").*;
+                    self.client.proxy_authorization = buf[0..("Basic ".len + encoded.len)];
+                } else {
+                    const size = std.base64.standard.Encoder.calcSize(username.len);
+                    _ = &size;
+                    var buf = (blk_catch_15: { break :blk_catch_15 ((self.allocator.alloc(u8, (size + "Basic ".len))) catch |__ce_15| { _ = &__ce_15; @panic("unreachable"); }); });
+                    _ = &buf;
+                    const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], username);
+                    _ = &encoded;
+                    (buf[0.."Basic ".len]).* = ("Basic ").*;
+                    self.client.proxy_authorization = buf[0..("Basic ".len + encoded.len)];
                 }
             }
-
+        }
 }
 
-pub fn schedule(self: *AsyncHTTP, _allocator: std.mem.Allocator, batch: *ThreadPool.Batch) void {
+pub fn schedule(self: *AsyncHTTP, _allocator: std.mem.Allocator, batch: *bun.ThreadPool.Batch) void {
         _ = _allocator;
-
         _ = self.state.store(.scheduled, .monotonic);
-        batch.push(ThreadPool.Batch.from(&self.task));
-
+        _ = batch.push(bun.ThreadPool.Batch.from((&self.task)));
 }
 
-pub fn sendSync(self: *AsyncHTTP) !picohttp.Response {
-        HTTPThread.init(&.{});
-
-            var ctx = try bun.default_allocator.create(SingleHTTPChannel);
-            ctx.* = SingleHTTPChannel.init();
-            self.result_callback = HTTPClientResult.Callback.New(
+pub fn sendSync(self: *AsyncHTTP) !bun.picohttp.Response {
+        _ = HTTPThread.init((&.{}));
+        var ctx = try bun.default_allocator.create(SingleHTTPChannel);
+        _ = &ctx;
+        ctx.* = SingleHTTPChannel.init();
+        self.result_callback = HTTPClientResult.Callback.New(
                 *SingleHTTPChannel,
                 sendSyncCallback,
             ).init(ctx);
 
-            var batch = bun.ThreadPool.Batch{};
-            self.schedule(bun.default_allocator, &batch);
-            bun.http.http_thread.schedule(batch);
-
-            const result = ctx.channel.readItem() catch unreachable;
-            if (result.fail) |err| {
-                return err;
-            }
-            assert(result.metadata != null);
-            return result.metadata.?.response;
+        var batch = ThreadPoolBatch{  };
+        _ = &batch;
+        _ = self.schedule(bun.default_allocator, (&batch));
+        _ = bun.http.http_thread.schedule(batch);
+        const result = (blk_catch_17: { break :blk_catch_17 ((ctx.channel.readItem()) catch |__ce_17| { _ = &__ce_17; @panic("unreachable"); }); });
+        _ = &result;
+        if (result.fail) |err| {
+            _ = &err;
+            return err;
+        }
+        _ = bun.assert((result.metadata != null));
+        return result.metadata.?.response;
 
 }
 
@@ -392,12 +430,18 @@ pub fn onAsyncHTTPCallback(self: *AsyncHTTP, async_http: *AsyncHTTP, result: HTT
         _ = bun.assert((self.real != null));
         var callback = self.result_callback;
         _ = &callback;
-        self.elapsed = bun.http.http_thread.timer.read() -| self.elapsed;
-
+        var now = bun.http.http_thread.timer.read();
+        _ = &now;
+        if ((now > self.elapsed)) {
+            self.elapsed = (now - self.elapsed);
+        } else {
+            self.elapsed = 0;
+        }
         self.redirected = self.client.flags.redirected;
         if (result.isSuccess()) {
             self.err = null;
             if (result.metadata) |metadata| {
+                _ = &metadata;
                 self.response = metadata.response;
             }
             _ = self.state.store(.success, .monotonic);
@@ -406,52 +450,41 @@ pub fn onAsyncHTTPCallback(self: *AsyncHTTP, async_http: *AsyncHTTP, result: HTT
             self.response = null;
             _ = self.state.store(State.fail, .monotonic);
         }
-        if (comptime Environment.enable_logs) {
-                if (bun.http.socket_async_http_abort_tracker.count() > 0) {
-                    log("bun.http.socket_async_http_abort_tracker count: {d}", .{bun.http.socket_async_http_abort_tracker.count()});
-                }
+        if (comptime bun.Environment.enable_logs) {
+            if ((bun.http.socket_async_http_abort_tracker.count() > 0)) {
+                _ = bun.Output.scoped(.AsyncHTTP, .visible)("bun.http.socket_async_http_abort_tracker count: {d}", .{ bun.http.socket_async_http_abort_tracker.count() });
             }
-
-            if (bun.http.socket_async_http_abort_tracker.capacity() > 10_000 and bun.http.socket_async_http_abort_tracker.count() < 100) {
-                bun.http.socket_async_http_abort_tracker.shrinkAndFree(bun.http.socket_async_http_abort_tracker.count());
-            }
-
-            if (result.has_more) {
-                callback.function(callback.ctx, async_http, result);
-            } else {
-                {
-                    self.client.deinit();
-                    var threadlocal_http: *bun.http.ThreadlocalAsyncHTTP = @fieldParentPtr("async_http", async_http);
+        }
+        if (((bun.http.socket_async_http_abort_tracker.capacity() > 10000) and (bun.http.socket_async_http_abort_tracker.count() < 100))) {
+            _ = bun.http.socket_async_http_abort_tracker.shrinkAndFree(bun.http.socket_async_http_abort_tracker.count());
+        }
+        if (result.has_more) {
+            _ = callback.function(callback.ctx, async_http, result);
+        } else {
+            {
+                _ = self.client.deinit();
+                const threadlocal_http: *bun.http.ThreadlocalAsyncHTTP = @fieldParentPtr("async_http", async_http);
                     defer threadlocal_http.deinit();
-                    log("onAsyncHTTPCallback: {D}", .{self.elapsed});
+                    bun.Output.scoped(.AsyncHTTP, .visible)("onAsyncHTTPCallback: {D}", .{self.elapsed});
                     callback.function(callback.ctx, async_http, result);
-                }
 
-                const active_requests = AsyncHTTP.active_requests_count.fetchSub(1, .monotonic);
-                assert(active_requests > 0);
             }
-
-            if ((!bun.http.http_thread.queued_tasks.isEmpty() or bun.http.http_thread.deferred_tasks.items.len > 0) and AsyncHTTP.active_requests_count.load(.monotonic) < AsyncHTTP.max_simultaneous_requests.load(.monotonic)) {
-                bun.http.http_thread.loop.loop.wakeup();
-            }
-
-}
-
-pub fn startAsyncHTTP(task: *Task) void {
-        var this_ptr: *AsyncHTTP = @fieldParentPtr("task", task);
-            this_ptr.onStart();
-
+            const active_requests = AsyncHTTP.active_requests_count.fetchSub(1, .monotonic);
+            _ = &active_requests;
+            _ = bun.assert((active_requests > 0));
+        }
+        if ((((!bun.http.http_thread.queued_tasks.isEmpty()) or (bun.http.http_thread.deferred_tasks.items.len > 0)) and (AsyncHTTP.active_requests_count.load(.monotonic) < AsyncHTTP.max_simultaneous_requests.load(.monotonic)))) {
+            _ = bun.http.http_thread.loop.loop.wakeup();
+        }
 }
 
 pub fn onStart(self: *AsyncHTTP) void {
         _ = AsyncHTTP.active_requests_count.fetchAdd(1, .monotonic);
         self.err = null;
         _ = self.state.store(.sending, .monotonic);
-        self.client.result_callback = HTTPClientResult.Callback.New(*AsyncHTTP, onAsyncHTTPCallback).init(
-                self,
-            );
-            self.elapsed = bun.http.http_thread.timer.read();
+        self.client.result_callback = HTTPClient.HTTPClientResult.Callback.New(*AsyncHTTP, onAsyncHTTPCallback).init(self);
 
+        self.elapsed = bun.http.http_thread.timer.read();
         if ((self.response_buffer.list.capacity == 0)) {
             self.response_buffer.allocator = bun.http.default_allocator;
         }
@@ -459,3 +492,18 @@ pub fn onStart(self: *AsyncHTTP) void {
 }
 pub var active_requests_count = std.atomic.Value(usize).init(0);
         pub var max_simultaneous_requests = std.atomic.Value(usize).init(256);
+pub fn startAsyncHTTP(task: *bun.ThreadPool.Task) void {
+            const this_ptr: *AsyncHTTP = @fieldParentPtr("task", task);
+            this_ptr.onStart();
+        }
+const MutableString = bun.MutableString;
+const ThreadPoolBatch = bun.ThreadPool.Batch;
+
+pub fn sendSyncCallback(channel_holder: *SingleHTTPChannel, async_http: *AsyncHTTP, result: HTTPClientResult) void {
+        if (async_http.real) |real| {
+            _ = &real;
+            real.* = async_http.*;
+            real.response_buffer = async_http.response_buffer;
+        }
+        _ = (blk_catch_18: { break :blk_catch_18 ((channel_holder.channel.writeItem(result)) catch |__ce_18| { _ = &__ce_18; @panic("unreachable"); }); });
+}

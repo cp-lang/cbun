@@ -2,22 +2,25 @@
 const std = @import("std");
 const string = []const u8;
 
-const ClientSession = @import("./ClientSession.zig");
-const Stream = @import("./Stream.zig");
-const wire = @import("../H2FrameParser.zig");
-
-const H2 = @import("../H2Client.zig");
-const local_initial_window_size = H2.local_initial_window_size;
-const local_max_header_list_size = H2.local_max_header_list_size;
-const write_buffer_high_water = H2.write_buffer_high_water;
-
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 const bun = @import("bun");
-const HTTPClient = bun.http;
-const picohttp = bun.picohttp;
-const strings = bun.strings;
-
-const ByteList = std.ArrayListUnmanaged(u8);
-
+const HPACK = @import("../lshpack.zig").HPACK;
 const RequestHeader = enum {
     drop,
     host,
@@ -41,189 +44,321 @@ const RequestHeader = enum {
         .{ "set-cookie", .sensitive },
     });
 };
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
+    const T = @TypeOf(val);
+    if (comptime @typeInfo(T) == .comptime_int) return val << shift;
+    if (comptime @typeInfo(T) == .int) {
+        const ShiftType = std.math.Log2Int(T);
+        return val << @as(ShiftType, @truncate(shift));
+    }
+    return val << shift;
+}
+fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
+    const T = @TypeOf(val);
+    if (comptime @typeInfo(T) == .comptime_int) return val >> shift;
+    if (comptime @typeInfo(T) == .int) {
+        const ShiftType = std.math.Log2Int(T);
+        return val >> @as(ShiftType, @truncate(shift));
+    }
+    return val >> shift;
+}
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+
+pub const ClientSession = @import("./ClientSession.zig").ClientSession;
+pub const Stream = @import("./Stream.zig").Stream;
+pub const H2FrameParser = @import("../H2FrameParser.zig");
 
 pub fn writePreface(session: *ClientSession) void {
-    _ = session.queue(wire.client_preface);
-    var settings: [3 * wire.SettingsPayloadUnit.byteSize]u8 = undefined;
-    wire.SettingsPayloadUnit.encode(settings[0..6], .SETTINGS_ENABLE_PUSH, 0);
-    wire.SettingsPayloadUnit.encode(settings[6..12], .SETTINGS_INITIAL_WINDOW_SIZE, local_initial_window_size);
-    wire.SettingsPayloadUnit.encode(settings[12..18], .SETTINGS_MAX_HEADER_LIST_SIZE, local_max_header_list_size);
-    session.writeFrame(.HTTP_FRAME_SETTINGS, 0, 0, &settings);
-
-    session.writeWindowUpdate(0, local_initial_window_size - wire.DEFAULT_WINDOW_SIZE);
-    session.preface_sent = true;
+        _ = session.queue(H2FrameParser.client_preface);
+        var settings: [18]u8 = @as([18]u8, @splat(@as(u8, 0)));
+        _ = &settings;
+        _ = H2FrameParser.SettingsPayloadUnit.encode(settings[0..6], .SETTINGS_ENABLE_PUSH, 0);
+        _ = H2FrameParser.SettingsPayloadUnit.encode(settings[6..12], .SETTINGS_INITIAL_WINDOW_SIZE, bun.http.H2.local_initial_window_size);
+        _ = H2FrameParser.SettingsPayloadUnit.encode(settings[12..18], .SETTINGS_MAX_HEADER_LIST_SIZE, bun.http.H2.local_max_header_list_size);
+        _ = session.writeFrame(.HTTP_FRAME_SETTINGS, 0, 0, (&settings));
+        _ = session.writeWindowUpdate(0, (bun.http.H2.local_initial_window_size - H2FrameParser.DEFAULT_WINDOW_SIZE));
+        session.preface_sent = true;
 }
 
-pub fn writeRequest(session: *ClientSession, client: *HTTPClient, stream: *Stream, request: picohttp.Request) !void {
-    const encoded = &session.encode_scratch;
-    encoded.clearRetainingCapacity();
+pub fn writeRequest(session: *ClientSession, client: *bun.http.HTTPClient, stream: *Stream, request: bun.picohttp.Request) !void {
+        _ = session.encode_scratch.clearRetainingCapacity();
+        if (session.pending_hpack_enc_capacity) |cap| {
+            _ = &cap;
+            session.pending_hpack_enc_capacity = null;
+            _ = session.hpack.setEncoderMaxCapacity(cap);
+            _ = try session.encode_scratch.ensureUnusedCapacity(bun.default_allocator, 8);
+            _ = encodeHpackTableSizeUpdate((&session.encode_scratch), cap);
+        }
+        var authority: []const u8 = client.url.host;
+        _ = &authority;
+        var has_expect_continue = false;
+        _ = &has_expect_continue;
+        for (cp_iter_slice(request.headers)) |h| {
+            _ = &h;
+            if (RequestHeader.map.getAnyCase(h.name)) |kind| {
+                _ = &kind;
+                switch (kind) {
+.host => {
+authority = h.value;
+},
+.expect => {
+has_expect_continue = bun.strings.eqlCaseInsensitiveASCIIICheckLength(h.value, "100-continue");
+},
+else => {
 
-    if (session.pending_hpack_enc_capacity) |cap| {
-        session.pending_hpack_enc_capacity = null;
-        session.hpack.setEncoderMaxCapacity(cap);
-        try encoded.ensureUnusedCapacity(bun.default_allocator, 8);
-        encodeHpackTableSizeUpdate(encoded, cap);
-    }
+},
+}
+            }
+        }
+        var path_str: []const u8 = "/";
+        _ = &path_str;
+        if ((request.path.len > 0)) {
+            path_str = request.path;
+        }
+        _ = try encodeHeader(session.hpack, (&session.encode_scratch), ":method", request.method, false);
+        _ = try encodeHeader(session.hpack, (&session.encode_scratch), ":scheme", "https", false);
+        _ = try encodeHeader(session.hpack, (&session.encode_scratch), ":authority", authority, false);
+        _ = try encodeHeader(session.hpack, (&session.encode_scratch), ":path", path_str, false);
+        var lower_buf: [256]u8 = @as([256]u8, @splat(@as(u8, 0)));
+        _ = &lower_buf;
+        for (cp_iter_slice(request.headers)) |h| {
+            _ = &h;
+            var heap: ?[]const u8 = null;
+            _ = &heap;
+            defer {
+            if (heap) |buf| {
+                _ = &buf;
+                _ = bun.default_allocator.free(buf);
+            }
+            }
+            var name: []const u8 = "";
+            _ = &name;
+            if ((h.name.len <= lower_buf.len)) {
+                name = bun.strings.copyLowercaseIfNeeded(h.name, (&lower_buf));
+            } else {
+                const hbuf = bun.handleOom(bun.default_allocator.alloc(u8, h.name.len));
+                _ = &hbuf;
+                name = bun.strings.copyLowercaseIfNeeded(h.name, hbuf);
+                heap = hbuf;
+            }
+            var never_index = false;
+            _ = &never_index;
+            if (RequestHeader.map.get(name)) |kind| {
+                _ = &kind;
+                var should_skip = false;
+                _ = &should_skip;
+                switch (kind) {
+                    .drop => should_skip = true,
+                    .host => should_skip = true,
+                    .te => {
+                        if (!bun.strings.eqlCaseInsensitiveASCIIICheckLength(bun.strings.trim(h.value, " \t"), "trailers")) {
+                            should_skip = true;
+                        }
+                    },
+                    .content_length => {
+                        if (has_expect_continue) {
+                            should_skip = true;
+                        }
+                    },
+                    .sensitive => never_index = true,
+                    .expect => {},
+                }
 
-    var authority: []const u8 = client.url.host;
-    var has_expect_continue = false;
-    for (request.headers) |h| switch (RequestHeader.map.getAnyCase(h.name) orelse continue) {
-        .host => authority = h.value,
-        .expect => has_expect_continue = strings.eqlCaseInsensitiveASCIIICheckLength(h.value, "100-continue"),
-        else => {},
-    };
-
-    try encodeHeader(session, encoded, ":method", request.method, false);
-    try encodeHeader(session, encoded, ":scheme", "https", false);
-    try encodeHeader(session, encoded, ":authority", authority, false);
-    try encodeHeader(session, encoded, ":path", if (request.path.len > 0) request.path else "/", false);
-
-    var lower_buf: [256]u8 = undefined;
-    for (request.headers) |h| {
-        var heap: ?[]u8 = null;
-        defer if (heap) |buf| bun.default_allocator.free(buf);
-        const name = if (h.name.len <= lower_buf.len)
-            strings.copyLowercaseIfNeeded(h.name, &lower_buf)
-        else blk: {
-            heap = bun.handleOom(bun.default_allocator.alloc(u8, h.name.len));
-            break :blk strings.copyLowercaseIfNeeded(h.name, heap.?);
-        };
-        var never_index = false;
-        if (RequestHeader.map.get(name)) |kind| switch (kind) {
-            .drop, .host => continue,
-            .te => if (!strings.eqlCaseInsensitiveASCIIICheckLength(strings.trim(h.value, " \t"), "trailers")) continue,
-            .content_length => if (has_expect_continue) continue,
-            .sensitive => never_index = true,
-            .expect => {},
-        };
-        try encodeHeader(session, encoded, name, h.value, never_index);
-    }
-
-    const body = client.state.request_body;
-    const has_inline_body = client.state.original_request_body == .bytes and body.len > 0;
-    const is_streaming = client.state.original_request_body == .stream;
-
-    if (has_expect_continue and (has_inline_body or is_streaming)) stream.awaiting_continue = true;
-
-    writeHeaderBlock(session, stream.id, encoded.items, !has_inline_body and !is_streaming);
-    if (encoded.capacity > 64 * 1024) encoded.clearAndFree(bun.default_allocator);
-    if (has_inline_body) {
-        stream.pending_body = body;
-        drainSendBody(session, stream, std.math.maxInt(usize));
-    } else if (!is_streaming) {
-        stream.sentEndStream();
-    }
+                if (should_skip) {
+                    continue;
+                }
+            }
+            _ = try encodeHeader(session.hpack, (&session.encode_scratch), name, h.value, never_index);
+        }
+        const body = client.state.request_body;
+        _ = &body;
+        const has_inline_body = ((client.state.original_request_body == .bytes) and (body.len > 0));
+        _ = &has_inline_body;
+        const is_streaming = (client.state.original_request_body == .stream);
+        _ = &is_streaming;
+        if ((has_expect_continue and (has_inline_body or is_streaming))) {
+            stream.awaiting_continue = true;
+        }
+        _ = writeHeaderBlock(session, stream.id, session.encode_scratch.items, ((!has_inline_body) and (!is_streaming)));
+        if ((session.encode_scratch.capacity > (64 * 1024))) {
+            _ = session.encode_scratch.clearAndFree(bun.default_allocator);
+        }
+        if (has_inline_body) {
+            stream.pending_body = body;
+            _ = drainSendBody(session, stream, std.math.maxInt(usize));
+        } else {
+            if ((!is_streaming)) {
+                _ = stream.sentEndStream();
+            }
+        }
 }
 
 pub fn writeHeaderBlock(session: *ClientSession, stream_id: u31, block: []const u8, end_stream: bool) void {
-    const max: usize = session.remote_max_frame_size;
-    var remaining = block;
-    var first = true;
-    while (true) {
-        const chunk = remaining[0..@min(remaining.len, max)];
-        remaining = remaining[chunk.len..];
-        const last = remaining.len == 0;
-        var flags: u8 = 0;
-        if (last) flags |= @intFromEnum(wire.HeadersFrameFlags.END_HEADERS);
-        if (first and end_stream) flags |= @intFromEnum(wire.HeadersFrameFlags.END_STREAM);
-        session.writeFrame(if (first) .HTTP_FRAME_HEADERS else .HTTP_FRAME_CONTINUATION, flags, stream_id, chunk);
-        first = false;
-        if (last) break;
-    }
+        const max: usize = session.remote_max_frame_size;
+        _ = &max;
+        var remaining = block;
+        _ = &remaining;
+        var first = true;
+        _ = &first;
+        while (true) {
+            const chunk = remaining[0..@min(remaining.len, max)];
+            _ = &chunk;
+            remaining = remaining[chunk.len..];
+            const last = (remaining.len == 0);
+            _ = &last;
+            var flags: u8 = 0;
+            _ = &flags;
+            if (last) {
+                flags = (flags | @intFromEnum(H2FrameParser.HeadersFrameFlags.END_HEADERS));
+            }
+            if ((first and end_stream)) {
+                flags = (flags | @intFromEnum(H2FrameParser.HeadersFrameFlags.END_STREAM));
+            }
+            var frame_kind: H2FrameParser.FrameType = .HTTP_FRAME_CONTINUATION;
+            _ = &frame_kind;
+            if (first) {
+                frame_kind = .HTTP_FRAME_HEADERS;
+            }
+            _ = session.writeFrame(frame_kind, flags, stream_id, chunk);
+            first = false;
+            if (last) {
+                break;
+            }
+        }
 }
 
 pub fn writeDataWindowed(session: *ClientSession, stream: *Stream, data: []const u8, end_stream: bool, cap: usize) usize {
-    var remaining = data;
-    var consumed: usize = 0;
-    while (true) {
-        const window: usize = @intCast(@max(0, @min(stream.send_window, session.conn_send_window)));
-        if (remaining.len > 0 and window == 0) break;
-        if (remaining.len > 0 and session.write_buffer.size() >= write_buffer_high_water) break;
-        if (consumed >= cap and remaining.len > 0) break;
-        const chunk_len = @min(remaining.len, @as(usize, session.remote_max_frame_size), window);
-        const last = chunk_len == remaining.len;
-        const flags: u8 = if (last and end_stream) @intFromEnum(wire.DataFrameFlags.END_STREAM) else 0;
-        session.writeFrame(.HTTP_FRAME_DATA, flags, stream.id, remaining[0..chunk_len]);
-        stream.send_window -= @intCast(chunk_len);
-        session.conn_send_window -= @intCast(chunk_len);
-        consumed += chunk_len;
-        remaining = remaining[chunk_len..];
-        if (last) break;
-    }
-    return consumed;
+        var remaining = data;
+        _ = &remaining;
+        var consumed: usize = 0;
+        _ = &consumed;
+        while (true) {
+            const window: usize = @intCast(@max(0, @min(stream.send_window, session.conn_send_window)));
+            _ = &window;
+            if (((remaining.len > 0) and (window == 0))) {
+                break;
+            }
+            if (((remaining.len > 0) and (session.write_buffer.size() >= bun.http.H2.write_buffer_high_water))) {
+                break;
+            }
+            if (((consumed >= cap) and (remaining.len > 0))) {
+                break;
+            }
+            const chunk_len = @min(remaining.len, @as(usize, session.remote_max_frame_size), window);
+            _ = &chunk_len;
+            const last = (chunk_len == remaining.len);
+            _ = &last;
+            var flags: u8 = 0;
+            _ = &flags;
+            if ((last and end_stream)) {
+                flags = @intFromEnum(H2FrameParser.DataFrameFlags.END_STREAM);
+            }
+            _ = session.writeFrame(.HTTP_FRAME_DATA, flags, stream.id, remaining[0..chunk_len]);
+            stream.send_window = (stream.send_window - @as(i32, @intCast(chunk_len)));
+            session.conn_send_window = (session.conn_send_window - @as(i32, @intCast(chunk_len)));
+            consumed = (consumed + chunk_len);
+            remaining = remaining[chunk_len..];
+            if (last) {
+                break;
+            }
+        }
+        return consumed;
 }
 
 pub fn drainSendBody(session: *ClientSession, stream: *Stream, cap: usize) void {
-    if (((stream.localClosed() or stream.awaiting_continue) or (stream.fatal_error != null))) {
-        return;
-    }
-    if (stream.client) |client| {
-        _ = &client;
-        switch (client.state.original_request_body) {
-            .bytes => {
-                const sent = writeDataWindowed(session, stream, stream.pending_body, true, cap);
-                stream.pending_body = stream.pending_body[sent..];
-                if (stream.pending_body.len == 0) {
-                    stream.sentEndStream();
-                    client.state.request_stage = .done;
-                }
-            },
-            .stream => |*body| {
-                const sb = body.buffer orelse return;
-                const buffer = sb.acquire();
-                const data = buffer.slice();
-                if (data.len == 0 and !body.ended) {
-                    sb.release();
-                    return;
-                }
-                const sent = writeDataWindowed(session, stream, data, body.ended, cap);
-                buffer.cursor += sent;
-                const drained = buffer.isEmpty();
-                if (drained) buffer.reset();
-                if (drained and body.ended) {
-                    stream.sentEndStream();
-                    client.state.request_stage = .done;
-                } else if (drained and data.len > 0) {
-                    sb.reportDrain();
-                }
-                sb.release();
-                if (stream.localClosed()) body.detach();
-            },
-            .sendfile => unreachable,
+        if (((stream.localClosed() or stream.awaiting_continue) or (stream.fatal_error != null))) {
+            return;
         }
-    }
+        if (stream.client) |client| {
+            _ = &client;
+            switch (client.state.original_request_body) {
+                .bytes => {
+                    const sent = writeDataWindowed(session, stream, stream.pending_body, true, cap);
+                    stream.pending_body = stream.pending_body[sent..];
+                    if (stream.pending_body.len == 0) {
+                        stream.sentEndStream();
+                        client.state.request_stage = .done;
+                    }
+                },
+                .stream => |*body| {
+                    if (body.buffer) |sb| {
+                        const buffer = sb.acquire();
+                        const data = buffer.slice();
+                        if (data.len == 0 and !body.ended) {
+                            sb.release();
+                            return;
+                        }
+                        const sent = writeDataWindowed(session, stream, data, body.ended, cap);
+                        buffer.cursor += sent;
+                        const drained = buffer.isEmpty();
+                        if (drained) buffer.reset();
+                        if (drained and body.ended) {
+                            stream.sentEndStream();
+                            client.state.request_stage = .done;
+                        } else if (drained and data.len > 0) {
+                            sb.reportDrain();
+                        }
+                        sb.release();
+                        if (stream.localClosed()) body.detach();
+                    } else {
+                        return;
+                    }
+                },
+                .sendfile => {
+                    @panic("unreachable");
+                },
+            }
+
+        }
 }
 
 pub fn drainSendBodies(session: *ClientSession) void {
-    const slice: usize = session.remote_max_frame_size;
-    while (session.conn_send_window > 0 and session.write_buffer.size() < write_buffer_high_water) {
-        var progressed = false;
-        for (session.streams.values()) |stream| {
-            if (stream.localClosed() or stream.send_window <= 0) continue;
-            const before = session.conn_send_window;
-            drainSendBody(session, stream, slice);
-            if (session.conn_send_window != before or stream.localClosed()) progressed = true;
+        const slice: usize = session.remote_max_frame_size;
+        _ = &slice;
+        while (((session.conn_send_window > 0) and (session.write_buffer.size() < bun.http.H2.write_buffer_high_water))) {
+            var progressed = false;
+            _ = &progressed;
+            for (session.streams.values()) |stream| {
+                _ = &stream;
+                if ((stream.localClosed() or (stream.send_window <= 0))) {
+                    continue;
+                }
+                const before = session.conn_send_window;
+                _ = &before;
+                _ = drainSendBody(session, stream, slice);
+                if (((session.conn_send_window != before) or stream.localClosed())) {
+                    progressed = true;
+                }
+            }
+            if ((!progressed)) {
+                break;
+            }
         }
-        if (!progressed) break;
-    }
 }
 
-pub fn encodeHeader(session: *ClientSession, encoded: *ByteList, name: []const u8, value: []const u8, never_index: bool) !void {
-    const required = encoded.items.len + name.len + value.len + 32;
-    try encoded.ensureTotalCapacity(bun.default_allocator, required);
-    const written = try session.hpack.encode(name, value, never_index, encoded.allocatedSlice(), encoded.items.len);
-    encoded.items.len += written;
+pub fn encodeHeader(hpack: *HPACK, encoded: *std.ArrayListUnmanaged(u8), name: []const u8, value: []const u8, never_index: bool) !void {
+        const required = (((encoded.items.len + name.len) + value.len) + 32);
+        _ = &required;
+        _ = try encoded.ensureTotalCapacity(bun.default_allocator, required);
+        const written = try hpack.encode(name, value, never_index, encoded.allocatedSlice(), encoded.items.len);
+        _ = &written;
+        encoded.items.len = (encoded.items.len + written);
 }
 
-pub fn encodeHpackTableSizeUpdate(encoded: *ByteList, value: u32) void {
-    if (value < 31) {
-        encoded.appendAssumeCapacity(0x20 | @as(u8, @intCast(value)));
-        return;
-    }
-    encoded.appendAssumeCapacity(0x20 | 31);
-    var rest = value - 31;
-    while (rest >= 128) : (rest >>= 7) {
-        encoded.appendAssumeCapacity(@as(u8, @truncate(rest)) | 0x80);
-    }
-    encoded.appendAssumeCapacity(@as(u8, @truncate(rest)));
+pub fn encodeHpackTableSizeUpdate(encoded: *std.ArrayListUnmanaged(u8), value: u32) void {
+        if ((value < 31)) {
+            _ = encoded.appendAssumeCapacity((32 | @as(u8, @intCast(value))));
+            return;
+        }
+        _ = encoded.appendAssumeCapacity((32 | 31));
+        var rest = (value - 31);
+        _ = &rest;
+        while ((rest >= 128)) {
+            _ = encoded.appendAssumeCapacity((@as(u8, @truncate(rest)) | 128));
+            rest = cp_shr(rest, 7);
+        }
+        _ = encoded.appendAssumeCapacity(@as(u8, @truncate(rest)));
 }

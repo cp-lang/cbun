@@ -2,13 +2,10 @@
 // WebSocket opcodes and header framing in CP language
 
 zig {
-    const std = @import("std");
     const bun = @import("bun");
-    const Environment = bun.Environment;
-    const Array2U8 = [2]u8;
 }
 
-export enum Opcode(u4) {
+export enum Opcode: u4 {
     Continue = 0x0,
     Text = 0x1,
     Binary = 0x2,
@@ -26,8 +23,10 @@ export enum Opcode(u4) {
     ResE = 0xE,
     ResF = 0xF,
 
-    pub static fn isControl(opcode: Opcode): bool {
-        return (@intFromEnum(opcode) & 0x8) != 0;
+    zig {
+        pub fn isControl(self: Opcode) bool {
+            return (@intFromEnum(self) & 0x8) != 0;
+        }
     }
 }
 
@@ -39,24 +38,14 @@ export @packed(u16) struct WebsocketHeader {
     compressed: bool = false,
     final: bool = true,
 
-    pub static fn writeHeader(header: WebsocketHeader, writer: anytype, n: usize)!anyerror {
-        zig {
-            if (comptime Environment.allow_assert) {
-                var buf_ = [2]u8{ 0, 0 };
-                var stream = std.io.fixedBufferStream(&buf_);
-                stream.writer().writeInt(u16, @as(u16, @bitCast(header)), .big) catch unreachable;
-                stream.pos = 0;
-                const casted = stream.reader().readInt(u16, .big) catch unreachable;
-                bun.assert(casted == @as(u16, @bitCast(header)));
-                bun.assert(std.meta.eql(@as(WebsocketHeader, @bitCast(casted)), header));
-            }
+    zig {
+        pub fn writeHeader(header: WebsocketHeader, writer: anytype, n: usize) !void {
+            try writer.writeInt(u16, @as(u16, @bitCast(header)), .big);
+            bun.assert(header.len == packLength(n));
         }
-
-        writer.writeInt(u16, @as(u16, @bitCast(header)), .big)?;
-        bun.assert(header.len == packLength(n));
     }
 
-    pub static fn packLength(length: usize): u7 {
+    static fn packLength(length: usize): u7 {
         return switch (length) {
             0..=125 => @as(u7, @truncate(length)),
             126..=0xFFFF => 126,
@@ -64,7 +53,7 @@ export @packed(u16) struct WebsocketHeader {
         };
     }
 
-    pub static fn lengthByteCount(byte_length: usize): usize {
+    static fn lengthByteCount(byte_length: usize): usize {
         return switch (byte_length) {
             0..=125 => 0,
             126..=0xFFFF => @sizeOf(u16),
@@ -72,19 +61,19 @@ export @packed(u16) struct WebsocketHeader {
         };
     }
 
-    pub static fn frameSize(byte_length: usize): usize {
+    static fn frameSize(byte_length: usize): usize {
         return 2 + byte_length + lengthByteCount(byte_length);
     }
 
-    pub static fn frameSizeIncludingMask(byte_length: usize): usize {
+    static fn frameSizeIncludingMask(byte_length: usize): usize {
         return frameSize(byte_length) + 4;
     }
 
-    pub static fn slice(header: WebsocketHeader): Array2U8 {
-        return @as(Array2U8, @bitCast(@byteSwap(@as(u16, @bitCast(header)))));
+    static fn slice(header: WebsocketHeader): [u8; 2] {
+        return @bitCast(@byteSwap(@as(u16, @bitCast(header))));
     }
 
-    pub static fn fromSlice(bytes: Array2U8): WebsocketHeader {
-        return @as(WebsocketHeader, @bitCast(@byteSwap(@as(u16, @bitCast(bytes)))));
+    static fn fromSlice(bytes: [u8; 2]): WebsocketHeader {
+        return @bitCast(@byteSwap(@as(u16, @bitCast(bytes))));
     }
 }

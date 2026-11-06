@@ -4,89 +4,65 @@
 import bun from "bun";
 import { InternalLoopData } from "./InternalLoopData.cp";
 
-zig {
-    const std = @import("std");
-    const Environment = bun.Environment;
-    const log = bun.Output.scoped(.Loop, .visible);
+@c {
+    fn us_create_loop(
+        hint: *any?!,
+        wakeup_cb: @c ((loop: *Loop): void)?,
+        pre_cb: @c ((loop: *Loop): void)?,
+        post_cb: @c ((loop: *Loop): void)?,
+        ext_size: u32,
+    ): *Loop?!;
+    fn us_loop_free(loop: *Loop?!): void;
+    fn us_loop_ext(loop: *Loop?!): *any?!;
+    fn us_quic_loop_flush_if_pending(loop: *Loop): void;
+    fn us_loop_run(loop: *Loop?!): void;
+    fn us_loop_pump(loop: *Loop?!): void;
+    fn us_wakeup_loop(loop: *Loop?!): void;
+    fn us_loop_integrate(loop: *Loop?!): void;
+    fn us_loop_iteration_number(loop: *Loop?!): i64;
+    fn uws_loop_addPostHandler(loop: *Loop, ctx: *any!, cb: @c ((ctx: *any!, loop: *Loop): void)): void;
+    fn uws_loop_removePostHandler(loop: *Loop, ctx: *any!, cb: @c ((ctx: *any!, loop: *Loop): void)): void;
+    fn uws_loop_addPreHandler(loop: *Loop, ctx: *any!, cb: @c ((ctx: *any!, loop: *Loop): void)): void;
+    fn uws_loop_removePreHandler(loop: *Loop, ctx: *any!, cb: @c ((ctx: *any!, loop: *Loop): void)): void;
+    fn us_loop_run_bun_tick(loop: *Loop?!, timeout_ms: *const bun.timespec?!): void;
+    fn us_internal_free_closed_sockets(loop: *Loop): void;
+    fn us_loop_close_all_groups(loop: *Loop): i32;
+    fn uws_get_loop(): *Loop;
+    fn uws_get_loop_with_native(native: *any!): *WindowsLoop;
+    fn uws_loop_defer(loop: *Loop, ctx: *any!, cb: @c ((ctx: *any!): void)): void;
+    fn uws_res_clear_corked_socket(loop: *Loop): void;
+    fn uws_loop_date_header_timer_update(loop: *Loop): void;
+}
 
-    const c = struct {
-        pub extern fn us_create_loop(
-            hint: ?*anyopaque,
-            wakeup_cb: ?*const fn (*Loop) callconv(.c) void,
-            pre_cb: ?*const fn (*Loop) callconv(.c) void,
-            post_cb: ?*const fn (*Loop) callconv(.c) void,
-            ext_size: c_uint,
-        ) ?*Loop;
-        pub extern fn us_loop_free(loop: ?*Loop) void;
-        pub extern fn us_loop_ext(loop: ?*Loop) ?*anyopaque;
-        pub extern fn us_quic_loop_flush_if_pending(loop: *Loop) void;
-        pub extern fn us_loop_run(loop: ?*Loop) void;
-        pub extern fn us_loop_pump(loop: ?*Loop) void;
-        pub extern fn us_wakeup_loop(loop: ?*Loop) void;
-        pub extern fn us_loop_integrate(loop: ?*Loop) void;
-        pub extern fn us_loop_iteration_number(loop: ?*Loop) c_longlong;
-        pub extern fn uws_loop_addPostHandler(loop: *Loop, ctx: *anyopaque, cb: *const (fn (ctx: *anyopaque, loop: *Loop) callconv(.c) void)) void;
-        pub extern fn uws_loop_removePostHandler(loop: *Loop, ctx: *anyopaque, cb: *const (fn (ctx: *anyopaque, loop: *Loop) callconv(.c) void)) void;
-        pub extern fn uws_loop_addPreHandler(loop: *Loop, ctx: *anyopaque, cb: *const (fn (ctx: *anyopaque, loop: *Loop) callconv(.c) void)) void;
-        pub extern fn uws_loop_removePreHandler(loop: *Loop, ctx: *anyopaque, cb: *const (fn (ctx: *anyopaque, loop: *Loop) callconv(.c) void)) void;
-        pub extern fn us_loop_run_bun_tick(loop: ?*Loop, timouetMs: ?*const bun.timespec) void;
-        pub extern fn us_internal_free_closed_sockets(loop: *Loop) void;
-        pub extern fn us_loop_close_all_groups(loop: *Loop) c_int;
-        pub extern fn uws_get_loop() *Loop;
-        pub extern fn uws_get_loop_with_native(*anyopaque) *WindowsLoop;
-        pub extern fn uws_loop_defer(loop: *Loop, ctx: *anyopaque, cb: *const (fn (ctx: *anyopaque) callconv(.c) void)) void;
-        pub extern fn uws_res_clear_corked_socket(loop: *Loop) void;
-        pub extern fn uws_loop_date_header_timer_update(loop: *Loop) void;
-    };
+export class LoopHandler<UserType> {
+    loop: *Loop,
+    cb: @c ((data: *any!, loop: *Loop): void),
+
+    pub fn removePost(this): void {
+        uws_loop_removePostHandler(this.loop, this as *any!, this.cb);
+    }
+
+    pub fn removePre(this): void {
+        uws_loop_removePreHandler(this.loop, this as *any!, this.cb);
+    }
 }
 
 export @extern class PosixLoop {
-    zig {
-        internal_loop_data: InternalLoopData align(16),
-        num_polls: i32,
-        num_ready_polls: i32,
-        current_ready_poll: i32,
-        fd: i32,
-        active: u32 = 0,
-        pending_wakeups: u32 = 0,
-        ready_polls: [1024]EventType align(16),
-
-        const EventType = switch (Environment.os) {
-            .linux => std.os.linux.epoll_event,
-            .mac => std.posix.system.kevent64_s,
-            .freebsd => std.c.Kevent,
-            .windows => *anyopaque,
-            .wasm => @compileError("Unsupported OS"),
-        };
-
-        pub const wake = wakeup;
-
-        fn NewHandler(comptime UserType: type, comptime callback_fn: fn (UserType) void) type {
-            return struct {
-                loop: *Loop,
-                pub fn removePost(handler: @This()) void {
-                    return c.uws_loop_removePostHandler(handler.loop, callback);
-                }
-                pub fn removePre(handler: @This()) void {
-                    return c.uws_loop_removePostHandler(handler.loop, callback);
-                }
-                pub fn callback(data: *anyopaque, _: *Loop) callconv(.c) void {
-                    callback_fn(@as(UserType, @ptrCast(@alignCast(data))));
-                }
-            };
-        }
-    }
+    @align(16) internal_loop_data: InternalLoopData,
+    num_polls: i32 = 0,
+    num_ready_polls: i32 = 0,
+    current_ready_poll: i32 = 0,
+    fd: i32 = 0,
+    active: u32 = 0,
+    pending_wakeups: u32 = 0,
+    @align(16) ready_polls: bun.EpollEvent[1024],
 
     pub fn uncork(*this): void {
-        zig {
-            c.uws_res_clear_corked_socket(self);
-        }
+        uws_res_clear_corked_socket(this as *Loop);
     }
 
     pub fn updateDate(*this): void {
-        zig {
-            c.uws_loop_date_header_timer_update(self);
-        }
+        uws_loop_date_header_timer_update(this as *Loop);
     }
 
     pub fn iterationNumber(this): u64 {
@@ -94,33 +70,21 @@ export @extern class PosixLoop {
     }
 
     pub fn inc(*this): void {
-        zig {
-            log("inc {d} + 1 = {d}", .{ self.num_polls, self.num_polls + 1 });
-            self.num_polls += 1;
-        }
+        this.num_polls += 1;
     }
 
     pub fn dec(*this): void {
-        zig {
-            log("dec {d} - 1 = {d}", .{ self.num_polls, self.num_polls - 1 });
-            self.num_polls -= 1;
-        }
+        this.num_polls -= 1;
     }
 
     pub fn ref(*this): void {
-        zig {
-            log("ref {d} + 1 = {d} | {d} + 1 = {d}", .{ self.num_polls, self.num_polls + 1, self.active, self.active + 1 });
-            self.num_polls += 1;
-            self.active += 1;
-        }
+        this.num_polls += 1;
+        this.active += 1;
     }
 
     pub fn unref(*this): void {
-        zig {
-            log("unref {d} - 1 = {d} | {d} - 1 = {d}", .{ self.num_polls, self.num_polls - 1, self.active, self.active -| 1 });
-            self.num_polls -= 1;
-            self.active -|= 1;
-        }
+        this.num_polls -= 1;
+        if (this.active > 0) this.active -= 1;
     }
 
     pub fn isActive(this): bool {
@@ -128,122 +92,82 @@ export @extern class PosixLoop {
     }
 
     pub fn addActive(*this, value: u32): void {
-        zig {
-            log("add {d} + {d} = {d}", .{ self.active, value, self.active +| value });
-            self.active +|= value;
-        }
+        this.active += value;
     }
 
     pub fn subActive(*this, value: u32): void {
-        zig {
-            log("sub {d} - {d} = {d}", .{ self.active, value, self.active -| value });
-            self.active -|= value;
+        if (this.active > value) {
+            this.active -= value;
+        } else {
+            this.active = 0;
         }
     }
 
     pub fn unrefCount(*this, count: i32): void {
-        zig {
-            log("unref x {d}", .{count});
-            self.num_polls -= count;
-            self.active -|= @as(u32, @intCast(count));
+        this.num_polls -= count;
+        let c_u32 = count as u32;
+        if (this.active > c_u32) {
+            this.active -= c_u32;
+        } else {
+            this.active = 0;
         }
     }
 
     pub static fn get(): *Loop {
-        zig {
-            return c.uws_get_loop();
-        }
+        return uws_get_loop();
     }
 
     pub fn drainQuicIfNecessary(*this): void {
         if (this.internal_loop_data.quic_head == null) return;
-        zig {
-            c.us_quic_loop_flush_if_pending(self);
-        }
+        us_quic_loop_flush_if_pending(this as *Loop);
     }
 
-    pub static fn create(@comptime Handler: anytype): *Loop {
-        zig {
-            return c.us_create_loop(
-                null,
-                Handler.wakeup,
-                if (@hasDecl(Handler, "pre")) Handler.pre else null,
-                if (@hasDecl(Handler, "post")) Handler.post else null,
-                0,
-            ).?;
-        }
+    pub static fn create<Handler>(): *Loop {
+        return us_create_loop(
+            null,
+            Handler.wakeup,
+            if (reflect.hasMethod(Handler, "pre")) Handler.pre else null,
+            if (reflect.hasMethod(Handler, "post")) Handler.post else null,
+            0,
+        )!;
     }
 
     pub fn wakeup(*this): void {
-        zig {
-            return c.us_wakeup_loop(self);
-        }
+        us_wakeup_loop(this as *Loop);
     }
 
     pub fn tick(*this): void {
-        zig {
-            c.us_loop_run_bun_tick(self, null);
-        }
+        us_loop_run_bun_tick(this as *Loop, null);
     }
 
     pub fn tickWithoutIdle(*this): void {
-        zig {
-            const timespec = bun.timespec{ .sec = 0, .nsec = 0 };
-            c.us_loop_run_bun_tick(self, &timespec);
-        }
+        let ts = bun.timespec { sec = 0, nsec = 0 };
+        us_loop_run_bun_tick(this as *Loop, &ts);
     }
 
     pub fn tickWithTimeout(*this, timespec: *const bun.timespec?): void {
-        zig {
-            c.us_loop_run_bun_tick(self, timespec);
-        }
+        us_loop_run_bun_tick(this as *Loop, timespec);
     }
 
     pub fn drainClosedSockets(*this): void {
-        zig {
-            c.us_internal_free_closed_sockets(self);
-        }
+        us_internal_free_closed_sockets(this as *Loop);
     }
 
     pub fn closeAllGroups(*this): bool {
-        zig {
-            return c.us_loop_close_all_groups(self) != 0;
-        }
+        return us_loop_close_all_groups(this as *Loop) != 0;
     }
 
-    pub fn nextTick(*this, @comptime UserType: type, user_data: UserType, @comptime deferCallback: anytype): void {
-        zig {
-            const Handler = struct {
-                pub fn callback(data: *anyopaque) callconv(.c) void {
-                    deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
-                }
-            };
-            c.uws_loop_defer(self, user_data, Handler.callback);
-        }
-    }
-
-    zig {
-        pub fn addPostHandler(this: *PosixLoop, comptime UserType: type, ctx: UserType, comptime callback: fn (UserType) void) NewHandler(UserType, callback) {
-            const Handler = NewHandler(UserType, callback);
-            c.uws_loop_addPostHandler(this, ctx, Handler.callback);
-            return Handler{
-                .loop = this,
-            };
-        }
-
-        pub fn addPreHandler(this: *PosixLoop, comptime UserType: type, ctx: UserType, comptime callback: fn (UserType) void) NewHandler(UserType, callback) {
-            const Handler = NewHandler(UserType, callback);
-            c.uws_loop_addPreHandler(this, ctx, Handler.callback);
-            return Handler{
-                .loop = this,
-            };
-        }
+    pub fn nextTick<UserType>(*this, user_data: UserType, deferCallback: fn(UserType): void): void {
+        let Handler = struct {
+            @c pub fn callback(data: *any!): void {
+                deferCallback(data as UserType);
+            }
+        };
+        uws_loop_defer(this as *Loop, user_data as *any!, Handler.callback);
     }
 
     pub fn run(*this): void {
-        zig {
-            c.us_loop_run(self);
-        }
+        us_loop_run(this as *Loop);
     }
 
     pub fn shouldEnableDateHeaderTimer(this): bool {
@@ -255,164 +179,103 @@ export @extern class PosixLoop {
     }
 
     pub fn deinit(*this): void {
-        zig {
-            c.us_loop_free(self);
-        }
+        us_loop_free(this as *Loop);
     }
 }
 
 export @extern class WindowsLoop {
-    zig {
-        const uv = bun.windows.libuv;
-        internal_loop_data: InternalLoopData align(16),
-        uv_loop: *uv.Loop,
-        is_default: c_int,
-        pre: *uv.uv_prepare_t,
-        check: *uv.uv_check_t,
-
-        pub const wake = wakeup;
-        pub const tick = run;
-        pub const wait = run;
-        pub const ref = inc;
-        pub const unref = dec;
-
-        fn NewHandler(comptime UserType: type, comptime callback_fn: fn (UserType) void) type {
-            return struct {
-                loop: *Loop,
-                pub fn removePost(handler: @This()) void {
-                    return c.uws_loop_removePostHandler(handler.loop, callback);
-                }
-                pub fn removePre(handler: @This()) void {
-                    return c.uws_loop_removePostHandler(handler.loop, callback);
-                }
-                pub fn callback(data: *anyopaque, _: *Loop) callconv(.c) void {
-                    callback_fn(@as(UserType, @ptrCast(@alignCast(data))));
-                }
-            };
-        }
-    }
+    @align(16) internal_loop_data: InternalLoopData,
+    uv_loop: *bun.windows.libuv.Loop,
+    is_default: i32 = 0,
+    pre: *bun.windows.libuv.uv_prepare_t,
+    check: *bun.windows.libuv.uv_check_t,
 
     pub fn shouldEnableDateHeaderTimer(this): bool {
         return this.internal_loop_data.shouldEnableDateHeaderTimer();
     }
 
     pub fn uncork(*this): void {
-        zig {
-            c.uws_res_clear_corked_socket(self);
-        }
+        uws_res_clear_corked_socket(this as *Loop);
     }
 
     pub static fn get(): *WindowsLoop {
-        zig {
-            return c.uws_get_loop_with_native(bun.windows.libuv.Loop.get());
-        }
+        return uws_get_loop_with_native(bun.windows.libuv.Loop.get() as *any!);
     }
 
     pub fn iterationNumber(this): u64 {
         return this.internal_loop_data.iteration_nr;
     }
 
-    pub fn addActive(this, val: u32): void {
-        zig {
-            self.uv_loop.addActive(val);
-        }
+    pub fn addActive(*this, val: u32): void {
+        this.uv_loop.addActive(val);
     }
 
-    pub fn subActive(this, val: u32): void {
-        zig {
-            self.uv_loop.subActive(val);
-        }
+    pub fn subActive(*this, val: u32): void {
+        this.uv_loop.subActive(val);
     }
 
     pub fn isActive(this): bool {
-        zig {
-            return self.uv_loop.isActive();
-        }
+        return this.uv_loop.isActive();
     }
 
     pub fn wakeup(*this): void {
-        zig {
-            c.us_wakeup_loop(self);
-        }
+        us_wakeup_loop(this as *Loop);
     }
 
     pub fn tickWithTimeout(*this, timespec: *const bun.timespec?): void {
-        zig {
-            _ = timespec;
-            c.us_loop_run(self);
-        }
+        us_loop_run(this as *Loop);
     }
 
     pub fn tickWithoutIdle(*this): void {
-        zig {
-            c.us_loop_pump(self);
-        }
+        us_loop_pump(this as *Loop);
     }
 
     pub fn drainQuicIfNecessary(*this): void {
         if (this.internal_loop_data.quic_head == null) return;
-        zig {
-            c.us_quic_loop_flush_if_pending(self);
-        }
+        us_quic_loop_flush_if_pending(this as *Loop);
     }
 
-    pub static fn create(@comptime Handler: anytype): *WindowsLoop {
-        zig {
-            return c.us_create_loop(
-                null,
-                Handler.wakeup,
-                if (@hasDecl(Handler, "pre")) Handler.pre else null,
-                if (@hasDecl(Handler, "post")) Handler.post else null,
-                0,
-            ).?;
-        }
+    pub static fn create<Handler>(): *WindowsLoop {
+        return us_create_loop(
+            null,
+            Handler.wakeup,
+            if (reflect.hasMethod(Handler, "pre")) Handler.pre else null,
+            if (reflect.hasMethod(Handler, "post")) Handler.post else null,
+            0,
+        )! as *WindowsLoop;
     }
 
     pub fn run(*this): void {
-        zig {
-            c.us_loop_run(self);
-        }
+        us_loop_run(this as *Loop);
     }
 
     pub fn inc(*this): void {
-        zig {
-            self.uv_loop.inc();
-        }
+        this.uv_loop.inc();
     }
 
     pub fn dec(*this): void {
-        zig {
-            self.uv_loop.dec();
-        }
+        this.uv_loop.dec();
     }
 
     pub fn drainClosedSockets(*this): void {
-        zig {
-            c.us_internal_free_closed_sockets(self);
-        }
+        us_internal_free_closed_sockets(this as *Loop);
     }
 
     pub fn closeAllGroups(*this): bool {
-        zig {
-            return c.us_loop_close_all_groups(self) != 0;
-        }
+        return us_loop_close_all_groups(this as *Loop) != 0;
     }
 
-    pub fn nextTick(*this, @comptime UserType: type, user_data: UserType, @comptime deferCallback: anytype): void {
-        zig {
-            const Handler = struct {
-                pub fn callback(data: *anyopaque) callconv(.c) void {
-                    deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
-                }
-            };
-            c.uws_loop_defer(self, user_data, Handler.callback);
-        }
+    pub fn nextTick<UserType>(*this, user_data: UserType, deferCallback: fn(UserType): void): void {
+        let Handler = struct {
+            @c pub fn callback(data: *any!): void {
+                deferCallback(data as UserType);
+            }
+        };
+        uws_loop_defer(this as *Loop, user_data as *any!, Handler.callback);
     }
 
     pub fn updateDate(*this): void {
-        zig {
-            c.uws_loop_date_header_timer_update(self);
-        }
+        uws_loop_date_header_timer_update(this as *Loop);
     }
 
     pub fn release(*this): void {
@@ -420,12 +283,8 @@ export @extern class WindowsLoop {
     }
 
     pub fn deinit(*this): void {
-        zig {
-            c.us_loop_free(self);
-        }
+        us_loop_free(this as *Loop);
     }
 }
 
-zig {
-    pub const Loop = if (bun.Environment.isWindows) WindowsLoop else PosixLoop;
-}
+export type Loop = PosixLoop;

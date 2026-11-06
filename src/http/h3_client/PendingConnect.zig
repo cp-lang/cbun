@@ -2,15 +2,32 @@
 const std = @import("std");
 const string = []const u8;
 
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
 const bun = @import("bun");
-const H3 = bun.http.H3;
-const ClientSession = H3.ClientSession;
-const uws = bun.uws;
-const quic = uws.quic;
+    const uws = bun.uws;
+    const quic = uws.quic;
+    var resolved_mutex: bun.Mutex = .{};
+    var resolved_head: ?*PendingConnect = null;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
-var resolved_mutex: bun.Mutex = .{};
-var resolved_head: ?*PendingConnect = null;
-
+pub const ClientSession = @import("./ClientSession.zig").ClientSession;
 pub const PendingConnect = @This();
 
 session: *ClientSession,
@@ -19,84 +36,82 @@ loop_ptr: *uws.Loop,
 next: ?*PendingConnect = null,
 
 pub fn register(session: *ClientSession, pc: *quic.PendingConnect, l: *uws.Loop) void {
-    const self = bun.new(PendingConnect, .{ .session = session, .pc = pc, .loop_ptr = l });
-    session.ref();
-    bun.dns.internal.registerQuic(@ptrCast(@alignCast(pc.addrinfo())), self);
+        const item = bun.new(PendingConnect, .{ .session = session, .pc = pc, .loop_ptr = l });
+        _ = &item;
+        _ = session.ref();
+        _ = bun.dns.internal.registerQuic(@ptrCast(@alignCast(pc.addrinfo())), item);
 }
 
-pub fn loop(self: *PendingConnect) *uws.Loop {
-    _ = &self;
-    return self.loop_ptr;
+pub fn loop(self: *PendingConnect) *anyopaque {
+        return self.loop_ptr;
 }
 
 pub fn onDNSResolved(self: *PendingConnect) void {
-    _ = &self;
-    const session = self.session;
-    _ = &session;
-    defer {
+        const session = self.session;
+        _ = &session;
+        defer {
         {
             _ = session.deref();
             _ = bun.destroy(self);
         }
-    }
-    if ((session.closed or (session.pending.items.len == 0))) {
-        _ = self.pc.cancel();
-        if ((!session.closed)) {
-            _ = PendingConnect.failSession(session, error.Aborted);
         }
-        return;
-    }
-    if (self.pc.resolved()) |qs| {
-        _ = &qs;
-        session.qsocket = qs;
-        qs.ext(ClientSession).* = session;
-    } else {
-        _ = PendingConnect.failSession(session, error.DNSResolutionFailed);
-        return;
-    }
+        if ((session.closed or (session.pending.items.len == 0))) {
+            _ = self.pc.cancel();
+            if ((!session.closed)) {
+                _ = PendingConnect.failSession(session, error.Aborted);
+            }
+            return;
+        }
+        if (self.pc.resolved()) |qs| {
+            _ = &qs;
+            session.qsocket = qs;
+            qs.ext(ClientSession).* = session;
+
+        } else {
+            _ = PendingConnect.failSession(session, error.DNSResolutionFailed);
+            return;
+        }
 }
 
 pub fn onDNSResolvedThreadsafe(self: *PendingConnect) void {
-    _ = &self;
-    _ = resolved_mutex.lock();
-    self.next = resolved_head;
-    resolved_head = self;
-    _ = resolved_mutex.unlock();
-    _ = self.loop_ptr.wakeup();
+        _ = resolved_mutex.lock();
+        self.next = resolved_head;
+        resolved_head = self;
+        _ = resolved_mutex.unlock();
+        _ = self.loop_ptr.wakeup();
 }
 
 pub fn drainResolved() void {
-    _ = resolved_mutex.lock();
-    var head = resolved_head;
-    _ = &head;
-    resolved_head = null;
-    _ = resolved_mutex.unlock();
-    while (head) |pc| {
-        _ = &pc;
-        const next = pc.next;
-        _ = &next;
-        _ = pc.onDNSResolved();
-        head = next;
-    }
+        _ = resolved_mutex.lock();
+        var head = resolved_head;
+        _ = &head;
+        resolved_head = null;
+        _ = resolved_mutex.unlock();
+        while (head) |pc| {
+            const next = pc.next;
+            _ = &next;
+            _ = pc.onDNSResolved();
+            head = next;
+        }
 }
 
 pub fn failSession(session: *ClientSession, err: anyerror) void {
-    session.closed = true;
-    if (H3.ClientContext.get()) |ctx| {
-        _ = &ctx;
-        _ = ctx.unregister(session);
-    }
-    while ((session.pending.items.len > 0)) {
-        const stream = session.pending.items[0];
-        _ = &stream;
-        const cl = stream.client;
-        _ = &cl;
-        _ = session.detach(stream);
-        if (cl) |cl_| {
-            _ = &cl_;
-            _ = cl_.failFromH2(err);
+        session.closed = true;
+        if (bun.http.H3.ClientContext.get()) |ctx| {
+            _ = &ctx;
+            _ = ctx.unregister(session);
         }
-    }
-    _ = H3.live_sessions.fetchSub(1, .monotonic);
-    _ = session.deref();
+        while ((session.pending.items.len > 0)) {
+            const stream = session.pending.items[0];
+            _ = &stream;
+            const cl = stream.client;
+            _ = &cl;
+            _ = session.detach(stream);
+            if (cl) |cl_| {
+                _ = &cl_;
+                _ = cl_.failFromH2(err);
+            }
+        }
+        _ = bun.http.H3.live_sessions.fetchSub(1, .monotonic);
+        _ = session.deref();
 }

@@ -1,9 +1,6 @@
 // src/sourcemap/VLQ.cp
 // Bun VLQ (Variable-Length Quantity) encoder & decoder in CP language
 
-zig {
-    const bun = @import("bun");
-}
 
 const vlq_max_in_bytes: usize = 7;
 const base64: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

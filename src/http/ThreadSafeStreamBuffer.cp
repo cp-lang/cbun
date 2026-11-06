@@ -3,50 +3,57 @@
 
 zig {
     const bun = @import("bun");
+    const StreamLock = bun.Mutex;
+}
 
-    pub const Callback = struct {
-        callback: *const fn (*anyopaque) void,
-        context: *anyopaque,
+export struct Callback {
+    callback: fn(ctx: any?): void,
+    context: any? = null,
 
-        pub fn init(comptime T: type, callback: *const fn (*T) void, context: *T) @This() {
-            return .{ .callback = @ptrCast(callback), .context = @ptrCast(context) };
-        }
-
-        pub fn call(this: @This()) void {
-            this.callback(this.context);
-        }
-    };
-
-    const StreamBufferRefCount = bun.ptr.ThreadSafeRefCount(ThreadSafeStreamBuffer, "ref_count", ThreadSafeStreamBuffer.deinit, .{});
-    pub const ref = StreamBufferRefCount.ref;
-    pub const deref = StreamBufferRefCount.deref;
-    pub const new = bun.TrivialNew(ThreadSafeStreamBuffer);
+    fn call(this): void {
+        this.callback(this.context);
+    }
 }
 
 export @root @value struct ThreadSafeStreamBuffer {
+    zig {
+        pub const StreamBufferRefCount = bun.ptr.ThreadSafeRefCount(ThreadSafeStreamBuffer, "ref_count", ThreadSafeStreamBuffer.deinit, .{});
+        pub const ref = StreamBufferRefCount.ref;
+        pub const deref = StreamBufferRefCount.deref;
+        pub const new = bun.TrivialNew(ThreadSafeStreamBuffer);
+
+        pub fn setDrainCallback(self: *ThreadSafeStreamBuffer, comptime Context: type, comptime callback: anytype, context: *Context) void {
+            const Wrapper = struct {
+                fn call(ctx: ?*anyopaque) void {
+                    @call(bun.callmod_inline, callback, .{@as(*Context, @ptrCast(@alignCast(ctx)))});
+                }
+            };
+            self.callback = .{
+                .callback = Wrapper.call,
+                .context = context,
+            };
+        }
+    }
+
     buffer: bun.io.StreamBuffer = {},
-    mutex: bun.Mutex = {},
+    mutex: StreamLock = {},
     ref_count: StreamBufferRefCount = StreamBufferRefCount.initExactRefs(2),
     callback: Callback? = null,
 
-    pub fn acquire(*this): *bun.io.StreamBuffer {
+    fn acquire(*this): *bun.io.StreamBuffer {
         this.mutex.lock();
         return &this.buffer;
     }
 
-    pub fn release(*this): void {
+    fn release(*this): void {
         this.mutex.unlock();
     }
 
-    pub fn setDrainCallback(*this, comptime T: type, callback: anytype, context: *T): void {
-        this.callback = Callback.init(T, callback, context);
-    }
-
-    pub fn clearDrainCallback(*this): void {
+    fn clearDrainCallback(*this): void {
         this.callback = null;
     }
 
-    pub fn reportDrain(*this): void {
+    fn reportDrain(*this): void {
         if (this.buffer.isEmpty()) {
             if (cb := this.callback) {
                 cb.call();
@@ -54,8 +61,9 @@ export @root @value struct ThreadSafeStreamBuffer {
         }
     }
 
-    pub fn deinit(*this): void {
+    fn deinit(*this): void {
         this.buffer.deinit();
         bun.destroy(this);
     }
 }
+
