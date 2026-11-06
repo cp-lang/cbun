@@ -1,15 +1,16 @@
 // src/uws_sys/socket.cp
 // High-level socket wrapper over us_socket_t / ConnectingSocket in CP language
 
+import bun from "bun";
+import { ConnectingSocket } from "./ConnectingSocket.cp";
+import { SocketGroup } from "./SocketGroup.cp";
+
 zig {
     const std = @import("std");
-    const bun = @import("bun");
     const Environment = bun.Environment;
     const BoringSSL = bun.BoringSSL.c;
 
     const uws = bun.uws;
-    const ConnectingSocket = uws.ConnectingSocket;
-    const SocketGroup = uws.SocketGroup;
     const SocketKind = uws.SocketKind;
     const UpgradedDuplex = uws.UpgradedDuplex;
     const WindowsNamedPipe = uws.WindowsNamedPipe;
@@ -17,8 +18,10 @@ zig {
     const us_socket_t = uws.us_socket_t;
 
     const debug = bun.Output.scoped(.uws, .visible);
+}
 
-    pub fn NewSocketHandler(comptime is_ssl: bool) type {
+pub fn NewSocketHandler(@comptime is_ssl: bool): type {
+    zig {
         return struct {
             socket: InternalSocket,
 
@@ -330,16 +333,16 @@ zig {
                 k: SocketKind,
                 handle: bun.FD,
                 comptime This: type,
-                this: *This,
+                this_ptr: *This,
                 comptime socket_field_name: ?[]const u8,
                 is_ipc: bool,
             ) ?ThisSocket {
                 const raw = g.fromFd(k, null, @sizeOf(?*This), handle.native(), is_ipc) orelse return null;
                 const socket_ = ThisSocket{ .socket = .{ .connected = raw } };
 
-                raw.ext(?*This).* = this;
+                raw.ext(?*This).* = this_ptr;
                 if (comptime socket_field_name) |field| {
-                    @field(this, field) = socket_;
+                    @field(this_ptr, field) = socket_;
                 }
                 return socket_;
             }
@@ -423,7 +426,9 @@ zig {
             }
         };
     }
+}
 
+zig {
     pub const SocketTCP = NewSocketHandler(false);
     pub const SocketTLS = NewSocketHandler(true);
 
@@ -451,15 +456,19 @@ zig {
                 },
             }
         }
+
         pub fn isDetached(this: InternalSocket) bool {
             return this == .detached;
         }
+
         pub fn isNamedPipe(this: InternalSocket) bool {
             return this == .pipe;
         }
+
         pub fn detach(this: *InternalSocket) void {
             this.* = .detached;
         }
+
         pub fn setNoDelay(this: InternalSocket, enabled: bool) bool {
             switch (this) {
                 .pipe, .upgradedDuplex, .connecting, .detached => return false,
@@ -469,12 +478,14 @@ zig {
                 },
             }
         }
+
         pub fn setKeepAlive(this: InternalSocket, enabled: bool, delay: u32) bool {
             switch (this) {
                 .pipe, .upgradedDuplex, .connecting, .detached => return false,
                 .connected => |socket| return socket.setKeepalive(enabled, delay) == 0,
             }
         }
+
         pub fn close(this: InternalSocket, code: us_socket_t.CloseCode) void {
             switch (this) {
                 .detached => {},

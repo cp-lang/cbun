@@ -1,8 +1,13 @@
+import bun from "bun";
+
 zig {
     const std = @import("std");
-    const bun = @import("bun");
     const uws = bun.uws;
     const BoringSSL = bun.BoringSSL.c;
+
+    pub const CString = [*c]const u8;
+    pub const CertArray = ?[*]const ?[*:0]const u8;
+    pub const DigestArray = [32]u8;
 
     pub const c = struct {
         pub extern fn us_ssl_ctx_from_options(BunSocketContextOptions, *uws.create_bun_socket_error_t) ?*BoringSSL.SSL_CTX;
@@ -10,32 +15,32 @@ zig {
     };
 }
 
-export @extern class BunSocketContextOptions {
-    zig {
-        key_file_name: [*c]const u8 = null,
-        cert_file_name: [*c]const u8 = null,
-        passphrase: [*c]const u8 = null,
-        dh_params_file_name: [*c]const u8 = null,
-        ca_file_name: [*c]const u8 = null,
-        ssl_ciphers: [*c]const u8 = null,
-        ssl_prefer_low_memory_usage: i32 = 0,
-        key: ?[*]const ?[*:0]const u8 = null,
-        key_count: u32 = 0,
-        cert: ?[*]const ?[*:0]const u8 = null,
-        cert_count: u32 = 0,
-        ca: ?[*]const ?[*:0]const u8 = null,
-        ca_count: u32 = 0,
-        secure_options: u32 = 0,
-        reject_unauthorized: i32 = 0,
-        request_cert: i32 = 0,
-        client_renegotiation_limit: u32 = 3,
-        client_renegotiation_window: u32 = 600,
+export @extern @value class BunSocketContextOptions {
+    key_file_name: CString = null,
+    cert_file_name: CString = null,
+    passphrase: CString = null,
+    dh_params_file_name: CString = null,
+    ca_file_name: CString = null,
+    ssl_ciphers: CString = null,
+    ssl_prefer_low_memory_usage: i32 = 0,
+    key: CertArray = null,
+    key_count: u32 = 0,
+    cert: CertArray = null,
+    cert_count: u32 = 0,
+    ca: CertArray = null,
+    ca_count: u32 = 0,
+    secure_options: u32 = 0,
+    reject_unauthorized: i32 = 0,
+    request_cert: i32 = 0,
+    client_renegotiation_limit: u32 = 3,
+    client_renegotiation_window: u32 = 600,
 
-        pub fn createSSLContext(options: BunSocketContextOptions, err: *uws.create_bun_socket_error_t) ?*BoringSSL.SSL_CTX {
-            return c.us_ssl_ctx_from_options(options, err);
-        }
+    pub static fn createSSLContext(options: BunSocketContextOptions, err: anytype): *BoringSSL.SSL_CTX? {
+        return c.us_ssl_ctx_from_options(options, err);
+    }
 
-        pub fn digest(self: BunSocketContextOptions) [32]u8 {
+    pub fn digest(this): DigestArray {
+        zig {
             var h = bun.sha.Hashers.SHA256.init();
             const feedZ = struct {
                 fn f(hp: *bun.sha.Hashers.SHA256, s: [*c]const u8) void {
@@ -94,8 +99,10 @@ export @extern class BunSocketContextOptions {
             h.final(&out);
             return out;
         }
+    }
 
-        pub fn approxCertBytes(self: BunSocketContextOptions) usize {
+    pub fn approxCertBytes(this): usize {
+        zig {
             var n: usize = 0;
             if (self.key) |arr| for (arr[0..self.key_count]) |k| {
                 if (k) |s| n += bun.sliceTo(s, 0).len;

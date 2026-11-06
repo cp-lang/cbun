@@ -2,11 +2,7 @@
 const std = @import("std");
 const string = []const u8;
 
-    const bun = @import("bun");
     const Environment = bun.Environment;
-    const uws = bun.uws;
-    const InternalLoopData = uws.InternalLoopData;
-
     const log = bun.Output.scoped(.Loop, .visible);
 
     const c = struct {
@@ -40,70 +36,133 @@ const string = []const u8;
     };
 pub const Loop = if (bun.Environment.isWindows) WindowsLoop else PosixLoop;
 
+pub const bun = @import("bun");
+pub const InternalLoopData = @import("./InternalLoopData.zig").InternalLoopData;
 pub const PosixLoop = extern struct {
+
+pub fn uncork(self: *PosixLoop) void {
+            c.uws_res_clear_corked_socket(self);
+    }
+
+pub fn updateDate(self: *PosixLoop) void {
+            c.uws_loop_date_header_timer_update(self);
+    }
+
+pub fn iterationNumber(self: *const PosixLoop) u64 {
+            return self.internal_loop_data.iteration_nr;
+    }
 
 pub fn inc(self: *PosixLoop) void {
             log("inc {d} + 1 = {d}", .{ self.num_polls, self.num_polls + 1 });
             self.num_polls += 1;
-
     }
 
 pub fn dec(self: *PosixLoop) void {
             log("dec {d} - 1 = {d}", .{ self.num_polls, self.num_polls - 1 });
             self.num_polls -= 1;
-
     }
 
 pub fn ref(self: *PosixLoop) void {
             log("ref {d} + 1 = {d} | {d} + 1 = {d}", .{ self.num_polls, self.num_polls + 1, self.active, self.active + 1 });
             self.num_polls += 1;
             self.active += 1;
-
     }
 
 pub fn unref(self: *PosixLoop) void {
             log("unref {d} - 1 = {d} | {d} - 1 = {d}", .{ self.num_polls, self.num_polls - 1, self.active, self.active -| 1 });
             self.num_polls -= 1;
             self.active -|= 1;
+    }
 
+pub fn isActive(self: *const PosixLoop) bool {
+            return (self.active > 0);
     }
 
 pub fn addActive(self: *PosixLoop, value: u32) void {
             log("add {d} + {d} = {d}", .{ self.active, value, self.active +| value });
             self.active +|= value;
-
     }
 
 pub fn subActive(self: *PosixLoop, value: u32) void {
             log("sub {d} - {d} = {d}", .{ self.active, value, self.active -| value });
             self.active -|= value;
-
     }
 
 pub fn unrefCount(self: *PosixLoop, count: i32) void {
             log("unref x {d}", .{count});
             self.num_polls -= count;
             self.active -|= @as(u32, @intCast(count));
+    }
 
+pub fn get() *Loop {
+            return c.uws_get_loop();
+    }
+
+pub fn drainQuicIfNecessary(self: *PosixLoop) void {
+            if ((self.internal_loop_data.quic_head == null)) {
+                return;
+            }
+            c.us_quic_loop_flush_if_pending(self);
+    }
+
+pub fn create(comptime Handler: anytype) *Loop {
+            return c.us_create_loop(
+                null,
+                Handler.wakeup,
+                if (@hasDecl(Handler, "pre")) Handler.pre else null,
+                if (@hasDecl(Handler, "post")) Handler.post else null,
+                0,
+            ).?;
     }
 
 pub fn wakeup(self: *PosixLoop) void {
-            c.us_wakeup_loop(self);
+            return c.us_wakeup_loop(self);
+    }
 
+pub fn tick(self: *PosixLoop) void {
+            c.us_loop_run_bun_tick(self, null);
+    }
+
+pub fn tickWithoutIdle(self: *PosixLoop) void {
+            const timespec = bun.timespec{ .sec = 0, .nsec = 0 };
+            c.us_loop_run_bun_tick(self, &timespec);
+    }
+
+pub fn tickWithTimeout(self: *PosixLoop, timespec: ?*const bun.timespec) void {
+            c.us_loop_run_bun_tick(self, timespec);
+    }
+
+pub fn drainClosedSockets(self: *PosixLoop) void {
+            c.us_internal_free_closed_sockets(self);
+    }
+
+pub fn closeAllGroups(self: *PosixLoop) bool {
+            return c.us_loop_close_all_groups(self) != 0;
+    }
+
+pub fn nextTick(self: *PosixLoop, comptime UserType: type, user_data: *UserType, comptime deferCallback: anytype) void {
+            const Handler = struct {
+                pub fn callback(data: *anyopaque) callconv(.c) void {
+                    deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
+                }
+            };
+            c.uws_loop_defer(self, user_data, Handler.callback);
     }
 
 pub fn run(self: *PosixLoop) void {
             c.us_loop_run(self);
-
     }
 
-pub fn deinit(self: *PosixLoop) void {
-            c.us_loop_free(self);
-
+pub fn shouldEnableDateHeaderTimer(self: *const PosixLoop) bool {
+            return self.internal_loop_data.shouldEnableDateHeaderTimer();
     }
 
 pub fn release(self: *PosixLoop) void {
             _ = self.deinit();
+    }
+
+pub fn deinit(self: *PosixLoop) void {
+            c.us_loop_free(self);
     }
     internal_loop_data: InternalLoopData align(16),
             num_polls: i32,
@@ -122,72 +181,7 @@ pub fn release(self: *PosixLoop) void {
                 .wasm => @compileError("Unsupported OS"),
             };
     
-            pub fn uncork(this: *PosixLoop) void {
-                c.uws_res_clear_corked_socket(this);
-            }
-    
-            pub fn updateDate(this: *PosixLoop) void {
-                c.uws_loop_date_header_timer_update(this);
-            }
-    
-            pub fn iterationNumber(this: *const PosixLoop) u64 {
-                return this.internal_loop_data.iteration_nr;
-            }
-    
-            pub fn isActive(this: *const Loop) bool {
-                return this.active > 0;
-            }
-    
-            pub fn get() *Loop {
-                return c.uws_get_loop();
-            }
-    
-            pub fn drainQuicIfNecessary(this: *Loop) void {
-                if (this.internal_loop_data.quic_head == null) return;
-                c.us_quic_loop_flush_if_pending(this);
-            }
-    
-            pub fn create(comptime Handler: anytype) *Loop {
-                return c.us_create_loop(
-                    null,
-                    Handler.wakeup,
-                    if (@hasDecl(Handler, "pre")) Handler.pre else null,
-                    if (@hasDecl(Handler, "post")) Handler.post else null,
-                    0,
-                ).?;
-            }
-    
             pub const wake = wakeup;
-    
-            pub fn tick(this: *PosixLoop) void {
-                c.us_loop_run_bun_tick(this, null);
-            }
-    
-            pub fn tickWithoutIdle(this: *PosixLoop) void {
-                const timespec = bun.timespec{ .sec = 0, .nsec = 0 };
-                c.us_loop_run_bun_tick(this, &timespec);
-            }
-    
-            pub fn tickWithTimeout(this: *PosixLoop, timespec: ?*const bun.timespec) void {
-                c.us_loop_run_bun_tick(this, timespec);
-            }
-    
-            pub fn drainClosedSockets(this: *PosixLoop) void {
-                c.us_internal_free_closed_sockets(this);
-            }
-    
-            pub fn closeAllGroups(this: *PosixLoop) bool {
-                return c.us_loop_close_all_groups(this) != 0;
-            }
-    
-            pub fn nextTick(this: *PosixLoop, comptime UserType: type, user_data: UserType, comptime deferCallback: fn (ctx: UserType) void) void {
-                const Handler = struct {
-                    pub fn callback(data: *anyopaque) callconv(.c) void {
-                        deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
-                    }
-                };
-                c.uws_loop_defer(this, user_data, Handler.callback);
-            }
     
             fn NewHandler(comptime UserType: type, comptime callback_fn: fn (UserType) void) type {
                 return struct {
@@ -203,8 +197,7 @@ pub fn release(self: *PosixLoop) void {
                     }
                 };
             }
-    
-            pub fn addPostHandler(this: *PosixLoop, comptime UserType: type, ctx: UserType, comptime callback: fn (UserType) void) NewHandler(UserType, callback) {
+    pub fn addPostHandler(this: *PosixLoop, comptime UserType: type, ctx: UserType, comptime callback: fn (UserType) void) NewHandler(UserType, callback) {
                 const Handler = NewHandler(UserType, callback);
                 c.uws_loop_addPostHandler(this, ctx, Handler.callback);
                 return Handler{
@@ -219,127 +212,120 @@ pub fn release(self: *PosixLoop) void {
                     .loop = this,
                 };
             }
-    
-            pub fn shouldEnableDateHeaderTimer(this: *const PosixLoop) bool {
-                return this.internal_loop_data.shouldEnableDateHeaderTimer();
-            }
 };
 
 pub const WindowsLoop = extern struct {
 
+pub fn shouldEnableDateHeaderTimer(self: *const WindowsLoop) bool {
+            return self.internal_loop_data.shouldEnableDateHeaderTimer();
+    }
+
+pub fn uncork(self: *WindowsLoop) void {
+            c.uws_res_clear_corked_socket(self);
+    }
+
+pub fn get() *WindowsLoop {
+            return c.uws_get_loop_with_native(bun.windows.libuv.Loop.get());
+    }
+
+pub fn iterationNumber(self: *const WindowsLoop) u64 {
+            return self.internal_loop_data.iteration_nr;
+    }
+
+pub fn addActive(self: *const WindowsLoop, val: u32) void {
+            self.uv_loop.addActive(val);
+    }
+
+pub fn subActive(self: *const WindowsLoop, val: u32) void {
+            self.uv_loop.subActive(val);
+    }
+
+pub fn isActive(self: *const WindowsLoop) bool {
+            return self.uv_loop.isActive();
+    }
+
 pub fn wakeup(self: *WindowsLoop) void {
             c.us_wakeup_loop(self);
+    }
 
+pub fn tickWithTimeout(self: *WindowsLoop, timespec: ?*const bun.timespec) void {
+            _ = timespec;
+            c.us_loop_run(self);
+    }
+
+pub fn tickWithoutIdle(self: *WindowsLoop) void {
+            c.us_loop_pump(self);
+    }
+
+pub fn drainQuicIfNecessary(self: *WindowsLoop) void {
+            if ((self.internal_loop_data.quic_head == null)) {
+                return;
+            }
+            c.us_quic_loop_flush_if_pending(self);
+    }
+
+pub fn create(comptime Handler: anytype) *WindowsLoop {
+            return c.us_create_loop(
+                null,
+                Handler.wakeup,
+                if (@hasDecl(Handler, "pre")) Handler.pre else null,
+                if (@hasDecl(Handler, "post")) Handler.post else null,
+                0,
+            ).?;
     }
 
 pub fn run(self: *WindowsLoop) void {
             c.us_loop_run(self);
-
     }
 
-pub fn deinit(self: *WindowsLoop) void {
-            c.us_loop_free(self);
+pub fn inc(self: *WindowsLoop) void {
+            self.uv_loop.inc();
+    }
 
+pub fn dec(self: *WindowsLoop) void {
+            self.uv_loop.dec();
+    }
+
+pub fn drainClosedSockets(self: *WindowsLoop) void {
+            c.us_internal_free_closed_sockets(self);
+    }
+
+pub fn closeAllGroups(self: *WindowsLoop) bool {
+            return c.us_loop_close_all_groups(self) != 0;
+    }
+
+pub fn nextTick(self: *WindowsLoop, comptime UserType: type, user_data: *UserType, comptime deferCallback: anytype) void {
+            const Handler = struct {
+                pub fn callback(data: *anyopaque) callconv(.c) void {
+                    deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
+                }
+            };
+            c.uws_loop_defer(self, user_data, Handler.callback);
+    }
+
+pub fn updateDate(self: *WindowsLoop) void {
+            c.uws_loop_date_header_timer_update(self);
     }
 
 pub fn release(self: *WindowsLoop) void {
             _ = self.deinit();
     }
+
+pub fn deinit(self: *WindowsLoop) void {
+            c.us_loop_free(self);
+    }
     const uv = bun.windows.libuv;
-    
             internal_loop_data: InternalLoopData align(16),
             uv_loop: *uv.Loop,
             is_default: c_int,
             pre: *uv.uv_prepare_t,
             check: *uv.uv_check_t,
     
-            pub fn shouldEnableDateHeaderTimer(this: *const WindowsLoop) bool {
-                return this.internal_loop_data.shouldEnableDateHeaderTimer();
-            }
-    
-            pub fn uncork(this: *PosixLoop) void {
-                c.uws_res_clear_corked_socket(this);
-            }
-    
-            pub fn get() *WindowsLoop {
-                return c.uws_get_loop_with_native(bun.windows.libuv.Loop.get());
-            }
-    
-            pub fn iterationNumber(this: *const WindowsLoop) u64 {
-                return this.internal_loop_data.iteration_nr;
-            }
-    
-            pub fn addActive(this: *const WindowsLoop, val: u32) void {
-                this.uv_loop.addActive(val);
-            }
-    
-            pub fn subActive(this: *const WindowsLoop, val: u32) void {
-                this.uv_loop.subActive(val);
-            }
-    
-            pub fn isActive(this: *const WindowsLoop) bool {
-                return this.uv_loop.isActive();
-            }
-    
             pub const wake = wakeup;
-    
-            pub fn tickWithTimeout(this: *WindowsLoop, _: ?*const bun.timespec) void {
-                c.us_loop_run(this);
-            }
-    
-            pub fn tickWithoutIdle(this: *WindowsLoop) void {
-                c.us_loop_pump(this);
-            }
-    
-            pub fn drainQuicIfNecessary(this: *WindowsLoop) void {
-                if (this.internal_loop_data.quic_head == null) return;
-                c.us_quic_loop_flush_if_pending(this);
-            }
-    
-            pub fn create(comptime Handler: anytype) *WindowsLoop {
-                return c.us_create_loop(
-                    null,
-                    Handler.wakeup,
-                    if (@hasDecl(Handler, "pre")) Handler.pre else null,
-                    if (@hasDecl(Handler, "post")) Handler.post else null,
-                    0,
-                ).?;
-            }
-    
             pub const tick = run;
             pub const wait = run;
-    
-            pub fn inc(this: *WindowsLoop) void {
-                this.uv_loop.inc();
-            }
-    
-            pub fn dec(this: *WindowsLoop) void {
-                this.uv_loop.dec();
-            }
-    
             pub const ref = inc;
             pub const unref = dec;
-    
-            pub fn drainClosedSockets(this: *WindowsLoop) void {
-                c.us_internal_free_closed_sockets(this);
-            }
-    
-            pub fn closeAllGroups(this: *WindowsLoop) bool {
-                return c.us_loop_close_all_groups(this) != 0;
-            }
-    
-            pub fn nextTick(this: *Loop, comptime UserType: type, user_data: UserType, comptime deferCallback: fn (ctx: UserType) void) void {
-                const Handler = struct {
-                    pub fn callback(data: *anyopaque) callconv(.c) void {
-                        deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
-                    }
-                };
-                c.uws_loop_defer(this, user_data, Handler.callback);
-            }
-    
-            pub fn updateDate(this: *Loop) void {
-                c.uws_loop_date_header_timer_update(this);
-            }
     
             fn NewHandler(comptime UserType: type, comptime callback_fn: fn (UserType) void) type {
                 return struct {

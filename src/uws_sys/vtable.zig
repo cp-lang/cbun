@@ -2,16 +2,18 @@
 const std = @import("std");
 const string = []const u8;
 
-const bun = @import("bun");
-    const uws = bun.uws;
-    const ConnectingSocket = uws.ConnectingSocket;
+const uws = bun.uws;
     const us_socket_t = uws.us_socket_t;
-    const VTable = uws.SocketGroup.VTable;
+    pub const VTable = SocketGroup.VTable;
 
-    pub fn make(comptime H: type) *const VTable {
+pub const bun = @import("bun");
+pub const ConnectingSocket = @import("./ConnectingSocket.zig").ConnectingSocket;
+pub const SocketGroup = @import("./SocketGroup.zig").SocketGroup;
+
+pub fn make(comptime H: type) *const SocketGroup.VTable {
         const T = Trampolines(H);
         return &(struct {
-            pub const vt: VTable = .{
+            pub const vt: SocketGroup.VTable = .{
                 .on_open = if (@hasDecl(H, "onOpen")) T.on_open else null,
                 .on_data = if (@hasDecl(H, "onData")) T.on_data else null,
                 .on_fd = if (@hasDecl(H, "onFd")) T.on_fd else null,
@@ -25,9 +27,9 @@ const bun = @import("bun");
                 .on_handshake = if (@hasDecl(H, "onHandshake")) T.on_handshake else null,
             };
         }).vt;
-    }
+}
 
-    pub fn Trampolines(comptime H: type) type {
+pub fn Trampolines(comptime H: type) type {
         const has_ext = @hasDecl(H, "Ext");
         const E = if (has_ext) H.Ext else void;
 
@@ -84,5 +86,4 @@ const bun = @import("bun");
                 call(s, H.onHandshake, .{ ok != 0, err });
             }
         };
-    }
-
+}

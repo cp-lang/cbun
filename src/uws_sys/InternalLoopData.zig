@@ -2,78 +2,79 @@
 const std = @import("std");
 const string = []const u8;
 
-const bun = @import("bun");
-    const jsc = bun.jsc;
-
+const jsc = bun.jsc;
     const uws = bun.uws;
-    const ConnectingSocket = uws.ConnectingSocket;
-    const Loop = uws.Loop;
-    const SocketGroup = uws.SocketGroup;
-    const Timer = uws.Timer;
-    const udp = uws.udp;
-    const us_socket_t = uws.us_socket_t;
+    pub const us_internal_async = opaque {};
+    const LIBUS_RECV_BUFFER_LENGTH = 524288;
+    pub const ManyU8 = [*]u8;
+    pub const PreCb = *const fn (?*Loop) callconv(.c) void;
+    pub const PostCb = *const fn (?*Loop) callconv(.c) void;
 
+pub const bun = @import("bun");
+pub const ConnectingSocket = @import("./ConnectingSocket.zig").ConnectingSocket;
+pub const Loop = @import("./Loop.zig").Loop;
+pub const SocketGroup = @import("./SocketGroup.zig").SocketGroup;
+pub const Timer = @import("./Timer.zig").Timer;
+pub const udp = @import("./udp.zig");
+pub const us_socket_t = @import("./us_socket_t.zig").us_socket_t;
 pub const InternalLoopData = extern struct {
+    sweep_timer: ?*Timer = null,
+    sweep_timer_count: i32 = 0,
+    wakeup_async: ?*us_internal_async = null,
+    head: ?*SocketGroup = null,
+    quic_head: ?*anyopaque = null,
+    quic_next_tick_us: i64 = 0,
+    quic_timer: ?*Timer = null,
+    iterator: ?*SocketGroup = null,
+    recv_buf: ManyU8 = undefined,
+    send_buf: ManyU8 = undefined,
+    ssl_data: ?*anyopaque = null,
+    pre_cb: ?PreCb = null,
+    post_cb: ?PostCb = null,
+    closed_udp_head: ?*udp.Socket = null,
+    closed_head: ?*us_socket_t = null,
+    low_prio_head: ?*us_socket_t = null,
+    low_prio_budget: i32 = 0,
+    dns_ready_head: *ConnectingSocket,
+    closed_connecting_head: *ConnectingSocket,
+    mutex: bun.Mutex.ReleaseImpl.Type,
+    parent_ptr: ?*anyopaque = null,
+    parent_tag: c_char = 0,
+    iteration_nr: usize = 0,
+    jsc_vm: ?*jsc.VM = null,
+    tick_depth: c_int = 0,
+
+pub fn recvSlice(self: *InternalLoopData) []u8 {
+            return self.recv_buf[0..LIBUS_RECV_BUFFER_LENGTH];
+    }
 
 pub fn shouldEnableDateHeaderTimer(self: *const InternalLoopData) bool {
-            return self.sweep_timer_count > 0;
+            return (self.sweep_timer_count > 0);
+    }
+
+pub fn setParentEventLoop(self: *InternalLoopData, parent: anytype) void {
+            switch (parent) {
+                .js => |ptr| {
+                    self.parent_tag = 1;
+                    self.parent_ptr = ptr;
+                },
+                .mini => |ptr| {
+                    self.parent_tag = 2;
+                    self.parent_ptr = ptr;
+                },
+            }
 
     }
-    pub const us_internal_async = opaque {};
-    
-            sweep_timer: ?*Timer,
-            sweep_timer_count: i32,
-            wakeup_async: ?*us_internal_async,
-            head: ?*SocketGroup,
-            quic_head: ?*anyopaque,
-            quic_next_tick_us: i64,
-            quic_timer: ?*Timer,
-            iterator: ?*SocketGroup,
-            recv_buf: [*]u8,
-            send_buf: [*]u8,
-            ssl_data: ?*anyopaque,
-            pre_cb: ?*fn (?*Loop) callconv(.c) void,
-            post_cb: ?*fn (?*Loop) callconv(.c) void,
-            closed_udp_head: ?*udp.Socket,
-            closed_head: ?*us_socket_t,
-            low_prio_head: ?*us_socket_t,
-            low_prio_budget: i32,
-            dns_ready_head: *ConnectingSocket,
-            closed_connecting_head: *ConnectingSocket,
-            mutex: bun.Mutex.ReleaseImpl.Type,
-            parent_ptr: ?*anyopaque,
-            parent_tag: c_char,
-            iteration_nr: usize,
-            jsc_vm: ?*jsc.VM,
-            tick_depth: c_int,
-    
-            pub fn recvSlice(this: *InternalLoopData) []u8 {
-                return this.recv_buf[0..LIBUS_RECV_BUFFER_LENGTH];
-            }
-    
-            pub fn setParentEventLoop(this: *InternalLoopData, parent: jsc.EventLoopHandle) void {
-                switch (parent) {
-                    .js => |ptr| {
-                        this.parent_tag = 1;
-                        this.parent_ptr = ptr;
-                    },
-                    .mini => |ptr| {
-                        this.parent_tag = 2;
-                        this.parent_ptr = ptr;
-                    },
-                }
-            }
-    
-            pub fn getParent(this: *InternalLoopData) jsc.EventLoopHandle {
-                const parent = this.parent_ptr orelse @panic("Parent loop not set - pointer is null");
-                return switch (this.parent_tag) {
-                    0 => @panic("Parent loop not set - tag is zero"),
-                    1 => .{ .js = bun.cast(*jsc.EventLoop, parent) },
-                    2 => .{ .mini = bun.cast(*jsc.MiniEventLoop, parent) },
-                    else => @panic("Parent loop data corrupted - tag is invalid"),
-                };
-            }
-    
-            const LIBUS_RECV_BUFFER_LENGTH = 524288;
+
+pub fn getParent(self: *InternalLoopData) jsc.EventLoopHandle {
+            const parent = self.parent_ptr orelse @panic("Parent loop not set - pointer is null");
+            return switch (self.parent_tag) {
+                0 => @panic("Parent loop not set - tag is zero"),
+                1 => .{ .js = bun.cast(*jsc.EventLoop, parent) },
+                2 => .{ .mini = bun.cast(*jsc.MiniEventLoop, parent) },
+                else => @panic("Parent loop data corrupted - tag is invalid"),
+            };
+
+    }
 };
 

@@ -1,8 +1,9 @@
-zig {
-    const bun = @import("bun");
-    const uws = bun.uws;
-    const SocketGroup = uws.SocketGroup;
+import bun from "bun";
+import { SocketGroup } from "./SocketGroup.cp";
+import { us_socket_t } from "./us_socket_t.cp";
 
+zig {
+    const uws = bun.uws;
     const c = struct {
         extern fn us_listen_socket_close(ls: *ListenSocket) void;
         extern fn us_listen_socket_group(ls: *ListenSocket) *SocketGroup;
@@ -16,58 +17,56 @@ zig {
     };
 }
 
-export @value class ListenSocket {
+export @opaque class ListenSocket {
     pub fn close(*this): void {
+        c.us_listen_socket_close(this);
+    }
+
+    pub fn getLocalAddress(*this, buf: anytype): !string {
+        return this.getSocket().localAddress(buf);
+    }
+
+    pub fn getLocalPort(*this): i32 {
+        return this.getSocket().localPort();
+    }
+
+    pub fn getSocket(*this): *us_socket_t {
+        return @ptrCast(this);
+    }
+
+    pub fn socket(*this, @comptime is_ssl: bool): uws.NewSocketHandler(is_ssl) {
+        return bun.uws.NewSocketHandler(is_ssl).from(this.getSocket());
+    }
+
+    pub fn group(*this): *SocketGroup {
+        return c.us_listen_socket_group(this);
+    }
+
+    pub fn ext(*this, @comptime T: type): *T {
+        return @ptrCast(@alignCast(c.us_listen_socket_ext(this)));
+    }
+
+    pub fn fd(*this): bun.FD {
+        return bun.FD.fromNative(c.us_listen_socket_get_fd(this));
+    }
+
+    pub fn addServerName(*this, hostname: anytype, ssl_ctx: anytype, user: anytype): bool {
         zig {
-            c.us_listen_socket_close(self);
+            const U = @TypeOf(user);
+            const erased: ?*anyopaque = if (U == @TypeOf(null)) null else @ptrCast(@constCast(user));
+            return c.us_listen_socket_add_server_name(self, hostname, ssl_ctx, erased) == 0;
         }
     }
 
-    zig {
-        pub fn getLocalAddress(this: *ListenSocket, buf: []u8) ![]const u8 {
-            return this.getSocket().localAddress(buf);
-        }
+    pub fn removeServerName(*this, hostname: anytype): void {
+        c.us_listen_socket_remove_server_name(this, hostname);
+    }
 
-        pub fn getLocalPort(this: *ListenSocket) i32 {
-            return this.getSocket().localPort();
-        }
+    pub fn findServerNameUserdata(*this, @comptime T: type, hostname: anytype): *T? {
+        return @ptrCast(@alignCast(c.us_listen_socket_find_server_name_userdata(this, hostname)));
+    }
 
-        pub fn getSocket(this: *ListenSocket) *uws.us_socket_t {
-            return @ptrCast(this);
-        }
-
-        pub fn socket(this: *ListenSocket, comptime is_ssl: bool) uws.NewSocketHandler(is_ssl) {
-            return uws.NewSocketHandler(is_ssl).from(this.getSocket());
-        }
-
-        pub fn group(this: *ListenSocket) *SocketGroup {
-            return c.us_listen_socket_group(this);
-        }
-
-        pub fn ext(this: *ListenSocket, comptime T: type) *T {
-            return @ptrCast(@alignCast(c.us_listen_socket_ext(this)));
-        }
-
-        pub fn fd(this: *ListenSocket) bun.FD {
-            return .fromNative(c.us_listen_socket_get_fd(this));
-        }
-
-        pub fn addServerName(this: *ListenSocket, hostname: [*:0]const u8, ssl_ctx: *uws.SslCtx, user: anytype) bool {
-            const U = @TypeOf(user);
-            const erased: ?*anyopaque = if (U == @TypeOf(null)) null else @ptrCast(@constCast(user));
-            return c.us_listen_socket_add_server_name(this, hostname, ssl_ctx, erased) == 0;
-        }
-
-        pub fn removeServerName(this: *ListenSocket, hostname: [*:0]const u8) void {
-            c.us_listen_socket_remove_server_name(this, hostname);
-        }
-
-        pub fn findServerNameUserdata(this: *ListenSocket, comptime T: type, hostname: [*:0]const u8) ?*T {
-            return @ptrCast(@alignCast(c.us_listen_socket_find_server_name_userdata(this, hostname)));
-        }
-
-        pub fn onServerName(this: *ListenSocket, cb: *const fn (*ListenSocket, [*:0]const u8) callconv(.c) void) void {
-            c.us_listen_socket_on_server_name(this, cb);
-        }
+    pub fn onServerName(*this, cb: anytype): void {
+        c.us_listen_socket_on_server_name(this, cb);
     }
 }

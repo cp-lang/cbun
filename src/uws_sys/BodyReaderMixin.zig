@@ -2,15 +2,13 @@
 const std = @import("std");
 const string = []const u8;
 
-    const bun = @import("bun");
     const uws = bun.uws;
 
-    pub fn BodyReaderMixin(
-        Wrap: type,
-        field: []const u8,
-        onBody: fn (*Wrap, body: []const u8, resp: uws.AnyResponse) anyerror!void,
-        onError: fn (*Wrap) void,
-    ) type {
+pub const bun = @import("bun");
+pub const AnyResponse = @import("./Response.zig").AnyResponse;
+
+pub fn BodyReaderMixin(comptime Wrap: type, comptime field: []const u8, comptime onBody: anytype, comptime onError: anytype) type {
+        _ = Wrap;
         return struct {
             body: std.array_list.Managed(u8),
 
@@ -84,5 +82,4 @@ const string = []const u8;
                 onError(@fieldParentPtr(field, ctx));
             }
         };
-    }
-
+}

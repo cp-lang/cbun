@@ -2,12 +2,7 @@
 const std = @import("std");
 const string = []const u8;
 
-const bun = @import("bun");
-    const uws = bun.uws;
-    const SocketGroup = uws.SocketGroup;
-    const SocketKind = uws.SocketKind;
-
-    const c = struct {
+const c = struct {
         pub extern fn us_connecting_socket_close(s: *ConnectingSocket) void;
         pub extern fn us_connecting_socket_group(s: *ConnectingSocket) *SocketGroup;
         pub extern fn us_connecting_socket_kind(s: *ConnectingSocket) u8;
@@ -20,66 +15,68 @@ const bun = @import("bun");
         pub extern fn us_connecting_socket_shutdown(s: *ConnectingSocket) void;
         pub extern fn us_connecting_socket_shutdown_read(s: *ConnectingSocket) void;
         pub extern fn us_connecting_socket_timeout(s: *ConnectingSocket, seconds: c_uint) void;
-        pub extern fn us_connecting_socket_get_loop(s: *ConnectingSocket) *uws.Loop;
+        pub extern fn us_connecting_socket_get_loop(s: *ConnectingSocket) *Loop;
     };
 
-pub const ConnectingSocket = struct {
+pub const SocketGroup = @import("./SocketGroup.zig").SocketGroup;
+pub const SocketKind = @import("./SocketKind.zig").SocketKind;
+pub const Loop = @import("./Loop.zig").Loop;
+pub const ConnectingSocket = opaque {
 
 pub fn close(self: *ConnectingSocket) void {
-            c.us_connecting_socket_close(self);
-
+            _ = c.us_connecting_socket_close(self);
     }
 
-pub fn shutdown(self: *ConnectingSocket) void {
-            c.us_connecting_socket_shutdown(self);
-
+pub fn group(self: *ConnectingSocket) *SocketGroup {
+            return c.us_connecting_socket_group(self);
     }
 
-pub fn shutdownRead(self: *ConnectingSocket) void {
-            c.us_connecting_socket_shutdown_read(self);
+pub fn rawGroup(self: *ConnectingSocket) *SocketGroup {
+            return self.group();
+    }
 
+pub fn kind(self: *ConnectingSocket) SocketKind {
+            return @enumFromInt(c.us_connecting_socket_kind(self));
+    }
+
+pub fn loop(self: *ConnectingSocket) *Loop {
+            return c.us_connecting_socket_get_loop(self);
+    }
+
+pub fn ext(self: *ConnectingSocket, comptime T: type) *T {
+            return @ptrCast(@alignCast(c.us_connecting_socket_ext(self)));
+    }
+
+pub fn getError(self: *ConnectingSocket) i32 {
+            return c.us_connecting_socket_get_error(self);
+    }
+
+pub fn getNativeHandle(self: *ConnectingSocket) ?*anyopaque {
+            return c.us_connecting_socket_get_native_handle(self);
+    }
+
+pub fn isClosed(self: *ConnectingSocket) bool {
+            return (c.us_connecting_socket_is_closed(self) == 1);
+    }
+
+pub fn isShutdown(self: *ConnectingSocket) bool {
+            return (c.us_connecting_socket_is_shut_down(self) == 1);
     }
 
 pub fn longTimeout(self: *ConnectingSocket, seconds: u32) void {
-            c.us_connecting_socket_long_timeout(self, seconds);
+            _ = c.us_connecting_socket_long_timeout(self, seconds);
+    }
 
+pub fn shutdown(self: *ConnectingSocket) void {
+            _ = c.us_connecting_socket_shutdown(self);
+    }
+
+pub fn shutdownRead(self: *ConnectingSocket) void {
+            _ = c.us_connecting_socket_shutdown_read(self);
     }
 
 pub fn timeout(self: *ConnectingSocket, seconds: u32) void {
-            c.us_connecting_socket_timeout(self, seconds);
-
+            _ = c.us_connecting_socket_timeout(self, seconds);
     }
-    pub fn group(this: *ConnectingSocket) *SocketGroup {
-                return c.us_connecting_socket_group(this);
-            }
-            pub const rawGroup = group;
-    
-            pub fn kind(this: *ConnectingSocket) SocketKind {
-                return @enumFromInt(c.us_connecting_socket_kind(this));
-            }
-    
-            pub fn loop(this: *ConnectingSocket) *uws.Loop {
-                return c.us_connecting_socket_get_loop(this);
-            }
-    
-            pub fn ext(this: *ConnectingSocket, comptime T: type) *T {
-                return @ptrCast(@alignCast(c.us_connecting_socket_ext(this)));
-            }
-    
-            pub fn getError(this: *ConnectingSocket) i32 {
-                return c.us_connecting_socket_get_error(this);
-            }
-    
-            pub fn getNativeHandle(this: *ConnectingSocket) ?*anyopaque {
-                return c.us_connecting_socket_get_native_handle(this);
-            }
-    
-            pub fn isClosed(this: *ConnectingSocket) bool {
-                return c.us_connecting_socket_is_closed(this) == 1;
-            }
-    
-            pub fn isShutdown(this: *ConnectingSocket) bool {
-                return c.us_connecting_socket_is_shut_down(this) == 1;
-            }
 };
 

@@ -1,22 +1,30 @@
+zig {
+    const c = struct {
+        extern fn us_quic_socket_make_stream(s: *Socket) void;
+        extern fn us_quic_socket_streams_avail(s: *Socket) c_uint;
+        extern fn us_quic_socket_status(s: *Socket, buf: [*]u8, len: c_uint) c_int;
+        extern fn us_quic_socket_close(s: *Socket) void;
+        extern fn us_quic_socket_ext(s: *Socket) *anyopaque;
+    };
+}
+
 export @opaque class Socket {
     zig {
-        extern fn us_quic_socket_make_stream(s: *Socket) void;
-        pub const makeStream = us_quic_socket_make_stream;
+        pub const makeStream = c.us_quic_socket_make_stream;
+        pub const streamsAvail = c.us_quic_socket_streams_avail;
+        pub const close = c.us_quic_socket_close;
+    }
 
-        extern fn us_quic_socket_streams_avail(s: *Socket) c_uint;
-        pub const streamsAvail = us_quic_socket_streams_avail;
-
-        extern fn us_quic_socket_status(s: *Socket, buf: [*]u8, len: c_uint) c_int;
-        pub fn status(s: *Socket, buf: []u8) c_int {
-            return us_quic_socket_status(s, buf.ptr, @intCast(buf.len));
+    pub fn status(*this, buf: &mut u8[]): i32 {
+        zig {
+            return c.us_quic_socket_status(self, buf.ptr, @intCast(buf.len));
         }
+    }
 
-        extern fn us_quic_socket_close(s: *Socket) void;
-        pub const close = us_quic_socket_close;
-
-        extern fn us_quic_socket_ext(s: *Socket) *anyopaque;
-        pub fn ext(s: *Socket, comptime T: type) *?*T {
-            return @ptrCast(@alignCast(us_quic_socket_ext(s)));
+    zig {
+        pub fn ext(self: *Socket, comptime T: type) *?*T {
+            const PtrT: type = *?*T;
+            return @as(PtrT, @ptrCast(@alignCast(c.us_quic_socket_ext(self))));
         }
     }
 }

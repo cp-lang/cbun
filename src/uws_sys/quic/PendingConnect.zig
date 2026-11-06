@@ -2,18 +2,16 @@
 const std = @import("std");
 const string = []const u8;
 
-const bun = @import("bun");
-    const uws = bun.uws;
-    const Socket = uws.quic.Socket;
+const c = struct {
+        extern fn us_quic_pending_connect_addrinfo(pc: *PendingConnect) *anyopaque;
+        extern fn us_quic_pending_connect_resolved(pc: *PendingConnect) ?*Socket;
+        extern fn us_quic_pending_connect_cancel(pc: *PendingConnect) void;
+    };
 
+pub const Socket = @import("./Socket.zig").Socket;
 pub const PendingConnect = opaque {
-    extern fn us_quic_pending_connect_addrinfo(pc: *PendingConnect) *anyopaque;
-            pub const addrinfo = us_quic_pending_connect_addrinfo;
-    
-            extern fn us_quic_pending_connect_resolved(pc: *PendingConnect) ?*Socket;
-            pub const resolved = us_quic_pending_connect_resolved;
-    
-            extern fn us_quic_pending_connect_cancel(pc: *PendingConnect) void;
-            pub const cancel = us_quic_pending_connect_cancel;
+    pub const addrinfo = c.us_quic_pending_connect_addrinfo;
+            pub const resolved = c.us_quic_pending_connect_resolved;
+            pub const cancel = c.us_quic_pending_connect_cancel;
 };
 

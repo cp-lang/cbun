@@ -2,7 +2,7 @@
 const std = @import("std");
 const string = []const u8;
 
-const bun = @import("bun");
+pub const ManyU8 = [*]const u8;
 
 pub const Qpack = enum(u8) {
     authority = 0,
@@ -92,21 +92,22 @@ pub const Qpack = enum(u8) {
             });
 };
 
+pub const bun = @import("bun");
 pub const Header = extern struct {
-    name: [*]const u8,
-            name_len: c_uint,
-            value: [*]const u8,
-            value_len: c_uint,
-            qpack_index: c_int = -1,
-    
-            pub fn init(name_: []const u8, value_: []const u8, idx: ?Qpack) Header {
-                return .{
-                    .name = name_.ptr,
-                    .name_len = @intCast(name_.len),
-                    .value = value_.ptr,
-                    .value_len = @intCast(value_.len),
-                    .qpack_index = if (idx) |i| @intFromEnum(i) else -1,
-                };
-            }
+    name: ManyU8,
+    name_len: u32,
+    value: ManyU8,
+    value_len: u32,
+    qpack_index: i32 = -1,
+
+pub fn init(name_: []const u8, value_: []const u8, idx: ?Qpack) Header {
+            return .{
+                .name = name_.ptr,
+                .name_len = @intCast(name_.len),
+                .value = value_.ptr,
+                .value_len = @intCast(value_.len),
+                .qpack_index = if (idx) |i| @intFromEnum(i) else -1,
+            };
+    }
 };
 

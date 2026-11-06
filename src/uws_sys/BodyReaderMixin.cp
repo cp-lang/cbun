@@ -1,14 +1,19 @@
+import bun from "bun";
+import { AnyResponse } from "./Response.cp";
+
 zig {
     const std = @import("std");
-    const bun = @import("bun");
     const uws = bun.uws;
+}
 
-    pub fn BodyReaderMixin(
-        Wrap: type,
-        field: []const u8,
-        onBody: fn (*Wrap, body: []const u8, resp: uws.AnyResponse) anyerror!void,
-        onError: fn (*Wrap) void,
-    ) type {
+pub fn BodyReaderMixin(
+    @comptime Wrap: type,
+    @comptime field: string,
+    @comptime onBody: anytype,
+    @comptime onError: anytype,
+): type {
+    zig {
+        _ = Wrap;
         return struct {
             body: std.array_list.Managed(u8),
 

@@ -2,10 +2,7 @@
 const std = @import("std");
 const string = []const u8;
 
-const bun = @import("bun");
-    const uws = bun.uws;
-    const SocketGroup = uws.SocketGroup;
-
+const uws = bun.uws;
     const c = struct {
         extern fn us_listen_socket_close(ls: *ListenSocket) void;
         extern fn us_listen_socket_group(ls: *ListenSocket) *SocketGroup;
@@ -18,56 +15,60 @@ const bun = @import("bun");
         extern fn us_listen_socket_on_server_name(ls: *ListenSocket, cb: *const fn (*ListenSocket, [*:0]const u8) callconv(.c) void) void;
     };
 
-pub const ListenSocket = struct {
+pub const bun = @import("bun");
+pub const SocketGroup = @import("./SocketGroup.zig").SocketGroup;
+pub const us_socket_t = @import("./us_socket_t.zig").us_socket_t;
+pub const ListenSocket = opaque {
 
 pub fn close(self: *ListenSocket) void {
-            c.us_listen_socket_close(self);
+            _ = c.us_listen_socket_close(self);
+    }
+
+pub fn getLocalAddress(self: *ListenSocket, buf: anytype) ![]const u8 {
+            return self.getSocket().localAddress(buf);
+    }
+
+pub fn getLocalPort(self: *ListenSocket) i32 {
+            return self.getSocket().localPort();
+    }
+
+pub fn getSocket(self: *ListenSocket) *us_socket_t {
+            return @ptrCast(self);
+    }
+
+pub fn socket(self: *ListenSocket, comptime is_ssl: bool) uws.NewSocketHandler(is_ssl) {
+            return bun.uws.NewSocketHandler(is_ssl).from(self.getSocket());
+    }
+
+pub fn group(self: *ListenSocket) *SocketGroup {
+            return c.us_listen_socket_group(self);
+    }
+
+pub fn ext(self: *ListenSocket, comptime T: type) *T {
+            return @ptrCast(@alignCast(c.us_listen_socket_ext(self)));
+    }
+
+pub fn fd(self: *ListenSocket) bun.FD {
+            return bun.FD.fromNative(c.us_listen_socket_get_fd(self));
+    }
+
+pub fn addServerName(self: *ListenSocket, hostname: anytype, ssl_ctx: anytype, user: anytype) bool {
+            const U = @TypeOf(user);
+            const erased: ?*anyopaque = if (U == @TypeOf(null)) null else @ptrCast(@constCast(user));
+            return c.us_listen_socket_add_server_name(self, hostname, ssl_ctx, erased) == 0;
 
     }
-    pub fn getLocalAddress(this: *ListenSocket, buf: []u8) ![]const u8 {
-                return this.getSocket().localAddress(buf);
-            }
-    
-            pub fn getLocalPort(this: *ListenSocket) i32 {
-                return this.getSocket().localPort();
-            }
-    
-            pub fn getSocket(this: *ListenSocket) *uws.us_socket_t {
-                return @ptrCast(this);
-            }
-    
-            pub fn socket(this: *ListenSocket, comptime is_ssl: bool) uws.NewSocketHandler(is_ssl) {
-                return uws.NewSocketHandler(is_ssl).from(this.getSocket());
-            }
-    
-            pub fn group(this: *ListenSocket) *SocketGroup {
-                return c.us_listen_socket_group(this);
-            }
-    
-            pub fn ext(this: *ListenSocket, comptime T: type) *T {
-                return @ptrCast(@alignCast(c.us_listen_socket_ext(this)));
-            }
-    
-            pub fn fd(this: *ListenSocket) bun.FD {
-                return .fromNative(c.us_listen_socket_get_fd(this));
-            }
-    
-            pub fn addServerName(this: *ListenSocket, hostname: [*:0]const u8, ssl_ctx: *uws.SslCtx, user: anytype) bool {
-                const U = @TypeOf(user);
-                const erased: ?*anyopaque = if (U == @TypeOf(null)) null else @ptrCast(@constCast(user));
-                return c.us_listen_socket_add_server_name(this, hostname, ssl_ctx, erased) == 0;
-            }
-    
-            pub fn removeServerName(this: *ListenSocket, hostname: [*:0]const u8) void {
-                c.us_listen_socket_remove_server_name(this, hostname);
-            }
-    
-            pub fn findServerNameUserdata(this: *ListenSocket, comptime T: type, hostname: [*:0]const u8) ?*T {
-                return @ptrCast(@alignCast(c.us_listen_socket_find_server_name_userdata(this, hostname)));
-            }
-    
-            pub fn onServerName(this: *ListenSocket, cb: *const fn (*ListenSocket, [*:0]const u8) callconv(.c) void) void {
-                c.us_listen_socket_on_server_name(this, cb);
-            }
+
+pub fn removeServerName(self: *ListenSocket, hostname: anytype) void {
+            _ = c.us_listen_socket_remove_server_name(self, hostname);
+    }
+
+pub fn findServerNameUserdata(self: *ListenSocket, comptime T: type, hostname: anytype) ?*T {
+            return @ptrCast(@alignCast(c.us_listen_socket_find_server_name_userdata(self, hostname)));
+    }
+
+pub fn onServerName(self: *ListenSocket, cb: anytype) void {
+            _ = c.us_listen_socket_on_server_name(self, cb);
+    }
 };
 

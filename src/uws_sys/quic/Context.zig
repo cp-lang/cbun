@@ -2,52 +2,51 @@
 const std = @import("std");
 const string = []const u8;
 
-const bun = @import("bun");
-    const uws = bun.uws;
-    const PendingConnect = uws.quic.PendingConnect;
-    const Socket = uws.quic.Socket;
-    const Stream = uws.quic.Stream;
+const c = struct {
+        extern fn us_create_quic_client_context(loop: *Loop, ext_size: c_uint, conn_ext: c_uint, stream_ext: c_uint) ?*Context;
+        extern fn us_quic_socket_context_loop(ctx: *Context) *Loop;
+        extern fn us_quic_socket_context_connect(ctx: *Context, host: [*:0]const u8, port: c_int, sni: [*:0]const u8, reject_unauthorized: c_int, out_qs: *?*Socket, out_pending: *?*PendingConnect, user: *anyopaque) c_int;
+        extern fn us_quic_socket_context_on_hsk_done(ctx: *Context, cb: *const fn (*Socket, c_int) callconv(.c) void) void;
+        extern fn us_quic_socket_context_on_goaway(ctx: *Context, cb: *const fn (*Socket) callconv(.c) void) void;
+        extern fn us_quic_socket_context_on_close(ctx: *Context, cb: *const fn (*Socket) callconv(.c) void) void;
+        extern fn us_quic_socket_context_on_stream_open(ctx: *Context, cb: *const fn (*Stream, c_int) callconv(.c) void) void;
+        extern fn us_quic_socket_context_on_stream_headers(ctx: *Context, cb: *const fn (*Stream) callconv(.c) void) void;
+        extern fn us_quic_socket_context_on_stream_data(ctx: *Context, cb: *const fn (*Stream, [*]const u8, c_uint, c_int) callconv(.c) void) void;
+        extern fn us_quic_socket_context_on_stream_writable(ctx: *Context, cb: *const fn (*Stream) callconv(.c) void) void;
+        extern fn us_quic_socket_context_on_stream_close(ctx: *Context, cb: *const fn (*Stream) callconv(.c) void) void;
+    };
 
+pub const ConnectResult = union(enum) {
+    socket: *Socket,
+    pending: *PendingConnect,
+    err,
+};
+
+pub const Loop = @import("../Loop.zig").Loop;
+pub const PendingConnect = @import("./PendingConnect.zig").PendingConnect;
+pub const Socket = @import("./Socket.zig").Socket;
+pub const Stream = @import("./Stream.zig").Stream;
 pub const Context = opaque {
-    extern fn us_create_quic_client_context(loop: *uws.Loop, ext_size: c_uint, conn_ext: c_uint, stream_ext: c_uint) ?*Context;
-            pub const createClient = us_create_quic_client_context;
-    
-            extern fn us_quic_socket_context_loop(ctx: *Context) *uws.Loop;
-            pub const loop = us_quic_socket_context_loop;
-    
-            extern fn us_quic_socket_context_connect(ctx: *Context, host: [*:0]const u8, port: c_int, sni: [*:0]const u8, reject_unauthorized: c_int, out_qs: *?*Socket, out_pending: *?*PendingConnect, user: *anyopaque) c_int;
-    
-            pub const ConnectResult = union(enum) {
-                socket: *Socket,
-                pending: *PendingConnect,
-                err,
+
+pub fn connect(self: *Context, host: anytype, port: u16, sni: anytype, reject_unauthorized: bool, user: *anyopaque) ConnectResult {
+            var qs: ?*Socket = null;
+            var pc: ?*PendingConnect = null;
+            return switch (c.us_quic_socket_context_connect(self, host, port, sni, @intFromBool(reject_unauthorized), &qs, &pc, user)) {
+                1 => .{ .socket = qs.? },
+                0 => .{ .pending = pc.? },
+                else => .err,
             };
+    }
+    pub const createClient = c.us_create_quic_client_context;
+            pub const loop = c.us_quic_socket_context_loop;
     
-            pub fn connect(ctx: *Context, host: [*:0]const u8, port: u16, sni: [*:0]const u8, reject_unauthorized: bool, user: *anyopaque) ConnectResult {
-                var qs: ?*Socket = null;
-                var pc: ?*PendingConnect = null;
-                return switch (us_quic_socket_context_connect(ctx, host, port, sni, @intFromBool(reject_unauthorized), &qs, &pc, user)) {
-                    1 => .{ .socket = qs.? },
-                    0 => .{ .pending = pc.? },
-                    else => .err,
-                };
-            }
-    
-            extern fn us_quic_socket_context_on_hsk_done(ctx: *Context, cb: *const fn (*Socket, c_int) callconv(.c) void) void;
-            pub const onHskDone = us_quic_socket_context_on_hsk_done;
-            extern fn us_quic_socket_context_on_goaway(ctx: *Context, cb: *const fn (*Socket) callconv(.c) void) void;
-            pub const onGoaway = us_quic_socket_context_on_goaway;
-            extern fn us_quic_socket_context_on_close(ctx: *Context, cb: *const fn (*Socket) callconv(.c) void) void;
-            pub const onClose = us_quic_socket_context_on_close;
-            extern fn us_quic_socket_context_on_stream_open(ctx: *Context, cb: *const fn (*Stream, c_int) callconv(.c) void) void;
-            pub const onStreamOpen = us_quic_socket_context_on_stream_open;
-            extern fn us_quic_socket_context_on_stream_headers(ctx: *Context, cb: *const fn (*Stream) callconv(.c) void) void;
-            pub const onStreamHeaders = us_quic_socket_context_on_stream_headers;
-            extern fn us_quic_socket_context_on_stream_data(ctx: *Context, cb: *const fn (*Stream, [*]const u8, c_uint, c_int) callconv(.c) void) void;
-            pub const onStreamData = us_quic_socket_context_on_stream_data;
-            extern fn us_quic_socket_context_on_stream_writable(ctx: *Context, cb: *const fn (*Stream) callconv(.c) void) void;
-            pub const onStreamWritable = us_quic_socket_context_on_stream_writable;
-            extern fn us_quic_socket_context_on_stream_close(ctx: *Context, cb: *const fn (*Stream) callconv(.c) void) void;
-            pub const onStreamClose = us_quic_socket_context_on_stream_close;
+            pub const onHskDone = c.us_quic_socket_context_on_hsk_done;
+            pub const onGoaway = c.us_quic_socket_context_on_goaway;
+            pub const onClose = c.us_quic_socket_context_on_close;
+            pub const onStreamOpen = c.us_quic_socket_context_on_stream_open;
+            pub const onStreamHeaders = c.us_quic_socket_context_on_stream_headers;
+            pub const onStreamData = c.us_quic_socket_context_on_stream_data;
+            pub const onStreamWritable = c.us_quic_socket_context_on_stream_writable;
+            pub const onStreamClose = c.us_quic_socket_context_on_stream_close;
 };
 

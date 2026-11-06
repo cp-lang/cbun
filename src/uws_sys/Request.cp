@@ -1,6 +1,7 @@
+import bun from "bun";
+
 zig {
     const std = @import("std");
-    const bun = @import("bun");
     const uws = bun.uws;
 
     const c = struct {
@@ -13,56 +14,64 @@ zig {
         pub extern fn uws_req_get_query(res: *Request, key: [*c]const u8, key_length: usize, dest: *[*]const u8) usize;
         pub extern fn uws_req_get_parameter(res: *Request, index: c_ushort, dest: *[*]const u8) usize;
     };
+}
 
-    pub const AnyRequest = union(enum) {
-        h1: *Request,
-        h3: *uws.H3.Request,
+export enum AnyRequest {
+    h1(*Request),
+    h3(*bun.uws.H3.Request),
 
-        pub fn header(this: AnyRequest, name: []const u8) ?[]const u8 {
-            return switch (this) {
+    pub fn header(this, name: string): string? {
+        zig {
+            return switch (self) {
                 inline else => |r| r.header(name),
             };
         }
-        pub fn method(this: AnyRequest) []const u8 {
-            return switch (this) {
+    }
+
+    pub fn method(this): string {
+        zig {
+            return switch (self) {
                 inline else => |r| r.method(),
             };
         }
-        pub fn url(this: AnyRequest) []const u8 {
-            return switch (this) {
+    }
+
+    pub fn url(this): string {
+        zig {
+            return switch (self) {
                 inline else => |r| r.url(),
             };
         }
-        pub fn setYield(this: AnyRequest, y: bool) void {
-            switch (this) {
+    }
+
+    pub fn setYield(this, y: bool): void {
+        zig {
+            switch (self) {
                 inline else => |r| r.setYield(y),
             }
         }
-        pub fn dateForHeader(this: AnyRequest, name: []const u8) bun.JSError!?u64 {
-            return switch (this) {
+    }
+
+    pub fn dateForHeader(this, name: string): !u64? {
+        zig {
+            return switch (self) {
                 inline else => |r| r.dateForHeader(name),
             };
         }
-    };
+    }
 }
 
-export @value class Request {
+export @opaque class Request {
     pub fn isAncient(*this): bool {
-        zig {
-            return c.uws_req_is_ancient(self);
-        }
+        return c.uws_req_is_ancient(this);
     }
 
     pub fn getYield(*this): bool {
-        zig {
-            return c.uws_req_get_yield(self);
-        }
+        return c.uws_req_get_yield(this);
     }
 
-    pub fn setYield(*this, y: bool): void {
-        zig {
-            c.uws_req_set_yield(self, y);
-        }
+    pub fn setYield(*this, yield: bool): void {
+        c.uws_req_set_yield(this, yield);
     }
 
     pub fn url(*this): string {
@@ -79,18 +88,19 @@ export @value class Request {
         }
     }
 
-    zig {
-        pub fn header(req: *Request, name: []const u8) ?[]const u8 {
+    pub fn header(*this, name: string): string? {
+        zig {
             bun.assert(std.ascii.isLower(name[0]));
-
             var ptr: [*]const u8 = undefined;
-            const len = c.uws_req_get_header(req, name.ptr, name.len, &ptr);
+            const len = c.uws_req_get_header(self, name.ptr, name.len, &ptr);
             if (len == 0) return null;
             return ptr[0..len];
         }
+    }
 
-        pub fn dateForHeader(req: *Request, name: []const u8) bun.JSError!?u64 {
-            const value = header(req, name);
+    pub fn dateForHeader(*this, name: string): !u64? {
+        zig {
+            const value = self.header(name);
             if (value == null) return null;
             var string_val = bun.String.init(value.?);
             defer string_val.deref();
@@ -100,15 +110,19 @@ export @value class Request {
             }
             return null;
         }
+    }
 
-        pub fn query(req: *Request, name: []const u8) []const u8 {
+    pub fn query(*this, name: string): string {
+        zig {
             var ptr: [*]const u8 = undefined;
-            return ptr[0..c.uws_req_get_query(req, name.ptr, name.len, &ptr)];
+            return ptr[0..c.uws_req_get_query(self, name.ptr, name.len, &ptr)];
         }
+    }
 
-        pub fn parameter(req: *Request, index: u16) []const u8 {
+    pub fn parameter(*this, index: u16): string {
+        zig {
             var ptr: [*]const u8 = undefined;
-            return ptr[0..c.uws_req_get_parameter(req, @as(c_ushort, @intCast(index)), &ptr)];
+            return ptr[0..c.uws_req_get_parameter(self, @as(c_ushort, @intCast(index)), &ptr)];
         }
     }
 }
