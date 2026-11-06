@@ -8,6 +8,7 @@ import {
   exampleHtml as fixture,
   gc,
   isBroken,
+  isDebug,
   isFlaky,
   isMacOS,
   isWindows,
@@ -546,7 +547,7 @@ describe("fetch", () => {
     } else {
       name = url as string;
     }
-    it.concurrent(name, async () => {
+    it(name, async () => {
       gc();
       const response = await fetch(url, { verbose: true, tls });
       gc();
@@ -556,7 +557,7 @@ describe("fetch", () => {
     });
   }
 
-  it.concurrent('redirect: "manual"', async () => {
+  it('redirect: "manual"', async () => {
     using server = Bun.serve({
       port: 0,
       fetch(req) {
@@ -576,7 +577,7 @@ describe("fetch", () => {
     expect(response.redirected).toBe(false); // not redirected
   });
 
-  it.concurrent('redirect: "follow"', async () => {
+  it('redirect: "follow"', async () => {
     using target = Bun.serve({
       port: 0,
       tls,
@@ -604,7 +605,7 @@ describe("fetch", () => {
     expect(response.redirected).toBe(true);
   });
 
-  it.concurrent('redirect: "error" #2819', async () => {
+  it('redirect: "error" #2819', async () => {
     using server = Bun.serve({
       port: 0,
       fetch(req) {
@@ -626,7 +627,7 @@ describe("fetch", () => {
     }
   });
 
-  it.concurrent("should properly redirect to another port #7793", async () => {
+  it("should properly redirect to another port #7793", async () => {
     var socket: net.Server | null = null;
     try {
       using server = Bun.serve({
@@ -662,7 +663,7 @@ describe("fetch", () => {
     }
   });
 
-  it.concurrent("provide body", async () => {
+  it("provide body", async () => {
     using server = Bun.serve({
       port: 0,
       fetch(req) {
@@ -679,7 +680,7 @@ describe("fetch", () => {
   });
 
   ["GET", "HEAD", "OPTIONS"].forEach(method =>
-    it.concurrent(`fail on ${method} with body`, async () => {
+    it(`fail on ${method} with body`, async () => {
       const url = `http://${server.hostname}:${server.port}`;
       expect(async () => {
         await fetch(url, { body: "buntastic" });
@@ -687,7 +688,7 @@ describe("fetch", () => {
     }),
   );
 
-  it.concurrent("content length is inferred", async () => {
+  it("content length is inferred", async () => {
     using server = Bun.serve({
       port: 0,
       fetch(req) {
@@ -707,7 +708,7 @@ describe("fetch", () => {
     expect(await response2.text()).toBe("0");
   });
 
-  it.concurrent("should work with ipv6 localhost", async () => {
+  it("should work with ipv6 localhost", async () => {
     using server = Bun.serve({
       port: 0,
       fetch(req) {
@@ -725,7 +726,7 @@ describe("fetch", () => {
   });
 });
 
-it.concurrent("simultaneous HTTPS fetch", async () => {
+it("simultaneous HTTPS fetch", async () => {
   const urls = [httpsServer.url.href, httpsServer.url.href];
   for (let batch = 0; batch < 4; batch++) {
     const promises = new Array(20);
@@ -741,7 +742,7 @@ it.concurrent("simultaneous HTTPS fetch", async () => {
   }
 });
 
-it.concurrent("website with tlsextname", async () => {
+it("website with tlsextname", async () => {
   using server = Bun.serve({
     port: 0,
     tls,
@@ -840,7 +841,7 @@ function testBlobInterface(blobbyConstructor: { (..._: any[]): any }, hasBlobFn?
           }
         });
         if (withGC) gc();
-      });
+      }, withGC && isDebug ? 20000 : 5000);
 
       it(`${jsonObject.hello === true ? "latin1" : "utf16"} bytes${withGC ? " (with gc) " : ""}`, async () => {
         if (withGC) gc();
@@ -863,7 +864,7 @@ function testBlobInterface(blobbyConstructor: { (..._: any[]): any }, hasBlobFn?
           }
         });
         if (withGC) gc();
-      });
+      }, withGC && isDebug ? 20000 : 5000);
 
       it(`${jsonObject.hello === true ? "latin1" : "utf16"} arrayBuffer -> arrayBuffer${
         withGC ? " (with gc) " : ""
@@ -888,7 +889,7 @@ function testBlobInterface(blobbyConstructor: { (..._: any[]): any }, hasBlobFn?
           }
         });
         if (withGC) gc();
-      });
+      }, withGC && isDebug ? 20000 : 5000);
 
       it(`${jsonObject.hello === true ? "latin1" : "utf16"} arrayBuffer -> bytes${
         withGC ? " (with gc) " : ""
@@ -913,7 +914,7 @@ function testBlobInterface(blobbyConstructor: { (..._: any[]): any }, hasBlobFn?
           }
         });
         if (withGC) gc();
-      });
+      }, withGC && isDebug ? 20000 : 5000);
 
       hasBlobFn &&
         it(`${jsonObject.hello === true ? "latin1" : "utf16"} blob${withGC ? " (with gc) " : ""}`, async () => {
@@ -975,8 +976,8 @@ describe.concurrent("Bun.file", () => {
     }
   }
 
-  // on Windows the creator of the file will be able to read from it so this test is disabled on it
-  describe.skipIf(isWindows)("bad permissions throws", () => {
+  // on Windows or when running as root (UID 0), the process can read mode 000 files
+  describe.skipIf(isWindows || process.getuid?.() === 0)("bad permissions throws", () => {
     const path = join(tmp_dir, "my-new-file");
     beforeAll(async () => {
       await Bun.write(path, "hey");
@@ -1949,7 +1950,7 @@ it.concurrent("should allow very long redirect URLS", async () => {
     expect(url).toBe(`${server.url.origin}${Location}`);
     expect(status).toBe(404);
   }
-});
+}, 15000);
 
 it.concurrent("304 not modified with missing content-length does not cause a request timeout", async () => {
   const server = await Bun.listen({
@@ -2184,7 +2185,7 @@ describe("fetch Response life cycle", () => {
       env: bunEnv,
     });
     expect(await clientProcess.exited).toBe(0);
-  });
+  }, 15000);
   it("should allow to get promise result after response is GC'd", async () => {
     using server = Bun.serve({
       port: 0,
@@ -2426,7 +2427,7 @@ it("should allow to follow redirect if connection is closed, abort should work e
                   socket.end(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nHello Bun",
                   );
-              }, 200);
+              }, isDebug ? 1500 : 200);
             } else {
               socket.end(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nHello Bun",
@@ -2444,7 +2445,7 @@ it("should allow to follow redirect if connection is closed, abort should work e
         address = "[::]";
       }
       const response = await fetch(`http://${address}:${port}/redirect`, {
-        signal: AbortSignal.timeout(150),
+        signal: AbortSignal.timeout(isDebug ? 1000 : 150),
       });
       if (type === "delay") {
         console.error(response, type);

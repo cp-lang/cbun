@@ -1130,7 +1130,7 @@ export @root @value struct HTTPClient {
             if (!override_host_header) {
                 request_headers_buf[header_count] = picohttp.Header{
                     .name = host_header_name,
-                    .value = this.hostname orelse this.url.hostname,
+                    .value = this.hostname orelse this.url.host,
                 };
                 header_count += 1;
             }
@@ -2054,7 +2054,16 @@ export @root @value struct HTTPClient {
         }
 
         pub fn progressUpdate(this: *HTTPClient, comptime is_ssl: bool, ctx: *NewHTTPContext(is_ssl), socket: NewHTTPContext(is_ssl).HTTPSocket) void {
-            this.sendProgressUpdateWithoutStageCheck(is_ssl, ctx, socket);
+            if (this.state.stage != .done and this.state.stage != .fail) {
+                if (this.state.flags.is_redirect_pending and this.state.fail == null) {
+                    if (this.state.isDone()) {
+                        this.doRedirect(is_ssl, ctx, socket);
+                    }
+                    return;
+                }
+
+                this.sendProgressUpdateWithoutStageCheck(is_ssl, ctx, socket);
+            }
         }
 
         pub fn doRedirect(

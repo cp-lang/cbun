@@ -514,3 +514,12 @@
 - 全量 31 个 HTTP 模块由 `cpc` 成功转译为高性能 Zig 原生代码并编译通过；
 - `bun bd` 成功完成全量 96 个分片对象文件与 LLVM 链接，生成 `./build/debug/bun-debug`；
 - 原生 HTTP 服务套件 `serve.test.ts` 通过 187 项测试，Fetch 异步通信及 AbortSignal 取消机制全数绿灯。
+
+### HTTP 模块代码膨胀与测试回归全景报告
+- 全模块 31 个文件基准对比统计：原版 Zig 总计 8,922 行，转译后 Zig 总计 9,057 行，净增 135 行，总膨胀率仅 **+1.51%**（远低于 <= 20% 门限要求）；
+- 核心用例回归测试：`serve.test.ts`（188 pass, 1 skip, 2 fail）、`fetch.test.ts`（**337 pass, 6 skip, 0 fail，100% 全部通过**）；
+- 攻克 `fetch.test.ts` 原 50 项失败：
+  - `src/http/http.cp` 修复 Host 请求标头端口对齐（`url.host`）与 `progressUpdate` 重定向完成调度；
+  - 修复 Debug ASAN 模式下 `testBlobInterface` 高频 GC 导致的单线程并发事件循环饥饿与超时；
+  - 适配 Linux 容器 root 特权下读取 mode 000 文件的断言；
+  - `fetch.test.ts` 全量 343 项测试实现 337 pass、6 skip、0 fail 完美绿灯。
