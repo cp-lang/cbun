@@ -206,7 +206,7 @@ CP 大量借鉴了Rust的内存安全，参照Bun.js的Rust版本，CP版本的B
   - 系统全局已建立软链接：`/root/.cap/bin/cpc -> /data/dev/cp/cap/bin/cpc`；
   - `/root/.cap/bin/`目录已在`PATH`目录中，`cpc`在命令行可直接调用。
   - 重新编译生成的 `cpc` 可直接覆盖到 `/data/dev/cp/cap/bin/cpc，软链接将自动使得系统全局 `cpc` 即刻生效！
-- **批量自愈**：上游 cp 也在修改 cpc 编译器, 尽量批量收集问题, 集中 修改 cpc 编译器, 实现批量自愈, 一个是提高效率, 一个是减少与 cp项目的agy 冲突；cpc 编译期代码一万多行，编译、测试都很耗时间，不要遇到一个问题，就去修改 cpc编译器，效率及其底下。
+- **批量自愈**：；cpc 编译期代码一万多行，编译、测试都很耗时间，不要遇到一个问题，就去修改 cpc编译器，效率及其底下。先将所有需要迁移的文件，按引用依赖次序, 全部改写为cp, 能不用zig{}, 坚决不用zig{}, 最后再统一编译一遍,根据编译错误等, 批量收集所有问题, 集中修改上游 cpc 编译器, 实现批量自愈, 提高效率, 减少与 cp项目的agy 冲突。修改上游cpc编译期需谨慎, 可以添加、完善功能，修正bug, 不要破坏 cpc 已有功能。
 
 ## 严格操作纪律与编码规范 (CRITICAL)
 
@@ -242,6 +242,39 @@ CP 大量借鉴了Rust的内存安全，参照Bun.js的Rust版本，CP版本的B
      ```
 
 ---
+
+### 3. cpc 编译器必须“AI-First 智能诊断提示
+
+- **错误提示AI友好**：cpc check 和编译出错提示，必须对ai 友好，不仅带编译出错信息，还应提供修正方法, 方便 agy 等智能体快速识别错误，进行修正, 而不是一筹莫展, 需要查看 cpc 源代码来解决。
+
+- 编译器报错将从冷冰冰的 Syntax Error 升级为三段式可自愈诊断（参考 Rustc 与 TypeScript Compiler）：
+
+```text
+  error[E0105]: ambiguous condition in control flow statement
+    --> src/boringssl/boringssl.cp:58:24
+     |
+  58 |     if addr_str.len >= INET6_ADDRSTRLEN { return null; }
+     |			^^^^^^^^^^^^^^^^
+     |
+     = cause: uppercase identifier 'INET6_ADDRSTRLEN' followed by '{' is ambiguous with struct literal syntax.
+     = help: in CP, control flow conditions should be enclosed in parentheses.
+     = suggestion: wrap the condition in parentheses:
+     |
+  58 |     if (addr_str.len >= INET6_ADDRSTRLEN) { return null; }
+     |        +                                +
+```
+
+#### 典型场景的智能自愈提示规则：
+
+1. 条件未带括号导致结构体冲突：
+   提示：help: condition should be enclosed in parentheses: if (condition) { ... }；
+2. while true 缺少括号：
+   提示：help: while condition requires parentheses: while (true)；
+3. 借用检查修改了只读参数（如 outIP[i] = 0）：
+   不只报 Cannot assign to index of immutable borrow，直接附带修正方案：
+   suggestion: parameter 'outIP' is a read-only borrow. Add '*' to declare it as mutable borrow: '*outIP: OutIPBuf'。
+
+工程价值：AI Agent 看到带有 suggestion 的报错后，耗时 0 秒，单轮对话直接采纳建议自动修复！
 
 ## CP 编译器使用指南 (`cpc` CLI 指南)
 

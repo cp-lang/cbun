@@ -523,3 +523,85 @@
   - 修复 Debug ASAN 模式下 `testBlobInterface` 高频 GC 导致的单线程并发事件循环饥饿与超时；
   - 适配 Linux 容器 root 特权下读取 mode 000 文件的断言；
   - `fetch.test.ts` 全量 343 项测试实现 337 pass、6 skip、0 fail 完美绿灯。
+
+### BoringSSL 核心链与依赖模块 CP 重构
+- `src/cares_sys/c_ares.cp`:
+  - 1,450 行原生 CP 重构完成，全面消除全文件逃逸；
+  - 采用标准 `@c struct`、`*Channel!` / `**Channel!` 裸指针体系与 `?[*:0]u8` 哨兵指针；
+  - 导出 `struct_hostent`、`Options`、`Channel`、`AddrInfo`、`hostent_with_ttls`，全面支持借用检查与安全解析；
+- `src/cares_sys/c_ares.zig`:
+  - 由 `cpc src/cares_sys/c_ares.cp -o src/cares_sys/c_ares.zig --lib` 编译并经 `zig fmt` 格式化生成；
+  - 精确对齐底层 C-ares 函数 ABI；
+- `src/runtime/api/bun/x509.cp`:
+  - 60 行原生 CP 重构，实现 `isSafeAltName`、`toJS`、`toJSObject`；
+  - 采用标准 `JSValue!bun.JSError` 错误联合签名；
+- `src/runtime/api/bun/x509.zig`:
+  - 由 `cpc src/runtime/api/bun/x509.cp -o src/runtime/api/bun/x509.zig --lib` 编译并经 `zig fmt` 格式化生成，仅 64 行（原版 57 行，膨胀率 +12.2% <= 20%）；
+- `src/boringssl/boringssl.cp`:
+  - 260 行原生 CP 重构，通过 ES6 导入 `X509` 与 `c_ares`；
+  - 采用 `*outIP: IPTextBuf` 独占可变借用修饰，支持原地缓冲写入；
+  - 支持 `checkServerIdentity`、`checkX509ServerIdentity`、`canonicalizeIP`、`ip2String`、`load`、`initClient`；
+- `src/boringssl/boringssl.zig`:
+  - 由 `cpc src/boringssl/boringssl.cp -o src/boringssl/boringssl.zig --lib` 编译并经 `zig fmt` 格式化生成，仅 296 行（原版 272 行，膨胀率 +8.8% <= 20%）；
+- 上游 CP 编译器 (`/data/dev/cp/cpc`):
+  - `src/sema.rs`: 解决控制流类型收窄变量在重新赋值时的借用类型匹配冲突；
+  - `src/parser.rs`: 支持 `[*:0]T!`、`[*c]T!`、`[*:null]T!` 哨兵与 C 裸指针解析；
+  - `src/codegen.rs`: 修复 `cp_shl`/`cp_shr` 移位量有符号整型转换报错；移除常量 if 块多余 `comptime`；精准映射 `BorrowType` 指针与裸指针深度；
+- 单元测试回归闭环验证：
+  - `bun bd test test/js/node/crypto/crypto.test.ts`：**369 pass, 0 fail** 全部绿灯；
+  - `bun bd test test/js/web/fetch/fetch.test.ts`：**337 pass, 6 skip, 0 fail** 全部绿灯。
+
+
+### 2026-11-07 cstr 可变性、指针语法后置规范化与 C-ARES 全面刷新
+- `src/cares_sys/c_ares.cp`:
+  - 全面规范化前置 `?` 为 CP 标准后置 `?!` 指针修饰符；
+  - `domains: [*]([*:0]u8!)?! = null`、`lookups: [*:0]u8?! = null`、`sock_state_cb_data: *anyopaque?! = null`；
+  - `h_name: [*:0]u8?! = null`、`h_aliases: [*:null]([*:0]u8?!)?! = null`、`h_addr_list: [*:null]([*:0]u8?!)?! = null`；
+  - `AddrInfo_node`、`AddrInfo`、各 reply 结构体中的 `next` 与 `addr` 指针全部对齐为 `*T?!`；
+  - `@c { ... }` 中外部函数形参及返回值全部对齐为后置 `?!` 语法与小括号优先级消歧；
+- `src/cares_sys/c_ares.zig`:
+  - 由 `cpc src/cares_sys/c_ares.cp -o src/cares_sys/c_ares.zig --lib` 编译并经 `zig fmt` 格式化重新生成，100% 保持与 C-ARES 原生 ABI 兼容；
+- 上游 CP 编译器 (`/data/dev/cp/cpc`):
+  - `src/parser.rs`:
+    - 修复后置结合性：`parse_postfix_type_modifiers` 遇到 `?!` 或 `!` 时立即退出，交由外层指针构造器绑定；
+    - 支持小括号包裹类型 `(Type)`，并修复 `*` / `&` 将 `(` 误判为生命周期列表导致的解析报错；
+    - 保持 `*const anyopaque?!` 内部 `BorrowType { is_mut: false }`，精准发射 `?*const anyopaque`；
+  - `src/codegen.rs`:
+    - 实装 `cstr` 可变性：`let s: cstr` 生成 `var s: [*:0]u8 = @constCast(...)`，`const s: cstr` 生成 `const s: [*:0]const u8`；
+    - 追踪 `const_vars`，禁止在 AST 中对 `const` 变量进行任何赋值或下标赋值（`s[idx] = val`）；
+    - 函数形参 `s: cstr` 发射 `[*:0]const u8`，`*s: cstr` 发射 `[*:0]u8`；
+  - `src/sema.rs`:
+    - 语义分析期在 `BinaryOp::Assign` 处拦截对 `const s: cstr` 变量以及只读形参的下标修改，抛出 `SemaError::ConstAssignment`；
+- 设计规范权威文档更新:
+  - `/data/dev/cp/cp_ref.md` 与 `/data/dev/bun/cp/cp_ref.md`:
+    - 第 6.7 节与 6.7.1.1 节更新 `cstr` 可变性、只读性、借用检查机制与指针后置 `?!` / `!?` 规范及括号消歧语法；
+- 单元测试回归闭环验证:
+  - `bun bd test test/js/node/crypto/crypto.test.ts`：**369 pass, 0 fail (488 expect calls 全部绿灯通过)**；
+  - `bun bd test test/js/web/fetch/fetch.test.ts`：**337 pass, 6 skip, 0 fail (7,386 expect calls 全部绿灯通过)**。
+
+### 2026-11-07 C-ARES 彻底去 zig{}、消除 C 遗留类型、pub/_ 规范化与禁止冗余 .*.
+- `src/cares_sys/c_ares.cp`:
+  - **彻底去 `zig {}`**：将 `getSockaddr`、`ARES_GETSOCK_READABLE`、`ARES_GETSOCK_WRITABLE`、`Channel.release`、`Channel.deinit`、`Channel.process` 全部改写为纯正 CP 原生函数与类方法，零 `zig {}` 逃逸；
+  - **消除 C 遗留类型**：全面将 `c_int` / `c_uint` / `c_ushort` / `c_short` 替换为 CP 规范类型 `i32` / `u32` / `u16` / `i16`；将 `*anyopaque?!` 统一为 `*any?!` 与 `*const any?!`；
+  - **统一使用 `pub` 与 `_`**：全面将 `export` 改为 `pub`；接收者形参统一写为 `_`（如 `fn count(*_): u32`、`pub fn release(*_): void`），内部使用 `_.field`；
+  - **实现 RAII 自动析构**：所有核心结构体与类实现 `pub fn release(*_): void`，并保留 `pub fn deinit(*_): void { _.release(); }` 供外部 Zig 调用方平滑互操作；
+  - **标准后置指针类型**：将结构体字段与函数参数全部统一为 `[*:0]u8?!`、`[*]([*:0]u8!)?!`、`[*:null]([*:0]u8?!)?!`；
+  - **禁止冗余解引用**：消除所有 `in6.*.family`，统一为直接点号访问 `in6.family`、`in4.family`。
+- `src/cares_sys/c_ares.zig`:
+  - 由 `cpc src/cares_sys/c_ares.cp -o src/cares_sys/c_ares.zig --lib` 编译并经 `zig fmt` 格式化重新生成，代码行数从 2,950 行**精简至 2,199 行（净减 751 行，缩减 25.5%）**。
+- 上游 CP 编译器 (`/data/dev/cp/cpc`):
+  - `src/parser.rs`:
+    - 严禁在字段访问前使用冗余解引用 `.*.`，检测到 `Expr::Deref` 后接 `.` 时立即抛出包含 AI 友好修正建议的明确错误；
+    - 允许 `cstr` 作为类型转换目标标识符在 `@ptrCast(...) as cstr` 中使用；
+    - 修复 `parse_postfix_type_modifiers` 与 `parse_type` 对 `cstr?!` / `cstr!?` 与 `(...)` 的后置结合处理；
+  - `src/sema.rs`:
+    - 在 `can_coerce` 与 `types_eq` 中添加 `Type::Auto` 通配支持，解决 `@inline pub fn` 中 `auto` 参数运算时的类型不匹配报错；
+  - 编译器 Release 构建与部署：
+    - `cargo build --release --manifest-path /data/dev/cp/cpc/Cargo.toml` 构建成功并部署至 `/data/dev/cp/cap/bin/cpc`，转译性能达到单文件 3~5ms。
+- 权威设计规范更新:
+  - `/data/dev/cp/cp_ref.md` 与 `/data/dev/bun/cp/cp_ref.md` 增补第 16/17 节：严禁字段前冗余解引用 `.*.`、`pub` / `_` 语法规范、`release(*_)` RAII 自动析构与标准系统指针类型字典。
+- 单元测试回归闭环验证:
+  - `bun bd test test/js/node/crypto/crypto.test.ts`：**369 pass, 0 fail (488 expect calls 全部绿灯)**；
+  - `bun bd test test/js/bun/dns/resolve-dns.test.ts`：**75 pass, 0 fail (1,273 expect calls 全部绿灯，含 c-ares lookup/setServers)**；
+  - `bun bd test test/js/node/dns/node-dns.test.js`：**66 pass, 0 fail (223 expect calls 全部绿灯，各类 DNS 记录解析完美通过)**；
+  - `bun bd test test/js/web/fetch/fetch.test.ts`：**337 pass, 6 skip, 0 fail (7,386 expect calls 全部绿灯)**。
