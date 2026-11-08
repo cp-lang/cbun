@@ -2433,3 +2433,68 @@ Level 2 (聚合根模块，依赖上述全部 3 个模块):
 **坚定选择【方案 A：AST 精细化按需注入】**。该方案具备零构建风险、零外部依赖、极低实现代价与极致代码纯净度，是现阶段 Bun 渐进式平滑迁移到 CP 语言的最优解。
 
 
+
+
+---
+
+## 2026-11-09 十二、三大核心模块组（19 模块）CP 迁移、死代码 Tree-Shaking 瘦身与 -0.1% 零膨胀转译实战
+
+### 1. 任务背景与核心目标
+按照既定迁移规划，集中推进三大推荐模块组共计 19 个核心模块的全量 CP 迁移：
+1. **第一推荐：路径与文件匹配模块组（`src/paths/`, `src/which/`, `src/glob/`，9 模块）**；
+2. **第二推荐：环境配置与语义化版本模块组（`src/semver/`, `src/dotenv/`, `src/ini/`，6 模块）**；
+3. **第三推荐：跨平台系统错误码映射模块组（`src/errno/`，4 模块）**。
+
+同时结合上游 `cpc` 编译器团队交付的五大系统级特性（`@asm`, `@tls let`, 标量与枚举互转, `@c`, `own`）与死代码 Tree-Shaking 机制，达成两大突破：
+- 消除已有 CP 模块中的 `zig {}` 逃逸；
+- 彻底剔除 RFC-002 辅助模板无用代码，将转译代码行数膨胀率严格压制在 $\le 20\%$ 内。
+
+### 2. 关键技术突破与借用安全排查
+1. **`src/threading/Futex.cp` 内联汇编与借用冲突自愈**：
+   - 采用纯 CP `@asm` 语法对接 WebAssembly `memory.atomic.wait32` 指令，摆脱 `zig {}` 逃逸；
+   - 遇到 CP 借用检查报错 `error[E0202]: Borrow conflict on 'tm'`：
+     - 原逻辑先取了 `tm_ptr = &tm`，后续又对 `tm.flags = 0` 进行字段修改；CP 严格实施“单写多读（Aliasing XOR Mutability）”安全排他模型，判定活跃只读/可变借用与写操作冲突；
+     - 调整执行顺序，先就地初始化 `tm` 的结构体字段，随后再获取指针引用 `tm_ptr`，实现零逃逸纯正编译。
+2. **线程局部存储缓存优化 (`src/paths/resolve_path.cp` 与 `src/http_types/URLPath.cp`)**：
+   - 使用 `@tls let temp_path_buf: [1024]u8 = undefined;` 声明高频路径格式化缓存，兼顾无锁高性能与纯正 CP 类型安全。
+3. **Tree-Shaking 瘦身验证与膨胀率消除**：
+   - 新版 `cpc` 引入精准特征探测：
+     - 仅在使用 `?.` 时才生成 `CpOptType` 与 `cp_opt_unwrap`；
+     - 仅在使用字符串模板插值或格式化时才生成 `cp_string_from`；
+   - 实测效果：如 `src/paths/paths.cp`（30 行）生成的 `paths.zig` 由原本带 45 行模板的 75 行直降至 31 行，代码行数缩减 60%，彻底根除小型模块的代码虚胖。
+
+### 3. 全量 19 模块代码行数膨胀率实测全景表
+通过 `bun bd run temp/check_lines.ts` 实测统计：
+
+| 模块 | CP 源码行数 | 转译 Zig 行数 | 膨胀率 | 状态 |
+|---|---|---|---|---|
+| `src/paths/paths` | 30 | 31 | +3.3% | PASS |
+| `src/paths/path_buffer_pool` | 31 | 33 | +6.5% | PASS |
+| `src/paths/EnvPath` | 88 | 89 | +1.1% | PASS |
+| `src/paths/Path` | 925 | 925 | 0.0% | PASS |
+| `src/paths/resolve_path` | 1,976 | 1,975 | -0.1% | PASS |
+| `src/which/which` | 159 | 160 | +0.6% | PASS |
+| `src/glob/glob` | 35 | 35 | 0.0% | PASS |
+| `src/glob/matcher` | 417 | 418 | +0.2% | PASS |
+| `src/glob/GlobWalker` | 1,665 | 1,642 | -1.4% | PASS |
+| `src/errno/darwin_errno` | 212 | 213 | +0.5% | PASS |
+| `src/errno/freebsd_errno` | 208 | 209 | +0.5% | PASS |
+| `src/errno/linux_errno` | 246 | 247 | +0.4% | PASS |
+| `src/errno/windows_errno` | 1,179 | 1,180 | +0.1% | PASS |
+| `src/semver/semver` | 12 | 14 | +16.7% | PASS |
+| `src/semver/SemverRange` | 245 | 245 | 0.0% | PASS |
+| `src/semver/SemverQuery` | 794 | 795 | +0.1% | PASS |
+| `src/semver/Version` | 996 | 996 | 0.0% | PASS |
+| `src/dotenv/env_loader` | 1,434 | 1,435 | +0.1% | PASS |
+| `src/ini/ini` | 1,357 | 1,358 | +0.1% | PASS |
+| **总计（19 个模块）** | **12,009** | **12,000** | **-0.1%** | **100% 达标** |
+
+### 4. 自动化测试与工程验证全绿
+- 19 个模块通过 `vendor/zig/zig ast-check` 0 错误；
+- `bun bd` 顺利通过 Ninja 100/100 步增量构建，96 个编译分片对象无一报错，MaxRSS 稳定；
+- 原生测试用例全数通过：
+  - `test/js/node/path/path.test.js`: 3 pass, 0 fail；
+  - `test/cli/install/semver.test.ts`: 22 pass, 0 fail (1,762 expect calls)；
+  - `test/js/node/env/` 相关用例: 147 pass；
+  - `glob` 测试: 144 pass (55,816 expect calls)；
+  - `bun bd -e "console.log('Bun version:', Bun.version)"` 输出 `Bun version: 1.3.14-debug`。

@@ -3,7 +3,7 @@ const std = @import("std");
 const string = []const u8;
 
 const bun = @import("bun");
-
+pub const ACL_MAP = std.StaticStringMap(ACL).initComptime(.{ .{ "private", .private }, .{ "public-read", .public_read }, .{ "public-read-write", .public_read_write }, .{ "aws-exec-read", .aws_exec_read }, .{ "authenticated-read", .authenticated_read }, .{ "bucket-owner-read", .bucket_owner_read }, .{ "bucket-owner-full-control", .bucket_owner_full_control }, .{ "log-delivery-write", .log_delivery_write } });
 pub const ACL = enum {
     private,
     public_read,
@@ -13,9 +13,20 @@ pub const ACL = enum {
     bucket_owner_read,
     bucket_owner_full_control,
     log_delivery_write,
+    pub fn get(s: []const u8) ?@This() {
+        return std.meta.stringToEnum(@This(), s);
+    }
+    pub fn has(s: []const u8) bool {
+        return std.meta.stringToEnum(@This(), s) != null;
+    }
+    pub fn fromName(s: []const u8) ?@This() {
+        return get(s);
+    }
+    pub fn name(self: @This()) []const u8 {
+        return @tagName(self);
+    }
 
     pub fn toString(self: ACL) []const u8 {
-        _ = &self;
         return (switch (self) {
             .private => "private",
             .public_read => "public-read",

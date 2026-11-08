@@ -32,9 +32,7 @@ export @opaque class ConnectingSocket {
     }
 
     pub fn kind(*this): SocketKind {
-        zig {
-            return @enumFromInt(us_connecting_socket_kind(self));
-        }
+        return us_connecting_socket_kind(this) as SocketKind;
     }
 
     pub fn loop(*this): *Loop {

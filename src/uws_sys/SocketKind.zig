@@ -2,35 +2,11 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
-pub const exported_ordinals = struct {
-        export const BUN_SOCKET_KIND_DYNAMIC: u8 = @intFromEnum(SocketKind.dynamic);
-        export const BUN_SOCKET_KIND_UWS_HTTP: u8 = @intFromEnum(SocketKind.uws_http);
-        export const BUN_SOCKET_KIND_UWS_HTTP_TLS: u8 = @intFromEnum(SocketKind.uws_http_tls);
-        export const BUN_SOCKET_KIND_UWS_WS: u8 = @intFromEnum(SocketKind.uws_ws);
-        export const BUN_SOCKET_KIND_UWS_WS_TLS: u8 = @intFromEnum(SocketKind.uws_ws_tls);
-    };
-    comptime {
-        _ = exported_ordinals;
-    }
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
+export const BUN_SOCKET_KIND_DYNAMIC: u8 = @intFromEnum(SocketKind.dynamic);
+export const BUN_SOCKET_KIND_UWS_HTTP: u8 = @intFromEnum(SocketKind.uws_http);
+export const BUN_SOCKET_KIND_UWS_HTTP_TLS: u8 = @intFromEnum(SocketKind.uws_http_tls);
+export const BUN_SOCKET_KIND_UWS_WS: u8 = @intFromEnum(SocketKind.uws_ws);
+export const BUN_SOCKET_KIND_UWS_WS_TLS: u8 = @intFromEnum(SocketKind.uws_ws_tls);
 pub const SocketKind = enum(u8) {
     invalid = 0,
     dynamic,
@@ -55,17 +31,23 @@ pub const SocketKind = enum(u8) {
     uws_http_tls,
     uws_ws,
     uws_ws_tls,
+    pub fn get(s: []const u8) ?@This() {
+        return std.meta.stringToEnum(@This(), s);
+    }
+    pub fn has(s: []const u8) bool {
+        return std.meta.stringToEnum(@This(), s) != null;
+    }
+    pub fn fromName(s: []const u8) ?@This() {
+        return get(s);
+    }
+    pub fn name(self: @This()) []const u8 {
+        return @tagName(self);
+    }
 
-pub fn isTLS(self: SocketKind) bool {
-            return (switch (self) {
-.bun_socket_tls, .bun_listener_tls, .http_client_tls, .ws_client_upgrade_tls, .ws_client_tls, .postgres_tls, .mysql_tls, .valkey_tls, .uws_http_tls, .uws_ws_tls => true,
-else => false,
-});
+    pub fn isTLS(self: SocketKind) bool {
+        return (switch (self) {
+            .bun_socket_tls, .bun_listener_tls, .http_client_tls, .ws_client_upgrade_tls, .ws_client_tls, .postgres_tls, .mysql_tls, .valkey_tls, .uws_http_tls, .uws_ws_tls => true,
+            else => false,
+        });
     }
 };
-
-
-pub var global_io: std.Io = undefined;
-pub var __cap_test_total: usize = 0;
-pub var __cap_test_passed: usize = 0;
-pub var __cap_test_failed: usize = 0;

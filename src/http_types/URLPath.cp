@@ -44,10 +44,10 @@ export @root struct URLPath {
     }
 }
 
-zig {
-    threadlocal var temp_path_buf: [1024]u8 = undefined;
-    threadlocal var big_temp_path_buf: [16384]u8 = undefined;
+@tls let temp_path_buf: [1024]u8 = undefined;
+@tls let big_temp_path_buf: [16384]u8 = undefined;
 
+zig {
     pub fn parse(possibly_encoded_pathname_: string) !URLPath {
         var decoded_pathname = possibly_encoded_pathname_;
         var needs_redirect = false;

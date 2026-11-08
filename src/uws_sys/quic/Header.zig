@@ -2,26 +2,27 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest {
+    const Src = @TypeOf(val);
+    if (comptime Src == Dest) return val;
+    if (comptime Src == comptime_int) {
+        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val));
+    }
+    const src_bits = @typeInfo(Src).int.bits;
+    const dest_bits = @typeInfo(Dest).int.bits;
+    if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {
+        if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val);
+    }
+    if (comptime @typeInfo(Src).int.signedness == .signed) {
+        const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val);
+        const u: u128 = @bitCast(s);
+        if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u);
+    } else {
+        const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val);
+        const s: i128 = @bitCast(u);
+        if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s);
+    }
 }
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
-fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
 pub const bun = @import("bun");
 pub const Qpack = enum(u8) {
     authority = 0,
@@ -57,58 +58,70 @@ pub const Qpack = enum(u8) {
     user_agent = 95,
     x_forwarded_for = 96,
     _,
-    
+    pub fn get(s: []const u8) ?@This() {
+        return std.meta.stringToEnum(@This(), s);
+    }
+    pub fn has(s: []const u8) bool {
+        return std.meta.stringToEnum(@This(), s) != null;
+    }
+    pub fn fromName(s: []const u8) ?@This() {
+        return get(s);
+    }
+    pub fn name(self: @This()) []const u8 {
+        return @tagName(self);
+    }
+
     pub const Class = union(enum) {
-                forbidden,
-                host,
-                indexed: struct { name: []const u8, index: Qpack },
-    
-                fn idx(comptime name: []const u8, i: Qpack) Class {
-                    return .{ .indexed = .{ .name = name, .index = i } };
-                }
-            };
-    
-            pub fn classify(name: []const u8) ?Class {
-                return map.getAnyCase(name);
-            }
-    
-            const map = bun.ComptimeStringMap(Class, .{
-                .{ "connection", .forbidden },
-                .{ "host", .host },
-                .{ "keep-alive", .forbidden },
-                .{ "proxy-connection", .forbidden },
-                .{ "transfer-encoding", .forbidden },
-                .{ "upgrade", .forbidden },
-    
-                .{ "accept", Class.idx("accept", .accept) },
-                .{ "accept-encoding", Class.idx("accept-encoding", .accept_encoding) },
-                .{ "accept-language", Class.idx("accept-language", .accept_language) },
-                .{ "accept-ranges", Class.idx("accept-ranges", .accept_ranges) },
-                .{ "authorization", Class.idx("authorization", .authorization) },
-                .{ "cache-control", Class.idx("cache-control", .cache_control) },
-                .{ "content-disposition", Class.idx("content-disposition", .content_disposition) },
-                .{ "content-encoding", Class.idx("content-encoding", .content_encoding) },
-                .{ "content-length", Class.idx("content-length", .content_length) },
-                .{ "content-type", Class.idx("content-type", .content_type) },
-                .{ "cookie", Class.idx("cookie", .cookie) },
-                .{ "date", Class.idx("date", .date) },
-                .{ "etag", Class.idx("etag", .etag) },
-                .{ "forwarded", Class.idx("forwarded", .forwarded) },
-                .{ "if-modified-since", Class.idx("if-modified-since", .if_modified_since) },
-                .{ "if-none-match", Class.idx("if-none-match", .if_none_match) },
-                .{ "if-range", Class.idx("if-range", .if_range) },
-                .{ "last-modified", Class.idx("last-modified", .last_modified) },
-                .{ "link", Class.idx("link", .link) },
-                .{ "location", Class.idx("location", .location) },
-                .{ "origin", Class.idx("origin", .origin) },
-                .{ "range", Class.idx("range", .range) },
-                .{ "referer", Class.idx("referer", .referer) },
-                .{ "server", Class.idx("server", .server) },
-                .{ "set-cookie", Class.idx("set-cookie", .set_cookie) },
-                .{ "user-agent", Class.idx("user-agent", .user_agent) },
-                .{ "vary", Class.idx("vary", .vary) },
-                .{ "x-forwarded-for", Class.idx("x-forwarded-for", .x_forwarded_for) },
-            });
+        forbidden,
+        host,
+        indexed: struct { name: []const u8, index: Qpack },
+
+        fn idx(comptime hdr_name: []const u8, i: Qpack) Class {
+            return .{ .indexed = .{ .name = hdr_name, .index = i } };
+        }
+    };
+
+    pub fn classify(hdr_name: []const u8) ?Class {
+        return map.getAnyCase(hdr_name);
+    }
+
+    const map = bun.ComptimeStringMap(Class, .{
+        .{ "connection", .forbidden },
+        .{ "host", .host },
+        .{ "keep-alive", .forbidden },
+        .{ "proxy-connection", .forbidden },
+        .{ "transfer-encoding", .forbidden },
+        .{ "upgrade", .forbidden },
+
+        .{ "accept", Class.idx("accept", .accept) },
+        .{ "accept-encoding", Class.idx("accept-encoding", .accept_encoding) },
+        .{ "accept-language", Class.idx("accept-language", .accept_language) },
+        .{ "accept-ranges", Class.idx("accept-ranges", .accept_ranges) },
+        .{ "authorization", Class.idx("authorization", .authorization) },
+        .{ "cache-control", Class.idx("cache-control", .cache_control) },
+        .{ "content-disposition", Class.idx("content-disposition", .content_disposition) },
+        .{ "content-encoding", Class.idx("content-encoding", .content_encoding) },
+        .{ "content-length", Class.idx("content-length", .content_length) },
+        .{ "content-type", Class.idx("content-type", .content_type) },
+        .{ "cookie", Class.idx("cookie", .cookie) },
+        .{ "date", Class.idx("date", .date) },
+        .{ "etag", Class.idx("etag", .etag) },
+        .{ "forwarded", Class.idx("forwarded", .forwarded) },
+        .{ "if-modified-since", Class.idx("if-modified-since", .if_modified_since) },
+        .{ "if-none-match", Class.idx("if-none-match", .if_none_match) },
+        .{ "if-range", Class.idx("if-range", .if_range) },
+        .{ "last-modified", Class.idx("last-modified", .last_modified) },
+        .{ "link", Class.idx("link", .link) },
+        .{ "location", Class.idx("location", .location) },
+        .{ "origin", Class.idx("origin", .origin) },
+        .{ "range", Class.idx("range", .range) },
+        .{ "referer", Class.idx("referer", .referer) },
+        .{ "server", Class.idx("server", .server) },
+        .{ "set-cookie", Class.idx("set-cookie", .set_cookie) },
+        .{ "user-agent", Class.idx("user-agent", .user_agent) },
+        .{ "vary", Class.idx("vary", .vary) },
+        .{ "x-forwarded-for", Class.idx("x-forwarded-for", .x_forwarded_for) },
+    });
 };
 
 pub const Header = extern struct {
@@ -118,13 +131,13 @@ pub const Header = extern struct {
     value_len: u32,
     qpack_index: i32 = -1,
 
-pub fn init(name_: []const u8, value_: []const u8, idx: ?Qpack) Header {
-            var qidx: i32 = -1;
-            _ = &qidx;
-            if ((idx != null)) {
-                qidx = @intFromEnum(idx.?);
-            }
-            return Header{ .name = name_.ptr, .name_len = cp_cast_int(u32, name_.len), .value = value_.ptr, .value_len = cp_cast_int(u32, value_.len), .qpack_index = qidx };
+    pub fn init(name_: []const u8, value_: []const u8, idx: ?Qpack) Header {
+        var qidx: i32 = -1;
+        _ = &qidx;
+        if (idx) |i| {
+            _ = &i;
+            qidx = cp_cast_int(i32, @intFromEnum(i));
+        }
+        return Header{ .name = name_.ptr, .name_len = (if (comptime @typeInfo(@TypeOf(name_.len)) == .@"enum") cp_cast_int(u32, @intFromEnum(name_.len)) else cp_cast_int(u32, name_.len)), .value = value_.ptr, .value_len = (if (comptime @typeInfo(@TypeOf(value_.len)) == .@"enum") cp_cast_int(u32, @intFromEnum(value_.len)) else cp_cast_int(u32, value_.len)), .qpack_index = qidx };
     }
 };
-

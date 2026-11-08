@@ -3,7 +3,7 @@ zig {
 }
 
 export enum ACL {
-    private,
+    @"private",
     public_read,
     public_read_write,
     aws_exec_read,
@@ -12,9 +12,9 @@ export enum ACL {
     bucket_owner_full_control,
     log_delivery_write,
 
-    fn toString(this): string {
+    pub fn toString(this): string {
         return switch (this) {
-            .private => "private",
+            .@"private" => "private",
             .public_read => "public-read",
             .public_read_write => "public-read-write",
             .aws_exec_read => "aws-exec-read",
@@ -27,7 +27,7 @@ export enum ACL {
 
     zig {
         pub const Map = bun.ComptimeStringMap(ACL, .{
-            .{ "private", .private },
+            .{ "private", .@"private" },
             .{ "public-read", .public_read },
             .{ "public-read-write", .public_read_write },
             .{ "aws-exec-read", .aws_exec_read },
@@ -38,3 +38,14 @@ export enum ACL {
         });
     }
 }
+
+pub const ACL_MAP = @map(ACL, {
+    "private": .@"private",
+    "public-read": .public_read,
+    "public-read-write": .public_read_write,
+    "aws-exec-read": .aws_exec_read,
+    "authenticated-read": .authenticated_read,
+    "bucket-owner-read": .bucket_owner_read,
+    "bucket-owner-full-control": .bucket_owner_full_control,
+    "log-delivery-write": .log_delivery_write,
+});

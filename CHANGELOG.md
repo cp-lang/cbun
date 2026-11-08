@@ -1003,3 +1003,57 @@
 23. `src/sys/File.cp` -> `File.zig` (ast-check PASS, fmt PASS)
 
 
+
+
+### 2026-11-09 (三大推荐模块组全量 19 模块 CP 迁移、死代码 Tree-Shaking 瘦身与全量测试闭环)
+
+#### 核心模块迁移与转译（19 个核心模块 100% AST 校验与格式化通过）
+- **第一推荐：路径与文件匹配模块组（`src/paths/`, `src/which/`, `src/glob/`，9 模块）**：
+  1. `src/paths/paths.cp` -> `paths.zig` (31 行 vs 30 行，Tree-Shaking 砍掉 60% 冗余模板)；
+  2. `src/paths/path_buffer_pool.cp` -> `path_buffer_pool.zig` (33 行 vs 31 行)；
+  3. `src/paths/EnvPath.cp` -> `EnvPath.zig` (89 行 vs 88 行)；
+  4. `src/paths/Path.cp` -> `Path.zig` (925 行 vs 925 行)；
+  5. `src/paths/resolve_path.cp` -> `resolve_path.zig` (1,975 行 vs 1,976 行，引入 `@tls let` 线程局部解析缓冲区)；
+  6. `src/which/which.cp` -> `which.zig` (160 行 vs 159 行)；
+  7. `src/glob/glob.cp` -> `glob.zig` (35 行 vs 35 行)；
+  8. `src/glob/matcher.cp` -> `matcher.zig` (418 行 vs 417 行)；
+  9. `src/glob/GlobWalker.cp` -> `GlobWalker.zig` (1,642 行 vs 1,665 行)。
+- **第二推荐：环境配置与语义化版本模块组（`src/semver/`, `src/dotenv/`, `src/ini/`，6 模块）**：
+  10. `src/semver/semver.cp` -> `semver.zig` (14 行 vs 12 行)；
+  11. `src/semver/SemverRange.cp` -> `SemverRange.zig` (245 行 vs 245 行)；
+  12. `src/semver/SemverQuery.cp` -> `SemverQuery.zig` (795 行 vs 794 行)；
+  13. `src/semver/Version.cp` -> `Version.zig` (996 行 vs 996 行)；
+  14. `src/dotenv/env_loader.cp` -> `env_loader.zig` (1,435 行 vs 1,434 行)；
+  15. `src/ini/ini.cp` -> `ini.zig` (1,358 行 vs 1,357 行)。
+- **第三推荐：跨平台系统错误码映射模块组（`src/errno/`，4 模块）**：
+  16. `src/errno/darwin_errno.cp` -> `darwin_errno.zig` (213 行 vs 212 行)；
+  17. `src/errno/freebsd_errno.cp` -> `freebsd_errno.zig` (209 行 vs 208 行)；
+  18. `src/errno/linux_errno.cp` -> `linux_errno.zig` (247 行 vs 246 行)；
+  19. `src/errno/windows_errno.cp` -> `windows_errno.zig` (1,180 行 vs 1,179 行)。
+
+#### 现有 CP 模块纯正化与 `zig {}` 消除
+- `src/threading/Futex.cp`:
+  - 采用纯 CP `@asm(...)` 解决 WASM 原子等待，消除 `asm volatile` 逃逸；
+  - 调整结构体成员赋值与指针借用顺序，解决借用检查器（Borrow Checker）别名独占写冲突；
+- `src/http_types/URLPath.cp`:
+  - 采用标准 `@tls let` 线程局部变量修饰符，消除 `threadlocal var` 逃逸；
+- `src/uws_sys/quic/Header.cp`:
+  - 统一为 `let` 声明，消除方法与字段重名冲突；
+- `src/uws_sys/ConnectingSocket.cp`:
+  - 采用 `as SocketKind` 纯 CP 标量强转，消除 `zig {}`；
+- `src/uws_sys/SocketKind.cp`:
+  - 规整 C++ LLVM 符号导出定义；
+- `src/s3_signing/acl.cp`:
+  - 规范化 `pub fn toString` 与 `bun.ComptimeStringMap`。
+
+#### 编译与测试验证结果
+- 全量 19 个新迁移模块与重构模块通过 `cpc` 重新编译，死代码 Tree-Shaking 100% 生效；
+- `vendor/zig/zig ast-check` 全部 0 错误通过，`vendor/zig/zig fmt` 格式化通过；
+- `bun bd` 编译 100/100 步成功，96 个 Zig 对象无错误生成并链接成功；
+- 原生测试套件全绿：
+  - `path.test.js`: 3 pass, 0 fail；
+  - `semver.test.ts`: 22 pass, 0 fail (1,762 expect calls)；
+  - `env` 测试: 147 pass；
+  - `glob` 测试: 144 pass (55,816 expect calls)；
+  - `Bun.version`: 1.3.14-debug 正常输出；
+- **全景代码行数对比**：CP 源码 12,009 行 vs 转译 Zig 12,000 行，**净膨胀率为 -0.1%**！

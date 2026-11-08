@@ -8,9 +8,9 @@ export @extern @value class Header {
     qpack_index: i32 = -1,
 
     pub static fn init(name_: string, value_: string, idx: Qpack?): Header {
-        let mut qidx: i32 = -1;
-        if (idx != null) {
-            qidx = @intFromEnum(idx.?);
+        let qidx: i32 = -1;
+        if (i := idx) {
+            qidx = i as i32;
         }
         return Header {
             name = name_.ptr,
@@ -63,13 +63,13 @@ export enum Qpack: u8 {
             host,
             indexed: struct { name: []const u8, index: Qpack },
 
-            fn idx(comptime name: []const u8, i: Qpack) Class {
-                return .{ .indexed = .{ .name = name, .index = i } };
+            fn idx(comptime hdr_name: []const u8, i: Qpack) Class {
+                return .{ .indexed = .{ .name = hdr_name, .index = i } };
             }
         };
 
-        pub fn classify(name: []const u8) ?Class {
-            return map.getAnyCase(name);
+        pub fn classify(hdr_name: []const u8) ?Class {
+            return map.getAnyCase(hdr_name);
         }
 
         const map = bun.ComptimeStringMap(Class, .{
