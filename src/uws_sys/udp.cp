@@ -3,61 +3,64 @@ import { Loop } from "./Loop.cp";
 
 @c {
     fn us_create_udp_socket(
-        loop: *Loop?!,
-        data_cb: @c ((s: *Socket, buf: *PacketBuffer, count: i32): void)?,
-        drain_cb: @c ((s: *Socket): void)?,
-        close_cb: @c ((s: *Socket): void)?,
-        recv_error_cb: @c ((s: *Socket, err: i32): void)?,
+        loop: ?*Loop,
+        data_cb: ?@c fn (*Socket, *PacketBuffer, i32): void,
+        drain_cb: ?@c fn (*Socket): void,
+        close_cb: ?@c fn (*Socket): void,
+        recv_error_cb: ?@c fn (*Socket, i32): void,
         host: cstr?,
         port: u16,
         options: i32,
-        err: *i32?!,
-        user_data: *any?!,
-    ): *Socket?!;
+        err: ?*i32,
+        user_data: *!?,
+    ): ?*Socket;
     fn us_udp_socket_connect(socket: *Socket, hostname: cstr, port: u32): i32;
     fn us_udp_socket_disconnect(socket: *Socket): i32;
-    fn us_udp_socket_send(socket: *Socket, payloads: [*]const [*]const u8!, lengths: [*]const usize!, addresses: [*]const *any?!, count: i32): i32;
-    fn us_udp_socket_user(socket: *Socket): *any?!;
+    fn us_udp_socket_send(socket: *Socket, payloads: [*c]const [*c]const u8, lengths: [*c]const usize, addresses: [*c]const ?*const anyopaque, count: i32): i32;
+    fn us_udp_socket_user(socket: *Socket): *!?;
     fn us_udp_socket_bind(socket: *Socket, hostname: cstr, port: u32): i32;
     fn us_udp_socket_bound_port(socket: *Socket): i32;
-    fn us_udp_socket_bound_ip(socket: *Socket, buf: [*]u8!, length: *i32): void;
-    fn us_udp_socket_remote_ip(socket: *Socket, buf: [*]u8!, length: *i32): void;
+    fn us_udp_socket_bound_ip(socket: *Socket, buf: [*c]u8, length: *i32): void;
+    fn us_udp_socket_remote_ip(socket: *Socket, buf: [*c]u8, length: *i32): void;
     fn us_udp_socket_close(socket: *Socket): void;
     fn us_udp_socket_set_broadcast(socket: *Socket, enabled: i32): i32;
     fn us_udp_socket_set_ttl_unicast(socket: *Socket, ttl: i32): i32;
     fn us_udp_socket_set_ttl_multicast(socket: *Socket, ttl: i32): i32;
     fn us_udp_socket_set_multicast_loopback(socket: *Socket, enabled: i32): i32;
-    fn us_udp_socket_set_multicast_interface(socket: *Socket, iface: *any!): i32;
-    fn us_udp_socket_set_membership(socket: *Socket, address: *any!, iface: *any?!, drop: i32): i32;
-    fn us_udp_socket_set_source_specific_membership(socket: *Socket, source: *any!, group: *any!, iface: *any?!, drop: i32): i32;
+    fn us_udp_socket_set_multicast_interface(socket: *Socket, iface: *const std.posix.sockaddr.storage): i32;
+    fn us_udp_socket_set_membership(socket: *Socket, address: *const std.posix.sockaddr.storage, iface: ?*const std.posix.sockaddr.storage, drop: i32): i32;
+    fn us_udp_socket_set_source_specific_membership(socket: *Socket, source: *const std.posix.sockaddr.storage, group: *const std.posix.sockaddr.storage, iface: ?*const std.posix.sockaddr.storage, drop: i32): i32;
 
-    fn us_udp_packet_buffer_peer(buf: *PacketBuffer?!, index: i32): *any!;
-    fn us_udp_packet_buffer_payload(buf: *PacketBuffer?!, index: i32): [*]u8!;
-    fn us_udp_packet_buffer_payload_length(buf: *PacketBuffer?!, index: i32): i32;
-    fn us_udp_packet_buffer_truncated(buf: *PacketBuffer?!, index: i32): i32;
+    fn us_udp_packet_buffer_peer(buf: ?*PacketBuffer, index: i32): *std.posix.sockaddr.storage;
+    fn us_udp_packet_buffer_payload(buf: ?*PacketBuffer, index: i32): [*]u8!;
+    fn us_udp_packet_buffer_payload_length(buf: ?*PacketBuffer, index: i32): i32;
+    fn us_udp_packet_buffer_truncated(buf: ?*PacketBuffer, index: i32): i32;
 }
 
 export @opaque class Socket {
     pub static fn create(
         loop: *Loop,
-        data_cb: @c ((s: *Socket, buf: *PacketBuffer, count: i32): void)?,
-        drain_cb: @c ((s: *Socket): void)?,
-        close_cb: @c ((s: *Socket): void)?,
-        recv_error_cb: @c ((s: *Socket, err: i32): void)?,
+        data_cb: ?@c fn (*Socket, *PacketBuffer, i32): void,
+        drain_cb: ?@c fn (*Socket): void,
+        close_cb: ?@c fn (*Socket): void,
+        recv_error_cb: ?@c fn (*Socket, i32): void,
         host: cstr?,
         port: u16,
         options: i32,
         err: *i32?,
-        user_data: *any?!,
-    ): *Socket? {
+        user_data: *!?,
+    ): ?*Socket {
         return us_create_udp_socket(loop, data_cb, drain_cb, close_cb, recv_error_cb, host, port, options, err, user_data);
     }
 
-    pub fn send(*this, payloads: [*]const u8![], lengths: usize[], addresses: *any?[], count: i32): i32 {
-        return us_udp_socket_send(this, payloads.ptr, lengths.ptr, addresses.ptr, count);
+    zig {
+        pub fn send(this: *Socket, payloads: []const [*]const u8, lengths: []const usize, addresses: []const ?*const anyopaque) c_int {
+            bun.assert(payloads.len == lengths.len and payloads.len == addresses.len);
+            return us_udp_socket_send(this, payloads.ptr, lengths.ptr, addresses.ptr, @intCast(payloads.len));
+        }
     }
 
-    pub fn user(*this): *any?! {
+    pub fn user(*this): *!? {
         return us_udp_socket_user(this);
     }
 
@@ -65,12 +68,12 @@ export @opaque class Socket {
         return us_udp_socket_bind(this, hostname, port);
     }
 
-    pub fn boundIp(*this, buf: u8[], length: *i32): void {
-        us_udp_socket_bound_ip(this, buf.ptr, length);
+    pub fn boundIp(*this, buf: [*c]u8, length: *i32): void {
+        us_udp_socket_bound_ip(this, buf, length);
     }
 
-    pub fn remoteIp(*this, buf: u8[], length: *i32): void {
-        us_udp_socket_remote_ip(this, buf.ptr, length);
+    pub fn remoteIp(*this, buf: [*c]u8, length: *i32): void {
+        us_udp_socket_remote_ip(this, buf, length);
     }
 
     pub fn connect(*this, hostname: cstr, port: u32): i32 {
@@ -78,7 +81,11 @@ export @opaque class Socket {
     }
 
     pub fn setBroadcast(*this, enabled: bool): i32 {
-        return us_udp_socket_set_broadcast(this, if (enabled) 1 else 0);
+        let mut en: i32 = 0;
+        if (enabled) {
+            en = 1;
+        }
+        return us_udp_socket_set_broadcast(this, en);
     }
 
     pub fn setUnicastTTL(*this, ttl: i32): i32 {
@@ -90,19 +97,25 @@ export @opaque class Socket {
     }
 
     pub fn setMulticastLoopback(*this, enabled: bool): i32 {
-        return us_udp_socket_set_multicast_loopback(this, if (enabled) 1 else 0);
+        let mut en: i32 = 0;
+        if (enabled) {
+            en = 1;
+        }
+        return us_udp_socket_set_multicast_loopback(this, en);
     }
 
-    pub fn setMulticastInterface(*this, iface: *any!): i32 {
-        return us_udp_socket_set_multicast_interface(this, iface);
-    }
+    zig {
+        pub fn setMulticastInterface(this: *Socket, iface: *const std.posix.sockaddr.storage) c_int {
+            return us_udp_socket_set_multicast_interface(this, iface);
+        }
 
-    pub fn setMembership(*this, address: *any!, iface: *any?!, drop: bool): i32 {
-        return us_udp_socket_set_membership(this, address, iface, if (drop) 1 else 0);
-    }
+        pub fn setMembership(this: *Socket, address: *const std.posix.sockaddr.storage, iface: ?*const std.posix.sockaddr.storage, drop: bool) c_int {
+            return us_udp_socket_set_membership(this, address, iface, @intFromBool(drop));
+        }
 
-    pub fn setSourceSpecificMembership(*this, source: *any!, group: *any!, iface: *any?!, drop: bool): i32 {
-        return us_udp_socket_set_source_specific_membership(this, source, group, iface, if (drop) 1 else 0);
+        pub fn setSourceSpecificMembership(this: *Socket, source: *const std.posix.sockaddr.storage, group: *const std.posix.sockaddr.storage, iface: ?*const std.posix.sockaddr.storage, drop: bool) c_int {
+            return us_udp_socket_set_source_specific_membership(this, source, group, iface, @intFromBool(drop));
+        }
     }
 
     pub fn boundPort(*this): i32 {
@@ -119,8 +132,10 @@ export @opaque class Socket {
 }
 
 export @opaque class PacketBuffer {
-    pub fn getPeer(*this, index: i32): *any! {
-        return us_udp_packet_buffer_peer(this, index);
+    pub fn getPeer(*this, index: i32): *std.posix.sockaddr.storage {
+        zig {
+            return us_udp_packet_buffer_peer(self, index);
+        }
     }
 
     pub fn getPayload(*this, index: i32): u8[] {

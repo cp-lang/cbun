@@ -8,7 +8,7 @@ export @root struct CertificateInfo {
     cert_error: HTTPCertError,
     hostname: string,
 
-    fn deinit(this, allocator: std.mem.Allocator): void {
+    pub fn deinit(&this, allocator: std.mem.Allocator) {
         allocator.free(this.cert);
         allocator.free(this.cert_error.code);
         allocator.free(this.cert_error.reason);

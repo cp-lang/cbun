@@ -1,18 +1,15 @@
 // src/http/h3_client/callbacks.cp
 // lsquic -> Zig callbacks for the HTTP/3 client in CP language
 
-zig {
-    const bun = @import("bun");
-    const quic = bun.uws.quic;
-    pub const ManyU8 = [*]const u8;
-}
+const bun = @import("bun");
+const quic = bun.uws.quic;
 
 import { ClientContext } from "./ClientContext.cp";
 import { ClientSession } from "./ClientSession.cp";
 import { Stream } from "./Stream.cp";
 import * as encode from "./encode.cp";
 
-export fn register(qctx: *quic.Context): void {
+export fn register(qctx: *quic.Context) {
     qctx.onHskDone(onHskDone);
     qctx.onGoaway(onGoaway);
     qctx.onClose(onConnClose);
@@ -23,7 +20,7 @@ export fn register(qctx: *quic.Context): void {
     qctx.onStreamClose(onStreamClose);
 }
 
-@c pub fn onHskDone(qs: *quic.Socket, ok: i32): void {
+@c pub fn onHskDone(qs: *quic.Socket, ok: i32) {
     if (session := qs.ext(ClientSession).*) {
         if (ok == 0) {
             session.closed = true;
@@ -38,13 +35,13 @@ export fn register(qctx: *quic.Context): void {
     }
 }
 
-@c pub fn onGoaway(qs: *quic.Socket): void {
+@c pub fn onGoaway(qs: *quic.Socket) {
     if (session := qs.ext(ClientSession).*) {
         session.closed = true;
     }
 }
 
-@c pub fn onConnClose(qs: *quic.Socket): void {
+@c pub fn onConnClose(qs: *quic.Socket) {
     if (session := qs.ext(ClientSession).*) {
         session.closed = true;
         session.qsocket = null;
@@ -55,43 +52,40 @@ export fn register(qctx: *quic.Context): void {
             ctx.unregister(session);
         }
         while (session.pending.items.len > 0) {
-            const stream = session.pending.items[0];
-            bun.debugAssert(stream.qstream == null);
-            let mut err_val: anyerror = error.HTTP3HandshakeFailed;
+            let err_val: anyerror = error.HTTP3HandshakeFailed;
             if (session.handshake_done) {
                 err_val = error.ConnectionClosed;
             }
-            session.retryOrFail(stream, err_val);
+            session.retryOrFail(session.pending.items[0], err_val);
         }
         bun.http.H3.live_sessions.fetchSub(1, .monotonic);
         session.deref();
     }
 }
 
-@c pub fn onStreamOpen(s: *quic.Stream, is_client: i32): void {
+@c pub fn onStreamOpen(s: *quic.Stream, is_client: i32) {
     s.ext(Stream).* = null;
     if (is_client == 0) return;
 
     if (qs := s.socket()) {
         if (session := qs.ext(ClientSession).*) {
-            zig {
-                var found_stream: ?*Stream = null;
-                for (session.pending.items) |st| {
-                    if (st.qstream == null) {
-                        found_stream = st;
-                        break;
-                    }
+            let target: ?*Stream = null;
+            for (st of session.pending.items) {
+                if (st.qstream == null) {
+                    target = st;
+                    break;
                 }
-                if (found_stream) |stream| {
-                    stream.qstream = s;
-                    s.ext(Stream).* = stream;
-                    encode.writeRequest(session, stream, s) catch |err| {
-                        session.fail(stream, err);
-                    };
-                } else {
-                    s.close();
-                    return;
-                }
+            }
+            if (target != null) {
+                let st = target.?;
+                st.qstream = s;
+                s.ext(Stream).* = st;
+                encode.writeRequest(session, st, s) catch (err) {
+                    session.fail(st, err);
+                };
+            } else {
+                s.close();
+                return;
             }
         } else {
             s.close();
@@ -102,7 +96,7 @@ export fn register(qctx: *quic.Context): void {
     }
 }
 
-@c pub fn onStreamHeaders(s: *quic.Stream): void {
+@c pub fn onStreamHeaders(s: *quic.Stream) {
     if (stream := s.ext(Stream).*) {
         const n = s.headerCount();
 
@@ -136,7 +130,7 @@ export fn register(qctx: *quic.Context): void {
     }
 }
 
-@c pub fn onStreamData(s: *quic.Stream, data: ManyU8, len: u32, fin: i32): void {
+@c pub fn onStreamData(s: *quic.Stream, data: [*]u8, len: u32, fin: i32) {
     if (stream := s.ext(Stream).*) {
         if (len > 0) {
             bun.handleOom(stream.body_buffer.appendSlice(bun.default_allocator, data[0..len]));
@@ -145,13 +139,13 @@ export fn register(qctx: *quic.Context): void {
     }
 }
 
-@c pub fn onStreamWritable(s: *quic.Stream): void {
+@c pub fn onStreamWritable(s: *quic.Stream) {
     if (stream := s.ext(Stream).*) {
         encode.drainSendBody(stream, s);
     }
 }
 
-@c pub fn onStreamClose(s: *quic.Stream): void {
+@c pub fn onStreamClose(s: *quic.Stream) {
     if (stream := s.ext(Stream).*) {
         s.ext(Stream).* = null;
         stream.qstream = null;

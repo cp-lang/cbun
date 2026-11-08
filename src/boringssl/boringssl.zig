@@ -17,282 +17,240 @@ fn cp_opt_is_null(v: anytype) bool {
 }
 fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
     const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) {
-        return v.?;
-    } else {
-        return v;
-    }
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
 }
-fn cp_cast_int(comptime Dest: type, val: anytype) Dest {
-    const Src = @TypeOf(val);
-    if (comptime Src == Dest) return val;
-    if (comptime Src == comptime_int) {
-        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val));
-    }
-    const src_bits = @typeInfo(Src).int.bits;
-    const dest_bits = @typeInfo(Dest).int.bits;
-    if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {
-        if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val);
-    }
-    if (comptime @typeInfo(Src).int.signedness == .signed) {
-        const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val);
-        const u: u128 = @bitCast(s);
-        if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u);
-    } else {
-        const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val);
-        const s: i128 = @bitCast(u);
-        if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s);
-    }
-}
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 pub const boring = @import("../boringssl_sys/boringssl.zig");
-pub const c = boring;
-pub const builtin = @import("builtin");
-pub const ERR_toJS = @import("../runtime/crypto/boringssl_jsc.zig").ERR_toJS;
-const bun = @import("bun");
-const strings = bun.strings;
+    pub const c = boring;
+    pub const builtin = @import("builtin");
+    pub const ERR_toJS = @import("../runtime/crypto/boringssl_jsc.zig").ERR_toJS;
+    const bun = @import("bun");
+    const strings = bun.strings;
 
-const INET6_ADDRSTRLEN = if (bun.Environment.isWindows) 65 else 46;
-pub const OutIPBuf = *[INET6_ADDRSTRLEN + 1]u8;
-pub const IPTextBuf = [INET6_ADDRSTRLEN + 1]u8;
-pub const CStrPtr = [*:0]u8;
-pub const GeneralNameStack = *boring.struct_stack_st_GENERAL_NAME;
-pub const SSL_CTX_Ptr = ?*boring.SSL_CTX;
-pub const SSL_Ptr = *boring.SSL;
-pub const X509_Ptr = *boring.X509;
-pub const ASN1_OCTET_STRING_Ptr = *boring.ASN1_OCTET_STRING;
-pub export fn OPENSSL_memory_alloc(size: usize) ?*anyopaque {
-    return bun.mimalloc.mi_malloc(size);
-}
-
-pub export fn OPENSSL_memory_free(ptr: *anyopaque) void {
-    const len = bun.mimalloc.mi_usable_size(ptr);
-    @memset(@as([*]u8, @ptrCast(ptr))[0..len], 0);
-    bun.mimalloc.mi_free(ptr);
-}
-
-pub export fn OPENSSL_memory_get_size(ptr: ?*const anyopaque) usize {
-    return bun.mimalloc.mi_usable_size(ptr);
-}
-pub var loaded = false;
-pub var ctx_store: ?SSL_CTX_Ptr = null;
-pub fn cp_string_from(val: anytype) []const u8 {
-    const T = @TypeOf(val);
-    if (comptime T == []const u8) {
-        return val;
-    } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) {
-        return std.mem.span(val);
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) {
-        return val;
-    } else if (comptime (@typeInfo(T) == .@"enum")) {
-        return @tagName(val);
-    } else if (comptime T == bool) {
-        return if (val) "true" else "false";
-    } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0";
-    } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0";
-    } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) {
-        return val.toString();
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) {
-        return val.toString();
-    } else {
-        return @typeName(T);
+    const INET6_ADDRSTRLEN = if (bun.Environment.isWindows) 65 else 46;
+    pub const OutIPBuf = *[INET6_ADDRSTRLEN + 1]u8;
+    pub const IPTextBuf = [INET6_ADDRSTRLEN + 1]u8;
+    pub const CStrPtr = [*:0]u8;
+    pub const GeneralNameStack = *boring.struct_stack_st_GENERAL_NAME;
+    pub const SSL_CTX_Ptr = ?*boring.SSL_CTX;
+    pub const SSL_Ptr = *boring.SSL;
+    pub const X509_Ptr = *boring.X509;
+    pub const ASN1_OCTET_STRING_Ptr = *boring.ASN1_OCTET_STRING;
+    pub export fn OPENSSL_memory_alloc(size: usize) ?*anyopaque {
+        return bun.mimalloc.mi_malloc(size);
     }
-}
+
+    pub export fn OPENSSL_memory_free(ptr: *anyopaque) void {
+        const len = bun.mimalloc.mi_usable_size(ptr);
+        @memset(@as([*]u8, @ptrCast(ptr))[0..len], 0);
+        bun.mimalloc.mi_free(ptr);
+    }
+
+    pub export fn OPENSSL_memory_get_size(ptr: ?*const anyopaque) usize {
+        return bun.mimalloc.mi_usable_size(ptr);
+    }
+var loaded = false;
+var ctx_store: ?SSL_CTX_Ptr = null;
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const X509 = @import("../runtime/api/bun/x509.zig");
 pub const c_ares = @import("../cares_sys/c_ares.zig");
 
 pub fn load() void {
-    if (loaded) {
-        return;
-    }
-    loaded = true;
-    _ = boring.CRYPTO_library_init();
-    _ = bun.assert((boring.SSL_library_init() > 0));
-    _ = boring.SSL_load_error_strings();
-    _ = boring.ERR_load_BIO_strings();
-    _ = boring.OpenSSL_add_all_algorithms();
-    if ((!builtin.is_test)) {
-        _ = std.mem.doNotOptimizeAway((&OPENSSL_memory_alloc));
-        _ = std.mem.doNotOptimizeAway((&OPENSSL_memory_get_size));
-        _ = std.mem.doNotOptimizeAway((&OPENSSL_memory_free));
-    }
+        if (loaded) {
+            return;
+        }
+        loaded = true;
+        _ = boring.CRYPTO_library_init();
+        _ = bun.assert((boring.SSL_library_init() > 0));
+        _ = boring.SSL_load_error_strings();
+        _ = boring.ERR_load_BIO_strings();
+        _ = boring.OpenSSL_add_all_algorithms();
+        if ((!builtin.is_test)) {
+            _ = std.mem.doNotOptimizeAway((&OPENSSL_memory_alloc));
+            _ = std.mem.doNotOptimizeAway((&OPENSSL_memory_get_size));
+            _ = std.mem.doNotOptimizeAway((&OPENSSL_memory_free));
+        }
 }
 
 pub fn initClient() SSL_Ptr {
-    if ((ctx_store != null)) {
-        _ = boring.SSL_CTX_up_ref(ctx_store.?);
-    }
-    if ((ctx_store == null)) {
-        ctx_store = (boring.SSL_CTX.init()).?;
-    }
-    const ctx = ctx_store.?;
-    _ = &ctx;
-    var ssl = boring.SSL.init(ctx);
-    _ = &ssl;
-    _ = ssl.setIsClient(true);
-    return ssl;
+        if ((ctx_store != null)) {
+            _ = boring.SSL_CTX_up_ref(ctx_store.?);
+        }
+        if ((ctx_store == null)) {
+            ctx_store = (boring.SSL_CTX.init()).?;
+        }
+        const ctx = ctx_store.?;
+        _ = &ctx;
+        var ssl = boring.SSL.init(ctx);
+        _ = &ssl;
+        _ = ssl.setIsClient(true);
+        return ssl;
 }
 
 pub fn canonicalizeIP(addr_str: []const u8, outIP: *IPTextBuf) ?[]const u8 {
-    if ((addr_str.len >= INET6_ADDRSTRLEN)) {
-        return null;
-    }
-    var ip_std_text: IPTextBuf = undefined;
-    _ = &ip_std_text;
-    _ = bun.copy(u8, outIP, addr_str);
-    outIP[cp_cast_int(usize, addr_str.len)] = 0;
-    var af: i32 = std.posix.AF.INET;
-    _ = &af;
-    if ((c_ares.ares_inet_pton(af, outIP, (&ip_std_text)) <= 0)) {
-        af = std.posix.AF.INET6;
-        if ((c_ares.ares_inet_pton(af, outIP, (&ip_std_text)) <= 0)) {
+        if ((addr_str.len >= INET6_ADDRSTRLEN)) {
             return null;
         }
-    }
-    if ((c_ares.ares_inet_ntop(af, (&ip_std_text), outIP, outIP.len) == null)) {
-        return null;
-    }
-    const size = bun.len(bun.cast(CStrPtr, outIP));
-    _ = &size;
-    return outIP[0..size];
+        var ip_std_text: IPTextBuf = undefined;
+        _ = &ip_std_text;
+        _ = bun.copy(u8, outIP, addr_str);
+        outIP[cp_cast_int(usize, addr_str.len)] = 0;
+        var af: i32 = std.posix.AF.INET;
+        _ = &af;
+        if ((c_ares.ares_inet_pton(af, outIP, (&ip_std_text)) <= 0)) {
+            af = std.posix.AF.INET6;
+            if ((c_ares.ares_inet_pton(af, outIP, (&ip_std_text)) <= 0)) {
+                return null;
+            }
+        }
+        if ((c_ares.ares_inet_ntop(af, (&ip_std_text), outIP, outIP.len) == null)) {
+            return null;
+        }
+        const size = bun.len(bun.cast(CStrPtr, outIP));
+        _ = &size;
+        return outIP[0..size];
 }
 
 pub fn ip2String(ip: *boring.ASN1_OCTET_STRING, outIP: *IPTextBuf) ?[]const u8 {
-    var af: i32 = std.posix.AF.INET6;
-    _ = &af;
-    if ((ip.length == 4)) {
-        af = std.posix.AF.INET;
-    }
-    if ((c_ares.ares_inet_ntop(af, ip.data, outIP, outIP.len) == null)) {
-        return null;
-    }
-    const size = bun.len(bun.cast(CStrPtr, outIP));
-    _ = &size;
-    return outIP[0..size];
+        var af: i32 = std.posix.AF.INET6;
+        _ = &af;
+        if ((ip.length == 4)) {
+            af = std.posix.AF.INET;
+        }
+        if ((c_ares.ares_inet_ntop(af, ip.data, outIP, outIP.len) == null)) {
+            return null;
+        }
+        const size = bun.len(bun.cast(CStrPtr, outIP));
+        _ = &size;
+        return outIP[0..size];
 }
 
 pub fn matchDnsName(pattern: []const u8, hostname: []const u8) bool {
-    if ((pattern.len == 0)) {
-        return false;
-    }
-    if ((!X509.isSafeAltName(pattern, false))) {
-        return false;
-    }
-    if ((pattern[0] == 42)) {
-        if (((pattern.len >= 2) and (pattern[1] == 46))) {
-            const suffix = pattern[2..];
-            _ = &suffix;
-            if (strings.containsChar(suffix, 46)) {
-                if ((hostname.len > (suffix.len + 1))) {
-                    const dot_index = ((hostname.len - suffix.len) - 1);
-                    _ = &dot_index;
-                    if (((hostname[@as(usize, @intCast(dot_index))] == 46) and (!strings.containsChar(hostname[0..dot_index], 46)))) {
-                        const host_suffix = hostname[(dot_index + 1)..];
-                        _ = &host_suffix;
-                        if (strings.eqlCaseInsensitiveASCII(suffix, host_suffix, true)) {
-                            return true;
+        if ((pattern.len == 0)) {
+            return false;
+        }
+        if ((!X509.isSafeAltName(pattern, false))) {
+            return false;
+        }
+        if ((pattern[0] == 42)) {
+            if (((pattern.len >= 2) and (pattern[1] == 46))) {
+                const suffix = pattern[2..];
+                _ = &suffix;
+                if (strings.containsChar(suffix, 46)) {
+                    if ((hostname.len > (suffix.len + 1))) {
+                        const dot_index = ((hostname.len - suffix.len) - 1);
+                        _ = &dot_index;
+                        if (((hostname[@as(usize, @intCast(dot_index))] == 46) and (!strings.containsChar(hostname[0..dot_index], 46)))) {
+                            const host_suffix = hostname[(dot_index + 1)..];
+                            _ = &host_suffix;
+                            if (strings.eqlCaseInsensitiveASCII(suffix, host_suffix, true)) {
+                                return true;
+                            }
                         }
                     }
                 }
             }
         }
-    }
-    return strings.eqlCaseInsensitiveASCII(pattern, hostname, true);
+        return strings.eqlCaseInsensitiveASCII(pattern, hostname, true);
 }
 
 pub fn checkX509ServerIdentity(x509: *boring.X509, hostname: []const u8) bool {
-    const host_is_ip = strings.isIPAddress(hostname);
-    _ = &host_is_ip;
-    var has_identifier_san = false;
-    _ = &has_identifier_san;
-    const index = boring.X509_get_ext_by_NID(x509, boring.NID_subject_alt_name, -1);
-    _ = &index;
-    if ((index >= 0)) {
-        if (boring.X509_get_ext(x509, index)) |ext| {
-            _ = &ext;
-            const method = boring.X509V3_EXT_get(ext);
-            _ = &method;
-            if ((method != boring.X509V3_EXT_get_nid(boring.NID_subject_alt_name))) {
-                return false;
-            }
-            if (host_is_ip) {
-                var canonicalIPBuf: IPTextBuf = undefined;
-                _ = &canonicalIPBuf;
-                var certIPBuf: IPTextBuf = undefined;
-                _ = &certIPBuf;
-                const host_ip = ((canonicalizeIP(hostname, (&canonicalIPBuf))) orelse (hostname));
-                _ = &host_ip;
-                if (boring.X509V3_EXT_d2i(ext)) |names_| {
-                    _ = &names_;
-                    const names = bun.cast(GeneralNameStack, names_);
-                    _ = &names;
-                    defer {
-                        _ = boring.sk_GENERAL_NAME_pop_free(names, boring.sk_GENERAL_NAME_free);
-                    }
-                    {
-                        var i: i32 = 0;
-                        _ = &i;
-                        const __end_0 = boring.sk_GENERAL_NAME_num(names);
-                        while (i < __end_0) : (i += 1) {
-                            const gen = boring.sk_GENERAL_NAME_value(names, @as(usize, @intCast(i)));
-                            _ = &gen;
-                            if (gen) |name| {
-                                _ = &name;
-                                switch (name.name_type) {
-                                    .GEN_DNS, .GEN_URI => {
-                                        has_identifier_san = true;
-                                    },
-                                    .GEN_IPADD => {
-                                        has_identifier_san = true;
-                                        if (ip2String(name.d.ip, (&certIPBuf))) |cert_ip| {
-                                            _ = &cert_ip;
-                                            if (strings.eql(host_ip, cert_ip)) {
-                                                return true;
-                                            }
-                                        }
-                                    },
-                                    else => {},
-                                }
-                            }
-                        }
-                    }
+        const host_is_ip = strings.isIPAddress(hostname);
+        _ = &host_is_ip;
+        var has_identifier_san = false;
+        _ = &has_identifier_san;
+        const index = boring.X509_get_ext_by_NID(x509, boring.NID_subject_alt_name, -1);
+        _ = &index;
+        if ((index >= 0)) {
+            if (boring.X509_get_ext(x509, index)) |ext| {
+                _ = &ext;
+                const method = boring.X509V3_EXT_get(ext);
+                _ = &method;
+                if ((method != boring.X509V3_EXT_get_nid(boring.NID_subject_alt_name))) {
+                    return false;
                 }
-            } else {
-                if (boring.X509V3_EXT_d2i(ext)) |names_| {
-                    _ = &names_;
-                    const names = bun.cast(GeneralNameStack, names_);
-                    _ = &names;
-                    defer {
+                if (host_is_ip) {
+                    var canonicalIPBuf: IPTextBuf = undefined;
+                    _ = &canonicalIPBuf;
+                    var certIPBuf: IPTextBuf = undefined;
+                    _ = &certIPBuf;
+                    const host_ip = ((canonicalizeIP(hostname, (&canonicalIPBuf))) orelse (hostname));
+                    _ = &host_ip;
+                    if (boring.X509V3_EXT_d2i(ext)) |names_| {
+                        _ = &names_;
+                        const names = bun.cast(GeneralNameStack, names_);
+                        _ = &names;
+                        defer {
                         _ = boring.sk_GENERAL_NAME_pop_free(names, boring.sk_GENERAL_NAME_free);
-                    }
-                    {
-                        var i: i32 = 0;
-                        _ = &i;
-                        const __end_1 = boring.sk_GENERAL_NAME_num(names);
-                        while (i < __end_1) : (i += 1) {
-                            const gen = boring.sk_GENERAL_NAME_value(names, @as(usize, @intCast(i)));
-                            _ = &gen;
-                            if (gen) |name| {
-                                _ = &name;
-                                switch (name.name_type) {
-                                    .GEN_IPADD, .GEN_URI => {
-                                        has_identifier_san = true;
-                                    },
-                                    .GEN_DNS => {
-                                        has_identifier_san = true;
-                                        const dnsName = name.d.dNSName;
-                                        _ = &dnsName;
-                                        const dns_len: usize = @intCast(dnsName.length);
-                                        _ = &dns_len;
-                                        const dnsNameSlice = dnsName.data[0..dns_len];
-                                        _ = &dnsNameSlice;
-                                        if (matchDnsName(dnsNameSlice, hostname)) {
+                        }
+                        {
+                            var i: i32 = 0;
+                            _ = &i;
+                            const __end_0 = boring.sk_GENERAL_NAME_num(names);
+                            while (i < __end_0) : (i += 1) {
+                                const gen = boring.sk_GENERAL_NAME_value(names, cp_cast_int(usize, i));
+                                _ = &gen;
+                                if (gen) |name| {
+                                    _ = &name;
+                                    switch (name.name_type) {
+.GEN_DNS, .GEN_URI => {
+has_identifier_san = true;
+},
+.GEN_IPADD => {
+has_identifier_san = true;
+                                    if (ip2String(name.d.ip, (&certIPBuf))) |cert_ip| {
+                                        _ = &cert_ip;
+                                        if (strings.eql(host_ip, cert_ip)) {
                                             return true;
                                         }
-                                    },
-                                    else => {},
+                                    }
+},
+else => {
+
+},
+}
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if (boring.X509V3_EXT_d2i(ext)) |names_| {
+                        _ = &names_;
+                        const names = bun.cast(GeneralNameStack, names_);
+                        _ = &names;
+                        defer {
+                        _ = boring.sk_GENERAL_NAME_pop_free(names, boring.sk_GENERAL_NAME_free);
+                        }
+                        {
+                            var i: i32 = 0;
+                            _ = &i;
+                            const __end_1 = boring.sk_GENERAL_NAME_num(names);
+                            while (i < __end_1) : (i += 1) {
+                                const gen = boring.sk_GENERAL_NAME_value(names, cp_cast_int(usize, i));
+                                _ = &gen;
+                                if (gen) |name| {
+                                    _ = &name;
+                                    switch (name.name_type) {
+.GEN_IPADD, .GEN_URI => {
+has_identifier_san = true;
+},
+.GEN_DNS => {
+has_identifier_san = true;
+                                    const dnsName = name.d.dNSName;
+                                    _ = &dnsName;
+                                    const dns_len: usize = @intCast(dnsName.length);
+                                    _ = &dns_len;
+                                    const dnsNameSlice = dnsName.data[0..dns_len];
+                                    _ = &dnsNameSlice;
+                                    if (matchDnsName(dnsNameSlice, hostname)) {
+                                        return true;
+                                    }
+},
+else => {
+
+},
+}
                                 }
                             }
                         }
@@ -300,60 +258,59 @@ pub fn checkX509ServerIdentity(x509: *boring.X509, hostname: []const u8) bool {
                 }
             }
         }
-    }
-    if (((!host_is_ip) and (!has_identifier_san))) {
-        if (boring.X509_get_subject_name(x509)) |subject| {
-            _ = &subject;
-            var last: i32 = -1;
-            _ = &last;
-            while (true) {
-                const entry_idx = boring.X509_NAME_get_index_by_NID(subject, boring.NID_commonName, last);
-                _ = &entry_idx;
-                if ((entry_idx < 0)) {
-                    break;
-                }
-                last = entry_idx;
-                const entry_opt = boring.X509_NAME_get_entry(subject, entry_idx);
-                _ = &entry_opt;
-                if ((entry_opt == null)) {
-                    continue;
-                }
-                const entry = entry_opt.?;
-                _ = &entry;
-                const data_opt = boring.X509_NAME_ENTRY_get_data(entry);
-                _ = &data_opt;
-                if ((data_opt == null)) {
-                    continue;
-                }
-                const data = data_opt.?;
-                _ = &data;
-                const cn_ptr = boring.ASN1_STRING_get0_data(data);
-                _ = &cn_ptr;
-                const cn_len = boring.ASN1_STRING_length(data);
-                _ = &cn_len;
-                if (((cn_ptr == null) or (cn_len <= 0))) {
-                    continue;
-                }
-                const cn_len_val: usize = @intCast(cn_len);
-                _ = &cn_len_val;
-                const cn = cn_ptr[0..cn_len_val];
-                _ = &cn;
-                if (matchDnsName(cn, hostname)) {
-                    return true;
+        if (((!host_is_ip) and (!has_identifier_san))) {
+            if (boring.X509_get_subject_name(x509)) |subject| {
+                _ = &subject;
+                var last: i32 = -1;
+                _ = &last;
+                while (true) {
+                    const entry_idx = boring.X509_NAME_get_index_by_NID(subject, boring.NID_commonName, last);
+                    _ = &entry_idx;
+                    if ((entry_idx < 0)) {
+                        break;
+                    }
+                    last = entry_idx;
+                    const entry_opt = boring.X509_NAME_get_entry(subject, entry_idx);
+                    _ = &entry_opt;
+                    if ((entry_opt == null)) {
+                        continue;
+                    }
+                    const entry = entry_opt.?;
+                    _ = &entry;
+                    const data_opt = boring.X509_NAME_ENTRY_get_data(entry);
+                    _ = &data_opt;
+                    if ((data_opt == null)) {
+                        continue;
+                    }
+                    const data = data_opt.?;
+                    _ = &data;
+                    const cn_ptr = boring.ASN1_STRING_get0_data(data);
+                    _ = &cn_ptr;
+                    const cn_len = boring.ASN1_STRING_length(data);
+                    _ = &cn_len;
+                    if (((cn_ptr == null) or (cn_len <= 0))) {
+                        continue;
+                    }
+                    const cn_len_val: usize = @intCast(cn_len);
+                    _ = &cn_len_val;
+                    const cn = cn_ptr[0..cn_len_val];
+                    _ = &cn;
+                    if (matchDnsName(cn, hostname)) {
+                        return true;
+                    }
                 }
             }
         }
-    }
-    return false;
+        return false;
 }
 
 pub fn checkServerIdentity(ssl_ptr: *boring.SSL, hostname: []const u8) bool {
-    if (boring.SSL_get_peer_cert_chain(ssl_ptr)) |cert_chain| {
-        _ = &cert_chain;
-        if (boring.sk_X509_value(cert_chain, 0)) |x509| {
-            _ = &x509;
-            return checkX509ServerIdentity(x509, hostname);
+        if (boring.SSL_get_peer_cert_chain(ssl_ptr)) |cert_chain| {
+            _ = &cert_chain;
+            if (boring.sk_X509_value(cert_chain, 0)) |x509| {
+                _ = &x509;
+                return checkX509ServerIdentity(x509, hostname);
+            }
         }
-    }
-    return false;
+        return false;
 }

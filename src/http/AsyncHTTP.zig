@@ -20,14 +20,13 @@ fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
     if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
 }
 const bun = @import("bun");
-    pub const PercentEncoding = @import("../url/url.zig").PercentEncoding;
+pub const PercentEncoding = @import("../url/url.zig").PercentEncoding;
 pub const Channel8 = bun.threading.Channel(HTTPClientResult, .{ .Static = 8 });
-    pub const Channel1000 = bun.threading.Channel(HTTPClientResult, .{ .Static = 1000 });
+pub const Channel1000 = bun.threading.Channel(HTTPClientResult, .{ .Static = 1000 });
 fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
 fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
 fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
 fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
-fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 fn cp_array_lit(comptime Elem: type, init_slice: []const Elem) []const Elem { const buf = std.heap.page_allocator.alloc(Elem, init_slice.len) catch unreachable; if (init_slice.len > 0) @memcpy(buf, init_slice); return buf; }
 fn CpArrayElemType(comptime PtrT: type) type { const S0 = @typeInfo(PtrT).pointer.child; const S1 = if (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one) @typeInfo(S0).pointer.child else S0; return @typeInfo(S1).pointer.child; }
 fn cp_array_push(arr_ptr: anytype, item: anytype) void { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const SliceT = @TypeOf(target_ptr.*); const Elem = @typeInfo(SliceT).pointer.child; const old_slice = target_ptr.*; const new_slice = std.heap.page_allocator.alloc(Elem, old_slice.len + 1) catch unreachable; if (old_slice.len > 0) @memcpy(new_slice[0..old_slice.len], old_slice); new_slice[old_slice.len] = @as(Elem, cp_val(item)); target_ptr.* = new_slice; }
@@ -223,19 +222,7 @@ pub fn preconnect(url: bun.URL, is_url_owned: bool) void {
         }
         var preconnect_ptr = Preconnect.new(.{ .async_http = undefined, .response_buffer = MutableString{ .allocator = bun.http.default_allocator, .list = .{} }, .url = url, .is_url_owned = is_url_owned });
         _ = &preconnect_ptr;
-        preconnect_ptr.async_http = AsyncHTTP.init(
-                bun.default_allocator,
-                .GET,
-                url,
-                .{},
-                "",
-                &preconnect_ptr.response_buffer,
-                "",
-                HTTPClientResult.Callback.New(*Preconnect, Preconnect.onResult).init(preconnect_ptr),
-                .manual,
-                .{},
-            );
-
+        preconnect_ptr.async_http = AsyncHTTP.init(bun.default_allocator, .GET, url, Headers.Entry.List.empty, "", (&preconnect_ptr.response_buffer), "", HTTPClientResult.Callback.New(*Preconnect, Preconnect.onResult).init(preconnect_ptr), .manual, Options{  });
         preconnect_ptr.async_http.client.flags.is_preconnect_only = true;
         _ = bun.http.http_thread.schedule(bun.ThreadPool.Batch.from((&preconnect_ptr.async_http.task)));
 }
@@ -406,11 +393,7 @@ pub fn sendSync(self: *AsyncHTTP) !bun.picohttp.Response {
         var ctx = try bun.default_allocator.create(SingleHTTPChannel);
         _ = &ctx;
         ctx.* = SingleHTTPChannel.init();
-        self.result_callback = HTTPClientResult.Callback.New(
-                *SingleHTTPChannel,
-                sendSyncCallback,
-            ).init(ctx);
-
+        self.result_callback = HTTPClientResult.Callback.New(*SingleHTTPChannel, sendSyncCallback).init(ctx);
         var batch = ThreadPoolBatch{  };
         _ = &batch;
         _ = self.schedule(bun.default_allocator, (&batch));
@@ -423,7 +406,6 @@ pub fn sendSync(self: *AsyncHTTP) !bun.picohttp.Response {
         }
         _ = bun.assert((result.metadata != null));
         return result.metadata.?.response;
-
 }
 
 pub fn onAsyncHTTPCallback(self: *AsyncHTTP, async_http: *AsyncHTTP, result: HTTPClientResult) void {
@@ -464,10 +446,12 @@ pub fn onAsyncHTTPCallback(self: *AsyncHTTP, async_http: *AsyncHTTP, result: HTT
             {
                 _ = self.client.deinit();
                 const threadlocal_http: *bun.http.ThreadlocalAsyncHTTP = @fieldParentPtr("async_http", async_http);
-                    defer threadlocal_http.deinit();
-                    bun.Output.scoped(.AsyncHTTP, .visible)("onAsyncHTTPCallback: {D}", .{self.elapsed});
-                    callback.function(callback.ctx, async_http, result);
-
+                _ = &threadlocal_http;
+                defer {
+                _ = threadlocal_http.deinit();
+                }
+                _ = bun.Output.scoped(.AsyncHTTP, .visible)("onAsyncHTTPCallback: {D}", .{ self.elapsed });
+                _ = callback.function(callback.ctx, async_http, result);
             }
             const active_requests = AsyncHTTP.active_requests_count.fetchSub(1, .monotonic);
             _ = &active_requests;
@@ -478,12 +462,17 @@ pub fn onAsyncHTTPCallback(self: *AsyncHTTP, async_http: *AsyncHTTP, result: HTT
         }
 }
 
+pub fn startAsyncHTTP(task: *bun.ThreadPool.Task) void {
+        const this_ptr: *AsyncHTTP = @fieldParentPtr("task", task);
+        _ = &this_ptr;
+        _ = this_ptr.onStart();
+}
+
 pub fn onStart(self: *AsyncHTTP) void {
         _ = AsyncHTTP.active_requests_count.fetchAdd(1, .monotonic);
         self.err = null;
         _ = self.state.store(.sending, .monotonic);
         self.client.result_callback = HTTPClient.HTTPClientResult.Callback.New(*AsyncHTTP, onAsyncHTTPCallback).init(self);
-
         self.elapsed = bun.http.http_thread.timer.read();
         if ((self.response_buffer.list.capacity == 0)) {
             self.response_buffer.allocator = bun.http.default_allocator;
@@ -491,11 +480,7 @@ pub fn onStart(self: *AsyncHTTP) void {
         _ = self.client.start(self.request_body, self.response_buffer);
 }
 pub var active_requests_count = std.atomic.Value(usize).init(0);
-        pub var max_simultaneous_requests = std.atomic.Value(usize).init(256);
-pub fn startAsyncHTTP(task: *bun.ThreadPool.Task) void {
-            const this_ptr: *AsyncHTTP = @fieldParentPtr("task", task);
-            this_ptr.onStart();
-        }
+pub var max_simultaneous_requests = std.atomic.Value(usize).init(256);
 const MutableString = bun.MutableString;
 const ThreadPoolBatch = bun.ThreadPool.Batch;
 
@@ -503,7 +488,7 @@ pub fn sendSyncCallback(channel_holder: *SingleHTTPChannel, async_http: *AsyncHT
         if (async_http.real) |real| {
             _ = &real;
             real.* = async_http.*;
-            real.response_buffer = async_http.response_buffer;
+            cp_opt_unwrap(real).response_buffer = async_http.response_buffer;
         }
         _ = (blk_catch_18: { break :blk_catch_18 ((channel_holder.channel.writeItem(result)) catch |__ce_18| { _ = &__ce_18; @panic("unreachable"); }); });
 }

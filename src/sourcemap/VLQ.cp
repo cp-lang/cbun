@@ -1,7 +1,6 @@
 // src/sourcemap/VLQ.cp
 // Bun VLQ (Variable-Length Quantity) encoder & decoder in CP language
 
-
 const vlq_max_in_bytes: usize = 7;
 const base64: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -14,7 +13,7 @@ export @root struct VLQ {
         return this.bytes[0..this.len as usize];
     }
 
-    pub fn writeTo(this, writer: anytype)! {
+    pub fn writeTo(this, writer: auto)! {
         writer.writeAll(this.bytes[0..this.len as usize])?;
     }
 }
@@ -32,7 +31,7 @@ export struct VLQResult {
 }
 
 fn make_base64_lut(): [u8; 128] {
-    let mut bytes: [u8; 128] = [127; 128];
+    let bytes: [u8; 128] = [127; 128];
     for (let i of 0..64) {
         let c = base64[i as usize];
         bytes[c as usize] = i as u8;
@@ -41,10 +40,10 @@ fn make_base64_lut(): [u8; 128] {
 }
 
 fn make_vlq_lookup_table(): [VLQ; 256] {
-    zig {
+    @{
         @setEvalBranchQuota(9999);
     }
-    let mut entries: [VLQ; 256] = [VLQ { bytes: [0; 7], len: 0 }; 256];
+    let entries: [VLQ; 256] = [VLQ { bytes: [0; 7], len: 0 }; 256];
     for (let i of 0..256) {
         entries[i as usize] = encodeSlowPath(i);
     }
@@ -64,10 +63,10 @@ pub fn encode(value: i32): VLQ {
 }
 
 pub fn encodeSlowPath(value: i32): VLQ {
-    let mut len: u8 = 0;
-    let mut bytes: [u8; 7] = [0; 7];
+    let len: u8 = 0;
+    let bytes: [u8; 7] = [0; 7];
 
-    let mut vlq: u32 = 0;
+    let vlq: u32 = 0;
     if (value >= 0) {
         vlq = (value as u32) << 1;
     } else {
@@ -75,7 +74,7 @@ pub fn encodeSlowPath(value: i32): VLQ {
     }
 
     for (let step of 0..7) {
-        let mut digit: u32 = vlq & 31;
+        let digit: u32 = vlq & 31;
         vlq = vlq >> 5;
 
         if (vlq != 0) {
@@ -94,11 +93,11 @@ pub fn encodeSlowPath(value: i32): VLQ {
 }
 
 pub fn decode(encoded: string, start: usize): VLQResult {
-    let mut shift: u8 = 0;
-    let mut vlq: u32 = 0;
+    let shift: u8 = 0;
+    let vlq: u32 = 0;
 
     let rem = encoded[start..];
-    let mut max_len: usize = 8;
+    let max_len: usize = 8;
     if (rem.len < 8) {
         max_len = rem.len;
     }
@@ -116,7 +115,7 @@ pub fn decode(encoded: string, start: usize): VLQResult {
         shift += 5;
 
         if ((index & 32) == 0) {
-            let mut res_val: i32 = 0;
+            let res_val: i32 = 0;
             if ((vlq & 1) == 0) {
                 res_val = (vlq >> 1) as i32;
             } else {

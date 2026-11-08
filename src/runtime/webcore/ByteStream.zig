@@ -84,7 +84,7 @@ pub fn onData(
     jsc.markBinding(@src());
     if (this.done) {
         if (stream.isDone() and (stream == .owned or stream == .owned_and_done)) {
-            if (stream == .owned) allocator.free(stream.owned.slice());
+            if (stream == .owned) allocator.free(stream.slice());
             if (stream == .owned_and_done) allocator.free(stream.owned_and_done.slice());
         }
         this.has_received_last_chunk = stream.isDone();

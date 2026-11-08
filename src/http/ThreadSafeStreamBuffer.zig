@@ -19,20 +19,21 @@ fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
     const T = @TypeOf(v);
     if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
 }
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
-    const StreamLock = bun.Mutex;
-fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const StreamLock = bun.Mutex;
 pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const Callback = struct {
-    callback: *const fn (?*anyopaque) void,
-    context: ?*anyopaque = null,
+    callback: *const fn (*anyopaque) void,
+    context: *anyopaque,
     
 pub fn _create(allocator: std.mem.Allocator) !*Callback { const self_ptr = try allocator.create(Callback); self_ptr.* = undefined; return self_ptr; }
 
-pub fn init(self: *Callback, callback: *const fn (?*anyopaque) void, context: ?*anyopaque) void {
-            self.callback = callback;
-            self.context = context;
+pub fn init(comptime T: type, callback: *const fn (*T) void, context: *T) Callback {
+            {
+                return .{ .callback = @as(*const fn (*anyopaque) void, @ptrCast(callback)), .context = @as(*anyopaque, @ptrCast(@alignCast(context))) };
+            }
     }
 
 pub fn call(self: *const Callback) void {
@@ -56,6 +57,10 @@ pub fn release(self: *ThreadSafeStreamBuffer) void {
         _ = self.mutex.unlock();
 }
 
+pub fn setDrainCallback(self: *ThreadSafeStreamBuffer, comptime T: type, callback: *const fn (*T) void, context: *T) void {
+        self.callback = Callback.init(T, callback, context);
+}
+
 pub fn clearDrainCallback(self: *ThreadSafeStreamBuffer) void {
         self.callback = null;
 }
@@ -74,18 +79,6 @@ pub fn deinit(self: *ThreadSafeStreamBuffer) void {
         _ = bun.destroy(self);
 }
 pub const StreamBufferRefCount = bun.ptr.ThreadSafeRefCount(ThreadSafeStreamBuffer, "ref_count", ThreadSafeStreamBuffer.deinit, .{});
-        pub const ref = StreamBufferRefCount.ref;
-        pub const deref = StreamBufferRefCount.deref;
-        pub const new = bun.TrivialNew(ThreadSafeStreamBuffer);
-
-        pub fn setDrainCallback(self: *ThreadSafeStreamBuffer, comptime Context: type, comptime callback: anytype, context: *Context) void {
-            const Wrapper = struct {
-                fn call(ctx: ?*anyopaque) void {
-                    @call(bun.callmod_inline, callback, .{@as(*Context, @ptrCast(@alignCast(ctx)))});
-                }
-            };
-            self.callback = .{
-                .callback = Wrapper.call,
-                .context = context,
-            };
-        }
+pub const ref = StreamBufferRefCount.ref;
+pub const deref = StreamBufferRefCount.deref;
+pub const new = bun.TrivialNew(ThreadSafeStreamBuffer);

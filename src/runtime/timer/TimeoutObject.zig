@@ -68,8 +68,8 @@ pub fn doRef(self: *Self, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame
     return self.internals.doRef(globalThis, callFrame.this());
 }
 
-pub fn doUnref(self: *Self, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
-    return self.internals.doUnref(globalThis, callFrame.this());
+pub fn doUnref(self: *Self, globalFree: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
+    return self.internals.doUnref(globalFree, callFrame.this());
 }
 
 pub fn doRefresh(self: *Self, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {

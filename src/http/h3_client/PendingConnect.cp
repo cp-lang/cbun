@@ -1,13 +1,11 @@
 // src/http/h3_client/PendingConnect.cp
 // DNS-pending QUIC connect in CP language
 
-zig {
-    const bun = @import("bun");
-    const uws = bun.uws;
-    const quic = uws.quic;
-    var resolved_mutex: bun.Mutex = .{};
-    var resolved_head: ?*PendingConnect = null;
-}
+const bun = @import("bun");
+const uws = bun.uws;
+const quic = uws.quic;
+let resolved_mutex: bun.Mutex = {};
+let resolved_head: ?*PendingConnect = null;
 
 import { ClientSession } from "./ClientSession.cp";
 
@@ -15,43 +13,40 @@ export @root struct PendingConnect {
     session: *ClientSession,
     pc: *quic.PendingConnect,
     loop_ptr: *uws.Loop,
-    next: *PendingConnect? = null,
+    next: ?*PendingConnect = null,
 
-    static fn register(session: *ClientSession, pc: *quic.PendingConnect, l: *uws.Loop): void {
-        const item = bun.new(PendingConnect, { session: session, pc: pc, loop_ptr: l });
+    static fn register(session: *ClientSession, pc: *quic.PendingConnect, l: *uws.Loop) {
         session.ref();
+        const item = bun.new(PendingConnect, { session: session, pc: pc, loop_ptr: l });
         bun.dns.internal.registerQuic(@ptrCast(@alignCast(pc.addrinfo())), item);
     }
 
-    fn loop(*this): any {
+    fn loop(*this): *uws.Loop {
         return this.loop_ptr;
     }
 
-    fn onDNSResolved(*this): void {
-        const session = this.session;
+    fn onDNSResolved(*this) {
         defer {
-            session.deref();
+            this.session.deref();
             bun.destroy(this);
         }
-        if (session.closed || session.pending.items.len == 0) {
+        if (this.session.closed || this.session.pending.items.len == 0) {
             this.pc.cancel();
-            if (!session.closed) {
-                failSession(session, error.Aborted);
+            if (!this.session.closed) {
+                failSession(this.session, error.Aborted);
             }
             return;
         }
         if (qs := this.pc.resolved()) {
-            session.qsocket = qs;
-            zig {
-                qs.ext(ClientSession).* = session;
-            }
+            this.session.qsocket = qs;
+            qs.ext(ClientSession).* = this.session;
         } else {
-            failSession(session, error.DNSResolutionFailed);
+            failSession(this.session, error.DNSResolutionFailed);
             return;
         }
     }
 
-    fn onDNSResolvedThreadsafe(*this): void {
+    fn onDNSResolvedThreadsafe(*this) {
         resolved_mutex.lock();
         this.next = resolved_head;
         resolved_head = this;
@@ -59,7 +54,7 @@ export @root struct PendingConnect {
         this.loop_ptr.wakeup();
     }
 
-    static fn drainResolved(): void {
+    static fn drainResolved() {
         resolved_mutex.lock();
         let head = resolved_head;
         resolved_head = null;
@@ -71,7 +66,7 @@ export @root struct PendingConnect {
         }
     }
 
-    static fn failSession(session: *ClientSession, err: anyerror): void {
+    static fn failSession(session: *ClientSession, err: anyerror) {
         session.closed = true;
         if (ctx := bun.http.H3.ClientContext.get()) {
             ctx.unregister(session);

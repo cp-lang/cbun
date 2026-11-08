@@ -2,21 +2,25 @@
 const std = @import("std");
 const string = []const u8;
 
-const c = struct {
-        pub extern fn us_connecting_socket_close(s: *ConnectingSocket) void;
-        pub extern fn us_connecting_socket_group(s: *ConnectingSocket) *SocketGroup;
-        pub extern fn us_connecting_socket_kind(s: *ConnectingSocket) u8;
-        pub extern fn us_connecting_socket_ext(s: *ConnectingSocket) *anyopaque;
-        pub extern fn us_connecting_socket_get_error(s: *ConnectingSocket) i32;
-        pub extern fn us_connecting_socket_get_native_handle(s: *ConnectingSocket) ?*anyopaque;
-        pub extern fn us_connecting_socket_is_closed(s: *ConnectingSocket) i32;
-        pub extern fn us_connecting_socket_is_shut_down(s: *ConnectingSocket) i32;
-        pub extern fn us_connecting_socket_long_timeout(s: *ConnectingSocket, seconds: c_uint) void;
-        pub extern fn us_connecting_socket_shutdown(s: *ConnectingSocket) void;
-        pub extern fn us_connecting_socket_shutdown_read(s: *ConnectingSocket) void;
-        pub extern fn us_connecting_socket_timeout(s: *ConnectingSocket, seconds: c_uint) void;
-        pub extern fn us_connecting_socket_get_loop(s: *ConnectingSocket) *Loop;
-    };
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const SocketGroup = @import("./SocketGroup.zig").SocketGroup;
 pub const SocketKind = @import("./SocketKind.zig").SocketKind;
@@ -24,11 +28,11 @@ pub const Loop = @import("./Loop.zig").Loop;
 pub const ConnectingSocket = opaque {
 
 pub fn close(self: *ConnectingSocket) void {
-            _ = c.us_connecting_socket_close(self);
+            _ = us_connecting_socket_close(self);
     }
 
 pub fn group(self: *ConnectingSocket) *SocketGroup {
-            return c.us_connecting_socket_group(self);
+            return us_connecting_socket_group(self);
     }
 
 pub fn rawGroup(self: *ConnectingSocket) *SocketGroup {
@@ -36,47 +40,76 @@ pub fn rawGroup(self: *ConnectingSocket) *SocketGroup {
     }
 
 pub fn kind(self: *ConnectingSocket) SocketKind {
-            return @enumFromInt(c.us_connecting_socket_kind(self));
+            return @enumFromInt(us_connecting_socket_kind(self));
+
     }
 
 pub fn loop(self: *ConnectingSocket) *Loop {
-            return c.us_connecting_socket_get_loop(self);
+            return us_connecting_socket_get_loop(self);
     }
 
 pub fn ext(self: *ConnectingSocket, comptime T: type) *T {
-            return @ptrCast(@alignCast(c.us_connecting_socket_ext(self)));
+            {
+                return @as(*T, @ptrCast(@alignCast(us_connecting_socket_ext(self))));
+            }
     }
 
 pub fn getError(self: *ConnectingSocket) i32 {
-            return c.us_connecting_socket_get_error(self);
+            return us_connecting_socket_get_error(self);
     }
 
 pub fn getNativeHandle(self: *ConnectingSocket) ?*anyopaque {
-            return c.us_connecting_socket_get_native_handle(self);
+            return us_connecting_socket_get_native_handle(self);
     }
 
 pub fn isClosed(self: *ConnectingSocket) bool {
-            return (c.us_connecting_socket_is_closed(self) == 1);
+            return (us_connecting_socket_is_closed(self) == 1);
     }
 
 pub fn isShutdown(self: *ConnectingSocket) bool {
-            return (c.us_connecting_socket_is_shut_down(self) == 1);
+            return (us_connecting_socket_is_shut_down(self) == 1);
     }
 
 pub fn longTimeout(self: *ConnectingSocket, seconds: u32) void {
-            _ = c.us_connecting_socket_long_timeout(self, seconds);
+            _ = us_connecting_socket_long_timeout(self, seconds);
     }
 
 pub fn shutdown(self: *ConnectingSocket) void {
-            _ = c.us_connecting_socket_shutdown(self);
+            _ = us_connecting_socket_shutdown(self);
     }
 
 pub fn shutdownRead(self: *ConnectingSocket) void {
-            _ = c.us_connecting_socket_shutdown_read(self);
+            _ = us_connecting_socket_shutdown_read(self);
     }
 
 pub fn timeout(self: *ConnectingSocket, seconds: u32) void {
-            _ = c.us_connecting_socket_timeout(self, seconds);
+            _ = us_connecting_socket_timeout(self, seconds);
     }
 };
 
+
+pub extern "c" fn us_connecting_socket_close(s: *ConnectingSocket) void;
+
+pub extern "c" fn us_connecting_socket_group(s: *ConnectingSocket) *SocketGroup;
+
+pub extern "c" fn us_connecting_socket_kind(s: *ConnectingSocket) u8;
+
+pub extern "c" fn us_connecting_socket_ext(s: *ConnectingSocket) *anyopaque;
+
+pub extern "c" fn us_connecting_socket_get_error(s: *ConnectingSocket) i32;
+
+pub extern "c" fn us_connecting_socket_get_native_handle(s: *ConnectingSocket) ?*anyopaque;
+
+pub extern "c" fn us_connecting_socket_is_closed(s: *ConnectingSocket) i32;
+
+pub extern "c" fn us_connecting_socket_is_shut_down(s: *ConnectingSocket) i32;
+
+pub extern "c" fn us_connecting_socket_long_timeout(s: *ConnectingSocket, seconds: u32) void;
+
+pub extern "c" fn us_connecting_socket_shutdown(s: *ConnectingSocket) void;
+
+pub extern "c" fn us_connecting_socket_shutdown_read(s: *ConnectingSocket) void;
+
+pub extern "c" fn us_connecting_socket_timeout(s: *ConnectingSocket, seconds: u32) void;
+
+pub extern "c" fn us_connecting_socket_get_loop(s: *ConnectingSocket) *Loop;

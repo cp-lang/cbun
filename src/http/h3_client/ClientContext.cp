@@ -1,38 +1,37 @@
 // src/http/h3_client/ClientContext.cp
 // Process-global lazily-initialised on the HTTP thread in CP language
 
-zig {
-    const bun = @import("bun");
-    const uws = bun.uws;
-    const quic = uws.quic;
-    var instance: ?*ClientContext = null;
-    var lsquic_init_once = bun.once(quic.globalInit);
-
-    pub fn get() ?*ClientContext {
-        return instance;
-    }
-
-    pub fn getOrCreate(loop: *uws.Loop) ?*ClientContext {
-        if (instance) |i| return i;
-        lsquic_init_once.call(.{});
-        const qctx = quic.Context.createClient(
-            loop,
-            0,
-            @sizeOf(*ClientSession),
-            @sizeOf(*Stream),
-        ) orelse return null;
-        callbacks.register(qctx);
-        const self = bun.handleOom(bun.default_allocator.create(ClientContext));
-        self.* = .{ .qctx = qctx };
-        instance = self;
-        return self;
-    }
-}
+const bun = @import("bun");
+const uws = bun.uws;
+const quic = uws.quic;
 
 import { ClientSession } from "./ClientSession.cp";
 import { PendingConnect } from "./PendingConnect.cp";
 import { Stream } from "./Stream.cp";
 import * as callbacks from "./callbacks.cp";
+
+let instance: ?*ClientContext = null;
+let lsquic_init_once = bun.once(quic.globalInit);
+
+pub fn get(): ?*ClientContext {
+    return instance;
+}
+
+pub fn getOrCreate(loop: *uws.Loop): ?*ClientContext {
+    if (i := instance) return i;
+    lsquic_init_once.call({});
+    const qctx = quic.Context.createClient(
+        loop,
+        0,
+        @sizeOf(*ClientSession),
+        @sizeOf(*Stream),
+    ) orelse return null;
+    callbacks.register(qctx);
+    let self = bun.handleOom(bun.default_allocator.create(ClientContext));
+    self.* = ClientContext { qctx: qctx };
+    instance = self;
+    return self;
+}
 
 export @root struct ClientContext {
     qctx: *bun.uws.quic.Context,
@@ -48,7 +47,7 @@ export @root struct ClientContext {
         }
 
         const host_z = bun.handleOom(bun.default_allocator.dupeZ(u8, hostname));
-        const session = ClientSession.new({
+        let session = ClientSession.new({
             qsocket: null,
             hostname: host_z,
             port: port,
@@ -59,26 +58,24 @@ export @root struct ClientContext {
         bun.handleOom(this.sessions.append(bun.default_allocator, session));
         session.enqueue(client);
 
-        zig {
-            switch (self.qctx.connect(host_z.ptr, port, host_z.ptr, reject, session)) {
-                .socket => |qs| {
-                    session.qsocket = qs;
-                    qs.ext(ClientSession).* = session;
-                },
-                .pending => |pending| {
-                    PendingConnect.register(session, pending, self.qctx.loop());
-                },
-                .err => {
-                    self.unregister(session);
-                    PendingConnect.failSession(session, error.ConnectionRefused);
-                    return false;
-                },
-            }
+        switch (this.qctx.connect(host_z.ptr, port, host_z.ptr, reject, session)) {
+            .socket(qs) => {
+                session.qsocket = qs;
+                qs.ext(ClientSession).* = session;
+            },
+            .pending(pending) => {
+                PendingConnect.register(session, pending, this.qctx.loop());
+            },
+            .err => {
+                this.unregister(session);
+                PendingConnect.failSession(session, error.ConnectionRefused);
+                return false;
+            },
         }
         return true;
     }
 
-    fn unregister(*this, session: *ClientSession): void {
+    fn unregister(*this, session: *ClientSession) {
         const i = session.registry_index;
         if (i >= this.sessions.items.len || this.sessions.items[i] != session) return;
         this.sessions.swapRemove(i);
@@ -97,7 +94,7 @@ export @root struct ClientContext {
         return false;
     }
 
-    static fn streamBodyByHttpId(async_http_id: u32, ended: bool): void {
+    static fn streamBodyByHttpId(async_http_id: u32, ended: bool) {
         if (this_inst := instance) {
             for (s of this_inst.sessions.items) {
                 s.streamBodyByHttpId(async_http_id, ended);

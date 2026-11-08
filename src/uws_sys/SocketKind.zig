@@ -2,12 +2,24 @@
 const std = @import("std");
 const string = []const u8;
 
-const bun = @import("bun");
-comptime {
-        bun.assert(@typeInfo(SocketKind).@"enum".fields.len <= 256);
-    }
-
-    const exported_ordinals = struct {
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
+pub const exported_ordinals = struct {
         export const BUN_SOCKET_KIND_DYNAMIC: u8 = @intFromEnum(SocketKind.dynamic);
         export const BUN_SOCKET_KIND_UWS_HTTP: u8 = @intFromEnum(SocketKind.uws_http);
         export const BUN_SOCKET_KIND_UWS_HTTP_TLS: u8 = @intFromEnum(SocketKind.uws_http_tls);
@@ -17,6 +29,7 @@ comptime {
     comptime {
         _ = exported_ordinals;
     }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const SocketKind = enum(u8) {
     invalid = 0,
@@ -51,3 +64,8 @@ else => false,
     }
 };
 
+
+pub var global_io: std.Io = undefined;
+pub var __cap_test_total: usize = 0;
+pub var __cap_test_passed: usize = 0;
+pub var __cap_test_failed: usize = 0;

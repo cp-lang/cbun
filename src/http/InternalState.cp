@@ -6,11 +6,9 @@ import { Decompressor } from "./Decompressor.cp";
 import { Encoding } from "../http_types/Encoding.cp";
 import { HTTPRequestBody } from "./HTTPRequestBody.cp";
 
-zig {
-    const bun = @import("bun");
-    const MutableString = bun.MutableString;
-    pub const HTTPResponseMetadata = @import("./http.zig").HTTPResponseMetadata;
-}
+const bun = @import("bun");
+const MutableString = bun.MutableString;
+pub const HTTPResponseMetadata = @import("./http.zig").HTTPResponseMetadata;
 
 export @packed(u8) struct InternalStateFlags {
     allow_keepalive: bool = true,
@@ -94,11 +92,9 @@ export @root @value struct InternalState {
         if (body := body_msg) body.reset();
         this.decompressor.deinit();
 
-        zig {
-            if (self.cloned_metadata) |*cloned_meta| {
-                cloned_meta.deinit(allocator);
-                self.cloned_metadata = null;
-            }
+        if (*cloned_meta := this.cloned_metadata) {
+            cloned_meta.deinit(allocator);
+            this.cloned_metadata = null;
         }
 
         if (info := this.certificate_info) {
@@ -185,8 +181,9 @@ export @root @value struct InternalState {
 
         if (still_needs_to_decompress) {
             if (body_out.list.capacity == 0) {
-                const min = @min(@ceil(@as(f64, @floatFromInt(buffer.len)) * 1.5), @as(f64, 1024 * 1024 * 2));
-                body_out.growBy(@max(@as(usize, @intFromFloat(min)), 32))?;
+                let min_f: f64 = @min(@ceil((buffer.len as f64) * 1.5), 1024.0 * 1024.0 * 2.0);
+                let grow_len: usize = @max(min_f as usize, 32);
+                body_out.growBy(grow_len)?;
             }
 
             this.decompressor.updateBuffers(this.encoding, buffer, body_out)?;

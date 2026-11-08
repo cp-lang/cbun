@@ -9,17 +9,17 @@ import { SocketKind } from "./SocketKind.cp";
 import { us_socket_t } from "./us_socket_t.cp";
 
 export class VTable {
-    on_open: @c ((s: *us_socket_t, is_client: i32, ip: [*]u8!, ip_len: i32): *us_socket_t?!)? = null,
-    on_data: @c ((s: *us_socket_t, data: [*]u8!, len: i32): *us_socket_t?!)? = null,
-    on_fd: @c ((s: *us_socket_t, fd: i32): *us_socket_t?!)? = null,
-    on_writable: @c ((s: *us_socket_t): *us_socket_t?!)? = null,
-    on_close: @c ((s: *us_socket_t, code: i32, ext: *any?!): *us_socket_t?!)? = null,
-    on_timeout: @c ((s: *us_socket_t): *us_socket_t?!)? = null,
-    on_long_timeout: @c ((s: *us_socket_t): *us_socket_t?!)? = null,
-    on_end: @c ((s: *us_socket_t): *us_socket_t?!)? = null,
-    on_connect_error: @c ((s: *us_socket_t, code: i32): *us_socket_t?!)? = null,
-    on_connecting_error: @c ((s: *ConnectingSocket, code: i32): *ConnectingSocket?!)? = null,
-    on_handshake: @c ((s: *us_socket_t, success: i32, verify_error: bun.uws.us_bun_verify_error_t, custom: *any?!): void)? = null,
+    on_open: ?@c fn (*us_socket_t, i32, [*]u8!, i32): *us_socket_t!? = null,
+    on_data: ?@c fn (*us_socket_t, [*]u8!, i32): *us_socket_t!? = null,
+    on_fd: ?@c fn (*us_socket_t, i32): *us_socket_t!? = null,
+    on_writable: ?@c fn (*us_socket_t): *us_socket_t!? = null,
+    on_close: ?@c fn (*us_socket_t, i32, *!?): *us_socket_t!? = null,
+    on_timeout: ?@c fn (*us_socket_t): *us_socket_t!? = null,
+    on_long_timeout: ?@c fn (*us_socket_t): *us_socket_t!? = null,
+    on_end: ?@c fn (*us_socket_t): *us_socket_t!? = null,
+    on_connect_error: ?@c fn (*us_socket_t, i32): *us_socket_t!? = null,
+    on_connecting_error: ?@c fn (*ConnectingSocket, i32): *ConnectingSocket!? = null,
+    on_handshake: ?@c fn (*us_socket_t, i32, bun.uws.us_bun_verify_error_t, *!?): void = null,
 }
 
 export enum ConnectResult {
@@ -29,24 +29,24 @@ export enum ConnectResult {
 }
 
 @c {
-    fn us_socket_group_init(g: *SocketGroup, loop: *Loop, vt: *const VTable?!, owner: *any?!): void;
+    fn us_socket_group_init(g: *SocketGroup, loop: *Loop, vt: ?*const VTable, owner: *!?): void;
     fn us_socket_group_deinit(g: *SocketGroup): void;
     fn us_socket_group_close_all(g: *SocketGroup): void;
     fn us_socket_group_timestamp(g: *SocketGroup): u16;
     fn us_socket_group_loop(g: *SocketGroup): *Loop;
-    fn us_socket_group_next(g: *SocketGroup): *SocketGroup?!;
-    fn us_socket_group_listen(g: *SocketGroup, kind: u8, ssl_ctx: *bun.uws.SslCtx?!, host: cstr?, port: i32, options: i32, ext_size: i32, err: *i32): *ListenSocket?!;
-    fn us_socket_group_listen_unix(g: *SocketGroup, kind: u8, ssl_ctx: *bun.uws.SslCtx?!, path: [*]const u8!, pathlen: usize, options: i32, ext_size: i32, err: *i32): *ListenSocket?!;
-    fn us_socket_group_connect(g: *SocketGroup, kind: u8, ssl_ctx: *bun.uws.SslCtx?!, host: cstr, port: i32, options: i32, ext_size: i32, dns_resolved: *i32): *any?!;
-    fn us_socket_group_connect_unix(g: *SocketGroup, kind: u8, ssl_ctx: *bun.uws.SslCtx?!, path: [*]const u8!, pathlen: usize, options: i32, ext_size: i32): *us_socket_t?!;
-    fn us_socket_from_fd(g: *SocketGroup, kind: u8, ssl_ctx: *bun.uws.SslCtx?!, ext_size: i32, fd: i32, ipc: i32): *us_socket_t?!;
-    fn us_socket_pair(g: *SocketGroup, kind: u8, ext_size: i32, fds: *i32[2]): *us_socket_t?!;
+    fn us_socket_group_next(g: *SocketGroup): ?*SocketGroup;
+    fn us_socket_group_listen(g: *SocketGroup, kind: u8, ssl_ctx: ?*bun.uws.SslCtx, host: cstr?, port: i32, options: i32, ext_size: i32, err: *i32): ?*ListenSocket;
+    fn us_socket_group_listen_unix(g: *SocketGroup, kind: u8, ssl_ctx: ?*bun.uws.SslCtx, path: [*]const u8!, pathlen: usize, options: i32, ext_size: i32, err: *i32): ?*ListenSocket;
+    fn us_socket_group_connect(g: *SocketGroup, kind: u8, ssl_ctx: ?*bun.uws.SslCtx, host: cstr, port: i32, options: i32, ext_size: i32, dns_resolved: *i32): *!?;
+    fn us_socket_group_connect_unix(g: *SocketGroup, kind: u8, ssl_ctx: ?*bun.uws.SslCtx, path: [*]const u8!, pathlen: usize, options: i32, ext_size: i32): ?*us_socket_t;
+    fn us_socket_from_fd(g: *SocketGroup, kind: u8, ssl_ctx: ?*bun.uws.SslCtx, ext_size: i32, fd: i32, ipc: i32): ?*us_socket_t;
+    fn us_socket_pair(g: *SocketGroup, kind: u8, ext_size: i32, fds: *i32[2]): ?*us_socket_t;
 }
 
 export @extern class SocketGroup {
     loop: *Loop? = null,
     vtable: *const VTable? = null,
-    #ext: *any?! = null,
+    #ext: *!? = null,
     head_sockets: *us_socket_t? = null,
     head_connecting_sockets: *ConnectingSocket? = null,
     head_listen_sockets: *ListenSocket? = null,
@@ -59,7 +59,7 @@ export @extern class SocketGroup {
     long_timestamp: u8 = 0,
     linked: u8 = 0,
 
-    pub fn init(*this, loop_: *Loop, vt: *const VTable?, owner_ptr: *any?!): void {
+    pub fn init(*this, loop_: *Loop, vt: ?*const VTable, owner_ptr: *!?): void {
         us_socket_group_init(this, loop_, vt, owner_ptr);
     }
 
@@ -76,11 +76,13 @@ export @extern class SocketGroup {
     }
 
     pub fn getLoop(this): *Loop {
-        return this.loop!;
+        return this.loop.?;
     }
 
-    pub fn owner<T>(this): *T {
-        return this.#ext! as *T;
+    pub fn owner(this, @comptime T: type): *T {
+        unsafe {
+            return this.#ext.? as *T;
+        }
     }
 
     pub fn isEmpty(this): bool {
@@ -128,9 +130,13 @@ export @extern class SocketGroup {
         let ptr = us_socket_group_connect(this, kind as u8, ssl_ctx, host, port, options, socket_ext_size, &has_dns_resolved);
         if (ptr == null) return ConnectResult.failed;
         if (has_dns_resolved != 0) {
-            return ConnectResult.socket(ptr! as *us_socket_t);
+            unsafe {
+                return ConnectResult.socket(ptr.? as *us_socket_t);
+            }
         } else {
-            return ConnectResult.connecting(ptr! as *ConnectingSocket);
+            unsafe {
+                return ConnectResult.connecting(ptr.? as *ConnectingSocket);
+            }
         }
     }
 
@@ -153,7 +159,11 @@ export @extern class SocketGroup {
         fd: bun.FD,
         ipc: bool,
     ): *us_socket_t? {
-        return us_socket_from_fd(this, kind as u8, ssl_ctx, socket_ext_size, fd.native(), if (ipc) 1 else 0);
+        let mut ipc_int: i32 = 0;
+        if (ipc) {
+            ipc_int = 1;
+        }
+        return us_socket_from_fd(this, kind as u8, ssl_ctx, socket_ext_size, fd.native(), ipc_int);
     }
 
     pub fn pair(*this, kind: SocketKind, ext_size: i32, fds: *i32[2]): *us_socket_t? {

@@ -1,15 +1,13 @@
 // src/http/websocket_http_client.cp
 // WebSocket HTTP and TLS client type instantiations in CP
 
-zig {
-    const upgrade_client = @import("../http_jsc/websocket_client/WebSocketUpgradeClient.zig");
-    const websocket_client = @import("../http_jsc/websocket_client.zig");
+const upgrade_client = @import("../http_jsc/websocket_client/WebSocketUpgradeClient.zig");
+const websocket_client = @import("../http_jsc/websocket_client.zig");
 
-    // Before the websocket handshaking step is completed:
-    pub const WebSocketHTTPClient = upgrade_client.NewHTTPUpgradeClient(false);
-    pub const WebSocketHTTPSClient = upgrade_client.NewHTTPUpgradeClient(true);
+// Before the websocket handshaking step is completed:
+pub const WebSocketHTTPClient = upgrade_client.NewHTTPUpgradeClient(false);
+pub const WebSocketHTTPSClient = upgrade_client.NewHTTPUpgradeClient(true);
 
-    // After the websocket handshaking step is completed:
-    pub const WebSocketClient = websocket_client.NewWebSocketClient(false);
-    pub const WebSocketClientTLS = websocket_client.NewWebSocketClient(true);
-}
+// After the websocket handshaking step is completed:
+pub const WebSocketClient = websocket_client.NewWebSocketClient(false);
+pub const WebSocketClientTLS = websocket_client.NewWebSocketClient(true);

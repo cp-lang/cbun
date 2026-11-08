@@ -2,62 +2,65 @@
 const std = @import("std");
 const string = []const u8;
 
-const bun = @import("bun");
+fn CpOptType(comptime T: type) type { if (@typeInfo(T) == .optional) return T; return ?T; }
+fn CpUnwrapOpt(comptime T: type) type { if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }
+fn cp_opt_is_null(v: anytype) bool { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) return v == null; return false; }
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
+pub const bun = @import("bun");
 pub const ParsedETag = struct {
     tag: []const u8,
     is_weak: bool,
-
-    pub fn init(self: *ParsedETag, tag: []const u8, is_weak: bool) void {
-        _ = &self;
-        self.tag = tag;
-        self.is_weak = is_weak;
-    }
 };
 
+
 pub fn parse(tag_str: []const u8) ParsedETag {
-    var str = std.mem.trim(u8, tag_str, " \t");
-    _ = &str;
-    var is_weak = false;
-    _ = &is_weak;
-    if (bun.strings.hasPrefix(str, "W/")) {
-        is_weak = true;
-        str = str[2..];
-        str = std.mem.trimLeft(u8, str, " \t");
-    }
-    if ((((str.len >= 2) and (str[0] == 34)) and (str[@as(usize, @intCast((str.len - 1)))] == 34))) {
-        str = str[1..(str.len - 1)];
-    }
-    return ParsedETag{ .tag = str, .is_weak = is_weak };
+        var str = std.mem.trim(u8, tag_str, " \t");
+        _ = &str;
+        var is_weak = false;
+        _ = &is_weak;
+        if (bun.strings.hasPrefix(str, "W/")) {
+            is_weak = true;
+            str = str[2..];
+            str = std.mem.trimLeft(u8, str, " \t");
+        }
+        if ((((str.len >= 2) and (str[0] == 34)) and (str[@as(usize, @intCast((str.len - 1)))] == 34))) {
+            str = str[1..(str.len - 1)];
+        }
+        return ParsedETag{ .tag = str, .is_weak = is_weak };
 }
 
 pub fn weakMatch(tag1: []const u8, is_weak1: bool, tag2: []const u8, is_weak2: bool) bool {
-    _ = is_weak1;
-    _ = is_weak2;
-    return std.mem.eql(u8, tag1, tag2);
+        _ = is_weak1;
+        _ = is_weak2;
+        return std.mem.eql(u8, tag1, tag2);
 }
 
 pub fn appendToHeaders(bytes: []const u8, headers: *bun.http.Headers) !void {
-    const hash = std.hash.XxHash64.hash(0, bytes);
-    var etag_buf: [40]u8 = undefined;
-    const etag_str = std.fmt.bufPrint(&etag_buf, "\"{f}\"", .{bun.fmt.hexIntLower(hash)}) catch unreachable;
-    try headers.append("etag", etag_str);
+        var hash = std.hash.XxHash64.hash(0, bytes);
+        _ = &hash;
+        var etag_buf: [40]u8 = undefined;
+        _ = &etag_buf;
+        var etag_str = ((std.fmt.bufPrint((&etag_buf), "\"{f}\"", .{ bun.fmt.hexIntLower(hash) })) catch unreachable);
+        _ = &etag_str;
+        _ = try headers.append("etag", etag_str);
 }
 
 pub fn ifNoneMatch(etag: []const u8, if_none_match: []const u8) bool {
-    const our_parsed = parse(etag);
-    _ = &our_parsed;
-    if (std.mem.eql(u8, std.mem.trim(u8, if_none_match, " \t"), "*")) {
-        return true;
-    }
-    var iter = std.mem.splitScalar(u8, if_none_match, 44);
-    _ = &iter;
-    while (iter.next()) |tag_str| {
-        const parsed = parse(tag_str);
-        _ = &parsed;
-        if (weakMatch(our_parsed.tag, our_parsed.is_weak, parsed.tag, parsed.is_weak)) {
+        const our_parsed = parse(etag);
+        _ = &our_parsed;
+        if (std.mem.eql(u8, std.mem.trim(u8, if_none_match, " \t"), "*")) {
             return true;
         }
-    }
-    return false;
+        var iter = std.mem.splitScalar(u8, if_none_match, 44);
+        _ = &iter;
+        while (iter.next()) |tag_str| {
+            const parsed = parse(tag_str);
+            _ = &parsed;
+            if (weakMatch(our_parsed.tag, our_parsed.is_weak, parsed.tag, parsed.is_weak)) {
+                return true;
+            }
+        }
+        return false;
 }

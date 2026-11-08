@@ -2,56 +2,23 @@
 const std = @import("std");
 const string = []const u8;
 
-fn cp_cast_int(comptime Dest: type, val: anytype) Dest {
-    const Src = @TypeOf(val);
-    if (comptime Src == Dest) return val;
-    if (comptime Src == comptime_int) {
-        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) {
-            return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val)))));
-        } else {
-            return @as(Dest, @truncate(val));
-        }
-    }
-    const src_bits = @typeInfo(Src).int.bits;
-    const dest_bits = @typeInfo(Dest).int.bits;
-    if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {
-        if (comptime dest_bits >= src_bits) {
-            return @as(Dest, val);
-        } else {
-            return @truncate(val);
-        }
-    }
-    if (comptime @typeInfo(Src).int.signedness == .signed) {
-        const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val);
-        const u: u128 = @bitCast(s);
-        if (comptime dest_bits >= 128) {
-            return @as(Dest, u);
-        } else {
-            return @truncate(u);
-        }
-    } else {
-        const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val);
-        const s: i128 = @bitCast(u);
-        if (comptime dest_bits >= 128) {
-            return @as(Dest, s);
-        } else {
-            return @truncate(s);
-        }
-    }
-}
-
-const bun = @import("bun");
-pub const vlq_max_in_bytes: usize = 7;
-pub const base64: []const u8 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-pub const base64_lut: [128]u8 = make_base64_lut();
-pub const vlq_lookup_table: [256]VLQ = make_vlq_lookup_table();
+fn CpOptType(comptime T: type) type { if (@typeInfo(T) == .optional) return T; return ?T; }
+fn CpUnwrapOpt(comptime T: type) type { if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }
+fn cp_opt_is_null(v: anytype) bool { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) return v == null; return false; }
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const vlq_max_in_bytes: usize = 7;
+const base64: []const u8 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const base64_lut: [128]u8 = make_base64_lut();
+const vlq_lookup_table: [256]VLQ = make_vlq_lookup_table();
 pub const zero: VLQ = vlq_lookup_table[0];
 fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
     const T = @TypeOf(val);
     if (comptime @typeInfo(T) == .comptime_int) return val << shift;
     if (comptime @typeInfo(T) == .int) {
         const ShiftType = std.math.Log2Int(T);
-        return val << @as(ShiftType, @truncate(shift));
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val << @as(ShiftType, @truncate(u_shift));
     }
     return val << shift;
 }
@@ -60,150 +27,153 @@ fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
     if (comptime @typeInfo(T) == .comptime_int) return val >> shift;
     if (comptime @typeInfo(T) == .int) {
         const ShiftType = std.math.Log2Int(T);
-        return val >> @as(ShiftType, @truncate(shift));
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val >> @as(ShiftType, @truncate(u_shift));
     }
     return val >> shift;
 }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const VLQ = @This();
 
 bytes: [7]u8,
 len: u8 = 0,
 
-pub inline fn slice(self: *const VLQ) []const u8 {
-    _ = &self;
-    return self.bytes[0..cp_cast_int(usize, self.len)];
+pub inline fn slice(self: VLQ) []const u8 {
+        return self.bytes[0..cp_cast_int(usize, self.len)];
 }
 
-pub fn writeTo(self: *const VLQ, writer: anytype) !void {
-    _ = &self;
-    _ = try writer.writeAll(self.bytes[0..cp_cast_int(usize, self.len)]);
+pub fn writeTo(self: VLQ, writer: anytype) !void {
+        _ = try writer.writeAll(self.bytes[0..cp_cast_int(usize, self.len)]);
 }
 pub const VLQResult = struct {
     value: i32,
     start: usize,
 
-    pub fn init(value: i32, start: usize) VLQResult {
-        return VLQResult{ .value = value, .start = start };
+pub fn init(value: i32, start: usize) VLQResult {
+            return VLQResult{ .value = value, .start = start };
     }
 };
 
+
 pub fn make_base64_lut() [128]u8 {
-    var bytes: [128]u8 = @as([128]u8, @splat(@as(u8, 127)));
-    _ = &bytes;
-    {
-        var i: i32 = 0;
-        _ = &i;
-        const __end_0 = 64;
-        while (i < __end_0) : (i += 1) {
-            var c = base64[@as(usize, @intCast(cp_cast_int(usize, i)))];
-            _ = &c;
-            bytes[cp_cast_int(usize, cp_cast_int(usize, c))] = cp_cast_int(u8, i);
+        var bytes: [128]u8 = @as([128]u8, @splat(@as(u8, 127)));
+        _ = &bytes;
+        {
+            var i: i32 = 0;
+            _ = &i;
+            const __end_0 = 64;
+            while (i < __end_0) : (i += 1) {
+                var c = base64[@as(usize, @intCast(cp_cast_int(usize, i)))];
+                _ = &c;
+                bytes[cp_cast_int(usize, cp_cast_int(usize, c))] = cp_cast_int(u8, i);
+            }
         }
-    }
-    return bytes;
+        return bytes;
 }
 
 pub fn make_vlq_lookup_table() [256]VLQ {
-    @setEvalBranchQuota(9999);
+        comptime {
+        _ = @setEvalBranchQuota(9999);
 
-    var entries: [256]VLQ = @as([256]VLQ, @splat(@as(VLQ, VLQ{ .bytes = @as([7]u8, @splat(@as(u8, 0))), .len = 0 })));
-    _ = &entries;
-    {
-        var i: i32 = 0;
-        _ = &i;
-        const __end_1 = 256;
-        while (i < __end_1) : (i += 1) {
-            entries[cp_cast_int(usize, cp_cast_int(usize, i))] = encodeSlowPath(i);
+}
+        var entries: [256]VLQ = @as([256]VLQ, @splat(@as(VLQ, VLQ{ .bytes = @as([7]u8, @splat(@as(u8, 0))), .len = 0 })));
+        _ = &entries;
+        {
+            var i: i32 = 0;
+            _ = &i;
+            const __end_1 = 256;
+            while (i < __end_1) : (i += 1) {
+                entries[cp_cast_int(usize, cp_cast_int(usize, i))] = encodeSlowPath(i);
+            }
         }
-    }
-    return entries;
+        return entries;
 }
 
 pub fn encode(value: i32) VLQ {
-    if (((value >= 0) and (value <= 255))) {
-        return vlq_lookup_table[@as(usize, @intCast(cp_cast_int(usize, value)))];
-    } else {
-        return encodeSlowPath(value);
-    }
+        if (((value >= 0) and (value <= 255))) {
+            return vlq_lookup_table[@as(usize, @intCast(cp_cast_int(usize, value)))];
+        } else {
+            return encodeSlowPath(value);
+        }
 }
 
 pub fn encodeSlowPath(value: i32) VLQ {
-    var len: u8 = 0;
-    _ = &len;
-    var bytes: [7]u8 = @as([7]u8, @splat(@as(u8, 0)));
-    _ = &bytes;
-    var vlq: u32 = 0;
-    _ = &vlq;
-    if ((value >= 0)) {
-        vlq = cp_shl(cp_cast_int(u32, value), 1);
-    } else {
-        vlq = (cp_shl(cp_cast_int(u32, (0 - value)), 1) | 1);
-    }
-    {
-        var step: i32 = 0;
-        _ = &step;
-        const __end_2 = 7;
-        while (step < __end_2) : (step += 1) {
-            var digit: u32 = (vlq & 31);
-            _ = &digit;
-            vlq = cp_shr(vlq, 5);
-            if ((vlq != 0)) {
-                digit = (digit | 32);
-            }
-            bytes[cp_cast_int(usize, cp_cast_int(usize, len))] = base64[@as(usize, @intCast(cp_cast_int(usize, digit)))];
-            len = (len + 1);
-            if ((vlq == 0)) {
-                return VLQ{ .bytes = bytes, .len = len };
+        var len: u8 = 0;
+        _ = &len;
+        var bytes: [7]u8 = @as([7]u8, @splat(@as(u8, 0)));
+        _ = &bytes;
+        var vlq: u32 = 0;
+        _ = &vlq;
+        if ((value >= 0)) {
+            vlq = cp_shl(cp_cast_int(u32, value), 1);
+        } else {
+            vlq = (cp_shl(cp_cast_int(u32, (0 - value)), 1) | 1);
+        }
+        {
+            var step: i32 = 0;
+            _ = &step;
+            const __end_2 = 7;
+            while (step < __end_2) : (step += 1) {
+                var digit: u32 = (vlq & 31);
+                _ = &digit;
+                vlq = cp_shr(vlq, 5);
+                if ((vlq != 0)) {
+                    digit = (digit | 32);
+                }
+                bytes[cp_cast_int(usize, cp_cast_int(usize, len))] = base64[@as(usize, @intCast(cp_cast_int(usize, digit)))];
+                len = (len + 1);
+                if ((vlq == 0)) {
+                    return VLQ{ .bytes = bytes, .len = len };
+                }
             }
         }
-    }
-    return VLQ{ .bytes = bytes, .len = 0 };
+        return VLQ{ .bytes = bytes, .len = 0 };
 }
 
 pub fn decode(encoded: []const u8, start: usize) VLQResult {
-    var shift: u8 = 0;
-    _ = &shift;
-    var vlq: u32 = 0;
-    _ = &vlq;
-    var rem = encoded[start..];
-    _ = &rem;
-    var max_len: usize = 8;
-    _ = &max_len;
-    if ((rem.len < 8)) {
-        max_len = rem.len;
-    }
-    var encoded_ = rem[0..max_len];
-    _ = &encoded_;
-    {
-        var i: i32 = 0;
-        _ = &i;
-        const __end_3 = 8;
-        while (i < __end_3) : (i += 1) {
-            if ((i >= encoded_.len)) {
-                break;
-            }
-            var char_code = (cp_cast_int(usize, encoded_[@as(usize, @intCast(i))]) & 127);
-            _ = &char_code;
-            var index = cp_cast_int(u32, base64_lut[@as(usize, @intCast(char_code))]);
-            _ = &index;
-            vlq = (vlq | cp_shl((index & 31), shift));
-            shift = (shift + 5);
-            if (((index & 32) == 0)) {
-                var res_val: i32 = 0;
-                _ = &res_val;
-                if (((vlq & 1) == 0)) {
-                    res_val = cp_cast_int(i32, cp_shr(vlq, 1));
-                } else {
-                    res_val = (0 - cp_cast_int(i32, cp_shr(vlq, 1)));
+        var shift: u8 = 0;
+        _ = &shift;
+        var vlq: u32 = 0;
+        _ = &vlq;
+        var rem = encoded[start..];
+        _ = &rem;
+        var max_len: usize = 8;
+        _ = &max_len;
+        if ((rem.len < 8)) {
+            max_len = rem.len;
+        }
+        var encoded_ = rem[0..max_len];
+        _ = &encoded_;
+        {
+            var i: i32 = 0;
+            _ = &i;
+            const __end_3 = 8;
+            while (i < __end_3) : (i += 1) {
+                if ((i >= encoded_.len)) {
+                    break;
                 }
-                return VLQResult{ .value = res_val, .start = ((start + cp_cast_int(usize, i)) + 1) };
+                var char_code = (cp_cast_int(usize, encoded_[@as(usize, @intCast(i))]) & 127);
+                _ = &char_code;
+                var index = cp_cast_int(u32, base64_lut[@as(usize, @intCast(char_code))]);
+                _ = &index;
+                vlq = (vlq | cp_shl((index & 31), shift));
+                shift = (shift + 5);
+                if (((index & 32) == 0)) {
+                    var res_val: i32 = 0;
+                    _ = &res_val;
+                    if (((vlq & 1) == 0)) {
+                        res_val = cp_cast_int(i32, cp_shr(vlq, 1));
+                    } else {
+                        res_val = (0 - cp_cast_int(i32, cp_shr(vlq, 1)));
+                    }
+                    return VLQResult{ .value = res_val, .start = ((start + cp_cast_int(usize, i)) + 1) };
+                }
             }
         }
-    }
-    return VLQResult{ .value = 0, .start = (start + encoded_.len) };
+        return VLQResult{ .value = 0, .start = (start + encoded_.len) };
 }
 
 pub fn decodeAssumeValid(encoded: []const u8, start: usize) VLQResult {
-    return decode(encoded, start);
+        return decode(encoded, start);
 }

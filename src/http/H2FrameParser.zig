@@ -2,7 +2,24 @@
 const std = @import("std");
 const string = []const u8;
 
-const bun = @import("bun");
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 pub const client_preface: []const u8 = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 pub const MAX_WINDOW_SIZE = std.math.maxInt(i32);
 pub const MAX_HEADER_TABLE_SIZE = std.math.maxInt(u32);
@@ -10,7 +27,9 @@ pub const MAX_STREAM_ID = std.math.maxInt(i32);
 pub const MAX_FRAME_SIZE = std.math.maxInt(u24);
 pub const DEFAULT_WINDOW_SIZE = std.math.maxInt(u16);
 pub const DEFAULT_MAX_FRAME_SIZE: u24 = 16384;
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
+pub const bun = @import("bun");
 pub const FrameType = enum(u8) {
     HTTP_FRAME_DATA = 0,
     HTTP_FRAME_HEADERS = 1,
@@ -82,21 +101,22 @@ pub const UInt31WithReserved = packed struct(u32) {
     reserved: bool = false,
     uint31: u31 = 0,
 
-    pub inline fn from(value: u32) UInt31WithReserved {
-        return .{ .uint31 = @truncate((value & 2147483647)), .reserved = ((value & 2147483648) != 0) };
+pub inline fn from(value: u32) UInt31WithReserved {
+            return .{ .uint31 = @truncate((value & 2147483647)), .reserved = ((value & 2147483648) != 0) };
     }
 
-    pub inline fn init(value: u31, reserved: bool) UInt31WithReserved {
-        return .{ .uint31 = value, .reserved = reserved };
+pub inline fn init(value: u31, reserved: bool) UInt31WithReserved {
+            return .{ .uint31 = value, .reserved = reserved };
     }
 
-    pub inline fn toUInt32(value: UInt31WithReserved) u32 {
-        return @bitCast(value);
+pub inline fn toUInt32(value: UInt31WithReserved) u32 {
+            return @bitCast(value);
     }
 
-    pub inline fn fromBytes(src: []const u8) UInt31WithReserved {
-        const value: u32 = u32FromBytes(src);
-        return .{ .uint31 = @truncate((value & 2147483647)), .reserved = ((value & 2147483648) != 0) };
+pub inline fn fromBytes(src: []const u8) UInt31WithReserved {
+            const value: u32 = u32FromBytes(src);
+            _ = &value;
+            return .{ .uint31 = @truncate((value & 2147483647)), .reserved = ((value & 2147483648) != 0) };
     }
 };
 
@@ -104,9 +124,9 @@ pub const StreamPriority = packed struct(u40) {
     streamIdentifier: u32 = 0,
     weight: u8 = 0,
 
-    pub inline fn from(dst: *StreamPriority, src: []const u8) void {
-        @memcpy(@as(*[StreamPriority.byteSize]u8, @ptrCast(dst)), src);
-        std.mem.byteSwapAllFields(StreamPriority, dst);
+pub inline fn from(dst: *StreamPriority, src: []const u8) void {
+            _ = @memcpy(@as(*[5]u8, @ptrCast(@alignCast(dst))), src);
+            _ = std.mem.byteSwapAllFields(StreamPriority, dst);
     }
     pub const byteSize: usize = 5;
 };
@@ -117,11 +137,11 @@ pub const FrameHeader = packed struct(u72) {
     flags: u8 = 0,
     streamIdentifier: u32 = 0,
 
-    pub inline fn from(dst: *FrameHeader, src: []const u8, offset: usize, comptime end: bool) void {
-        @memcpy(@as(*[FrameHeader.byteSize]u8, @ptrCast(dst))[offset .. src.len + offset], src);
-        if (comptime end) {
-            std.mem.byteSwapAllFields(FrameHeader, dst);
-        }
+pub inline fn from(dst: *FrameHeader, src: []const u8, offset: usize, comptime end: bool) void {
+            _ = @memcpy(@as(*[9]u8, @ptrCast(@alignCast(dst)))[offset..(src.len + offset)], src);
+            if (comptime end) {
+                _ = std.mem.byteSwapAllFields(FrameHeader, dst);
+            }
     }
     pub const byteSize: usize = 9;
 };
@@ -130,21 +150,22 @@ pub const SettingsPayloadUnit = packed struct(u48) {
     type: u16,
     value: u32,
 
-    pub inline fn from(dst: *SettingsPayloadUnit, src: []const u8, offset: usize, comptime end: bool) void {
-        @memcpy(@as(*[SettingsPayloadUnit.byteSize]u8, @ptrCast(dst))[offset .. src.len + offset], src);
-        if (comptime end) {
-            std.mem.byteSwapAllFields(SettingsPayloadUnit, dst);
-        }
+pub inline fn from(dst: *SettingsPayloadUnit, src: []const u8, offset: usize, comptime end: bool) void {
+            _ = @memcpy(@as(*[6]u8, @ptrCast(@alignCast(dst)))[offset..(src.len + offset)], src);
+            if (comptime end) {
+                _ = std.mem.byteSwapAllFields(SettingsPayloadUnit, dst);
+            }
     }
 
-    pub inline fn encode(dst: anytype, setting: SettingsType, value: u32) void {
-        std.mem.writeInt(u16, dst[0..2], @intFromEnum(setting), .big);
-        std.mem.writeInt(u32, dst[2..6], value, .big);
+pub inline fn encode(dst: *[6]u8, setting: SettingsType, value: u32) void {
+            _ = std.mem.writeInt(u16, dst[0..2], @intFromEnum(setting), .big);
+            _ = std.mem.writeInt(u32, dst[2..6], value, .big);
     }
     pub const byteSize: usize = 6;
 };
 
+
 pub inline fn u32FromBytes(src: []const u8) u32 {
-    _ = bun.debugAssert((src.len == 4));
-    return std.mem.readInt(u32, src[0..4], .big);
+        _ = bun.debugAssert((src.len == 4));
+        return std.mem.readInt(u32, src[0..4], .big);
 }

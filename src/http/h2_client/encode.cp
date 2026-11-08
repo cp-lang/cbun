@@ -5,38 +5,38 @@ import { ClientSession } from "./ClientSession.cp";
 import { Stream } from "./Stream.cp";
 import * as H2FrameParser from "../H2FrameParser.cp";
 
-zig {
 const bun = @import("bun");
-const HPACK = @import("../lshpack.zig").HPACK;
-const RequestHeader = enum {
+import { HPACK } from "../lshpack.cp";
+
+enum RequestHeader {
     drop,
     host,
     te,
     content_length,
     expect,
     sensitive,
-
-    const map = bun.ComptimeStringMap(RequestHeader, .{
-        .{ "connection", .drop },
-        .{ "keep-alive", .drop },
-        .{ "proxy-connection", .drop },
-        .{ "transfer-encoding", .drop },
-        .{ "upgrade", .drop },
-        .{ "host", .host },
-        .{ "te", .te },
-        .{ "content-length", .content_length },
-        .{ "expect", .expect },
-        .{ "authorization", .sensitive },
-        .{ "cookie", .sensitive },
-        .{ "set-cookie", .sensitive },
-    });
-};
 }
 
-export fn writePreface(session: *ClientSession): void {
+fn classifyHeader(name: string): RequestHeader? {
+    if (bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "host")) return .host;
+    if (bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "expect")) return .expect;
+    if (bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "connection") ||
+        bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "keep-alive") ||
+        bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "proxy-connection") ||
+        bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "transfer-encoding") ||
+        bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "upgrade")) return .drop;
+    if (bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "te")) return .te;
+    if (bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "content-length")) return .content_length;
+    if (bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "authorization") ||
+        bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "cookie") ||
+        bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "set-cookie")) return .sensitive;
+    return null;
+}
+
+export fn writePreface(session: *ClientSession) {
     session.queue(H2FrameParser.client_preface);
 
-    let mut settings: [u8; 18] = [0; 18];
+    let settings: [u8; 18] = [0; 18];
     H2FrameParser.SettingsPayloadUnit.encode(settings[0..6], .SETTINGS_ENABLE_PUSH, 0);
     H2FrameParser.SettingsPayloadUnit.encode(settings[6..12], .SETTINGS_INITIAL_WINDOW_SIZE, bun.http.H2.local_initial_window_size);
     H2FrameParser.SettingsPayloadUnit.encode(settings[12..18], .SETTINGS_MAX_HEADER_LIST_SIZE, bun.http.H2.local_max_header_list_size);
@@ -46,7 +46,7 @@ export fn writePreface(session: *ClientSession): void {
     session.preface_sent = true;
 }
 
-export fn writeRequest(session: *ClientSession, client: *bun.http.HTTPClient, stream: *Stream, request: bun.picohttp.Request): !void {
+export fn writeRequest(session: *ClientSession, client: *bun.http.HTTPClient, stream: *Stream, request: bun.picohttp.Request): ! {
     session.encode_scratch.clearRetainingCapacity();
 
     if (cap := session.pending_hpack_enc_capacity) {
@@ -59,7 +59,7 @@ export fn writeRequest(session: *ClientSession, client: *bun.http.HTTPClient, st
     let authority: string = client.url.host;
     let has_expect_continue = false;
     for (h of request.headers) {
-        if (kind := RequestHeader.map.getAnyCase(h.name)) {
+        if (kind := classifyHeader(h.name)) {
             switch (kind) {
                 .host => authority = h.value,
                 .expect => has_expect_continue = bun.strings.eqlCaseInsensitiveASCIIICheckLength(h.value, "100-continue"),
@@ -78,9 +78,9 @@ export fn writeRequest(session: *ClientSession, client: *bun.http.HTTPClient, st
     encodeHeader(session.hpack, &session.encode_scratch, ":authority", authority, false)?;
     encodeHeader(session.hpack, &session.encode_scratch, ":path", path_str, false)?;
 
-    let mut lower_buf: [u8; 256] = [0; 256];
+    let lower_buf: [u8; 256] = [0; 256];
     for (h of request.headers) {
-        let mut heap: u8[]? = null;
+        let heap: (u8[])? = null;
         defer if (buf := heap) bun.default_allocator.free(buf);
         let name: string = "";
         if (h.name.len <= lower_buf.len) {
@@ -91,25 +91,23 @@ export fn writeRequest(session: *ClientSession, client: *bun.http.HTTPClient, st
             heap = hbuf;
         }
         let never_index = false;
-        if (kind := RequestHeader.map.get(name)) {
-            let mut should_skip = false;
-            zig {
-                switch (kind) {
-                    .drop => should_skip = true,
-                    .host => should_skip = true,
-                    .te => {
-                        if (!bun.strings.eqlCaseInsensitiveASCIIICheckLength(bun.strings.trim(h.value, " \t"), "trailers")) {
-                            should_skip = true;
-                        }
-                    },
-                    .content_length => {
-                        if (has_expect_continue) {
-                            should_skip = true;
-                        }
-                    },
-                    .sensitive => never_index = true,
-                    .expect => {},
-                }
+        if (kind := classifyHeader(name)) {
+            let should_skip = false;
+            switch (kind) {
+                .drop => should_skip = true,
+                .host => should_skip = true,
+                .te => {
+                    if (!bun.strings.eqlCaseInsensitiveASCIIICheckLength(bun.strings.trim(h.value, " \t"), "trailers")) {
+                        should_skip = true;
+                    }
+                },
+                .content_length => {
+                    if (has_expect_continue) {
+                        should_skip = true;
+                    }
+                },
+                .sensitive => never_index = true,
+                .expect => {},
             }
             if (should_skip) continue;
         }
@@ -132,7 +130,7 @@ export fn writeRequest(session: *ClientSession, client: *bun.http.HTTPClient, st
     }
 }
 
-export fn writeHeaderBlock(session: *ClientSession, stream_id: u31, block: string, end_stream: bool): void {
+export fn writeHeaderBlock(session: *ClientSession, stream_id: u31, block: string, end_stream: bool) {
     const max: usize = session.remote_max_frame_size;
     let remaining = block;
     let first = true;
@@ -143,7 +141,7 @@ export fn writeHeaderBlock(session: *ClientSession, stream_id: u31, block: strin
         let flags: u8 = 0;
         if (last) flags |= @intFromEnum(H2FrameParser.HeadersFrameFlags.END_HEADERS);
         if (first && end_stream) flags |= @intFromEnum(H2FrameParser.HeadersFrameFlags.END_STREAM);
-        let mut frame_kind: H2FrameParser.FrameType = .HTTP_FRAME_CONTINUATION;
+        let frame_kind: H2FrameParser.FrameType = .HTTP_FRAME_CONTINUATION;
         if (first) {
             frame_kind = .HTTP_FRAME_HEADERS;
         }
@@ -168,8 +166,8 @@ export fn writeDataWindowed(session: *ClientSession, stream: *Stream, data: stri
             flags = @intFromEnum(H2FrameParser.DataFrameFlags.END_STREAM);
         }
         session.writeFrame(.HTTP_FRAME_DATA, flags, stream.id, remaining[0..chunk_len]);
-        stream.send_window -= @as(i32, @intCast(chunk_len));
-        session.conn_send_window -= @as(i32, @intCast(chunk_len));
+        stream.send_window -= chunk_len as i32;
+        session.conn_send_window -= chunk_len as i32;
         consumed += chunk_len;
         remaining = remaining[chunk_len..];
         if (last) break;
@@ -177,52 +175,50 @@ export fn writeDataWindowed(session: *ClientSession, stream: *Stream, data: stri
     return consumed;
 }
 
-export fn drainSendBody(session: *ClientSession, stream: *Stream, cap: usize): void {
+export fn drainSendBody(session: *ClientSession, stream: *Stream, cap: usize) {
     if (stream.localClosed() || stream.awaiting_continue || stream.fatal_error != null) return;
     if (client := stream.client) {
-        zig {
-            switch (client.state.original_request_body) {
-                .bytes => {
-                    const sent = writeDataWindowed(session, stream, stream.pending_body, true, cap);
-                    stream.pending_body = stream.pending_body[sent..];
-                    if (stream.pending_body.len == 0) {
-                        stream.sentEndStream();
-                        client.state.request_stage = .done;
-                    }
-                },
-                .stream => |*body| {
-                    if (body.buffer) |sb| {
-                        const buffer = sb.acquire();
-                        const data = buffer.slice();
-                        if (data.len == 0 and !body.ended) {
-                            sb.release();
-                            return;
-                        }
-                        const sent = writeDataWindowed(session, stream, data, body.ended, cap);
-                        buffer.cursor += sent;
-                        const drained = buffer.isEmpty();
-                        if (drained) buffer.reset();
-                        if (drained and body.ended) {
-                            stream.sentEndStream();
-                            client.state.request_stage = .done;
-                        } else if (drained and data.len > 0) {
-                            sb.reportDrain();
-                        }
+        switch (client.state.original_request_body) {
+            .bytes => {
+                const sent = writeDataWindowed(session, stream, stream.pending_body, true, cap);
+                stream.pending_body = stream.pending_body[sent..];
+                if (stream.pending_body.len == 0) {
+                    stream.sentEndStream();
+                    client.state.request_stage = .done;
+                }
+            },
+            .stream(body) => {
+                if (sb := body.buffer) {
+                    let buffer = sb.acquire();
+                    const data = buffer.slice();
+                    if (data.len == 0 && !body.ended) {
                         sb.release();
-                        if (stream.localClosed()) body.detach();
-                    } else {
                         return;
                     }
-                },
-                .sendfile => {
-                    @panic("unreachable");
-                },
-            }
+                    const sent = writeDataWindowed(session, stream, data, body.ended, cap);
+                    buffer.cursor += sent;
+                    const drained = buffer.isEmpty();
+                    if (drained) buffer.reset();
+                    if (drained && body.ended) {
+                        stream.sentEndStream();
+                        client.state.request_stage = .done;
+                    } else if (drained && data.len > 0) {
+                        sb.reportDrain();
+                    }
+                    sb.release();
+                    if (stream.localClosed()) body.detach();
+                } else {
+                    return;
+                }
+            },
+            .sendfile => {
+                @panic("unreachable");
+            },
         }
     }
 }
 
-export fn drainSendBodies(session: *ClientSession): void {
+export fn drainSendBodies(session: *ClientSession) {
     const slice: usize = session.remote_max_frame_size;
     while (session.conn_send_window > 0 && session.write_buffer.size() < bun.http.H2.write_buffer_high_water) {
         let progressed = false;
@@ -236,23 +232,23 @@ export fn drainSendBodies(session: *ClientSession): void {
     }
 }
 
-export fn encodeHeader(hpack: *HPACK, encoded: *std.ArrayListUnmanaged(u8), name: string, value: string, never_index: bool): !void {
+export fn encodeHeader(hpack: *HPACK, encoded: *std.ArrayListUnmanaged(u8), name: string, value: string, never_index: bool): ! {
     const required = encoded.items.len + name.len + value.len + 32;
     encoded.ensureTotalCapacity(bun.default_allocator, required)?;
     const written = hpack.encode(name, value, never_index, encoded.allocatedSlice(), encoded.items.len)?;
     encoded.items.len += written;
 }
 
-export fn encodeHpackTableSizeUpdate(encoded: *std.ArrayListUnmanaged(u8), value: u32): void {
+export fn encodeHpackTableSizeUpdate(encoded: *std.ArrayListUnmanaged(u8), value: u32) {
     if (value < 31) {
-        encoded.appendAssumeCapacity(0x20 | @as(u8, @intCast(value)));
+        encoded.appendAssumeCapacity(0x20 | (value as u8));
         return;
     }
     encoded.appendAssumeCapacity(0x20 | 31);
     let rest = value - 31;
     while (rest >= 128) {
-        encoded.appendAssumeCapacity(@as(u8, @truncate(rest)) | 0x80);
+        encoded.appendAssumeCapacity((rest as u8) | 0x80);
         rest >>= 7;
     }
-    encoded.appendAssumeCapacity(@as(u8, @truncate(rest)));
+    encoded.appendAssumeCapacity(rest as u8);
 }

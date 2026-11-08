@@ -20,18 +20,18 @@ fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
     if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
 }
 const bun = @import("bun");
-    pub const HTTPContextTLS = @import("../HTTPContext.zig").NewHTTPContext(true);
-fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub const HTTPContextTLS = @import("../HTTPContext.zig").NewHTTPContext(true);
+const SSLConfig = bun.api.server.ServerConfig.SSLConfig;
 pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const PendingConnect = @This();
 
 hostname: []const u8,
 port: u16,
-ssl_config: ?*anyopaque = null,
+ssl_config: ?*SSLConfig = null,
 waiters: std.ArrayListUnmanaged(*bun.http.HTTPClient) = .{},
 
-pub fn matches(self: *const PendingConnect, hostname: []const u8, port: u16, ssl_config: ?*anyopaque) bool {
+pub fn matches(self: *const PendingConnect, hostname: []const u8, port: u16, ssl_config: ?*SSLConfig) bool {
         return (((self.port == port) and (self.ssl_config == ssl_config)) and bun.strings.eqlLong(self.hostname, hostname, true));
 }
 

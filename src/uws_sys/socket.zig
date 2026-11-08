@@ -2,639 +2,837 @@
 const std = @import("std");
 const string = []const u8;
 
-    const Environment = bun.Environment;
-    const BoringSSL = bun.BoringSSL.c;
-
-    const uws = bun.uws;
-    const SocketKind = uws.SocketKind;
-    const UpgradedDuplex = uws.UpgradedDuplex;
-    const WindowsNamedPipe = uws.WindowsNamedPipe;
-    const us_bun_verify_error_t = uws.us_bun_verify_error_t;
-    const us_socket_t = uws.us_socket_t;
-
-    const debug = bun.Output.scoped(.uws, .visible);
-pub const SocketTCP = NewSocketHandler(false);
-    pub const SocketTLS = NewSocketHandler(true);
-
-    pub const InternalSocket = union(enum) {
-        connected: *us_socket_t,
-        connecting: *ConnectingSocket,
-        detached: void,
-        upgradedDuplex: *uws.UpgradedDuplex,
-        pipe: if (Environment.isWindows) *uws.WindowsNamedPipe else void,
-
-        pub fn pauseResume(this: InternalSocket, pause: bool) bool {
-            switch (this) {
-                .detached => return true,
-                .connected => |socket| {
-                    if (pause) socket.pause() else socket.@"resume"();
-                    return true;
-                },
-                .connecting => |_| return false,
-                .upgradedDuplex => |_| return false,
-                .pipe => |pipe| {
-                    if (Environment.isWindows) {
-                        return if (pause) pipe.pauseStream() else pipe.resumeStream();
-                    }
-                    return false;
-                },
-            }
-        }
-
-        pub fn isDetached(this: InternalSocket) bool {
-            return this == .detached;
-        }
-
-        pub fn isNamedPipe(this: InternalSocket) bool {
-            return this == .pipe;
-        }
-
-        pub fn detach(this: *InternalSocket) void {
-            this.* = .detached;
-        }
-
-        pub fn setNoDelay(this: InternalSocket, enabled: bool) bool {
-            switch (this) {
-                .pipe, .upgradedDuplex, .connecting, .detached => return false,
-                .connected => |socket| {
-                    socket.setNodelay(enabled);
-                    return true;
-                },
-            }
-        }
-
-        pub fn setKeepAlive(this: InternalSocket, enabled: bool, delay: u32) bool {
-            switch (this) {
-                .pipe, .upgradedDuplex, .connecting, .detached => return false,
-                .connected => |socket| return socket.setKeepalive(enabled, delay) == 0,
-            }
-        }
-
-        pub fn close(this: InternalSocket, code: us_socket_t.CloseCode) void {
-            switch (this) {
-                .detached => {},
-                .connected => |socket| socket.close(code),
-                .connecting => |socket| socket.close(),
-                .upgradedDuplex => |socket| socket.close(),
-                .pipe => |pipe| if (Environment.isWindows) pipe.close(),
-            }
-        }
-
-        pub fn isClosed(this: InternalSocket) bool {
-            return switch (this) {
-                .connected => |socket| socket.isClosed(),
-                .connecting => |socket| socket.isClosed(),
-                .detached => true,
-                .upgradedDuplex => |socket| socket.isClosed(),
-                .pipe => |pipe| if (Environment.isWindows) pipe.isClosed() else true,
-            };
-        }
-
-        pub fn get(this: @This()) ?*us_socket_t {
-            return switch (this) {
-                .connected => this.connected,
-                .connecting, .detached, .upgradedDuplex, .pipe => null,
-            };
-        }
-
-        pub fn eq(this: @This(), other: @This()) bool {
-            return switch (this) {
-                .connected => switch (other) {
-                    .connected => this.connected == other.connected,
-                    .upgradedDuplex, .connecting, .detached, .pipe => false,
-                },
-                .connecting => switch (other) {
-                    .upgradedDuplex, .connected, .detached, .pipe => false,
-                    .connecting => this.connecting == other.connecting,
-                },
-                .detached => switch (other) {
-                    .detached => true,
-                    .upgradedDuplex, .connected, .connecting, .pipe => false,
-                },
-                .upgradedDuplex => switch (other) {
-                    .upgradedDuplex => this.upgradedDuplex == other.upgradedDuplex,
-                    .connected, .connecting, .detached, .pipe => false,
-                },
-                .pipe => switch (other) {
-                    .pipe => if (Environment.isWindows) this.pipe == other.pipe else false,
-                    .connected, .connecting, .detached, .upgradedDuplex => false,
-                },
-            };
-        }
-    };
-
-    pub const AnySocket = union(enum) {
-        SocketTCP: SocketTCP,
-        SocketTLS: SocketTLS,
-
-        pub fn setTimeout(this: AnySocket, seconds: c_uint) void {
-            switch (this) {
-                .SocketTCP => this.SocketTCP.setTimeout(seconds),
-                .SocketTLS => this.SocketTLS.setTimeout(seconds),
-            }
-        }
-
-        pub fn shutdown(this: AnySocket) void {
-            switch (this) {
-                .SocketTCP => |sock| sock.shutdown(),
-                .SocketTLS => |sock| sock.shutdown(),
-            }
-        }
-
-        pub fn shutdownRead(this: AnySocket) void {
-            switch (this) {
-                .SocketTCP => |sock| sock.shutdownRead(),
-                .SocketTLS => |sock| sock.shutdownRead(),
-            }
-        }
-
-        pub fn isShutdown(this: AnySocket) bool {
-            return switch (this) {
-                .SocketTCP => this.SocketTCP.isShutdown(),
-                .SocketTLS => this.SocketTLS.isShutdown(),
-            };
-        }
-        pub fn isClosed(this: AnySocket) bool {
-            return switch (this) {
-                inline else => |s| s.isClosed(),
-            };
-        }
-        pub fn close(this: AnySocket) void {
-            switch (this) {
-                inline else => |s| s.close(.normal),
-            }
-        }
-
-        pub fn terminate(this: AnySocket) void {
-            switch (this) {
-                inline else => |s| s.close(.failure),
-            }
-        }
-
-        pub fn write(this: AnySocket, data: []const u8) i32 {
-            return switch (this) {
-                .SocketTCP => |sock| sock.write(data),
-                .SocketTLS => |sock| sock.write(data),
-            };
-        }
-
-        pub fn getNativeHandle(this: AnySocket) ?*anyopaque {
-            return switch (this.socket()) {
-                .connected => |sock| sock.getNativeHandle(),
-                else => null,
-            };
-        }
-
-        pub fn localPort(this: AnySocket) i32 {
-            switch (this) {
-                .SocketTCP => |sock| sock.localPort(),
-                .SocketTLS => |sock| sock.localPort(),
-            }
-        }
-
-        pub fn isSSL(this: AnySocket) bool {
-            return switch (this) {
-                .SocketTCP => false,
-                .SocketTLS => true,
-            };
-        }
-
-        pub fn socket(this: AnySocket) InternalSocket {
-            return switch (this) {
-                .SocketTCP => this.SocketTCP.socket,
-                .SocketTLS => this.SocketTLS.socket,
-            };
-        }
-
-        pub fn ext(this: AnySocket, comptime ContextType: type) ?*ContextType {
-            return switch (this) {
-                inline else => |s| s.ext(ContextType),
-            };
-        }
-
-        pub fn group(this: AnySocket) *SocketGroup {
-            @setRuntimeSafety(true);
-            return switch (this) {
-                .SocketTCP => |sock| sock.group(),
-                .SocketTLS => |sock| sock.group(),
-            }.?;
-        }
-    };
-
-    fn NativeSocketHandleType(comptime ssl: bool) type {
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
+fn NativeSocketHandleType(comptime ssl: bool) type {
         if (ssl) {
-            return BoringSSL.SSL;
+            return bun.BoringSSL.c.SSL;
         } else {
             return anyopaque;
         }
     }
+pub const NewSocketHandler = SocketHandler;
+fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@"struct".fields.len; return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
+pub fn CpUnpackSliceType(comptime T: type, comptime start: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start < fields.len) fields[start].type else fields[0].type; return []const CpValType(Elem); }
+pub fn cp_unpack_slice(v: anytype, comptime start: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start + suffix_len) { return m.array[start .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start + suffix_len) { return v.array[start .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start) end - start else 0; const Elem = if (start < fields.len) CpValType(fields[start].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const bun = @import("bun");
 pub const ConnectingSocket = @import("./ConnectingSocket.zig").ConnectingSocket;
 pub const SocketGroup = @import("./SocketGroup.zig").SocketGroup;
+pub const SocketKind = @import("./SocketKind.zig").SocketKind;
+pub const us_socket_t = @import("./us_socket_t.zig").us_socket_t;
+pub const InternalSocket = union(enum) {
+    connected: *us_socket_t,
+    connecting: *ConnectingSocket,
+    detached,
+    upgradedDuplex: *bun.uws.UpgradedDuplex,
+    pipe: *bun.uws.WindowsNamedPipe,
 
-pub fn NewSocketHandler(comptime is_ssl: bool) type {
-        return struct {
-            socket: InternalSocket,
-
-            const ThisSocket = @This();
-
-            pub const detached: NewSocketHandler(is_ssl) = NewSocketHandler(is_ssl){ .socket = .{ .detached = {} } };
-
-            pub fn setNoDelay(this: ThisSocket, enabled: bool) bool {
-                return this.socket.setNoDelay(enabled);
+pub fn pauseResume(self: InternalSocket, pause: bool) bool {
+            switch (self) {
+.detached => {
+return true;
+},
+.connected => |socket| {
+if (pause) {
+                _ = socket.pause();
+            } else {
+                _ = socket.resumeSocket();
             }
-
-            pub fn setKeepAlive(this: ThisSocket, enabled: bool, delay: u32) bool {
-                return this.socket.setKeepAlive(enabled, delay);
-            }
-
-            pub fn pauseStream(this: ThisSocket) bool {
-                return this.socket.pauseResume(true);
-            }
-
-            pub fn resumeStream(this: ThisSocket) bool {
-                return this.socket.pauseResume(false);
-            }
-
-            pub fn detach(this: *ThisSocket) void {
-                this.socket.detach();
-            }
-
-            pub fn isDetached(this: ThisSocket) bool {
-                return this.socket.isDetached();
-            }
-
-            pub fn isNamedPipe(this: ThisSocket) bool {
-                return this.socket.isNamedPipe();
-            }
-
-            pub fn getVerifyError(this: ThisSocket) uws.us_bun_verify_error_t {
-                switch (this.socket) {
-                    .connected => |socket| return socket.getVerifyError(),
-                    .upgradedDuplex => |socket| return socket.sslError(),
-                    .pipe => |pipe| if (Environment.isWindows) return pipe.sslError() else return std.mem.zeroes(us_bun_verify_error_t),
-                    .connecting, .detached => return std.mem.zeroes(us_bun_verify_error_t),
+            return true;
+},
+.connecting => {
+return false;
+},
+.upgradedDuplex => {
+return false;
+},
+.pipe => |p| {
+if (bun.Environment.isWindows) {
+                if (pause) {
+                    return p.pauseStream();
+                } else {
+                    return p.resumeStream();
                 }
             }
+            return false;
+},
+}
+    }
 
-            pub fn isEstablished(this: ThisSocket) bool {
-                switch (this.socket) {
-                    .connected => |socket| return socket.isEstablished(),
-                    .upgradedDuplex => |socket| return socket.isEstablished(),
-                    .pipe => |pipe| if (Environment.isWindows) return pipe.isEstablished() else return false,
-                    .connecting, .detached => return false,
-                }
+pub fn isDetached(self: InternalSocket) bool {
+            return (switch (self) {
+.detached => true,
+else => false,
+});
+    }
+
+pub fn isNamedPipe(self: InternalSocket) bool {
+            return (switch (self) {
+.pipe => true,
+else => false,
+});
+    }
+
+pub fn detach(self: *InternalSocket) void {
+            self.* = InternalSocket{ .detached = {} };
+    }
+
+pub fn setNoDelay(self: InternalSocket, enabled: bool) bool {
+            switch (self) {
+.pipe, .upgradedDuplex, .connecting, .detached => {
+return false;
+},
+.connected => |socket| {
+_ = socket.setNodelay(enabled);
+            return true;
+},
+}
+    }
+
+pub fn setKeepAlive(self: InternalSocket, enabled: bool, delay: u32) bool {
+            switch (self) {
+.pipe, .upgradedDuplex, .connecting, .detached => {
+return false;
+},
+.connected => |socket| {
+return (socket.setKeepalive(enabled, delay) == 0);
+},
+}
+    }
+
+pub fn close(self: InternalSocket, code: us_socket_t.CloseCode) void {
+            switch (self) {
+.detached => {
+
+},
+.connected => |socket| {
+_ = socket.close(code);
+},
+.connecting => |socket| {
+_ = socket.close();
+},
+.upgradedDuplex => |socket| {
+_ = socket.close();
+},
+.pipe => |p| {
+if (bun.Environment.isWindows) {
+                _ = p.close();
             }
+},
+}
+    }
 
-            pub fn timeout(this: ThisSocket, seconds: c_uint) void {
-                switch (this.socket) {
-                    .upgradedDuplex => |socket| socket.setTimeout(seconds),
-                    .pipe => |pipe| if (Environment.isWindows) pipe.setTimeout(seconds),
-                    .connected => |socket| socket.setTimeout(seconds),
-                    .connecting => |socket| socket.timeout(seconds),
-                    .detached => {},
-                }
-            }
-
-            pub fn setTimeout(this: ThisSocket, seconds: c_uint) void {
-                switch (this.socket) {
-                    .connected => |socket| {
-                        if (seconds > 240) {
-                            socket.setTimeout(0);
-                            socket.setLongTimeout(seconds / 60);
-                        } else {
-                            socket.setTimeout(seconds);
-                            socket.setLongTimeout(0);
-                        }
-                    },
-                    .connecting => |socket| {
-                        if (seconds > 240) {
-                            socket.timeout(0);
-                            socket.longTimeout(seconds / 60);
-                        } else {
-                            socket.timeout(seconds);
-                            socket.longTimeout(0);
-                        }
-                    },
-                    .detached => {},
-                    .upgradedDuplex => |socket| socket.setTimeout(seconds),
-                    .pipe => |pipe| if (Environment.isWindows) pipe.setTimeout(seconds),
-                }
-            }
-
-            pub fn setTimeoutMinutes(this: ThisSocket, minutes: c_uint) void {
-                switch (this.socket) {
-                    .connected => |socket| {
-                        socket.setTimeout(0);
-                        socket.setLongTimeout(minutes);
-                    },
-                    .connecting => |socket| {
-                        socket.timeout(0);
-                        socket.longTimeout(minutes);
-                    },
-                    .detached => {},
-                    .upgradedDuplex => |socket| socket.setTimeout(minutes * 60),
-                    .pipe => |pipe| if (Environment.isWindows) pipe.setTimeout(minutes * 60),
-                }
-            }
-
-            pub fn startTLS(this: ThisSocket, is_client: bool) void {
-                if (this.socket.get()) |socket| socket.open(is_client, null);
-            }
-
-            pub fn ssl(this: ThisSocket) ?*BoringSSL.SSL {
-                if (comptime is_ssl) {
-                    if (this.getNativeHandle()) |handle| {
-                        return @as(*BoringSSL.SSL, @ptrCast(handle));
-                    }
-                    return null;
-                }
-                return null;
-            }
-
-            pub fn getNativeHandle(this: ThisSocket) ?*NativeSocketHandleType(is_ssl) {
-                return @ptrCast(switch (this.socket) {
-                    .connected => |socket| socket.getNativeHandle(),
-                    .connecting => |socket| socket.getNativeHandle(),
-                    .detached => null,
-                    .upgradedDuplex => |socket| if (is_ssl) @as(*anyopaque, @ptrCast(socket.ssl() orelse return null)) else null,
-                    .pipe => |socket| if (is_ssl and Environment.isWindows) @as(*anyopaque, @ptrCast(socket.ssl() orelse return null)) else null,
-                } orelse return null);
-            }
-
-            pub inline fn fd(this: ThisSocket) bun.FD {
-                const socket = this.socket.get() orelse return bun.invalid_fd;
-                return socket.getFd();
-            }
-
-            pub fn markNeedsMoreForSendfile(this: ThisSocket) void {
-                if (comptime is_ssl) {
-                    @compileError("SSL sockets do not support sendfile yet");
-                }
-                const socket = this.socket.get() orelse return;
-                socket.sendFileNeedsMore();
-            }
-
-            pub fn ext(this: ThisSocket, comptime ContextType: type) ?*ContextType {
-                return switch (this.socket) {
-                    .connected => |sock| sock.ext(ContextType),
-                    .connecting => |sock| sock.ext(ContextType),
-                    .detached, .upgradedDuplex, .pipe => null,
-                };
-            }
-
-            pub fn group(this: ThisSocket) ?*SocketGroup {
-                switch (this.socket) {
-                    .connected => |socket| return socket.group(),
-                    .connecting => |socket| return socket.group(),
-                    .detached, .upgradedDuplex, .pipe => return null,
-                }
-            }
-
-            pub fn flush(this: ThisSocket) void {
-                switch (this.socket) {
-                    .upgradedDuplex => |socket| socket.flush(),
-                    .pipe => |pipe| if (comptime Environment.isWindows) pipe.flush(),
-                    .connected => |socket| socket.flush(),
-                    .connecting, .detached => return,
-                }
-            }
-
-            pub fn write(this: ThisSocket, data: []const u8) i32 {
-                return switch (this.socket) {
-                    .upgradedDuplex => |socket| socket.encodeAndWrite(data),
-                    .pipe => |pipe| if (comptime Environment.isWindows) pipe.encodeAndWrite(data) else 0,
-                    .connected => |socket| socket.write(data),
-                    .connecting, .detached => 0,
-                };
-            }
-
-            pub fn writeFd(this: ThisSocket, data: []const u8, file_descriptor: bun.FD) i32 {
-                return switch (this.socket) {
-                    .upgradedDuplex, .pipe => this.write(data),
-                    .connected => |socket| socket.writeFd(data, file_descriptor),
-                    .connecting, .detached => 0,
-                };
-            }
-
-            pub fn rawWrite(this: ThisSocket, data: []const u8) i32 {
-                return switch (this.socket) {
-                    .connected => |socket| socket.rawWrite(data),
-                    .connecting, .detached => 0,
-                    .upgradedDuplex => |socket| socket.rawWrite(data),
-                    .pipe => |pipe| if (comptime Environment.isWindows) pipe.rawWrite(data) else 0,
-                };
-            }
-
-            pub fn shutdown(this: ThisSocket) void {
-                switch (this.socket) {
-                    .connected => |socket| socket.shutdown(),
-                    .connecting => |socket| {
-                        debug("us_connecting_socket_shutdown({d})", .{@intFromPtr(socket)});
-                        return socket.shutdown();
-                    },
-                    .detached => {},
-                    .upgradedDuplex => |socket| socket.shutdown(),
-                    .pipe => |pipe| if (comptime Environment.isWindows) pipe.shutdown(),
-                }
-            }
-
-            pub fn shutdownRead(this: ThisSocket) void {
-                switch (this.socket) {
-                    .connected => |socket| socket.shutdownRead(),
-                    .connecting => |socket| {
-                        debug("us_connecting_socket_shutdown_read({d})", .{@intFromPtr(socket)});
-                        return socket.shutdownRead();
-                    },
-                    .upgradedDuplex => |socket| socket.shutdownRead(),
-                    .pipe => |pipe| if (comptime Environment.isWindows) pipe.shutdownRead(),
-                    .detached => {},
-                }
-            }
-
-            pub fn isShutdown(this: ThisSocket) bool {
-                return switch (this.socket) {
-                    .connected => |socket| socket.isShutdown(),
-                    .connecting => |socket| blk: {
-                        debug("us_connecting_socket_is_shut_down({d})", .{@intFromPtr(socket)});
-                        break :blk socket.isShutdown();
-                    },
-                    .upgradedDuplex => |socket| socket.isShutdown(),
-                    .pipe => |pipe| return if (Environment.isWindows) pipe.isShutdown() else false,
-                    .detached => true,
-                };
-            }
-
-            pub fn isClosedOrHasError(this: ThisSocket) bool {
-                if (this.isClosed() or this.isShutdown()) {
-                    return true;
-                }
-                return this.getError() != 0;
-            }
-
-            pub fn getError(this: ThisSocket) i32 {
-                switch (this.socket) {
-                    .connected => |socket| {
-                        debug("us_socket_get_error({d})", .{@intFromPtr(socket)});
-                        return socket.getError();
-                    },
-                    .connecting => |socket| {
-                        debug("us_connecting_socket_get_error({d})", .{@intFromPtr(socket)});
-                        return socket.getError();
-                    },
-                    .detached => return 0,
-                    .upgradedDuplex => |socket| return socket.sslError().error_no,
-                    .pipe => |pipe| return if (Environment.isWindows) pipe.sslError().error_no else 0,
-                }
-            }
-
-            pub fn isClosed(this: ThisSocket) bool {
-                return this.socket.isClosed();
-            }
-
-            pub fn close(this: ThisSocket, code: us_socket_t.CloseCode) void {
-                return this.socket.close(code);
-            }
-
-            pub fn localPort(this: ThisSocket) i32 {
-                return switch (this.socket) {
-                    .connected => |socket| socket.localPort(),
-                    .pipe, .upgradedDuplex, .connecting, .detached => 0,
-                };
-            }
-
-            pub fn remotePort(this: ThisSocket) i32 {
-                return switch (this.socket) {
-                    .connected => |socket| socket.remotePort(),
-                    .pipe, .upgradedDuplex, .connecting, .detached => 0,
-                };
-            }
-
-            pub fn remoteAddress(this: ThisSocket, buf: []u8) ?[]const u8 {
-                return switch (this.socket) {
-                    .connected => |sock| sock.remoteAddress(buf) catch |e| {
-                        bun.Output.panic("Failed to get socket's remote address: {s}", .{@errorName(e)});
-                    },
-                    .pipe, .upgradedDuplex, .connecting, .detached => null,
-                };
-            }
-
-            pub fn localAddress(this: ThisSocket, buf: []u8) ?[]const u8 {
-                return switch (this.socket) {
-                    .connected => |sock| sock.localAddress(buf) catch |e| {
-                        bun.Output.panic("Failed to get socket's local address: {s}", .{@errorName(e)});
-                    },
-                    .pipe, .upgradedDuplex, .connecting, .detached => null,
-                };
-            }
-
-            pub fn fromDuplex(duplex: *UpgradedDuplex) ThisSocket {
-                return ThisSocket{ .socket = .{ .upgradedDuplex = duplex } };
-            }
-
-            pub fn fromNamedPipe(pipe: *WindowsNamedPipe) ThisSocket {
-                if (Environment.isWindows) {
-                    return ThisSocket{ .socket = .{ .pipe = pipe } };
-                }
-                @compileError("WindowsNamedPipe is only available on Windows");
-            }
-
-            pub fn fromFd(
-                g: *SocketGroup,
-                k: SocketKind,
-                handle: bun.FD,
-                comptime This: type,
-                this_ptr: *This,
-                comptime socket_field_name: ?[]const u8,
-                is_ipc: bool,
-            ) ?ThisSocket {
-                const raw = g.fromFd(k, null, @sizeOf(?*This), handle.native(), is_ipc) orelse return null;
-                const socket_ = ThisSocket{ .socket = .{ .connected = raw } };
-
-                raw.ext(?*This).* = this_ptr;
-                if (comptime socket_field_name) |field| {
-                    @field(this_ptr, field) = socket_;
-                }
-                return socket_;
-            }
-
-            pub fn connectGroup(
-                g: *SocketGroup,
-                kind: SocketKind,
-                ssl_ctx: ?*uws.SslCtx,
-                raw_host: []const u8,
-                port: anytype,
-                owner: anytype,
-                allow_half_open: bool,
-            ) !ThisSocket {
-                const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
-                const opts: c_int = if (allow_half_open) uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0;
-                const host = if (raw_host.len > 1 and raw_host[0] == '[' and raw_host[raw_host.len - 1] == ']')
-                    raw_host[1 .. raw_host.len - 1]
-                else
-                    raw_host;
-                var stack: [256]u8 = undefined;
-                const hostZ: [:0]const u8 = if (host.len < stack.len) blk: {
-                    @memcpy(stack[0..host.len], host);
-                    stack[host.len] = 0;
-                    break :blk stack[0..host.len :0];
-                } else bun.handleOom(bun.default_allocator.dupeZ(u8, host));
-                defer if (hostZ.ptr != &stack) bun.default_allocator.free(hostZ);
-
-                return switch (g.connect(kind, ssl_ctx, hostZ, @intCast(port), opts, @sizeOf(?*Owner))) {
-                    .failed => error.FailedToOpenSocket,
-                    .socket => |s| blk: {
-                        s.ext(?*Owner).* = owner;
-                        break :blk .{ .socket = .{ .connected = s } };
-                    },
-                    .connecting => |cs| blk: {
-                        cs.ext(?*Owner).* = owner;
-                        break :blk .{ .socket = .{ .connecting = cs } };
-                    },
-                };
-            }
-
-            pub fn connectUnixGroup(
-                g: *SocketGroup,
-                kind: SocketKind,
-                ssl_ctx: ?*uws.SslCtx,
-                path: []const u8,
-                owner: anytype,
-                allow_half_open: bool,
-            ) !ThisSocket {
-                const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
-                const opts: c_int = if (allow_half_open) uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0;
-                const s = g.connectUnix(kind, ssl_ctx, path.ptr, path.len, opts, @sizeOf(?*Owner)) orelse
-                    return error.FailedToOpenSocket;
-                s.ext(?*Owner).* = owner;
-                return .{ .socket = .{ .connected = s } };
-            }
-
-            pub fn adoptGroup(
-                tcp: *us_socket_t,
-                g: *SocketGroup,
-                kind: SocketKind,
-                comptime Owner: type,
-                comptime field: []const u8,
-                owner: *Owner,
-            ) bool {
-                const new_s = tcp.adopt(g, kind, @sizeOf(*anyopaque), @sizeOf(*anyopaque)) orelse return false;
-                new_s.ext(*anyopaque).* = owner;
-                @field(owner, field) = .{ .socket = .{ .connected = new_s } };
+pub fn isClosed(self: InternalSocket) bool {
+            return (switch (self) {
+.connected => |socket| socket.isClosed(),
+.connecting => |socket| socket.isClosed(),
+.detached => true,
+.upgradedDuplex => |socket| socket.isClosed(),
+.pipe => |p| {
+if (bun.Environment.isWindows) {
+                return p.isClosed();
+            } else {
                 return true;
             }
-
-            pub fn from(socket: *us_socket_t) ThisSocket {
-                return ThisSocket{ .socket = .{ .connected = socket } };
+},
+});
+    }
+    
+    pub fn get(this: @This()) ?*us_socket_t {
+                return switch (this) {
+                    .connected => this.connected,
+                    .connecting, .detached, .upgradedDuplex, .pipe => null,
+                };
             }
-
-            pub fn fromConnecting(connecting: *ConnectingSocket) ThisSocket {
-                return ThisSocket{ .socket = .{ .connecting = connecting } };
+    
+            pub fn eq(this: @This(), other: @This()) bool {
+                return switch (this) {
+                    .connected => switch (other) {
+                        .connected => this.connected == other.connected,
+                        .upgradedDuplex, .connecting, .detached, .pipe => false,
+                    },
+                    .connecting => switch (other) {
+                        .upgradedDuplex, .connected, .detached, .pipe => false,
+                        .connecting => this.connecting == other.connecting,
+                    },
+                    .detached => switch (other) {
+                        .detached => true,
+                        .upgradedDuplex, .connected, .connecting, .pipe => false,
+                    },
+                    .upgradedDuplex => switch (other) {
+                        .upgradedDuplex => this.upgradedDuplex == other.upgradedDuplex,
+                        .connected, .connecting, .detached, .pipe => false,
+                    },
+                    .pipe => switch (other) {
+                        .pipe => if (bun.Environment.isWindows) this.pipe == other.pipe else false,
+                        .connected, .connecting, .detached, .upgradedDuplex => false,
+                    },
+                };
             }
+};
 
-            pub fn fromAny(socket: InternalSocket) ThisSocket {
-                return ThisSocket{ .socket = socket };
-            }
-        };
+pub const AnySocket = union(enum) {
+    SocketTCP: SocketTCP,
+    SocketTLS: SocketTLS,
+
+pub fn setTimeout(self: AnySocket, seconds: u32) void {
+            switch (self) {
+.SocketTCP => |s| {
+_ = s.setTimeout(seconds);
+},
+.SocketTLS => |s| {
+_ = s.setTimeout(seconds);
+},
 }
+    }
+
+pub fn shutdown(self: AnySocket) void {
+            switch (self) {
+.SocketTCP => |sock| {
+_ = sock.shutdown();
+},
+.SocketTLS => |sock| {
+_ = sock.shutdown();
+},
+}
+    }
+
+pub fn shutdownRead(self: AnySocket) void {
+            switch (self) {
+.SocketTCP => |sock| {
+_ = sock.shutdownRead();
+},
+.SocketTLS => |sock| {
+_ = sock.shutdownRead();
+},
+}
+    }
+
+pub fn isShutdown(self: AnySocket) bool {
+            return (switch (self) {
+.SocketTCP => |s| s.isShutdown(),
+.SocketTLS => |s| s.isShutdown(),
+});
+    }
+
+pub fn isClosed(self: AnySocket) bool {
+            return (switch (self) {
+.SocketTCP => |s| s.isClosed(),
+.SocketTLS => |s| s.isClosed(),
+});
+    }
+
+pub fn close(self: AnySocket) void {
+            switch (self) {
+.SocketTCP => |s| {
+_ = s.close(us_socket_t.CloseCode.normal);
+},
+.SocketTLS => |s| {
+_ = s.close(us_socket_t.CloseCode.normal);
+},
+}
+    }
+
+pub fn terminate(self: AnySocket) void {
+            switch (self) {
+.SocketTCP => |s| {
+_ = s.close(us_socket_t.CloseCode.failure);
+},
+.SocketTLS => |s| {
+_ = s.close(us_socket_t.CloseCode.failure);
+},
+}
+    }
+
+pub fn write(self: AnySocket, data: []const u8) i32 {
+            return (switch (self) {
+.SocketTCP => |sock| sock.write(data),
+.SocketTLS => |sock| sock.write(data),
+});
+    }
+
+pub fn getNativeHandle(self: AnySocket) ?*anyopaque {
+            return (switch (self.socket()) {
+.connected => |sock| sock.getNativeHandle(),
+else => null,
+});
+    }
+
+pub fn localPort(self: AnySocket) i32 {
+            return (switch (self) {
+.SocketTCP => |sock| sock.localPort(),
+.SocketTLS => |sock| sock.localPort(),
+});
+    }
+
+pub fn isSSL(self: AnySocket) bool {
+            return (switch (self) {
+.SocketTCP => false,
+.SocketTLS => true,
+});
+    }
+
+pub fn socket(self: AnySocket) InternalSocket {
+            return (switch (self) {
+.SocketTCP => |s| s.socket,
+.SocketTLS => |s| s.socket,
+});
+    }
+
+pub fn ext(self: AnySocket, comptime ContextType: type) ?*ContextType {
+            return (switch (self) {
+.SocketTCP => |s| s.ext(ContextType),
+.SocketTLS => |s| s.ext(ContextType),
+});
+    }
+
+pub fn group(self: AnySocket) *SocketGroup {
+            return (switch (self) {
+.SocketTCP => |sock| (sock.group()).?,
+.SocketTLS => |sock| (sock.group()).?,
+});
+    }
+};
+
+pub fn SocketHandler(comptime is_ssl: bool) type {
+    return struct {
+        socket: InternalSocket,
+
+pub fn setNoDelay(self: @This(), enabled: bool) bool {
+                return self.socket.setNoDelay(enabled);
+        }
+
+pub fn setKeepAlive(self: @This(), enabled: bool, delay: u32) bool {
+                return self.socket.setKeepAlive(enabled, delay);
+        }
+
+pub fn pauseStream(self: @This()) bool {
+                return self.socket.pauseResume(true);
+        }
+
+pub fn resumeStream(self: @This()) bool {
+                return self.socket.pauseResume(false);
+        }
+
+pub fn detach(self: *@This()) void {
+                _ = self.socket.detach();
+        }
+
+pub fn isDetached(self: @This()) bool {
+                return self.socket.isDetached();
+        }
+
+pub fn isNamedPipe(self: @This()) bool {
+                return self.socket.isNamedPipe();
+        }
+
+pub fn getVerifyError(self: @This()) bun.uws.us_bun_verify_error_t {
+                switch (self.socket) {
+.connected => |socket| {
+return socket.getVerifyError();
+},
+.upgradedDuplex => |socket| {
+return socket.sslError();
+},
+.pipe => |pipe| {
+if (bun.Environment.isWindows) {
+                    return pipe.sslError();
+                }
+                return std.mem.zeroes(bun.uws.us_bun_verify_error_t);
+},
+.connecting, .detached => {
+return std.mem.zeroes(bun.uws.us_bun_verify_error_t);
+},
+}
+        }
+
+pub fn isEstablished(self: @This()) bool {
+                switch (self.socket) {
+.connected => |socket| {
+return socket.isEstablished();
+},
+.upgradedDuplex => |socket| {
+return socket.isEstablished();
+},
+.pipe => |pipe| {
+if (bun.Environment.isWindows) {
+                    return pipe.isEstablished();
+                }
+                return false;
+},
+.connecting, .detached => {
+return false;
+},
+}
+        }
+
+pub fn timeout(self: @This(), seconds: u32) void {
+                switch (self.socket) {
+.upgradedDuplex => |socket| {
+_ = socket.setTimeout(seconds);
+},
+.pipe => |pipe| {
+if (bun.Environment.isWindows) {
+                    _ = pipe.setTimeout(seconds);
+                }
+},
+.connected => |socket| {
+_ = socket.setTimeout(seconds);
+},
+.connecting => |socket| {
+_ = socket.timeout(seconds);
+},
+.detached => {
+
+},
+}
+        }
+
+pub fn setTimeout(self: @This(), seconds: u32) void {
+                switch (self.socket) {
+.connected => |socket| {
+if ((seconds > 240)) {
+                    _ = socket.setTimeout(0);
+                    _ = socket.setLongTimeout((seconds / 60));
+                } else {
+                    _ = socket.setTimeout(seconds);
+                    _ = socket.setLongTimeout(0);
+                }
+},
+.connecting => |socket| {
+if ((seconds > 240)) {
+                    _ = socket.timeout(0);
+                    _ = socket.longTimeout((seconds / 60));
+                } else {
+                    _ = socket.timeout(seconds);
+                    _ = socket.longTimeout(0);
+                }
+},
+.detached => {
+
+},
+.upgradedDuplex => |socket| {
+_ = socket.setTimeout(seconds);
+},
+.pipe => |pipe| {
+if (bun.Environment.isWindows) {
+                    _ = pipe.setTimeout(seconds);
+                }
+},
+}
+        }
+
+pub fn setTimeoutMinutes(self: @This(), minutes: u32) void {
+                switch (self.socket) {
+.connected => |socket| {
+_ = socket.setTimeout(0);
+                _ = socket.setLongTimeout(minutes);
+},
+.connecting => |socket| {
+_ = socket.timeout(0);
+                _ = socket.longTimeout(minutes);
+},
+.detached => {
+
+},
+.upgradedDuplex => |socket| {
+_ = socket.setTimeout((minutes * 60));
+},
+.pipe => |pipe| {
+if (bun.Environment.isWindows) {
+                    _ = pipe.setTimeout((minutes * 60));
+                }
+},
+}
+        }
+
+pub fn startTLS(self: @This(), is_client: bool) void {
+                var sock = self.socket.get();
+                _ = &sock;
+                if ((sock != null)) {
+                    _ = sock.?.open(is_client, null);
+                }
+        }
+
+pub fn ssl(self: @This()) ?*bun.BoringSSL.c.SSL {
+                if (is_ssl) {
+                    var handle = self.getNativeHandle();
+                    _ = &handle;
+                    if ((handle != null)) {
+                        return @ptrCast(handle.?);
+                    }
+                }
+                return null;
+        }
+
+pub fn fd(self: @This()) bun.FD {
+                var sock = self.socket.get();
+                _ = &sock;
+                if ((sock == null)) {
+                    return bun.invalid_fd;
+                }
+                return sock.?.getFd();
+        }
+
+pub fn markNeedsMoreForSendfile(self: @This()) void {
+                var sock = self.socket.get();
+                _ = &sock;
+                if ((sock != null)) {
+                    _ = sock.?.sendFileNeedsMore();
+                }
+        }
+
+pub fn ext(self: @This(), comptime ContextType: type) ?*ContextType {
+                return (switch (self.socket) {
+.connected => |sock| sock.ext(ContextType),
+.connecting => |sock| sock.ext(ContextType),
+.detached, .upgradedDuplex, .pipe => null,
+});
+        }
+
+pub fn group(self: @This()) ?*SocketGroup {
+                return (switch (self.socket) {
+.connected => |socket| socket.group(),
+.connecting => |socket| socket.group(),
+.detached, .upgradedDuplex, .pipe => null,
+});
+        }
+
+pub fn flush(self: @This()) void {
+                switch (self.socket) {
+.upgradedDuplex => |socket| {
+_ = socket.flush();
+},
+.pipe => |pipe| {
+if (bun.Environment.isWindows) {
+                    _ = pipe.flush();
+                }
+},
+.connected => |socket| {
+_ = socket.flush();
+},
+.connecting, .detached => {
+
+},
+}
+        }
+
+pub fn write(self: @This(), data: []const u8) i32 {
+                return (switch (self.socket) {
+.upgradedDuplex => |socket| socket.encodeAndWrite(data),
+.pipe => |pipe| {
+if (bun.Environment.isWindows) {
+                    return pipe.encodeAndWrite(data);
+                } else {
+                    return 0;
+                }
+},
+.connected => |socket| socket.write(data),
+.connecting, .detached => 0,
+});
+        }
+
+pub fn writeFd(self: @This(), data: []const u8, file_descriptor: bun.FD) i32 {
+                return (switch (self.socket) {
+.upgradedDuplex, .pipe => self.write(data),
+.connected => |socket| socket.writeFd(data, file_descriptor),
+.connecting, .detached => 0,
+});
+        }
+
+pub fn rawWrite(self: @This(), data: []const u8) i32 {
+                return (switch (self.socket) {
+.connected => |socket| socket.rawWrite(data),
+.connecting, .detached => 0,
+.upgradedDuplex => |socket| socket.rawWrite(data),
+.pipe => |pipe| {
+if (bun.Environment.isWindows) {
+                    return pipe.rawWrite(data);
+                } else {
+                    return 0;
+                }
+},
+});
+        }
+
+pub fn shutdown(self: @This()) void {
+                switch (self.socket) {
+.connected => |socket| {
+_ = socket.shutdown();
+},
+.connecting => |socket| {
+_ = socket.shutdown();
+},
+.detached => {
+
+},
+.upgradedDuplex => |socket| {
+_ = socket.shutdown();
+},
+.pipe => |pipe| {
+if (bun.Environment.isWindows) {
+                    _ = pipe.shutdown();
+                }
+},
+}
+        }
+
+pub fn shutdownRead(self: @This()) void {
+                switch (self.socket) {
+.connected => |socket| {
+_ = socket.shutdownRead();
+},
+.connecting => |socket| {
+_ = socket.shutdownRead();
+},
+.upgradedDuplex => |socket| {
+_ = socket.shutdownRead();
+},
+.pipe => |pipe| {
+if (bun.Environment.isWindows) {
+                    _ = pipe.shutdownRead();
+                }
+},
+.detached => {
+
+},
+}
+        }
+
+pub fn isShutdown(self: @This()) bool {
+                return (switch (self.socket) {
+.connected => |socket| socket.isShutdown(),
+.connecting => |socket| socket.isShutdown(),
+.upgradedDuplex => |socket| socket.isShutdown(),
+.pipe => |pipe| {
+if (bun.Environment.isWindows) {
+                    return pipe.isShutdown();
+                } else {
+                    return false;
+                }
+},
+.detached => true,
+});
+        }
+
+pub fn isClosedOrHasError(self: @This()) bool {
+                if ((self.isClosed() or self.isShutdown())) {
+                    return true;
+                }
+                return (self.getError() != 0);
+        }
+
+pub fn getError(self: @This()) i32 {
+                switch (self.socket) {
+.connected => |socket| {
+return socket.getError();
+},
+.connecting => |socket| {
+return socket.getError();
+},
+.detached => {
+return 0;
+},
+.upgradedDuplex => |socket| {
+return socket.sslError().error_no;
+},
+.pipe => |pipe| {
+if (bun.Environment.isWindows) {
+                    return pipe.sslError().error_no;
+                } else {
+                    return 0;
+                }
+},
+}
+        }
+
+pub fn isClosed(self: @This()) bool {
+                return self.socket.isClosed();
+        }
+
+pub fn close(self: @This(), code: us_socket_t.CloseCode) void {
+                _ = self.socket.close(code);
+        }
+
+pub fn localPort(self: @This()) i32 {
+                return (switch (self.socket) {
+.connected => |socket| socket.localPort(),
+.pipe, .upgradedDuplex, .connecting, .detached => 0,
+});
+        }
+
+pub fn remotePort(self: @This()) i32 {
+                return (switch (self.socket) {
+.connected => |socket| socket.remotePort(),
+.pipe, .upgradedDuplex, .connecting, .detached => 0,
+});
+        }
+
+pub fn remoteAddress(self: @This(), buf: []u8) ?[]const u8 {
+                return (switch (self.socket) {
+.connected => |sock| (blk_catch_0: { break :blk_catch_0 ((sock.remoteAddress(buf)) catch |__ce_0| { _ = &__ce_0; break :blk_catch_0 null; }); }),
+.pipe, .upgradedDuplex, .connecting, .detached => null,
+});
+        }
+
+pub fn localAddress(self: @This(), buf: []u8) ?[]const u8 {
+                return (switch (self.socket) {
+.connected => |sock| (blk_catch_1: { break :blk_catch_1 ((sock.localAddress(buf)) catch |__ce_1| { _ = &__ce_1; break :blk_catch_1 null; }); }),
+.pipe, .upgradedDuplex, .connecting, .detached => null,
+});
+        }
+
+pub fn fromDuplex(duplex: *bun.uws.UpgradedDuplex) Self {
+                return Self{ .socket = InternalSocket{ .upgradedDuplex = duplex } };
+        }
+
+pub fn fromNamedPipe(pipe: *bun.uws.WindowsNamedPipe) Self {
+                return Self{ .socket = InternalSocket{ .pipe = pipe } };
+        }
+
+pub fn from(socket: *us_socket_t) Self {
+                return Self{ .socket = InternalSocket{ .connected = socket } };
+        }
+
+pub fn fromConnecting(connecting: *ConnectingSocket) Self {
+                return Self{ .socket = InternalSocket{ .connecting = connecting } };
+        }
+
+pub fn fromAny(socket: InternalSocket) Self {
+                return Self{ .socket = socket };
+        }
+        pub const Self = @This();
+                pub const detached: Self = .{ .socket = .detached };
+        
+                pub fn getNativeHandle(this: Self) ?*NativeSocketHandleType(is_ssl) {
+                    return @ptrCast(switch (this.socket) {
+                        .connected => |socket| socket.getNativeHandle(),
+                        .connecting => |socket| socket.getNativeHandle(),
+                        .detached => null,
+                        .upgradedDuplex => |socket| if (is_ssl) @as(*anyopaque, @ptrCast(socket.ssl() orelse return null)) else null,
+                        .pipe => |socket| if (is_ssl and bun.Environment.isWindows) @as(*anyopaque, @ptrCast(socket.ssl() orelse return null)) else null,
+                    } orelse return null);
+                }
+        pub const fromFd = struct {
+                    pub fn call(
+                        g: *SocketGroup,
+                        k: SocketKind,
+                        handle: bun.FD,
+                        comptime This: type,
+                        this: *This,
+                        comptime socket_field_name: ?[]const u8,
+                        is_ipc: bool,
+                    ) ?SocketHandler(is_ssl) {
+                        const raw = g.fromFd(k, null, @sizeOf(?*This), handle.native(), is_ipc) orelse return null;
+                        const socket_ = SocketHandler(is_ssl){ .socket = .{ .connected = raw } };
+        
+                        raw.ext(?*This).* = this;
+                        if (comptime socket_field_name) |field| {
+                            @field(this, field) = socket_;
+                        }
+                        return socket_;
+                    }
+                }.call;
+        
+                pub const connectGroup = struct {
+                    pub fn call(
+                        g: *SocketGroup,
+                        kind: SocketKind,
+                        ssl_ctx: ?*bun.uws.SslCtx,
+                        raw_host: []const u8,
+                        port: anytype,
+                        owner: anytype,
+                        allow_half_open: bool,
+                    ) !SocketHandler(is_ssl) {
+                        const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
+                        const opts: c_int = if (allow_half_open) bun.uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0;
+                        const host = if (raw_host.len > 1 and raw_host[0] == '[' and raw_host[raw_host.len - 1] == ']')
+                            raw_host[1 .. raw_host.len - 1]
+                        else
+                            raw_host;
+                        var stack: [256]u8 = undefined;
+                        const hostZ: [:0]const u8 = if (host.len < stack.len) blk: {
+                            @memcpy(stack[0..host.len], host);
+                            stack[host.len] = 0;
+                            break :blk stack[0..host.len :0];
+                        } else bun.handleOom(bun.default_allocator.dupeZ(u8, host));
+                        defer if (hostZ.ptr != &stack) bun.default_allocator.free(hostZ);
+        
+                        return switch (g.connect(kind, ssl_ctx, hostZ, @intCast(port), opts, @sizeOf(?*Owner))) {
+                            .failed => error.FailedToOpenSocket,
+                            .socket => |s| blk: {
+                                s.ext(?*Owner).* = owner;
+                                break :blk .{ .socket = .{ .connected = s } };
+                            },
+                            .connecting => |cs| blk: {
+                                cs.ext(?*Owner).* = owner;
+                                break :blk .{ .socket = .{ .connecting = cs } };
+                            },
+                        };
+                    }
+                }.call;
+        
+                pub const connectUnixGroup = struct {
+                    pub fn call(
+                        g: *SocketGroup,
+                        kind: SocketKind,
+                        ssl_ctx: ?*bun.uws.SslCtx,
+                        path: []const u8,
+                        owner: anytype,
+                        allow_half_open: bool,
+                    ) !SocketHandler(is_ssl) {
+                        const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
+                        const opts: c_int = if (allow_half_open) bun.uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0;
+                        const s = g.connectUnix(kind, ssl_ctx, path.ptr, path.len, opts, @sizeOf(?*Owner)) orelse
+                            return error.FailedToOpenSocket;
+                        s.ext(?*Owner).* = owner;
+                        return .{ .socket = .{ .connected = s } };
+                    }
+                }.call;
+        
+                pub const adoptGroup = struct {
+                    pub fn call(
+                        tcp: *us_socket_t,
+                        g: *SocketGroup,
+                        kind: SocketKind,
+                        comptime Owner: type,
+                        comptime field: []const u8,
+                        owner: *Owner,
+                    ) bool {
+                        const new_s = tcp.adopt(g, kind, @sizeOf(*anyopaque), @sizeOf(*anyopaque)) orelse return false;
+                        new_s.ext(*anyopaque).* = owner;
+                        @field(owner, field) = .{ .socket = .{ .connected = new_s } };
+                        return true;
+                    }
+                }.call;
+    };
+}
+
+pub const SocketTCP = SocketHandler(false);
+pub const SocketTLS = SocketHandler(true);

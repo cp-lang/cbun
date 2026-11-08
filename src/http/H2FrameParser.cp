@@ -1,10 +1,7 @@
 // src/http/H2FrameParser.cp
 // HTTP/2 wire-format types for fetch() HTTP/2 client in CP language
 
-zig {
-    const bun = @import("bun");
-    const std = @import("std");
-}
+import bun from "bun";
 
 export const client_preface: string = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
@@ -118,16 +115,12 @@ export @packed(u40) struct StreamPriority {
     streamIdentifier: u32 = 0,
     weight: u8 = 0,
 
-    zig {
-        pub const byteSize: usize = 5;
-    }
+    pub const byteSize: usize = 5;
 
     @inline
-    pub static fn from(dst: *StreamPriority, src: string): void {
-        zig {
-            @memcpy(@as(*[StreamPriority.byteSize]u8, @ptrCast(dst)), src);
-            std.mem.byteSwapAllFields(StreamPriority, dst);
-        }
+    pub static fn from(dst: *StreamPriority, src: string) {
+        @memcpy(@as(*[5]u8, dst), src);
+        std.mem.byteSwapAllFields(StreamPriority, dst);
     }
 }
 
@@ -137,17 +130,13 @@ export @packed(u72) struct FrameHeader {
     flags: u8 = 0,
     streamIdentifier: u32 = 0,
 
-    zig {
-        pub const byteSize: usize = 9;
-    }
+    pub const byteSize: usize = 9;
 
     @inline
-    pub static fn from(dst: *FrameHeader, src: string, offset: usize, comptime end: bool): void {
-        zig {
-            @memcpy(@as(*[FrameHeader.byteSize]u8, @ptrCast(dst))[offset .. src.len + offset], src);
-            if (comptime end) {
-                std.mem.byteSwapAllFields(FrameHeader, dst);
-            }
+    pub static fn from(dst: *FrameHeader, src: string, offset: usize, comptime end: bool) {
+        @memcpy(@as(*[9]u8, dst)[offset .. src.len + offset], src);
+        if (comptime end) {
+            std.mem.byteSwapAllFields(FrameHeader, dst);
         }
     }
 }
@@ -155,26 +144,19 @@ export @packed(u72) struct FrameHeader {
 export @packed(u48) struct SettingsPayloadUnit {
     type: u16,
     value: u32,
-
-    zig {
-        pub const byteSize: usize = 6;
-    }
+    pub const byteSize: usize = 6;
 
     @inline
-    pub static fn from(dst: *SettingsPayloadUnit, src: string, offset: usize, comptime end: bool): void {
-        zig {
-            @memcpy(@as(*[SettingsPayloadUnit.byteSize]u8, @ptrCast(dst))[offset .. src.len + offset], src);
-            if (comptime end) {
-                std.mem.byteSwapAllFields(SettingsPayloadUnit, dst);
-            }
+    pub static fn from(dst: *SettingsPayloadUnit, src: string, offset: usize, comptime end: bool) {
+        @memcpy(@as(*[6]u8, dst)[offset .. src.len + offset], src);
+        if (comptime end) {
+            std.mem.byteSwapAllFields(SettingsPayloadUnit, dst);
         }
     }
 
     @inline
-    pub static fn encode(dst: anytype, setting: SettingsType, value: u32): void {
-        zig {
-            std.mem.writeInt(u16, dst[0..2], @intFromEnum(setting), .big);
-            std.mem.writeInt(u32, dst[2..6], value, .big);
-        }
+    pub static fn encode(dst: *[6]u8, setting: SettingsType, value: u32) {
+        std.mem.writeInt(u16, dst[0..2], @intFromEnum(setting), .big);
+        std.mem.writeInt(u32, dst[2..6], value, .big);
     }
 }

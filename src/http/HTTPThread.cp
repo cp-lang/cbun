@@ -1,24 +1,23 @@
 // src/http/HTTPThread.cp
 // HTTP Client thread loop and connection coordination in CP language
 
-zig {
-    const bun = @import("bun");
-    pub const HTTPContextTCP = @import("./HTTPContext.zig").NewHTTPContext(false);
-    pub const HTTPContextTLS = @import("./HTTPContext.zig").NewHTTPContext(true);
-    pub const AsyncHTTP = @import("./AsyncHTTP.zig").AsyncHTTP;
-    pub const TaskQueue = bun.UnboundedQueue(AsyncHTTP, .next);
-    pub const request_body_send_stack_buffer_size = 32 * 1024;
-    pub const StackFallback = std.heap.StackFallbackAllocator(request_body_send_stack_buffer_size);
-    pub const ssl_context_cache_max_size = 60;
-    pub const ssl_context_cache_ttl_ns = 30 * std.time.ns_per_min;
-    pub const SSLConfigSharedPtr = bun.api.server.ServerConfig.SSLConfig.SharedPtr;
-}
+const bun = @import("bun");
+pub const NewHTTPContext = @import("./HTTPContext.zig").NewHTTPContext;
+pub const HTTPContextTCP = NewHTTPContext(false);
+pub const HTTPContextTLS = NewHTTPContext(true);
+pub const AsyncHTTP = @import("./AsyncHTTP.zig").AsyncHTTP;
+pub const TaskQueue = bun.UnboundedQueue(AsyncHTTP, .next);
+pub const request_body_send_stack_buffer_size = 32 * 1024;
+pub const StackFallback = std.heap.StackFallbackAllocator(request_body_send_stack_buffer_size);
+pub const ssl_context_cache_max_size = 60;
+pub const ssl_context_cache_ttl_ns = 30 * std.time.ns_per_min;
+pub const SSLConfigSharedPtr = bun.api.server.ServerConfig.SSLConfig.SharedPtr;
 
 import { HTTPContext } from "./HTTPContext.cp";
 import { InitError } from "./InitError.cp";
 import { ProxyTunnel } from "./ProxyTunnel.cp";
 
-export enum WriteMessageType: u2 {
+export enum WriteMessageType(u2) {
     data = 0,
     end = 1,
 }
@@ -37,23 +36,21 @@ export struct ShutdownMessage {
 }
 
 export @value struct HeapRequestBodyBuffer {
-    zig {
-        pub const new = bun.TrivialNew(@This());
-        pub const deinit = bun.TrivialDeinit(@This());
-    }
+    pub const new = bun.TrivialNew(@This());
+    pub const deinit = bun.TrivialDeinit(@This());
 
     buffer: [u8; 524288] = undefined,
     fixed_buffer_allocator: std.heap.FixedBufferAllocator = undefined,
 
     static fn init(): *HeapRequestBodyBuffer {
-        let mut this_ptr = HeapRequestBodyBuffer.new({
+        let this_ptr = HeapRequestBodyBuffer.new({
             fixed_buffer_allocator: undefined,
         });
         this_ptr.fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&this_ptr.buffer);
         return this_ptr;
     }
 
-    fn put(*this): void {
+    fn put(*this) {
         if (bun.http.http_thread.lazy_request_body_buffer == null) {
             this.fixed_buffer_allocator.reset();
             bun.http.http_thread.lazy_request_body_buffer = this;
@@ -64,19 +61,17 @@ export @value struct HeapRequestBodyBuffer {
 }
 
 export @value struct LibdeflateState {
-    zig {
-        pub const new = bun.TrivialNew(@This());
-    }
+    pub const new = bun.TrivialNew(@This());
 
     decompressor: *bun.libdeflate.Decompressor = undefined,
     shared_buffer: [u8; 524288] = undefined,
 
-    fn release(*this): void {
+    fn release(*this) {
         this.decompressor.deinit();
         bun.TrivialDeinit(LibdeflateState)(this);
     }
 
-    fn deinit(*this): void {
+    fn deinit(*this) {
         this.release();
     }
 }
@@ -85,37 +80,35 @@ export enum RequestBodyBuffer {
     heap: *HeapRequestBodyBuffer,
     stack: StackFallback,
 
-    pub fn release(*this): void {
+    pub fn release(*this) {
         switch (this.*) {
             .heap(heap) => heap.put(),
             .stack => {},
         }
     }
 
-    pub fn deinit(*this): void {
+    pub fn deinit(*this) {
         this.release();
     }
 
-    zig {
-        pub fn allocatedSlice(self: *RequestBodyBuffer) []u8 {
-            return switch (self.*) {
-                .heap => |heap| &heap.buffer,
-                .stack => |*stack| &stack.buffer,
-            };
-        }
+    pub fn allocatedSlice(*this): []u8 {
+        return switch (this.*) {
+            .heap(heap) => &heap.buffer,
+            .stack(stack) => &stack.buffer,
+        };
+    }
 
-        pub fn allocator(self: *RequestBodyBuffer) std.mem.Allocator {
-            return switch (self.*) {
-                .heap => |heap| heap.fixed_buffer_allocator.allocator(),
-                .stack => |*stack| stack.get(),
-            };
-        }
+    pub fn allocator(*this): std.mem.Allocator {
+        return switch (this.*) {
+            .heap(heap) => heap.fixed_buffer_allocator.allocator(),
+            .stack(stack) => stack.get(),
+        };
+    }
 
-        pub fn toArrayList(self: *RequestBodyBuffer) std.array_list.Managed(u8) {
-            var list = std.array_list.Managed(u8).fromOwnedSlice(self.allocator(), self.allocatedSlice());
-            list.items.len = 0;
-            return list;
-        }
+    pub fn toArrayList(*this): std.array_list.Managed(u8) {
+        let list = std.array_list.Managed(u8).fromOwnedSlice(this.allocator(), this.allocatedSlice());
+        list.items.len = 0;
+        return list;
     }
 }
 
@@ -125,13 +118,11 @@ export struct SslContextCacheEntry {
     config_ref: SSLConfigSharedPtr,
 }
 
-zig {
-    pub const InitOpts = struct {
-        ca: []const [:0]const u8 = &.{},
-        abs_ca_file_name: [:0]const u8 = "",
-        for_install: bool = false,
-        onInitError: ?*const fn (error_val: InitError, opts: InitOpts) void = null,
-    };
+export struct InitOpts {
+    ca: []const cstring = &.{},
+    abs_ca_file_name: cstring = "",
+    for_install: bool = false,
+    onInitError: ?fn (error_val: InitError, opts: InitOpts) = null,
 }
 
 export @root @value struct HTTPThread {
@@ -158,10 +149,8 @@ export @root @value struct HTTPThread {
     lazy_libdeflater: *LibdeflateState? = null,
     lazy_request_body_buffer: *HeapRequestBodyBuffer? = null,
 
-    zig {
-        pub var custom_ssl_context_map = std.AutoArrayHashMap(*anyopaque, SslContextCacheEntry).init(bun.default_allocator);
-        pub var init_once = bun.once(initOnce);
-    }
+    pub var custom_ssl_context_map = std.AutoArrayHashMap(*anyopaque, SslContextCacheEntry).init(bun.default_allocator);
+    pub var init_once = bun.once(initOnce);
 
     fn deflater(*this): *LibdeflateState {
         if (this.lazy_libdeflater == null) {
@@ -172,20 +161,19 @@ export @root @value struct HTTPThread {
         return this.lazy_libdeflater.?;
     }
 
-    zig {
-        pub inline fn getRequestBodySendBuffer(self: *HTTPThread, estimated_size: usize) RequestBodyBuffer {
-            if (estimated_size >= request_body_send_stack_buffer_size) {
-                if (self.lazy_request_body_buffer == null) {
-                    return .{
-                        .heap = HeapRequestBodyBuffer.init(),
-                    };
-                }
-                return .{ .heap = bun.take(&self.lazy_request_body_buffer).? };
+    @inline
+    pub fn getRequestBodySendBuffer(*this, estimated_size: usize): RequestBodyBuffer {
+        if (estimated_size >= request_body_send_stack_buffer_size) {
+            if (this.lazy_request_body_buffer == null) {
+                return .{
+                    .heap = HeapRequestBodyBuffer.init(),
+                };
             }
-            return .{
-                .stack = std.heap.stackFallback(request_body_send_stack_buffer_size, bun.default_allocator),
-            };
+            return .{ .heap = bun.take(&this.lazy_request_body_buffer).? };
         }
+        return .{
+            .stack = std.heap.stackFallback(request_body_send_stack_buffer_size, bun.default_allocator),
+        };
     }
 
     static fn onInitErrorNoop(err: InitError, opts: InitOpts): noreturn {
@@ -210,49 +198,43 @@ export @root @value struct HTTPThread {
         bun.Global.crash();
     }
 
-    static fn initOnce(opts: *const InitOpts): void {
-        zig {
-            bun.http.http_thread = .{
-                .loop = undefined,
-                .http_context = .{
-                    .ref_count = .init(),
-                    .pending_sockets = HTTPContextTCP.PooledSocketHiveAllocator.empty,
-                },
-                .https_context = .{
-                    .ref_count = .init(),
-                    .pending_sockets = HTTPContextTLS.PooledSocketHiveAllocator.empty,
-                },
-                .timer = std.time.Timer.start() catch @panic("Failed to start timer"),
-            };
-        }
+    static fn initOnce(opts: *const InitOpts) {
+        bun.http.http_thread = .{
+            .loop = undefined,
+            .http_context = .{
+                .ref_count = .init(),
+                .pending_sockets = HTTPContextTCP.PooledSocketHiveAllocator.empty,
+            },
+            .https_context = .{
+                .ref_count = .init(),
+                .pending_sockets = HTTPContextTLS.PooledSocketHiveAllocator.empty,
+            },
+            .timer = std.time.Timer.start() catch @panic("Failed to start timer"),
+        };
         bun.libdeflate.load();
-        zig {
-            const thread = std.Thread.spawn(
-                .{
-                    .stack_size = bun.default_thread_stack_size,
-                },
-                onStart,
-                .{opts.*},
-            ) catch |err| {
-                bun.Output.panic("Failed to start HTTP Client thread: {s}", .{bun.asByteSlice(@errorName(err))});
-            };
-            thread.detach();
-        }
+        const thread = std.Thread.spawn(
+            .{
+                .stack_size = bun.default_thread_stack_size,
+            },
+            onStart,
+            [opts.*],
+        ) catch (err) {
+            bun.Output.panic("Failed to start HTTP Client thread: {s}", [bun.asByteSlice(@errorName(err))]);
+        };
+        thread.detach();
     }
 
-    static fn init(opts: *const InitOpts): void {
-        zig {
-            init_once.call(.{opts});
-        }
+    static fn init(opts: *const InitOpts) {
+        init_once.call([opts]);
     }
 
-    static fn onStart(opts: InitOpts): void {
+    static fn onStart(opts: InitOpts) {
         bun.Output.Source.configureNamedThread("HTTP Client");
         bun.http.default_arena = bun.allocators.MimallocArena.init();
         bun.http.default_allocator = bun.http.default_arena.allocator();
 
         const raw: u64 = @min(bun.env_var.BUN_CONFIG_HTTP_IDLE_TIMEOUT.get(), 239 * 60);
-        let mut timeout_val: u64 = raw;
+        let timeout_val: u64 = raw;
         if (raw > 240) {
             timeout_val = ((raw + 59) / 60) * 60;
         }
@@ -277,83 +259,81 @@ export @root @value struct HTTPThread {
         bun.http.http_thread.processEvents();
     }
 
-    zig {
-        pub fn context(self: *HTTPThread, comptime is_ssl: bool) if (is_ssl) *HTTPContextTLS else *HTTPContextTCP {
-            if (is_ssl) return &self.https_context;
-            return &self.http_context;
-        }
-
-        pub fn connect(self: *HTTPThread, comptime is_ssl: bool, client: *bun.http.HTTPClient) !?bun.http.NewHTTPContext(is_ssl).HTTPSocket {
-            if (client.unix_socket_path.length() > 0) {
-                return try self.context(is_ssl).connectSocket(client, client.unix_socket_path.slice());
-            }
-
-            if (comptime is_ssl) {
-                if (client.tls_props) |*tls| {
-                    if (tls.get().requires_custom_request_ctx) {
-                        const requested_config = tls.get();
-                        self.evictStaleSslContexts();
-
-                        if (custom_ssl_context_map.getPtr(requested_config)) |entry| {
-                            entry.last_used_ns = self.timer.read();
-                            client.setCustomSslCtx(entry.ctx);
-                            if (client.http_proxy) |url| {
-                                return try entry.ctx.connect(client, url.hostname, url.getPortAuto());
-                            } else {
-                                return try entry.ctx.connect(client, client.url.hostname, client.url.getPortAuto());
-                            }
-                        }
-
-                        const custom_context = try bun.default_allocator.create(HTTPContextTLS);
-                        custom_context.* = .{
-                            .ref_count = .init(),
-                            .pending_sockets = HTTPContextTLS.PooledSocketHiveAllocator.empty,
-                        };
-                        custom_context.initWithClientConfig(client) catch {
-                            bun.default_allocator.destroy(custom_context);
-                            return error.FailedToOpenSocket;
-                        };
-
-                        const now = self.timer.read();
-                        bun.handleOom(custom_ssl_context_map.put(requested_config, .{
-                            .ctx = custom_context,
-                            .last_used_ns = now,
-                            .config_ref = tls.clone(),
-                        }));
-
-                        if (custom_ssl_context_map.count() > ssl_context_cache_max_size) {
-                            HTTPThread.evictOldestSslContext();
-                        }
-
-                        client.setCustomSslCtx(custom_context);
-                        if (client.http_proxy) |url| {
-                            if (url.protocol.len == 0 or bun.strings.eqlComptime(url.protocol, "https") or bun.strings.eqlComptime(url.protocol, "http")) {
-                                return try custom_context.connect(client, url.hostname, url.getPortAuto());
-                            }
-                            return error.UnsupportedProxyProtocol;
-                        }
-                        return try custom_context.connect(client, client.url.hostname, client.url.getPortAuto());
-                    }
-                }
-            }
-
-            if (client.http_proxy) |url| {
-                if (url.href.len > 0) {
-                    if (url.protocol.len == 0 or bun.strings.eqlComptime(url.protocol, "https") or bun.strings.eqlComptime(url.protocol, "http")) {
-                        return try self.context(is_ssl).connect(client, url.hostname, url.getPortAuto());
-                    }
-                    return error.UnsupportedProxyProtocol;
-                }
-            }
-            return try self.context(is_ssl).connect(client, client.url.hostname, client.url.getPortAuto());
-        }
+    pub fn context(*this, @comptime is_ssl: bool): @if (is_ssl) *HTTPContextTLS else *HTTPContextTCP {
+        if (is_ssl) return &this.https_context;
+        return &this.http_context;
     }
 
-    pub fn evictStaleSslContexts(*this): void {
+    pub fn connect(*this, @comptime is_ssl: bool, client: *bun.http.HTTPClient): !?NewHTTPContext(is_ssl).HTTPSocket {
+        if (client.unix_socket_path.length() > 0) {
+            return this.context(is_ssl).connectSocket(client, client.unix_socket_path.slice())?;
+        }
+
+        if (is_ssl) {
+            if (tls := client.tls_props) {
+                if (tls.get().requires_custom_request_ctx) {
+                    const requested_config = tls.get();
+                    this.evictStaleSslContexts();
+
+                    if (entry := custom_ssl_context_map.getPtr(requested_config)) {
+                        entry.last_used_ns = this.timer.read();
+                        client.setCustomSslCtx(entry.ctx);
+                        if (url := client.http_proxy) {
+                            return entry.ctx.connect(client, url.hostname, url.getPortAuto())?;
+                        } else {
+                            return entry.ctx.connect(client, client.url.hostname, client.url.getPortAuto())?;
+                        }
+                    }
+
+                    let custom_context = bun.default_allocator.create(HTTPContextTLS)?;
+                    custom_context.* = .{
+                        .ref_count = .init(),
+                        .pending_sockets = HTTPContextTLS.PooledSocketHiveAllocator.empty,
+                    };
+                    custom_context.initWithClientConfig(client) catch {
+                        bun.default_allocator.destroy(custom_context);
+                        return error.FailedToOpenSocket;
+                    };
+
+                    const now = this.timer.read();
+                    bun.handleOom(custom_ssl_context_map.put(requested_config, .{
+                        .ctx = custom_context,
+                        .last_used_ns = now,
+                        .config_ref = tls.clone(),
+                    }));
+
+                    if (custom_ssl_context_map.count() > ssl_context_cache_max_size) {
+                        HTTPThread.evictOldestSslContext();
+                    }
+
+                    client.setCustomSslCtx(custom_context);
+                    if (url := client.http_proxy) {
+                        if (url.protocol.len == 0 || bun.strings.eqlComptime(url.protocol, "https") || bun.strings.eqlComptime(url.protocol, "http")) {
+                            return custom_context.connect(client, url.hostname, url.getPortAuto())?;
+                        }
+                        return error.UnsupportedProxyProtocol;
+                    }
+                    return custom_context.connect(client, client.url.hostname, client.url.getPortAuto())?;
+                }
+            }
+        }
+
+        if (url := client.http_proxy) {
+            if (url.href.len > 0) {
+                if (url.protocol.len == 0 || bun.strings.eqlComptime(url.protocol, "https") || bun.strings.eqlComptime(url.protocol, "http")) {
+                    return this.context(is_ssl).connect(client, url.hostname, url.getPortAuto())?;
+                }
+                return error.UnsupportedProxyProtocol;
+            }
+        }
+        return this.context(is_ssl).connect(client, client.url.hostname, client.url.getPortAuto())?;
+    }
+
+    pub fn evictStaleSslContexts(*this) {
         const now = this.timer.read();
-        let mut i: usize = 0;
+        let i: usize = 0;
         while (i < custom_ssl_context_map.count()) {
-            let mut entry = custom_ssl_context_map.values()[i];
+            let entry = custom_ssl_context_map.values()[i];
             if (now > entry.last_used_ns && now - entry.last_used_ns > ssl_context_cache_ttl_ns) {
                 _ = custom_ssl_context_map.swapRemoveAt(i);
                 entry.ctx.deref();
@@ -364,11 +344,11 @@ export @root @value struct HTTPThread {
         }
     }
 
-    static fn evictOldestSslContext(): void {
+    static fn evictOldestSslContext() {
         if (custom_ssl_context_map.count() == 0) return;
-        let mut oldest_idx: usize = 0;
-        let mut oldest_time: u64 = std.math.maxInt(u64);
-        let mut i: usize = 0;
+        let oldest_idx: usize = 0;
+        let oldest_time: u64 = std.math.maxInt(u64);
+        let i: usize = 0;
         for (entry of custom_ssl_context_map.values()) {
             if (entry.last_used_ns < oldest_time) {
                 oldest_time = entry.last_used_ns;
@@ -376,7 +356,7 @@ export @root @value struct HTTPThread {
             }
             i += 1;
         }
-        let mut entry = custom_ssl_context_map.values()[oldest_idx];
+        let entry = custom_ssl_context_map.values()[oldest_idx];
         _ = custom_ssl_context_map.swapRemoveAt(oldest_idx);
         entry.ctx.deref();
         entry.config_ref.deinit();
@@ -390,45 +370,43 @@ export @root @value struct HTTPThread {
         return false;
     }
 
-    fn drainQueuedShutdowns(*this): void {
+    fn drainQueuedShutdowns(*this) {
         while (true) {
             this.queued_shutdowns_lock.lock();
-            let mut queued_shutdowns = this.queued_shutdowns;
+            let queued_shutdowns = this.queued_shutdowns;
             this.queued_shutdowns = {};
             this.queued_shutdowns_lock.unlock();
             defer queued_shutdowns.deinit(bun.default_allocator);
 
             for (http of queued_shutdowns.items) {
                 if (socket_ptr := bun.http.socket_async_http_abort_tracker.fetchSwapRemove(http.async_http_id)) {
-                    zig {
-                        switch (socket_ptr.value) {
-                            .SocketTLS => |socket| {
-                                const is_tls = true;
-                                const tagged = HTTPContextTLS.getTaggedFromSocket(socket);
-                                if (tagged.get(bun.http)) |client| {
-                                    client.closeAndAbort(is_tls, socket);
-                                    continue;
-                                }
-                                if (tagged.get(bun.http.H2.ClientSession)) |session| {
-                                    session.abortByHttpId(http.async_http_id);
-                                    continue;
-                                }
-                                socket.close(.failure);
-                            },
-                            .SocketTCP => |socket| {
-                                const is_tls = false;
-                                const tagged = HTTPContextTCP.getTaggedFromSocket(socket);
-                                if (tagged.get(bun.http)) |client| {
-                                    client.closeAndAbort(is_tls, socket);
-                                    continue;
-                                }
-                                if (tagged.get(bun.http.H2.ClientSession)) |session| {
-                                    session.abortByHttpId(http.async_http_id);
-                                    continue;
-                                }
-                                socket.close(.failure);
-                            },
-                        }
+                    switch (socket_ptr.value) {
+                        .SocketTLS(socket) => {
+                            const is_tls = true;
+                            const tagged = HTTPContextTLS.getTaggedFromSocket(socket);
+                            if (client := tagged.get(bun.http)) {
+                                client.closeAndAbort(is_tls, socket);
+                                continue;
+                            }
+                            if (session := tagged.get(bun.http.H2.ClientSession)) {
+                                session.abortByHttpId(http.async_http_id);
+                                continue;
+                            }
+                            socket.close(.failure);
+                        },
+                        .SocketTCP(socket) => {
+                            const is_tls = false;
+                            const tagged = HTTPContextTCP.getTaggedFromSocket(socket);
+                            if (client := tagged.get(bun.http)) {
+                                client.closeAndAbort(is_tls, socket);
+                                continue;
+                            }
+                            if (session := tagged.get(bun.http.H2.ClientSession)) {
+                                session.abortByHttpId(http.async_http_id);
+                                continue;
+                            }
+                            socket.close(.failure);
+                        },
                     }
                 } else {
                     if (this.abortPendingH2Waiter(http.async_http_id)) continue;
@@ -442,10 +420,10 @@ export @root @value struct HTTPThread {
         }
     }
 
-    fn drainQueuedWrites(*this): void {
+    fn drainQueuedWrites(*this) {
         while (true) {
             this.queued_writes_lock.lock();
-            let mut queued_writes = this.queued_writes;
+            let queued_writes = this.queued_writes;
             this.queued_writes = {};
             this.queued_writes_lock.unlock();
             defer queued_writes.deinit(bun.default_allocator);
@@ -453,39 +431,37 @@ export @root @value struct HTTPThread {
             for (write of queued_writes.items) {
                 const ended = write.message_type == .end;
                 if (socket_ptr := bun.http.socket_async_http_abort_tracker.get(write.async_http_id)) {
-                    zig {
-                        switch (socket_ptr) {
-                            .SocketTLS => |socket| {
-                                const is_tls = true;
-                                if (socket.isClosed() or socket.isShutdown()) continue;
-                                const tagged = HTTPContextTLS.getTaggedFromSocket(socket);
-                                if (tagged.get(bun.http)) |client| {
-                                    if (client.state.original_request_body == .stream) {
-                                        var stream = &client.state.original_request_body.stream;
-                                        stream.ended = ended;
-                                        client.flushStream(is_tls, socket);
-                                    }
+                    switch (socket_ptr) {
+                        .SocketTLS(socket) => {
+                            const is_tls = true;
+                            if (socket.isClosed() || socket.isShutdown()) continue;
+                            const tagged = HTTPContextTLS.getTaggedFromSocket(socket);
+                            if (client := tagged.get(bun.http)) {
+                                if (client.state.original_request_body == .stream) {
+                                    let stream = &client.state.original_request_body.stream;
+                                    stream.ended = ended;
+                                    client.flushStream(is_tls, socket);
                                 }
-                                if (tagged.get(bun.http.H2.ClientSession)) |session| {
-                                    session.streamBodyByHttpId(write.async_http_id, ended);
+                            }
+                            if (session := tagged.get(bun.http.H2.ClientSession)) {
+                                session.streamBodyByHttpId(write.async_http_id, ended);
+                            }
+                        },
+                        .SocketTCP(socket) => {
+                            const is_tls = false;
+                            if (socket.isClosed() || socket.isShutdown()) continue;
+                            const tagged = HTTPContextTCP.getTaggedFromSocket(socket);
+                            if (client := tagged.get(bun.http)) {
+                                if (client.state.original_request_body == .stream) {
+                                    let stream = &client.state.original_request_body.stream;
+                                    stream.ended = ended;
+                                    client.flushStream(is_tls, socket);
                                 }
-                            },
-                            .SocketTCP => |socket| {
-                                const is_tls = false;
-                                if (socket.isClosed() or socket.isShutdown()) continue;
-                                const tagged = HTTPContextTCP.getTaggedFromSocket(socket);
-                                if (tagged.get(bun.http)) |client| {
-                                    if (client.state.original_request_body == .stream) {
-                                        var stream = &client.state.original_request_body.stream;
-                                        stream.ended = ended;
-                                        client.flushStream(is_tls, socket);
-                                    }
-                                }
-                                if (tagged.get(bun.http.H2.ClientSession)) |session| {
-                                    session.streamBodyByHttpId(write.async_http_id, ended);
-                                }
-                            },
-                        }
+                            }
+                            if (session := tagged.get(bun.http.H2.ClientSession)) {
+                                session.streamBodyByHttpId(write.async_http_id, ended);
+                            }
+                        },
                     }
                 } else {
                     bun.http.H3.ClientContext.streamBodyByHttpId(write.async_http_id, ended);
@@ -497,39 +473,37 @@ export @root @value struct HTTPThread {
         }
     }
 
-    fn drainQueuedHTTPResponseBodyDrains(*this): void {
+    fn drainQueuedHTTPResponseBodyDrains(*this) {
         while (true) {
             this.queued_response_body_drains_lock.lock();
-            let mut queued_response_body_drains = this.queued_response_body_drains;
+            let queued_response_body_drains = this.queued_response_body_drains;
             this.queued_response_body_drains = {};
             this.queued_response_body_drains_lock.unlock();
             defer queued_response_body_drains.deinit(bun.default_allocator);
 
             for (drain of queued_response_body_drains.items) {
                 if (socket_ptr := bun.http.socket_async_http_abort_tracker.get(drain.async_http_id)) {
-                    zig {
-                        switch (socket_ptr) {
-                            .SocketTLS => |socket| {
-                                const is_tls = true;
-                                const tagged = HTTPContextTLS.getTaggedFromSocket(socket);
-                                if (tagged.get(bun.http)) |client| {
-                                    client.drainResponseBody(is_tls, socket);
-                                }
-                                if (tagged.get(bun.http.H2.ClientSession)) |session| {
-                                    session.drainResponseBodyByHttpId(drain.async_http_id);
-                                }
-                            },
-                            .SocketTCP => |socket| {
-                                const is_tls = false;
-                                const tagged = HTTPContextTCP.getTaggedFromSocket(socket);
-                                if (tagged.get(bun.http)) |client| {
-                                    client.drainResponseBody(is_tls, socket);
-                                }
-                                if (tagged.get(bun.http.H2.ClientSession)) |session| {
-                                    session.drainResponseBodyByHttpId(drain.async_http_id);
-                                }
-                            },
-                        }
+                    switch (socket_ptr) {
+                        .SocketTLS(socket) => {
+                            const is_tls = true;
+                            const tagged = HTTPContextTLS.getTaggedFromSocket(socket);
+                            if (client := tagged.get(bun.http)) {
+                                client.drainResponseBody(is_tls, socket);
+                            }
+                            if (session := tagged.get(bun.http.H2.ClientSession)) {
+                                session.drainResponseBodyByHttpId(drain.async_http_id);
+                            }
+                        },
+                        .SocketTCP(socket) => {
+                            const is_tls = false;
+                            const tagged = HTTPContextTCP.getTaggedFromSocket(socket);
+                            if (client := tagged.get(bun.http)) {
+                                client.drainResponseBody(is_tls, socket);
+                            }
+                            if (session := tagged.get(bun.http.H2.ClientSession)) {
+                                session.drainResponseBodyByHttpId(drain.async_http_id);
+                            }
+                        },
                     }
                 }
             }
@@ -539,7 +513,7 @@ export @root @value struct HTTPThread {
         }
     }
 
-    fn drainEvents(*this): void {
+    fn drainEvents(*this) {
         this.drainQueuedHTTPResponseBodyDrains();
         this.drainQueuedWrites();
         this.drainQueuedShutdowns();
@@ -550,14 +524,14 @@ export @root @value struct HTTPThread {
         }
         this.queued_threadlocal_proxy_derefs.clearRetainingCapacity();
 
-        let mut active = bun.http.AsyncHTTP.active_requests_count.load(.monotonic);
+        let active = bun.http.AsyncHTTP.active_requests_count.load(.monotonic);
         const max = bun.http.AsyncHTTP.max_simultaneous_requests.load(.monotonic);
 
         if (active >= max && !this.has_pending_queued_abort) return;
 
         this.has_pending_queued_abort = false;
         {
-            let mut pending = this.deferred_tasks;
+            let pending = this.deferred_tasks;
             this.deferred_tasks = {};
             defer pending.deinit(bun.default_allocator);
             for (http of pending.items) {
@@ -580,8 +554,8 @@ export @root @value struct HTTPThread {
         }
     }
 
-    static fn startQueuedTask(http: *AsyncHTTP): void {
-        let mut cloned = bun.http.ThreadlocalAsyncHTTP.new({
+    static fn startQueuedTask(http: *AsyncHTTP) {
+        let cloned = bun.http.ThreadlocalAsyncHTTP.new({
             async_http: http.*,
         });
         cloned.async_http.real = http;
@@ -606,7 +580,7 @@ export @root @value struct HTTPThread {
         }
     }
 
-    fn scheduleResponseBodyDrain(*this, async_http_id: u32): void {
+    fn scheduleResponseBodyDrain(*this, async_http_id: u32) {
         {
             this.queued_response_body_drains_lock.lock();
             defer this.queued_response_body_drains_lock.unlock();
@@ -619,7 +593,7 @@ export @root @value struct HTTPThread {
         }
     }
 
-    fn scheduleShutdown(*this, http: *AsyncHTTP): void {
+    fn scheduleShutdown(*this, http: *AsyncHTTP) {
         {
             this.queued_shutdowns_lock.lock();
             defer this.queued_shutdowns_lock.unlock();
@@ -632,7 +606,7 @@ export @root @value struct HTTPThread {
         }
     }
 
-    fn scheduleRequestWrite(*this, http: *AsyncHTTP, messageType: WriteMessageType): void {
+    fn scheduleRequestWrite(*this, http: *AsyncHTTP, messageType: WriteMessageType) {
         {
             this.queued_writes_lock.lock();
             defer this.queued_writes_lock.unlock();
@@ -646,28 +620,26 @@ export @root @value struct HTTPThread {
         }
     }
 
-    fn scheduleProxyDeref(*this, proxy: *ProxyTunnel): void {
+    fn scheduleProxyDeref(*this, proxy: *ProxyTunnel) {
         bun.handleOom(this.queued_threadlocal_proxy_derefs.append(bun.default_allocator, proxy));
         if (this.has_awoken.load(.monotonic)) {
             this.loop.loop.wakeup();
         }
     }
 
-    fn wakeup(*this): void {
+    fn wakeup(*this) {
         if (this.has_awoken.load(.monotonic)) {
             this.loop.loop.wakeup();
         }
     }
 
-    fn schedule(*this, batch: bun.ThreadPool.Batch): void {
+    fn schedule(*this, batch: bun.ThreadPool.Batch) {
         if (batch.len == 0) return;
 
-        zig {
-            var mut_batch = batch;
-            while (mut_batch.pop()) |task| {
-                const http: *AsyncHTTP = @fieldParentPtr("task", task);
-                self.queued_tasks.push(http);
-            }
+        let mut_batch = batch;
+        while (task := mut_batch.pop()) {
+            const http: *AsyncHTTP = @fieldParentPtr("task", task);
+            this.queued_tasks.push(http);
         }
 
         if (this.has_awoken.load(.monotonic)) {

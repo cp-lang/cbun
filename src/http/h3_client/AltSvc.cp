@@ -1,9 +1,7 @@
 // src/http/h3_client/AltSvc.cp
 // Alt-Svc (RFC 7838) header handling for the HTTP/3 client in CP language
 
-zig {
-    const bun = @import("bun");
-}
+const bun = @import("bun");
 
 let cache: bun.StringHashMapUnmanaged(Record) = {};
 
@@ -19,13 +17,11 @@ struct Record {
 
 const max_entries: usize = 256;
 
-zig {
-    pub fn key(buf: []u8, hostname: []const u8, port: u16) []const u8 {
-        return std.fmt.bufPrint(buf, "{s}:{d}", .{ hostname, port }) catch "";
-    }
+pub fn key(buf: *[]u8, hostname: string, port: u16): string {
+    return std.fmt.bufPrint(buf, "{s}:{d}", [hostname, port]) catch "";
 }
 
-fn sweepExpired(now: i64): void {
+fn sweepExpired(now: i64) {
     let it = cache.iterator();
     while (kv := it.next()) {
         if (now >= kv.value_ptr.expires_at) {
@@ -37,7 +33,7 @@ fn sweepExpired(now: i64): void {
     }
 }
 
-export fn parse(field_value: string): Entry?! {
+export fn parse(field_value: string): !Entry? {
     const value = bun.strings.trim(field_value, " \t");
     if (value.len == 0) return null;
     if (std.ascii.eqlIgnoreCase(value, "clear")) return error.Clear;
@@ -96,7 +92,7 @@ export fn record(origin_host: string, origin_port: u16, field_value: string): vo
             sweepExpired(now);
             if (cache.count() >= max_entries) return;
         }
-        const gop = bun.handleOom(cache.getOrPut(bun.default_allocator, k));
+        let gop = bun.handleOom(cache.getOrPut(bun.default_allocator, k));
         if (!gop.found_existing) {
             gop.key_ptr.* = bun.handleOom(bun.default_allocator.dupe(u8, k));
         }

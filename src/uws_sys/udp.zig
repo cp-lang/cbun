@@ -2,75 +2,96 @@
 const std = @import("std");
 const string = []const u8;
 
-const bun = @import("bun");
+fn CpOptType(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return T;
+    return ?T;
+}
+fn CpUnwrapOpt(comptime T: type) type {
+    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
+    return T;
+}
+fn cp_opt_is_null(v: anytype) bool {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) return v == null;
+    return false;
+}
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
+    const T = @TypeOf(v);
+    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
+}
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
-    const uws = bun.uws;
-    const Loop = uws.Loop;
-
-    const udp = @This();
-
+pub const bun = @import("bun");
+pub const Loop = @import("./Loop.zig").Loop;
 pub const Socket = opaque {
+
+pub fn create(loop: *Loop, data_cb: ?*const fn (*Socket, *PacketBuffer, i32) callconv(.c) void, drain_cb: ?*const fn (*Socket) callconv(.c) void, close_cb: ?*const fn (*Socket) callconv(.c) void, recv_error_cb: ?*const fn (*Socket, i32) callconv(.c) void, host: ?[*:0]const u8, port: u16, options: i32, err: ?*i32, user_data: ?*anyopaque) ?*Socket {
+            return us_create_udp_socket(loop, data_cb, drain_cb, close_cb, recv_error_cb, host, port, options, err, user_data);
+    }
+
+pub fn user(self: *Socket) ?*anyopaque {
+            return us_udp_socket_user(self);
+    }
+
+pub fn bind(self: *Socket, hostname: [*:0]const u8, port: u32) i32 {
+            return us_udp_socket_bind(self, hostname, port);
+    }
+
+pub fn boundIp(self: *Socket, buf: [*c]u8, length: *i32) void {
+            _ = us_udp_socket_bound_ip(self, buf, length);
+    }
+
+pub fn remoteIp(self: *Socket, buf: [*c]u8, length: *i32) void {
+            _ = us_udp_socket_remote_ip(self, buf, length);
+    }
+
+pub fn connect(self: *Socket, hostname: [*:0]const u8, port: u32) i32 {
+            return us_udp_socket_connect(self, hostname, port);
+    }
+
+pub fn setBroadcast(self: *Socket, enabled: bool) i32 {
+            var en: i32 = 0;
+            _ = &en;
+            if (enabled) {
+                en = 1;
+            }
+            return us_udp_socket_set_broadcast(self, en);
+    }
+
+pub fn setUnicastTTL(self: *Socket, ttl: i32) i32 {
+            return us_udp_socket_set_ttl_unicast(self, ttl);
+    }
+
+pub fn setMulticastTTL(self: *Socket, ttl: i32) i32 {
+            return us_udp_socket_set_ttl_multicast(self, ttl);
+    }
+
+pub fn setMulticastLoopback(self: *Socket, enabled: bool) i32 {
+            var en: i32 = 0;
+            _ = &en;
+            if (enabled) {
+                en = 1;
+            }
+            return us_udp_socket_set_multicast_loopback(self, en);
+    }
 
 pub fn boundPort(self: *Socket) i32 {
             return us_udp_socket_bound_port(self);
-
     }
 
 pub fn close(self: *Socket) void {
-            us_udp_socket_close(self);
-
+            _ = us_udp_socket_close(self);
     }
 
 pub fn disconnect(self: *Socket) i32 {
             return us_udp_socket_disconnect(self);
-
     }
-    pub fn create(loop: *Loop, data_cb: *const fn (*Socket, *PacketBuffer, c_int) callconv(.c) void, drain_cb: *const fn (*Socket) callconv(.c) void, close_cb: *const fn (*Socket) callconv(.c) void, recv_error_cb: *const fn (*Socket, c_int) callconv(.c) void, host: [*c]const u8, port: c_ushort, options: c_int, err: ?*c_int, user_data: ?*anyopaque) ?*Socket {
-                return us_create_udp_socket(loop, data_cb, drain_cb, close_cb, recv_error_cb, host, port, options, err, user_data);
-            }
-    
-            pub fn send(this: *Socket, payloads: []const [*]const u8, lengths: []const usize, addresses: []const ?*const anyopaque) c_int {
+    pub fn send(this: *Socket, payloads: []const [*]const u8, lengths: []const usize, addresses: []const ?*const anyopaque) c_int {
                 bun.assert(payloads.len == lengths.len and payloads.len == addresses.len);
                 return us_udp_socket_send(this, payloads.ptr, lengths.ptr, addresses.ptr, @intCast(payloads.len));
             }
-    
-            pub fn user(this: *Socket) ?*anyopaque {
-                return us_udp_socket_user(this);
-            }
-    
-            pub fn bind(this: *Socket, hostname: [*c]const u8, port: c_uint) c_int {
-                return us_udp_socket_bind(this, hostname, port);
-            }
-    
-            pub fn boundIp(this: *Socket, buf: [*c]u8, length: *i32) void {
-                return us_udp_socket_bound_ip(this, buf, length);
-            }
-    
-            pub fn remoteIp(this: *Socket, buf: [*c]u8, length: *i32) void {
-                return us_udp_socket_remote_ip(this, buf, length);
-            }
-    
-            pub fn connect(this: *Socket, hostname: [*c]const u8, port: c_uint) c_int {
-                return us_udp_socket_connect(this, hostname, port);
-            }
-    
-            pub fn setBroadcast(this: *Socket, enabled: bool) c_int {
-                return us_udp_socket_set_broadcast(this, @intCast(@intFromBool(enabled)));
-            }
-    
-            pub fn setUnicastTTL(this: *Socket, ttl: i32) c_int {
-                return us_udp_socket_set_ttl_unicast(this, @intCast(ttl));
-            }
-    
-            pub fn setMulticastTTL(this: *Socket, ttl: i32) c_int {
-                return us_udp_socket_set_ttl_multicast(this, @intCast(ttl));
-            }
-    
-            pub fn setMulticastLoopback(this: *Socket, enabled: bool) c_int {
-                return us_udp_socket_set_multicast_loopback(this, @intCast(@intFromBool(enabled)));
-            }
-    
-            pub fn setMulticastInterface(this: *Socket, iface: *const std.posix.sockaddr.storage) c_int {
+    pub fn setMulticastInterface(this: *Socket, iface: *const std.posix.sockaddr.storage) c_int {
                 return us_udp_socket_set_multicast_interface(this, iface);
             }
     
@@ -81,45 +102,67 @@ pub fn disconnect(self: *Socket) i32 {
             pub fn setSourceSpecificMembership(this: *Socket, source: *const std.posix.sockaddr.storage, group: *const std.posix.sockaddr.storage, iface: ?*const std.posix.sockaddr.storage, drop: bool) c_int {
                 return us_udp_socket_set_source_specific_membership(this, source, group, iface, @intFromBool(drop));
             }
-    
-            extern fn us_create_udp_socket(loop: ?*Loop, data_cb: *const fn (*Socket, *PacketBuffer, c_int) callconv(.c) void, drain_cb: *const fn (*Socket) callconv(.c) void, close_cb: *const fn (*Socket) callconv(.c) void, recv_error_cb: *const fn (*Socket, c_int) callconv(.c) void, host: [*c]const u8, port: c_ushort, options: c_int, err: ?*c_int, user_data: ?*anyopaque) ?*Socket;
-            extern fn us_udp_socket_connect(socket: *Socket, hostname: [*c]const u8, port: c_uint) c_int;
-            extern fn us_udp_socket_disconnect(socket: *Socket) c_int;
-            extern fn us_udp_socket_send(socket: *Socket, [*c]const [*c]const u8, [*c]const usize, [*c]const ?*const anyopaque, c_int) c_int;
-            extern fn us_udp_socket_user(socket: *Socket) ?*anyopaque;
-            extern fn us_udp_socket_bind(socket: *Socket, hostname: [*c]const u8, port: c_uint) c_int;
-            extern fn us_udp_socket_bound_port(socket: *Socket) c_int;
-            extern fn us_udp_socket_bound_ip(socket: *Socket, buf: [*c]u8, length: [*c]i32) void;
-            extern fn us_udp_socket_remote_ip(socket: *Socket, buf: [*c]u8, length: [*c]i32) void;
-            extern fn us_udp_socket_close(socket: *Socket) void;
-            extern fn us_udp_socket_set_broadcast(socket: *Socket, enabled: c_int) c_int;
-            extern fn us_udp_socket_set_ttl_unicast(socket: *Socket, ttl: c_int) c_int;
-            extern fn us_udp_socket_set_ttl_multicast(socket: *Socket, ttl: c_int) c_int;
-            extern fn us_udp_socket_set_multicast_loopback(socket: *Socket, enabled: c_int) c_int;
-            extern fn us_udp_socket_set_multicast_interface(socket: *Socket, iface: *const std.posix.sockaddr.storage) c_int;
-            extern fn us_udp_socket_set_membership(socket: *Socket, address: *const std.posix.sockaddr.storage, iface: ?*const std.posix.sockaddr.storage, drop: c_int) c_int;
-            extern fn us_udp_socket_set_source_specific_membership(socket: *Socket, source: *const std.posix.sockaddr.storage, group: *const std.posix.sockaddr.storage, iface: ?*const std.posix.sockaddr.storage, drop: c_int) c_int;
 };
 
 pub const PacketBuffer = opaque {
 
-pub fn getTruncated(self: *PacketBuffer, index: i32) bool {
-            return us_udp_packet_buffer_truncated(self, index) != 0;
+pub fn getPeer(self: *PacketBuffer, index: i32) *std.posix.sockaddr.storage {
+            return us_udp_packet_buffer_peer(self, index);
 
     }
-    pub fn getPeer(this: *PacketBuffer, index: c_int) *std.posix.sockaddr.storage {
-                return us_udp_packet_buffer_peer(this, index);
-            }
-    
-            pub fn getPayload(this: *PacketBuffer, index: c_int) []u8 {
-                const payload = us_udp_packet_buffer_payload(this, index);
-                const len = us_udp_packet_buffer_payload_length(this, index);
-                return payload[0..@as(usize, @intCast(len))];
-            }
-    
-            extern fn us_udp_packet_buffer_peer(buf: ?*PacketBuffer, index: c_int) *std.posix.sockaddr.storage;
-            extern fn us_udp_packet_buffer_payload(buf: ?*PacketBuffer, index: c_int) [*]u8;
-            extern fn us_udp_packet_buffer_payload_length(buf: ?*PacketBuffer, index: c_int) c_int;
-            extern fn us_udp_packet_buffer_truncated(buf: ?*PacketBuffer, index: c_int) c_int;
+
+pub fn getPayload(self: *PacketBuffer, index: i32) []const u8 {
+            var payload = us_udp_packet_buffer_payload(self, index);
+            _ = &payload;
+            var len = us_udp_packet_buffer_payload_length(self, index);
+            _ = &len;
+            return payload[0..cp_cast_int(usize, len)];
+    }
+
+pub fn getTruncated(self: *PacketBuffer, index: i32) bool {
+            return (us_udp_packet_buffer_truncated(self, index) != 0);
+    }
 };
 
+
+pub extern "c" fn us_create_udp_socket(loop: ?*Loop, data_cb: ?*const fn (*Socket, *PacketBuffer, i32) callconv(.c) void, drain_cb: ?*const fn (*Socket) callconv(.c) void, close_cb: ?*const fn (*Socket) callconv(.c) void, recv_error_cb: ?*const fn (*Socket, i32) callconv(.c) void, host: ?[*:0]const u8, port: u16, options: i32, err: ?*i32, user_data: ?*anyopaque) ?*Socket;
+
+pub extern "c" fn us_udp_socket_connect(socket: *Socket, hostname: [*:0]const u8, port: u32) i32;
+
+pub extern "c" fn us_udp_socket_disconnect(socket: *Socket) i32;
+
+pub extern "c" fn us_udp_socket_send(socket: *Socket, payloads: [*c]const [*c]const u8, lengths: [*c]const usize, addresses: [*c]const ?*const anyopaque, count: i32) i32;
+
+pub extern "c" fn us_udp_socket_user(socket: *Socket) ?*anyopaque;
+
+pub extern "c" fn us_udp_socket_bind(socket: *Socket, hostname: [*:0]const u8, port: u32) i32;
+
+pub extern "c" fn us_udp_socket_bound_port(socket: *Socket) i32;
+
+pub extern "c" fn us_udp_socket_bound_ip(socket: *Socket, buf: [*c]u8, length: *i32) void;
+
+pub extern "c" fn us_udp_socket_remote_ip(socket: *Socket, buf: [*c]u8, length: *i32) void;
+
+pub extern "c" fn us_udp_socket_close(socket: *Socket) void;
+
+pub extern "c" fn us_udp_socket_set_broadcast(socket: *Socket, enabled: i32) i32;
+
+pub extern "c" fn us_udp_socket_set_ttl_unicast(socket: *Socket, ttl: i32) i32;
+
+pub extern "c" fn us_udp_socket_set_ttl_multicast(socket: *Socket, ttl: i32) i32;
+
+pub extern "c" fn us_udp_socket_set_multicast_loopback(socket: *Socket, enabled: i32) i32;
+
+pub extern "c" fn us_udp_socket_set_multicast_interface(socket: *Socket, iface: *const std.posix.sockaddr.storage) i32;
+
+pub extern "c" fn us_udp_socket_set_membership(socket: *Socket, address: *const std.posix.sockaddr.storage, iface: ?*const std.posix.sockaddr.storage, drop: i32) i32;
+
+pub extern "c" fn us_udp_socket_set_source_specific_membership(socket: *Socket, source: *const std.posix.sockaddr.storage, group: *const std.posix.sockaddr.storage, iface: ?*const std.posix.sockaddr.storage, drop: i32) i32;
+
+pub extern "c" fn us_udp_packet_buffer_peer(buf: ?*PacketBuffer, index: i32) *std.posix.sockaddr.storage;
+
+pub extern "c" fn us_udp_packet_buffer_payload(buf: ?*PacketBuffer, index: i32) [*]u8;
+
+pub extern "c" fn us_udp_packet_buffer_payload_length(buf: ?*PacketBuffer, index: i32) i32;
+
+pub extern "c" fn us_udp_packet_buffer_truncated(buf: ?*PacketBuffer, index: i32) i32;

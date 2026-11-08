@@ -157,12 +157,12 @@ pub fn fromPicoHttpHeaders(headers: []const bun.picohttp.Header, allocator: std.
             const name_offset = offset;
             _ = &name_offset;
             _ = bun.copy(u8, result.buf.items[offset..][0..header.name.len], header.name);
-            offset = (offset + @as(u32, @truncate(header.name.len)));
+            offset = (offset + cp_cast_int(u32, header.name.len));
             const value_offset = offset;
             _ = &value_offset;
             _ = bun.copy(u8, result.buf.items[offset..][0..header.value.len], header.value);
-            offset = (offset + @as(u32, @truncate(header.value.len)));
-            _ = result.entries.set(i, .{ .name = .{ .offset = name_offset, .length = @truncate(header.name.len) }, .value = .{ .offset = value_offset, .length = @truncate(header.value.len) } });
+            offset = (offset + cp_cast_int(u32, header.value.len));
+            _ = result.entries.set(i, .{ .name = .{ .offset = name_offset, .length = cp_cast_int(u32, header.name.len) }, .value = .{ .offset = value_offset, .length = cp_cast_int(u32, header.value.len) } });
             i = (i + 1);
         }
         __result_moved = true;
@@ -175,7 +175,8 @@ pub fn from(fetch_headers_ref: ?*bun.webcore.FetchHeaders, allocator: std.mem.Al
         var buf_len: u32 = 0;
         _ = &buf_len;
         if (fetch_headers_ref) |headers_ref| {
-            _ = headers_ref.count((&header_count), (&buf_len));
+            _ = &headers_ref;
+            _ = cp_opt_unwrap(headers_ref).count((&header_count), (&buf_len));
         }
         var headers: Headers = .{ .entries = .{}, .buf = .{}, .allocator = allocator };
         var __headers_moved = false; _ = &__headers_moved;
@@ -185,14 +186,16 @@ pub fn from(fetch_headers_ref: ?*bun.webcore.FetchHeaders, allocator: std.mem.Al
         var needs_content_type = false;
         _ = &needs_content_type;
         if (options.body) |body| {
+            _ = &body;
             var has_ct = false;
             _ = &has_ct;
             if (fetch_headers_ref) |headers_ref2| {
-                has_ct = headers_ref2.fastHas(.ContentType);
+                _ = &headers_ref2;
+                has_ct = cp_opt_unwrap(headers_ref2).fastHas(.ContentType);
             }
-            if ((body.hasContentTypeFromUser() and (!has_ct))) {
+            if ((cp_opt_unwrap(body).hasContentTypeFromUser() and (!has_ct))) {
                 header_count = (header_count + 1);
-                buf_len = (buf_len + @as(u32, @truncate((body.contentType().len + "Content-Type".len))));
+                buf_len = (buf_len + cp_cast_int(u32, (cp_opt_unwrap(body).contentType().len + "Content-Type".len)));
                 needs_content_type = true;
             }
         }
@@ -210,14 +213,16 @@ pub fn from(fetch_headers_ref: ?*bun.webcore.FetchHeaders, allocator: std.mem.Al
         var __values_moved = false; _ = &__values_moved;
         defer if (!__values_moved) { const T = @TypeOf(values); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = values.release() catch {}; } else { values.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { values.release(); } };
         if (fetch_headers_ref) |headers_ref| {
-            _ = headers_ref.copyTo(names.ptr, values.ptr, headers.buf.items.ptr);
+            _ = &headers_ref;
+            _ = cp_opt_unwrap(headers_ref).copyTo(names.ptr, values.ptr, headers.buf.items.ptr);
         }
         if (needs_content_type) {
             _ = bun.copy(u8, headers.buf.items[buf_len_before_content_type..], "Content-Type");
-            names[cp_cast_int(usize, (header_count - 1))] = .{ .offset = buf_len_before_content_type, .length = "Content-Type".len };
+            names[cp_cast_int(usize, (header_count - 1))] = .{ .offset = buf_len_before_content_type, .length = cp_cast_int(u32, "Content-Type".len) };
             if (options.body) |b| {
-                _ = bun.copy(u8, headers.buf.items[(buf_len_before_content_type + "Content-Type".len)..], b.contentType());
-                values[cp_cast_int(usize, (header_count - 1))] = .{ .offset = (buf_len_before_content_type + @as(u32, "Content-Type".len)), .length = @as(u32, @truncate(b.contentType().len)) };
+                _ = &b;
+                _ = bun.copy(u8, headers.buf.items[(buf_len_before_content_type + "Content-Type".len)..], cp_opt_unwrap(b).contentType());
+                values[cp_cast_int(usize, (header_count - 1))] = .{ .offset = (buf_len_before_content_type + cp_cast_int(u32, "Content-Type".len)), .length = cp_cast_int(u32, cp_opt_unwrap(b).contentType().len) };
             }
         }
         __headers_moved = true;

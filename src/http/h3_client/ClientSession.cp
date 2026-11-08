@@ -1,10 +1,8 @@
 // src/http/h3_client/ClientSession.cp
 // One QUIC connection to an origin in CP language
 
-zig {
-    const bun = @import("bun");
-    const quic = bun.uws.quic;
-}
+const bun = @import("bun");
+const quic = bun.uws.quic;
 
 import { ClientContext } from "./ClientContext.cp";
 import { Stream } from "./Stream.cp";
@@ -17,12 +15,10 @@ enum HeaderResult {
 }
 
 export @root struct ClientSession {
-    zig {
-        pub const new = bun.TrivialNew(@This());
-        pub const RefCount = bun.ptr.RefCount(@This(), "ref_count", deinit, .{});
-        pub const ref = RefCount.ref;
-        pub const deref = RefCount.deref;
-    }
+    pub const new = bun.TrivialNew(@This());
+    pub const RefCount = bun.ptr.RefCount(@This(), "ref_count", deinit, .{});
+    pub const ref = RefCount.ref;
+    pub const deref = RefCount.deref;
 
     ref_count: RefCount,
     qsocket: *quic.Socket? = null,
@@ -34,14 +30,14 @@ export @root struct ClientSession {
     registry_index: u32 = 4294967295,
     pending: std.ArrayListUnmanaged(*Stream),
 
-    fn release(*this): void {
+    fn release(*this) {
         bun.debugAssert(this.pending.items.len == 0);
         this.pending.deinit(bun.default_allocator);
         bun.default_allocator.free(this.hostname);
         bun.destroy(this);
     }
 
-    fn deinit(*this): void {
+    fn deinit(*this) {
         this.release();
     }
 
@@ -60,13 +56,13 @@ export @root struct ClientSession {
         return this.pending.items.len < 64;
     }
 
-    fn enqueue(*this, client: *HTTPClient): void {
+    fn enqueue(*this, client: *HTTPClient) {
         bun.debugAssert(!this.closed);
         client.h3 = null;
         client.flags.protocol = .http3;
         client.allow_retry = false;
 
-        const stream = Stream.new({ session: this, client: client });
+        let stream = Stream.new({ session: this, client: client });
         bun.http.H3.live_streams.fetchAdd(1, .monotonic);
         client.h3 = stream;
         bun.handleOom(this.pending.append(bun.default_allocator, stream));
@@ -77,8 +73,8 @@ export @root struct ClientSession {
         }
     }
 
-    fn streamBodyByHttpId(*this, async_http_id: u32, ended: bool): void {
-        for (stream of this.pending.items) {
+    fn streamBodyByHttpId(*this, async_http_id: u32, ended: bool) {
+        for (let stream of this.pending.items) {
             if (client := stream.client) {
                 if (client.async_http_id != async_http_id) continue;
                 if (client.state.original_request_body != .stream) return;
@@ -89,7 +85,7 @@ export @root struct ClientSession {
         }
     }
 
-    fn detach(*this, stream: *Stream): void {
+    fn detach(*this, stream: *Stream) {
         if (cl := stream.client) cl.h3 = null;
         stream.client = null;
         if (qs := stream.qstream) {
@@ -97,23 +93,21 @@ export @root struct ClientSession {
             if (!stream.request_body_done) qs.reset();
         }
         stream.qstream = null;
-        zig {
-            if (std.mem.indexOfScalar(*Stream, self.pending.items, stream)) |i| {
-                _ = self.pending.orderedRemove(i);
-            }
+        if (i := std.mem.indexOfScalar(*Stream, this.pending.items, stream)) {
+            _ = this.pending.orderedRemove(i);
         }
         stream.deinit();
         this.deref();
     }
 
-    fn fail(*this, stream: *Stream, err: anyerror): void {
-        const client = stream.client;
+    fn fail(*this, stream: *Stream, err: anyerror) {
+        let client = stream.client;
         stream.abort();
         this.detach(stream);
         if (cl := client) cl.failFromH2(err);
     }
 
-    fn retryOrFail(*this, stream: *Stream, err: anyerror): void {
+    fn retryOrFail(*this, stream: *Stream, err: anyerror) {
         if (client := stream.client) {
             if (client.flags.h3_retried || stream.is_streaming_body) {
                 return this.fail(stream, err);
@@ -138,7 +132,7 @@ export @root struct ClientSession {
     }
 
     fn abortByHttpId(*this, async_http_id: u32): bool {
-        for (stream of this.pending.items) {
+        for (let stream of this.pending.items) {
             if (cl := stream.client) {
                 if (cl.async_http_id == async_http_id) {
                     this.fail(stream, error.Aborted);
@@ -149,13 +143,13 @@ export @root struct ClientSession {
         return false;
     }
 
-    fn deliver(*this, stream: *Stream, done: bool): void {
-        const client_opt = stream.client;
+    fn deliver(*this, stream: *Stream, done: bool) {
+        let client_opt = stream.client;
         if (client_opt == null) {
             if (done) this.detach(stream);
             return;
         }
-        const client = client_opt.?;
+        let client = client_opt.?;
 
         if (client.signals.get(.aborted)) {
             return this.fail(stream, error.Aborted);
@@ -187,7 +181,7 @@ export @root struct ClientSession {
 
         if (client.state.response_stage != .body) {
             if (done) {
-                let mut err_kind: anyerror = error.ConnectionClosed;
+                let err_kind: anyerror = error.ConnectionClosed;
                 if (stream.status_code == 0) {
                     err_kind = error.HTTP3StreamReset;
                 }
@@ -203,7 +197,7 @@ export @root struct ClientSession {
             const report = client.handleResponseBody(stream.body_buffer.items, false) catch (err) {
                 stream.body_buffer.clearRetainingCapacity();
                 return this.fail(stream, err);
-            }
+            };
             stream.body_buffer.clearRetainingCapacity();
             if (done) {
                 this.detach(stream);
@@ -247,7 +241,7 @@ export @root struct ClientSession {
         }
     }
 
-    static fn finish(client: *bun.http.HTTPClient): void {
+    static fn finish(client: *bun.http.HTTPClient) {
         if (cl := client.state.content_length) {
             if (client.state.total_body_received != cl) {
                 return client.failFromH2(error.HTTP3ContentLengthMismatch);

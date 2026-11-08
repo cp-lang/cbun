@@ -3,13 +3,15 @@
 // Based on Wyhash from the zig standard library, version v0.11.0-dev.2609+5e19250a1
 //
 
-const primes: [u64; 5] = [
-    0xa0761d6478bd642f,
-    0xe7037ed1a0b428db,
-    0x8ebc6af09c88c6e3,
-    0x589965cc75374cc3,
-    0x1d8e4e27c47d124f,
-];
+zig {
+    const primes = [_]u64{
+        0xa0761d6478bd642f,
+        0xe7037ed1a0b428db,
+        0x8ebc6af09c88c6e3,
+        0x589965cc75374cc3,
+        0x1d8e4e27c47d124f,
+    };
+}
 
 fn read_bytes1(data: string): u64 {
     return data[0] as u64;

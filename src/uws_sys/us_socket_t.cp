@@ -1,15 +1,9 @@
 import bun from "bun";
-import { SocketGroup } from "./SocketGroup.cp";
-import { SocketKind } from "./SocketKind.cp";
-
-export enum CloseCode : i32 {
-    normal = 0,
-    failure = 1,
-    fast_shutdown = 2,
-}
+import { SocketGroup } from "./SocketGroup.zig";
+import { SocketKind } from "./SocketKind.zig";
 
 @c {
-    fn us_socket_get_native_handle(s: *us_socket_t): *any?!;
+    fn us_socket_get_native_handle(s: *us_socket_t): *!?;
     fn us_socket_local_port(s: *us_socket_t): i32;
     fn us_socket_remote_port(s: *us_socket_t): i32;
     fn us_socket_remote_address(s: *us_socket_t, buf: [*]u8!, length: *i32): void;
@@ -18,7 +12,7 @@ export enum CloseCode : i32 {
     fn us_socket_long_timeout(s: *us_socket_t, minutes: u32): void;
     fn us_socket_nodelay(s: *us_socket_t, enable: i32): void;
     fn us_socket_keepalive(s: *us_socket_t, enable: i32, delay: u32): i32;
-    fn us_socket_ext(s: *us_socket_t): *any!;
+    fn us_socket_ext(s: *us_socket_t): *!;
     fn us_socket_group(s: *us_socket_t): *SocketGroup;
     fn us_socket_kind(s: *us_socket_t): u8;
     fn us_socket_set_kind(s: *us_socket_t, kind: u8): void;
@@ -26,13 +20,13 @@ export enum CloseCode : i32 {
     fn us_socket_is_tls(s: *us_socket_t): i32;
     fn us_socket_write(s: *us_socket_t, data: [*]const u8!, length: i32): i32;
     fn us_socket_ipc_write_fd(s: *us_socket_t, data: [*]const u8!, length: i32, fd: i32): i32;
-    fn us_socket_write2(s: *us_socket_t, header: [*]const u8?!, len: usize, payload: [*]const u8?!, payload_len: usize): i32;
+    fn us_socket_write2(s: *us_socket_t, header: ?[*]const u8, len: usize, payload: ?[*]const u8, payload_len: usize): i32;
     fn us_socket_raw_write(s: *us_socket_t, data: [*]const u8!, length: i32): i32;
     fn us_socket_flush(s: *us_socket_t): void;
-    fn us_socket_open(s: *us_socket_t, is_client: i32, ip: [*]const u8?!, ip_length: i32): *us_socket_t?!;
+    fn us_socket_open(s: *us_socket_t, is_client: i32, ip: ?[*]const u8, ip_length: i32): ?*us_socket_t;
     fn us_socket_pause(s: *us_socket_t): void;
     fn us_socket_resume(s: *us_socket_t): void;
-    fn us_socket_close(s: *us_socket_t, code: CloseCode, reason: *any?!): *us_socket_t?!;
+    fn us_socket_close(s: *us_socket_t, code: us_socket_t.CloseCode, reason: *!?): ?*us_socket_t;
     fn us_socket_shutdown(s: *us_socket_t): void;
     fn us_socket_is_closed(s: *us_socket_t): i32;
     fn us_socket_shutdown_read(s: *us_socket_t): void;
@@ -42,56 +36,72 @@ export enum CloseCode : i32 {
     fn us_socket_verify_error(s: *us_socket_t): bun.uws.us_bun_verify_error_t;
     fn us_socket_get_error(s: *us_socket_t): i32;
     fn us_socket_is_established(s: *us_socket_t): i32;
-    fn us_socket_adopt(s: *us_socket_t, group: *SocketGroup, kind: u8, old_ext_size: i32, ext_size: i32): *us_socket_t?!;
-    fn us_socket_adopt_tls(s: *us_socket_t, group: *SocketGroup, kind: u8, ssl_ctx: *bun.uws.SslCtx, sni: cstr?, old_ext_size: i32, ext_size: i32): *us_socket_t?!;
+    fn us_socket_adopt(s: *us_socket_t, group: *SocketGroup, kind: u8, old_ext_size: i32, ext_size: i32): ?*us_socket_t;
+    fn us_socket_adopt_tls(s: *us_socket_t, group: *SocketGroup, kind: u8, ssl_ctx: *bun.uws.SslCtx, sni: cstr?, old_ext_size: i32, ext_size: i32): ?*us_socket_t;
     fn us_socket_start_tls_handshake(s: *us_socket_t): void;
 }
 
 export @opaque class us_socket_t {
+    zig {
+        pub const CloseCode = enum(i32) {
+            normal = 0,
+            failure = 1,
+            fast_shutdown = 2,
+        };
+    }
+
     pub fn open(*this, is_client: bool, ip_addr: string?): void {
+        let mut client_int: i32 = 0;
+        if (is_client) {
+            client_int = 1;
+        }
         if (ip_addr != null) {
-            let ip = ip_addr!;
-            us_socket_open(this, if (is_client) 1 else 0, ip.ptr, ip.len as i32);
+            let ip = ip_addr.?;
+            us_socket_open(this, client_int, ip.ptr, ip.len as i32);
         } else {
-            us_socket_open(this, if (is_client) 1 else 0, null, 0);
+            us_socket_open(this, client_int, null, 0);
         }
     }
 
-    pub fn close(*this, code: CloseCode): void {
+    pub fn close(*this, code: us_socket_t.CloseCode): void {
         us_socket_close(this, code, null);
     }
 
-    pub fn localAddress(*this, buf: u8[]): ?string {
+    pub fn localAddress(*this, *buf: u8[]): !string {
         let length: i32 = buf.len as i32;
         us_socket_local_address(this, buf.ptr, &length);
         if (length < 0) {
             let errno = bun.sys.getErrno(length);
-            return bun.errnoToZigErr(errno)?;
+            return bun.errnoToZigErr(errno);
         }
         return buf[0..(length as usize)];
     }
 
-    pub fn remoteAddress(*this, buf: u8[]): ?string {
+    pub fn remoteAddress(*this, *buf: u8[]): !string {
         let length: i32 = buf.len as i32;
         us_socket_remote_address(this, buf.ptr, &length);
         if (length < 0) {
             let errno = bun.sys.getErrno(length);
-            return bun.errnoToZigErr(errno)?;
+            return bun.errnoToZigErr(errno);
         }
         return buf[0..(length as usize)];
     }
 
-    pub fn ssl(*this): *bun.BoringSSL.c.SSL?! {
+    pub fn ssl(*this): ?*bun.BoringSSL.c.SSL {
         if (!this.isTLS()) return null;
-        return us_socket_get_native_handle(this) as *bun.BoringSSL.c.SSL?!;
+        unsafe {
+            return us_socket_get_native_handle(this) as ?*bun.BoringSSL.c.SSL;
+        }
     }
 
-    pub fn getNativeHandle(*this): *any?! {
+    pub fn getNativeHandle(*this): *!? {
         return us_socket_get_native_handle(this);
     }
 
-    pub fn ext<T>(*this): *T {
-        return us_socket_ext(this) as *T;
+    pub fn ext(*this, @comptime T: type): *T {
+        unsafe {
+            return us_socket_ext(this) as *T;
+        }
     }
 
     pub fn group(*this): *SocketGroup {
@@ -103,15 +113,15 @@ export @opaque class us_socket_t {
     }
 
     pub fn kind(*this): SocketKind {
-        return us_socket_kind(this) as SocketKind;
+        return @enumFromInt(us_socket_kind(this));
     }
 
     pub fn setKind(*this, k: SocketKind): void {
-        us_socket_set_kind(this, k as u8);
+        us_socket_set_kind(this, @intFromEnum(k));
     }
 
-    pub fn adopt(*this, g: *SocketGroup, k: SocketKind, old_ext: i32, new_ext: i32): *us_socket_t?! {
-        return us_socket_adopt(this, g, k as u8, old_ext, new_ext);
+    pub fn adopt(*this, g: *SocketGroup, k: SocketKind, old_ext: i32, new_ext: i32): ?*us_socket_t {
+        return us_socket_adopt(this, g, @intFromEnum(k), old_ext, new_ext);
     }
 
     pub fn adoptTLS(
@@ -122,8 +132,8 @@ export @opaque class us_socket_t {
         sni: cstr?,
         old_ext: i32,
         new_ext: i32,
-    ): *us_socket_t?! {
-        return us_socket_adopt_tls(this, g, k as u8, ssl_ctx, sni, old_ext, new_ext);
+    ): ?*us_socket_t {
+        return us_socket_adopt_tls(this, g, @intFromEnum(k), ssl_ctx, sni, old_ext, new_ext);
     }
 
     pub fn write(*this, data: string): i32 {
@@ -195,11 +205,15 @@ export @opaque class us_socket_t {
     }
 
     pub fn setNodelay(*this, enabled: bool): void {
-        us_socket_nodelay(this, if (enabled) 1 else 0);
+        let mut en: i32 = 0;
+        if (enabled) { en = 1; }
+        us_socket_nodelay(this, en);
     }
 
     pub fn setKeepalive(*this, enabled: bool, delay: u32): i32 {
-        return us_socket_keepalive(this, if (enabled) 1 else 0, delay);
+        let mut en: i32 = 0;
+        if (enabled) { en = 1; }
+        return us_socket_keepalive(this, en, delay);
     }
 
     pub fn startTLSHandshake(*this): void {
@@ -207,7 +221,9 @@ export @opaque class us_socket_t {
     }
 
     pub fn setSslRawTap(*this, enabled: bool): void {
-        us_socket_set_ssl_raw_tap(this, if (enabled) 1 else 0);
+        let mut en: i32 = 0;
+        if (enabled) { en = 1; }
+        us_socket_set_ssl_raw_tap(this, en);
     }
 
     pub fn flush(*this): void {
@@ -228,7 +244,7 @@ export @opaque class us_socket_t {
 }
 
 export @extern @value class us_socket_stream_buffer_t {
-    list_ptr: [*]u8?! = null,
+    list_ptr: [*]u8? = null,
     list_cap: usize = 0,
     list_len: usize = 0,
     total_bytes_written: usize = 0,
@@ -249,9 +265,36 @@ export @extern @value class us_socket_stream_buffer_t {
         this.total_bytes_written += written;
     }
 
+    pub fn toStreamBuffer(this): bun.io.StreamBuffer {
+        zig {
+            return .{
+                .list = if (self.list_ptr) |buffer_ptr| .{
+                    .allocator = bun.default_allocator,
+                    .items = buffer_ptr[0..self.list_len],
+                    .capacity = self.list_cap,
+                } else .{
+                    .allocator = bun.default_allocator,
+                    .items = &.{},
+                    .capacity = 0,
+                },
+                .cursor = self.cursor,
+            };
+        }
+    }
+
     pub fn release(*this): void {
         if (this.list_ptr != null) {
-            bun.default_allocator.free(this.list_ptr![0..this.list_cap]);
+            bun.default_allocator.free(this.list_ptr.?[0..this.list_cap]);
         }
+    }
+
+    pub fn deinit(*this): void {
+        this.release();
+    }
+}
+
+zig {
+    export fn us_socket_free_stream_buffer(buffer: *us_socket_stream_buffer_t) void {
+        buffer.deinit();
     }
 }

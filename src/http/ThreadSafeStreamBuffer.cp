@@ -1,59 +1,56 @@
 // src/http/ThreadSafeStreamBuffer.cp
 // Thread-safe stream buffer for HTTP thread in CP language
 
-zig {
-    const bun = @import("bun");
-    const StreamLock = bun.Mutex;
-}
+const bun = @import("bun");
+const StreamLock = bun.Mutex;
 
 export struct Callback {
-    callback: fn(ctx: any?): void,
-    context: any? = null,
+    callback: fn(*!),
+    context: *!,
 
-    fn call(this): void {
+    pub static fn init(@comptime T: type, callback: fn(*T), context: *T): Callback {
+        unsafe {
+            return {
+                callback: callback as fn(*!),
+                context: context as *!,
+            };
+        }
+    }
+
+    pub fn call(this) {
         this.callback(this.context);
     }
 }
 
 export @root @value struct ThreadSafeStreamBuffer {
-    zig {
-        pub const StreamBufferRefCount = bun.ptr.ThreadSafeRefCount(ThreadSafeStreamBuffer, "ref_count", ThreadSafeStreamBuffer.deinit, .{});
-        pub const ref = StreamBufferRefCount.ref;
-        pub const deref = StreamBufferRefCount.deref;
-        pub const new = bun.TrivialNew(ThreadSafeStreamBuffer);
-
-        pub fn setDrainCallback(self: *ThreadSafeStreamBuffer, comptime Context: type, comptime callback: anytype, context: *Context) void {
-            const Wrapper = struct {
-                fn call(ctx: ?*anyopaque) void {
-                    @call(bun.callmod_inline, callback, .{@as(*Context, @ptrCast(@alignCast(ctx)))});
-                }
-            };
-            self.callback = .{
-                .callback = Wrapper.call,
-                .context = context,
-            };
-        }
-    }
+    pub const StreamBufferRefCount = bun.ptr.ThreadSafeRefCount(ThreadSafeStreamBuffer, "ref_count", ThreadSafeStreamBuffer.deinit, .{});
+    pub const ref = StreamBufferRefCount.ref;
+    pub const deref = StreamBufferRefCount.deref;
+    pub const new = bun.TrivialNew(ThreadSafeStreamBuffer);
 
     buffer: bun.io.StreamBuffer = {},
     mutex: StreamLock = {},
     ref_count: StreamBufferRefCount = StreamBufferRefCount.initExactRefs(2),
     callback: Callback? = null,
 
-    fn acquire(*this): *bun.io.StreamBuffer {
+    pub fn acquire(*this): *bun.io.StreamBuffer {
         this.mutex.lock();
         return &this.buffer;
     }
 
-    fn release(*this): void {
+    pub fn release(*this) {
         this.mutex.unlock();
     }
 
-    fn clearDrainCallback(*this): void {
+    pub fn setDrainCallback(*this, @comptime T: type, callback: fn(*T), context: *T) {
+        this.callback = Callback.init(T, callback, context);
+    }
+
+    pub fn clearDrainCallback(*this) {
         this.callback = null;
     }
 
-    fn reportDrain(*this): void {
+    pub fn reportDrain(*this) {
         if (this.buffer.isEmpty()) {
             if (cb := this.callback) {
                 cb.call();
@@ -61,9 +58,8 @@ export @root @value struct ThreadSafeStreamBuffer {
         }
     }
 
-    fn deinit(*this): void {
+    pub fn deinit(*this) {
         this.buffer.deinit();
         bun.destroy(this);
     }
 }
-

@@ -40,7 +40,7 @@ import * as c_ares from "../cares_sys/c_ares.cp";
 let loaded = false;
 
 export fn load(): void {
-    if loaded {
+    if (loaded) {
         return;
     }
     loaded = true;
@@ -50,7 +50,7 @@ export fn load(): void {
     boring.ERR_load_BIO_strings();
     boring.OpenSSL_add_all_algorithms();
 
-    if !builtin.is_test {
+    if (!builtin.is_test) {
         std.mem.doNotOptimizeAway(&OPENSSL_memory_alloc);
         std.mem.doNotOptimizeAway(&OPENSSL_memory_get_size);
         std.mem.doNotOptimizeAway(&OPENSSL_memory_free);
@@ -60,11 +60,11 @@ export fn load(): void {
 let ctx_store: SSL_CTX_Ptr? = null;
 
 export fn initClient(): SSL_Ptr {
-    if ctx_store != null {
+    if (ctx_store != null) {
         _ = boring.SSL_CTX_up_ref(ctx_store.?);
     }
 
-    if ctx_store == null {
+    if (ctx_store == null) {
         ctx_store = boring.SSL_CTX.init().?;
     }
     const ctx = ctx_store.?;
@@ -75,7 +75,6 @@ export fn initClient(): SSL_Ptr {
     return ssl;
 }
 
-
 export fn canonicalizeIP(addr_str: string, *outIP: IPTextBuf): string? {
     if (addr_str.len >= INET6_ADDRSTRLEN) {
         return null;
@@ -85,13 +84,13 @@ export fn canonicalizeIP(addr_str: string, *outIP: IPTextBuf): string? {
     outIP[addr_str.len] = 0;
 
     let af: i32 = std.posix.AF.INET;
-    if c_ares.ares_inet_pton(af, outIP, &ip_std_text) <= 0 {
+    if (c_ares.ares_inet_pton(af, outIP, &ip_std_text) <= 0) {
         af = std.posix.AF.INET6;
-        if c_ares.ares_inet_pton(af, outIP, &ip_std_text) <= 0 {
+        if (c_ares.ares_inet_pton(af, outIP, &ip_std_text) <= 0) {
             return null;
         }
     }
-    if c_ares.ares_inet_ntop(af, &ip_std_text, outIP, outIP.len) == null {
+    if (c_ares.ares_inet_ntop(af, &ip_std_text, outIP, outIP.len) == null) {
         return null;
     }
     const size = bun.len(bun.cast(CStrPtr, outIP));
@@ -100,10 +99,10 @@ export fn canonicalizeIP(addr_str: string, *outIP: IPTextBuf): string? {
 
 export fn ip2String(ip: *boring.ASN1_OCTET_STRING, *outIP: IPTextBuf): string? {
     let af: i32 = std.posix.AF.INET6;
-    if ip.length == 4 {
+    if (ip.length == 4) {
         af = std.posix.AF.INET;
     }
-    if c_ares.ares_inet_ntop(af, ip.data, outIP, outIP.len) == null {
+    if (c_ares.ares_inet_ntop(af, ip.data, outIP, outIP.len) == null) {
         return null;
     }
 
@@ -112,22 +111,22 @@ export fn ip2String(ip: *boring.ASN1_OCTET_STRING, *outIP: IPTextBuf): string? {
 }
 
 fn matchDnsName(pattern: string, hostname: string): bool {
-    if pattern.len == 0 {
+    if (pattern.len == 0) {
         return false;
     }
-    if !X509.isSafeAltName(pattern, false) {
+    if (!X509.isSafeAltName(pattern, false)) {
         return false;
     }
 
-    if pattern[0] == '*' {
-        if pattern.len >= 2 && pattern[1] == '.' {
+    if (pattern[0] == '*') {
+        if (pattern.len >= 2 && pattern[1] == '.') {
             const suffix = pattern[2..];
-            if strings.containsChar(suffix, '.') {
-                if hostname.len > suffix.len + 1 {
+            if (strings.containsChar(suffix, '.')) {
+                if (hostname.len > suffix.len + 1) {
                     const dot_index = hostname.len - suffix.len - 1;
-                    if hostname[dot_index] == '.' && !strings.containsChar(hostname[0..dot_index], '.') {
+                    if (hostname[dot_index] == '.' && !strings.containsChar(hostname[0..dot_index], '.')) {
                         const host_suffix = hostname[dot_index + 1..];
-                        if strings.eqlCaseInsensitiveASCII(suffix, host_suffix, true) {
+                        if (strings.eqlCaseInsensitiveASCII(suffix, host_suffix, true)) {
                             return true;
                         }
                     }
@@ -146,14 +145,14 @@ export fn checkX509ServerIdentity(
     let has_identifier_san = false;
 
     const index = boring.X509_get_ext_by_NID(x509, boring.NID_subject_alt_name, -1);
-    if index >= 0 {
+    if (index >= 0) {
         if (ext := boring.X509_get_ext(x509, index)) {
             const method = boring.X509V3_EXT_get(ext);
-            if method != boring.X509V3_EXT_get_nid(boring.NID_subject_alt_name) {
+            if (method != boring.X509V3_EXT_get_nid(boring.NID_subject_alt_name)) {
                 return false;
             }
 
-            if host_is_ip {
+            if (host_is_ip) {
                 let canonicalIPBuf: IPTextBuf = undefined;
                 let certIPBuf: IPTextBuf = undefined;
                 const host_ip = canonicalizeIP(hostname, &canonicalIPBuf) ?? hostname;
@@ -161,17 +160,17 @@ export fn checkX509ServerIdentity(
                 if (names_ := boring.X509V3_EXT_d2i(ext)) {
                     const names = bun.cast(GeneralNameStack, names_);
                     defer boring.sk_GENERAL_NAME_pop_free(names, boring.sk_GENERAL_NAME_free);
-                    for i in 0..boring.sk_GENERAL_NAME_num(names) {
-                        const gen = boring.sk_GENERAL_NAME_value(names, @as(usize, @intCast(i)));
+                    for (i in 0..boring.sk_GENERAL_NAME_num(names)) {
+                        const gen = boring.sk_GENERAL_NAME_value(names, i as usize);
                         if (name := gen) {
-                            switch name.name_type {
+                            switch (name.name_type) {
                                 .GEN_DNS, .GEN_URI => {
                                     has_identifier_san = true;
                                 },
                                 .GEN_IPADD => {
                                     has_identifier_san = true;
                                     if (cert_ip := ip2String(name.d.ip, &certIPBuf)) {
-                                        if strings.eql(host_ip, cert_ip) {
+                                        if (strings.eql(host_ip, cert_ip)) {
                                             return true;
                                         }
                                     }
@@ -185,10 +184,10 @@ export fn checkX509ServerIdentity(
                 if (names_ := boring.X509V3_EXT_d2i(ext)) {
                     const names = bun.cast(GeneralNameStack, names_);
                     defer boring.sk_GENERAL_NAME_pop_free(names, boring.sk_GENERAL_NAME_free);
-                    for i in 0..boring.sk_GENERAL_NAME_num(names) {
-                        const gen = boring.sk_GENERAL_NAME_value(names, @as(usize, @intCast(i)));
+                    for (i in 0..boring.sk_GENERAL_NAME_num(names)) {
+                        const gen = boring.sk_GENERAL_NAME_value(names, i as usize);
                         if (name := gen) {
-                            switch name.name_type {
+                            switch (name.name_type) {
                                 .GEN_IPADD, .GEN_URI => {
                                     has_identifier_san = true;
                                 },
@@ -197,7 +196,7 @@ export fn checkX509ServerIdentity(
                                     const dnsName = name.d.dNSName;
                                     const dns_len: usize = @intCast(dnsName.length);
                                     const dnsNameSlice = dnsName.data[0..dns_len];
-                                    if matchDnsName(dnsNameSlice, hostname) {
+                                    if (matchDnsName(dnsNameSlice, hostname)) {
                                         return true;
                                     }
                                 },
@@ -210,12 +209,12 @@ export fn checkX509ServerIdentity(
         }
     }
 
-    if !host_is_ip && !has_identifier_san {
+    if (!host_is_ip && !has_identifier_san) {
         if (subject := boring.X509_get_subject_name(x509)) {
             let last: i32 = -1;
             while (true) {
                 const entry_idx = boring.X509_NAME_get_index_by_NID(subject, boring.NID_commonName, last);
-                if entry_idx < 0 {
+                if (entry_idx < 0) {
                     break;
                 }
                 last = entry_idx;
@@ -232,12 +231,12 @@ export fn checkX509ServerIdentity(
                 const data = data_opt.?;
                 const cn_ptr = boring.ASN1_STRING_get0_data(data);
                 const cn_len = boring.ASN1_STRING_length(data);
-                if cn_ptr == null || cn_len <= 0 {
+                if (cn_ptr == null || cn_len <= 0) {
                     continue;
                 }
                 const cn_len_val: usize = @intCast(cn_len);
                 const cn = cn_ptr[0..cn_len_val];
-                if matchDnsName(cn, hostname) {
+                if (matchDnsName(cn, hostname)) {
                     return true;
                 }
             }

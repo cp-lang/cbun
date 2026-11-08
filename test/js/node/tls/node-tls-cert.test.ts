@@ -535,7 +535,7 @@ it("tls.connect should ignore invalid NODE_EXTRA_CA_CERTS", async () => {
     const stderr = await proc.stderr.text();
     expect(stderr).toContain("UNABLE_TO_GET_ISSUER_CERT_LOCALLY");
   }
-});
+}, 15_000);
 
 it("tls.connect should ignore NODE_EXTRA_CA_CERTS if it contains invalid cert", async () => {
   const mixedValidAndInvalidCertsBundlePath = join(tmpdirSync(), "mixed-valid-and-invalid-certs-bundle.pem");

@@ -1,23 +1,23 @@
 import bun from "bun";
 
 export @extern @value class Header {
-    name: [*]u8!,
+    name: [*]const u8!,
     name_len: u32,
-    value: [*]u8!,
+    value: [*]const u8!,
     value_len: u32,
     qpack_index: i32 = -1,
 
     pub static fn init(name_: string, value_: string, idx: Qpack?): Header {
-        let qidx: i32 = -1;
+        let mut qidx: i32 = -1;
         if (idx != null) {
-            qidx = idx as i32;
+            qidx = @intFromEnum(idx.?);
         }
         return Header {
-            name: name_.ptr,
-            name_len: name_.len as u32,
-            value: value_.ptr,
-            value_len: value_.len as u32,
-            qpack_index: qidx,
+            name = name_.ptr,
+            name_len = name_.len as u32,
+            value = value_.ptr,
+            value_len = value_.len as u32,
+            qpack_index = qidx,
         };
     }
 }

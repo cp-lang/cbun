@@ -26,12 +26,12 @@ export @root struct Signals {
     cert_errors: *std.atomic.Value(bool)? = null,
     upgraded: *std.atomic.Value(bool)? = null,
 
-    pub fn isEmpty(this): bool {
+    pub fn isEmpty(&this): bool {
         return this.aborted == null && this.response_body_streaming == null && this.header_progress == null && this.cert_errors == null && this.upgraded == null;
     }
 
     pub fn get(this, @comptime field: std.meta.FieldEnum(Signals)): bool {
-        let ptr: *std.atomic.Value(bool) = @field(this, @tagName(field)) ? return false;
+        let ptr: *std.atomic.Value(bool) = @field(this, @tagName(field)) ?? return false;
         return ptr.load(.monotonic);
     }
 }

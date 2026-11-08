@@ -20,11 +20,10 @@ fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
     if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
 }
 const bun = @import("bun");
-    const uws = bun.uws;
-    const quic = uws.quic;
-    var resolved_mutex: bun.Mutex = .{};
-    var resolved_head: ?*PendingConnect = null;
-fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const uws = bun.uws;
+const quic = uws.quic;
+var resolved_mutex: bun.Mutex = .{};
+var resolved_head: ?*PendingConnect = null;
 pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const ClientSession = @import("./ClientSession.zig").ClientSession;
@@ -36,39 +35,36 @@ loop_ptr: *uws.Loop,
 next: ?*PendingConnect = null,
 
 pub fn register(session: *ClientSession, pc: *quic.PendingConnect, l: *uws.Loop) void {
+        _ = session.ref();
         const item = bun.new(PendingConnect, .{ .session = session, .pc = pc, .loop_ptr = l });
         _ = &item;
-        _ = session.ref();
         _ = bun.dns.internal.registerQuic(@ptrCast(@alignCast(pc.addrinfo())), item);
 }
 
-pub fn loop(self: *PendingConnect) *anyopaque {
+pub fn loop(self: *PendingConnect) *uws.Loop {
         return self.loop_ptr;
 }
 
 pub fn onDNSResolved(self: *PendingConnect) void {
-        const session = self.session;
-        _ = &session;
         defer {
         {
-            _ = session.deref();
+            _ = self.session.deref();
             _ = bun.destroy(self);
         }
         }
-        if ((session.closed or (session.pending.items.len == 0))) {
+        if ((self.session.closed or (self.session.pending.items.len == 0))) {
             _ = self.pc.cancel();
-            if ((!session.closed)) {
-                _ = PendingConnect.failSession(session, error.Aborted);
+            if ((!self.session.closed)) {
+                _ = PendingConnect.failSession(self.session, error.Aborted);
             }
             return;
         }
         if (self.pc.resolved()) |qs| {
             _ = &qs;
-            session.qsocket = qs;
-            qs.ext(ClientSession).* = session;
-
+            self.session.qsocket = qs;
+            (qs.ext(ClientSession)).* = self.session;
         } else {
-            _ = PendingConnect.failSession(session, error.DNSResolutionFailed);
+            _ = PendingConnect.failSession(self.session, error.DNSResolutionFailed);
             return;
         }
 }

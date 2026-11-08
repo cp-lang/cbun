@@ -40,23 +40,23 @@ export enum Method: u8 {
     UNLOCK = 34,
     UNSUBSCRIBE = 35,
 
-    fn hasBody(this): bool {
+    pub fn hasBody(this): bool {
         return with_body.contains(this);
     }
 
-    fn hasRequestBody(this): bool {
+    pub fn hasRequestBody(this): bool {
         return with_request_body.contains(this);
     }
 
-    fn isIdempotent(this): bool {
+    pub fn isIdempotent(this): bool {
         return idempotent.contains(this);
     }
 
-    static fn find(str: string): Method? {
+    pub static fn find(str: string): Method? {
         return Map.get(str);
     }
 
-    static fn which(str: string): Method? {
+    pub static fn which(str: string): Method? {
         return Map.get(str);
     }
 

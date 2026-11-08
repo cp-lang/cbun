@@ -1,9 +1,5 @@
-// src/http/Decompressor.cp
-// HTTP stream decompressor in CP language
-
-zig {
-    const bun = @import("bun");
-}
+// HTTP stream decompressor in pure CP language
+const bun = @import("bun");
 
 import { Encoding } from "../http_types/Encoding.cp";
 
@@ -11,9 +7,9 @@ export enum Decompressor {
     zlib: *bun.zlib.ZlibReaderArrayList,
     brotli: *bun.brotli.BrotliReaderArrayList,
     zstd: *bun.zstd.ZstdReaderArrayList,
-    none: void,
+    none,
 
-    pub fn release(*this): void {
+    pub fn release(*this) {
         switch (this.*) {
             .brotli(that) => {
                 that.deinit();
@@ -31,7 +27,7 @@ export enum Decompressor {
         }
     }
 
-    pub fn deinit(*this): void {
+    pub fn deinit(*this) {
         this.release();
     }
 
@@ -49,39 +45,39 @@ export enum Decompressor {
                     } else if (buffer.len > 1 && buffer[0] == 120) {
                         windowBits = 0;
                     }
-                    const reader = bun.zlib.ZlibReaderArrayList.initWithOptionsAndListAllocator(
+                    let reader = bun.zlib.ZlibReaderArrayList.initWithOptionsAndListAllocator(
                         buffer,
                         *body_out_str.list,
                         body_out_str.allocator,
                         bun.http.default_allocator,
-                        {
-                            windowBits: windowBits,
+                        .{
+                            .windowBits = windowBits,
                         },
                     )?;
-                    this.* = { zlib: reader };
+                    this.* = .{ .zlib = reader };
                     return;
                 },
                 .brotli => {
-                    const reader = bun.brotli.BrotliReaderArrayList.newWithOptions(
+                    let reader = bun.brotli.BrotliReaderArrayList.newWithOptions(
                         buffer,
                         *body_out_str.list,
                         body_out_str.allocator,
-                        {},
+                        .{},
                     )?;
-                    this.* = { brotli: reader };
+                    this.* = .{ .brotli = reader };
                     return;
                 },
                 .zstd => {
-                    const reader = bun.zstd.ZstdReaderArrayList.initWithListAllocator(
+                    let reader = bun.zstd.ZstdReaderArrayList.initWithListAllocator(
                         buffer,
                         *body_out_str.list,
                         body_out_str.allocator,
                         bun.http.default_allocator,
                     )?;
-                    this.* = { zstd: reader };
+                    this.* = .{ .zstd = reader };
                     return;
                 },
-                * => @panic("Invalid encoding. This code should not be reachable"),
+                else => @panic("Invalid encoding. This code should not be reachable"),
             }
         }
 
@@ -98,7 +94,7 @@ export enum Decompressor {
                     body_out_str.list.expandToCapacity();
                 }
                 reader.list = body_out_str.list;
-                reader.zlib.next_out = @ptrCast(*body_out_str.list.items[initial]);
+                reader.zlib.next_out = @ptrCast(&body_out_str.list.items[initial]);
                 reader.zlib.avail_out = @as(u32, @truncate(body_out_str.list.capacity - initial));
                 reader.zlib.total_out = @truncate(initial);
             },
@@ -118,7 +114,7 @@ export enum Decompressor {
                 reader.list = body_out_str.list;
                 reader.total_out = @truncate(initial);
             },
-            * => @panic("Invalid encoding. This code should not be reachable"),
+            else => @panic("Invalid encoding. This code should not be reachable"),
         }
     }
 

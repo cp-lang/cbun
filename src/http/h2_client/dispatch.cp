@@ -6,19 +6,9 @@ import { Stream } from "./Stream.cp";
 import * as wire from "../H2FrameParser.cp";
 import { local_max_header_list_size, write_buffer_control_limit } from "../H2Client.cp";
 
-zig {
-    const bun = @import("bun");
-    const strings = bun.strings;
-    const log = bun.Output.scoped(.h2_client, .hidden);
-    const forbidden_response_fields = bun.ComptimeStringMap(void, .{
-        .{ "connection", {} },
-        .{ "keep-alive", {} },
-        .{ "proxy-connection", {} },
-        .{ "te", {} },
-        .{ "transfer-encoding", {} },
-        .{ "upgrade", {} },
-    });
-}
+const bun = @import("bun");
+const strings = bun.strings;
+const log = bun.Output.scoped(.h2_client, .hidden);
 
 pub fn parseFrames(session: *ClientSession, buf: string): usize {
     let consumed: usize = 0;
@@ -47,7 +37,7 @@ pub fn parseFrames(session: *ClientSession, buf: string): usize {
     return consumed;
 }
 
-pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload: string): void {
+pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload: string) {
     log("frame type={d} len={d} flags={d} stream={d}", [header.type, header.length, header.flags, header.streamIdentifier]);
 
     if (session.expecting_continuation != 0 && header.type != @intFromEnum(wire.FrameType.HTTP_FRAME_CONTINUATION)) {
@@ -100,7 +90,7 @@ pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload:
                         }
                         const delta = @as(i64, unit.value) - @as(i64, session.remote_initial_window_size);
                         session.remote_initial_window_size = unit.value;
-                        for (s of session.streams.values()) {
+                        for (let s of session.streams.values()) {
                             const next = @as(i64, s.send_window) + delta;
                             if (next > wire.MAX_WINDOW_SIZE) {
                                 session.fatal_error = error.HTTP2FlowControlError;
@@ -286,7 +276,7 @@ pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload:
             }
         },
         .HTTP_FRAME_DATA => {
-            zig { session.conn_unacked_bytes +|= header.length; }
+            session.conn_unacked_bytes += header.length;
             const stream_id: u31 = @intCast(header.streamIdentifier);
             if (stream := session.streams.get(stream_id)) {
                 session.stream_progressed = true;
@@ -299,7 +289,7 @@ pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload:
                     stream.fatal_error = stream.fatal_error ?? error.HTTP2ProtocolError;
                     return;
                 }
-                zig { stream.unacked_bytes +|= header.length; }
+                stream.unacked_bytes += header.length;
                 let fragment = payload;
                 if ((header.flags & @intFromEnum(wire.DataFrameFlags.PADDED)) != 0) {
                     if (stripped := stripPadding(fragment)) {
@@ -366,7 +356,7 @@ pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload:
             const graceful = code == @intFromEnum(wire.ErrorCode.NO_ERROR);
             let it = session.streams.iterator();
             while (e := it.next()) {
-                const s = e.value_ptr.*;
+                let s = e.value_ptr.*;
                 if (s.id > session.goaway_last_stream_id) {
                     if (graceful) {
                         s.fatal_error = error.HTTP2RefusedStream;
@@ -385,7 +375,7 @@ pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload:
     }
 }
 
-pub fn decodeDiscardOrphan(session: *ClientSession): void {
+pub fn decodeDiscardOrphan(session: *ClientSession) {
     defer session.orphan_header_block.clearRetainingCapacity();
     let offset: usize = 0;
     while (offset < session.orphan_header_block.items.len) {
@@ -397,7 +387,7 @@ pub fn decodeDiscardOrphan(session: *ClientSession): void {
     }
 }
 
-pub fn decodeHeaderBlock(session: *ClientSession, stream: *Stream): void {
+pub fn decodeHeaderBlock(session: *ClientSession, stream: *Stream) {
     defer stream.header_block.clearRetainingCapacity();
 
     let status: u32 = 0;
@@ -511,7 +501,12 @@ pub fn isMalformedResponseField(name: string): bool {
             return true;
         }
     }
-    return forbidden_response_fields.has(name);
+    return strings.eqlComptime(name, "connection") ||
+        strings.eqlComptime(name, "keep-alive") ||
+        strings.eqlComptime(name, "proxy-connection") ||
+        strings.eqlComptime(name, "te") ||
+        strings.eqlComptime(name, "transfer-encoding") ||
+        strings.eqlComptime(name, "upgrade");
 }
 
 pub fn errorCodeFor(err: anyerror): wire.ErrorCode {

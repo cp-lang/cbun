@@ -6,9 +6,9 @@ import { Loop } from "./Loop.cp";
     fn us_connecting_socket_close(s: *ConnectingSocket): void;
     fn us_connecting_socket_group(s: *ConnectingSocket): *SocketGroup;
     fn us_connecting_socket_kind(s: *ConnectingSocket): u8;
-    fn us_connecting_socket_ext(s: *ConnectingSocket): *any!;
+    fn us_connecting_socket_ext(s: *ConnectingSocket): *!;
     fn us_connecting_socket_get_error(s: *ConnectingSocket): i32;
-    fn us_connecting_socket_get_native_handle(s: *ConnectingSocket): *any?!;
+    fn us_connecting_socket_get_native_handle(s: *ConnectingSocket): *!?;
     fn us_connecting_socket_is_closed(s: *ConnectingSocket): i32;
     fn us_connecting_socket_is_shut_down(s: *ConnectingSocket): i32;
     fn us_connecting_socket_long_timeout(s: *ConnectingSocket, seconds: u32): void;
@@ -32,22 +32,26 @@ export @opaque class ConnectingSocket {
     }
 
     pub fn kind(*this): SocketKind {
-        return us_connecting_socket_kind(this) as SocketKind;
+        zig {
+            return @enumFromInt(us_connecting_socket_kind(self));
+        }
     }
 
     pub fn loop(*this): *Loop {
         return us_connecting_socket_get_loop(this);
     }
 
-    pub fn ext<T>(*this): *T {
-        return us_connecting_socket_ext(this) as *T;
+    pub fn ext(*this, @comptime T: type): *T {
+        unsafe {
+            return us_connecting_socket_ext(this) as *T;
+        }
     }
 
     pub fn getError(*this): i32 {
         return us_connecting_socket_get_error(this);
     }
 
-    pub fn getNativeHandle(*this): *any?! {
+    pub fn getNativeHandle(*this): *!? {
         return us_connecting_socket_get_native_handle(this);
     }
 

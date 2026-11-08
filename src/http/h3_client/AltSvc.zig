@@ -21,12 +21,8 @@ fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
 }
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
-pub fn key(buf: []u8, hostname: []const u8, port: u16) []const u8 {
-        return std.fmt.bufPrint(buf, "{s}:{d}", .{ hostname, port }) catch "";
-    }
-pub var cache: bun.StringHashMapUnmanaged(Record) = .{};
-pub const max_entries: usize = 256;
-fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+var cache: bun.StringHashMapUnmanaged(Record) = .{};
+const max_entries: usize = 256;
 pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const Entry = struct {
@@ -53,6 +49,10 @@ pub fn init(self: *Record, h3_port: u16, expires_at: i64) void {
     }
 };
 
+
+pub fn key(buf: []u8, hostname: []const u8, port: u16) []const u8 {
+        return (blk_catch_0: { break :blk_catch_0 ((std.fmt.bufPrint(buf, "{s}:{d}", .{ hostname, port })) catch |__ce_0| { _ = &__ce_0; break :blk_catch_0 ""; }); });
+}
 
 pub fn sweepExpired(now: i64) void {
         var it = cache.iterator();
@@ -106,7 +106,7 @@ pub fn parse(field_value: []const u8) !?Entry {
                     if ((colon != 0)) {
                         continue;
                     }
-                    const port = (blk_catch_0: { break :blk_catch_0 ((std.fmt.parseInt(u16, auth[(colon + 1)..], 10)) catch |__ce_0| { _ = &__ce_0; continue; }); });
+                    const port = (blk_catch_1: { break :blk_catch_1 ((std.fmt.parseInt(u16, auth[(colon + 1)..], 10)) catch |__ce_1| { _ = &__ce_1; continue; }); });
                     _ = &port;
                     if ((port == 0)) {
                         continue;
@@ -119,7 +119,7 @@ pub fn parse(field_value: []const u8) !?Entry {
                         if (bun.strings.indexOfChar(param, 61)) |peq| {
                             _ = &peq;
                             if (std.ascii.eqlIgnoreCase(param[0..peq], "ma")) {
-                                result.ma = (blk_catch_1: { break :blk_catch_1 ((std.fmt.parseInt(u32, param[(peq + 1)..], 10)) catch |__ce_1| { _ = &__ce_1; break :blk_catch_1 result.ma; }); });
+                                result.ma = (blk_catch_2: { break :blk_catch_2 ((std.fmt.parseInt(u32, param[(peq + 1)..], 10)) catch |__ce_2| { _ = &__ce_2; break :blk_catch_2 result.ma; }); });
                             }
                         }
                     }
@@ -138,7 +138,7 @@ pub fn record(origin_host: []const u8, origin_port: u16, field_value: []const u8
         }
         const k = key((&buf), origin_host, origin_port);
         _ = &k;
-        const entry_opt = (blk_catch_2: { break :blk_catch_2 ((parse(field_value)) catch |__ce_2| { _ = &__ce_2; if (cache.fetchRemove(k)) |kv| {
+        const entry_opt = (blk_catch_3: { break :blk_catch_3 ((parse(field_value)) catch |__ce_3| { _ = &__ce_3; if (cache.fetchRemove(k)) |kv| {
             _ = &kv;
             _ = bun.default_allocator.free(kv.key);
         }
@@ -154,7 +154,7 @@ pub fn record(origin_host: []const u8, origin_port: u16, field_value: []const u8
                     return;
                 }
             }
-            const gop = bun.handleOom(cache.getOrPut(bun.default_allocator, k));
+            var gop = bun.handleOom(cache.getOrPut(bun.default_allocator, k));
             _ = &gop;
             if ((!gop.found_existing)) {
                 gop.key_ptr.* = bun.handleOom(bun.default_allocator.dupe(u8, k));

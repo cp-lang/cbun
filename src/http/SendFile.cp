@@ -1,9 +1,7 @@
 // src/http/SendFile.cp
 // Streaming file upload handler for HTTP client
 
-zig {
-    const bun = @import("bun");
-}
+const bun = @import("bun");
 
 import { HTTPContext } from "./HTTPContext.cp";
 
@@ -26,15 +24,15 @@ export @root @value struct SendFile {
         return url.isHTTP() && url.href.len > 0;
     }
 
-    fn write(*this, socket: anytype): Status {
+    fn write(*this, socket: auto): Status {
         const adjusted_count_temporary = @min(@as(u64, this.remain), @as(u63, std.math.maxInt(u63)));
-        const adjusted_count = @as(u63, @intCast(adjusted_count_temporary));
+        const adjusted_count = adjusted_count_temporary as u63;
 
         if (bun.Environment.isLinux) {
-            let mut signed_offset: i64 = @intCast(this.offset);
+            let mut signed_offset: i64 = this.offset as i64;
             const begin = this.offset;
             const val = std.os.linux.sendfile(socket.fd().cast(), this.fd.cast(), &signed_offset, this.remain);
-            this.offset = @as(u64, @intCast(signed_offset));
+            this.offset = signed_offset as u64;
 
             const errcode = bun.sys.getErrno(val);
             let mut diff: usize = 0;
@@ -65,7 +63,7 @@ export @root @value struct SendFile {
                 &sbytes,
                 0,
             ));
-            const wrote = @as(u64, @intCast(sbytes));
+            const wrote = sbytes as u64;
             this.offset += wrote;
             if (this.remain > wrote) {
                 this.remain -= wrote;
@@ -89,7 +87,7 @@ export @root @value struct SendFile {
                 null,
                 0,
             ));
-            const wrote = @as(u64, @intCast(sbytes));
+            const wrote = sbytes as u64;
             this.offset += wrote;
             if (this.remain > wrote) {
                 this.remain -= wrote;

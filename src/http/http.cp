@@ -31,52 +31,44 @@ import { FetchCacheMode } from "../http_types/FetchCacheMode.cp";
 import { FetchRequestMode } from "../http_types/FetchRequestMode.cp";
 
 
-zig {
-    const bun = @import("bun");
-    const Output = bun.Output;
-    const picohttp = bun.picohttp;
-    const FeatureFlags = bun.FeatureFlags;
-    const Environment = bun.Environment;
-    const MutableString = bun.MutableString;
-    const log = bun.Output.scoped(.fetch, .hidden);
-    const assert = bun.assert;
-    const strings = bun.strings;
-    const jsc = bun.jsc;
-    const Global = bun.Global;
-    const URL = bun.URL;
-    const print_every = 0;
-    var print_every_i: usize = 0;
-    pub const HTTPContextTLS = @import("./HTTPContext.zig").NewHTTPContext(true);
-}
+const bun = @import("bun");
+const Output = bun.Output;
+const picohttp = bun.picohttp;
+const FeatureFlags = bun.FeatureFlags;
+const Environment = bun.Environment;
+const MutableString = bun.MutableString;
+const log = bun.Output.scoped(.fetch, .hidden);
+const assert = bun.assert;
+const strings = bun.strings;
+const jsc = bun.jsc;
+const Global = bun.Global;
+const URL = bun.URL;
+const print_every = 0;
+var print_every_i: usize = 0;
+pub const HTTPContextTLS = @import("./HTTPContext.zig").NewHTTPContext(true);
 
-zig {
-    pub var default_allocator: std.mem.Allocator = undefined;
-    pub var default_arena: bun.allocators.MimallocArena = undefined;
-    pub var http_thread: HTTPThread = undefined;
+pub var default_allocator: std.mem.Allocator = undefined;
+pub var default_arena: bun.allocators.MimallocArena = undefined;
+pub var http_thread: HTTPThread = undefined;
 
-    pub var socket_async_http_abort_tracker = std.AutoArrayHashMap(u32, bun.uws.AnySocket).init(bun.default_allocator);
-    pub var async_http_id_monotonic: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+pub var socket_async_http_abort_tracker = std.AutoArrayHashMap(u32, bun.uws.AnySocket).init(bun.default_allocator);
+pub var async_http_id_monotonic: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
-    pub var experimental_http2_client_from_cli: bool = false;
-    pub var experimental_http3_client_from_cli: bool = false;
+pub var experimental_http2_client_from_cli: bool = false;
+pub var experimental_http3_client_from_cli: bool = false;
 
-    pub const MAX_REDIRECT_URL_LENGTH = 128 * 1024;
+pub const MAX_REDIRECT_URL_LENGTH = 128 * 1024;
 
-    pub var max_http_header_size: usize = 16 * 1024;
-    comptime {
-        @export(&max_http_header_size, .{ .name = "BUN_DEFAULT_MAX_HTTP_HEADER_SIZE" });
-    }
-    pub var idle_timeout_seconds: u32 = 300;
+pub var max_http_header_size: usize = 16 * 1024;
+@export(&max_http_header_size, .{ name: "BUN_DEFAULT_MAX_HTTP_HEADER_SIZE" });
+pub var idle_timeout_seconds: u32 = 300;
 
-    pub var overridden_default_user_agent: []const u8 = "";
-}
+pub var overridden_default_user_agent: string = "";
 
-zig {
-    pub const max_request_headers = 256;
-    pub var shared_request_headers_buf: [max_request_headers]bun.picohttp.Header = undefined;
-    pub var shared_response_headers_buf: [256]bun.picohttp.Header = undefined;
-    pub var temp_hostname: [8192]u8 = undefined;
-}
+pub const max_request_headers = 256;
+pub var shared_request_headers_buf: [max_request_headers]bun.picohttp.Header = undefined;
+pub var shared_response_headers_buf: [256]bun.picohttp.Header = undefined;
+pub var temp_hostname: [8192]u8 = undefined;
 
 export const end_of_chunked_http1_1_encoding_response_body = "0\r\n\r\n";
 export const default_redirect_count = 127;
@@ -104,7 +96,6 @@ export enum ShouldContinue {
     finished,
 }
 
-zig {
 pub const Flags = packed struct(u32) {
     disable_timeout: bool = false,
     disable_keepalive: bool = false,
@@ -125,24 +116,19 @@ pub const Flags = packed struct(u32) {
     h3_retried: bool = false,
     _: u13 = 0,
 };
-}
 
-zig {
 pub const SOCKET_FLAGS: u32 = if (bun.Environment.isLinux)
     std.posix.SOCK.CLOEXEC | std.posix.MSG.NOSIGNAL
 else
     std.posix.SOCK.CLOEXEC;
-}
 
 export const OPEN_SOCKET_FLAGS = std.posix.SOCK.CLOEXEC;
 export const extremely_verbose = false;
 export const max_h2_retries: u8 = 5;
 
 export @value struct ThreadlocalAsyncHTTP {
-    zig {
-        pub const new = bun.TrivialNew(ThreadlocalAsyncHTTP);
-        pub const deinit = bun.TrivialDeinit(ThreadlocalAsyncHTTP);
-    }
+    pub const new = bun.TrivialNew(ThreadlocalAsyncHTTP);
+    pub const deinit = bun.TrivialDeinit(ThreadlocalAsyncHTTP);
 
     async_http: AsyncHTTP,
 }
@@ -603,22 +589,18 @@ export @root @value struct HTTPClient {
             this.allocator.free(auth);
             this.proxy_authorization = null;
         }
-        zig {
-            if (self.proxy_headers) |*hdrs| {
-                hdrs.deinit();
-                self.proxy_headers = null;
-            }
+        if (hdrs := this.proxy_headers) {
+            hdrs.deinit();
+            this.proxy_headers = null;
         }
         if (tunnel := this.proxy_tunnel) {
             this.proxy_tunnel = null;
             tunnel.detachAndDeref();
         }
         bun.debugAssert(this.h2 == null);
-        zig {
-            if (self.tls_props) |*tls| {
-                tls.deinit();
-                self.tls_props = null;
-            }
+        if (tls := this.tls_props) {
+            tls.deinit();
+            this.tls_props = null;
         }
         if (ctx := this.custom_ssl_ctx) ctx.deref();
         this.custom_ssl_ctx = null;
@@ -2857,38 +2839,36 @@ export @value struct HTTPClientResult {
         return false;
     }
 
-    zig {
-        pub const BodySize = union(enum) {
-            total_received: usize,
-            content_length: usize,
-            unknown: void,
-        };
+    pub const BodySize = union(enum) {
+        total_received: usize,
+        content_length: usize,
+        unknown: void,
+    };
 
-        pub const Callback = struct {
-            ctx: ?*anyopaque,
-            function: Function,
+    pub const Callback = struct {
+        ctx: ?*anyopaque,
+        function: Function,
 
-            pub const Function = *const fn (ctx: ?*anyopaque, async_http: *AsyncHTTP, result: HTTPClientResult) void;
+        pub const Function = *const fn (ctx: ?*anyopaque, async_http: *AsyncHTTP, result: HTTPClientResult) void;
 
-            pub fn run(self: Callback, async_http: *AsyncHTTP, result: HTTPClientResult) void {
-                self.function(self.ctx, async_http, result);
-            }
+        pub fn run(self: Callback, async_http: *AsyncHTTP, result: HTTPClientResult) void {
+            self.function(self.ctx, async_http, result);
+        }
 
-            pub fn New(comptime Type: type, comptime callback: anytype) type {
-                return struct {
-                    pub fn init(this: Type) Callback {
-                        return Callback{
-                            .ctx = this,
-                            .function = wrapped_callback,
-                        };
-                    }
+        pub fn New(comptime Type: type, comptime callback: anytype) type {
+            return struct {
+                pub fn init(this: Type) Callback {
+                    return Callback{
+                        .ctx = this,
+                        .function = wrapped_callback,
+                    };
+                }
 
-                    fn wrapped_callback(ptr: ?*anyopaque, async_http: *AsyncHTTP, result: HTTPClientResult) void {
-                        const casted: Type = @ptrCast(@alignCast(ptr));
-                        @call(bun.callmod_inline, callback, .{ casted, async_http, result });
-                    }
-                };
-            }
-        };
-    }
+                fn wrapped_callback(ptr: ?*anyopaque, async_http: *AsyncHTTP, result: HTTPClientResult) void {
+                    const casted: Type = @ptrCast(@alignCast(ptr));
+                    @call(bun.callmod_inline, callback, .{ casted, async_http, result });
+                }
+            };
+        }
+    };
 }

@@ -6,44 +6,44 @@ import { InternalLoopData } from "./InternalLoopData.cp";
 
 @c {
     fn us_create_loop(
-        hint: *any?!,
-        wakeup_cb: @c ((loop: *Loop): void)?,
-        pre_cb: @c ((loop: *Loop): void)?,
-        post_cb: @c ((loop: *Loop): void)?,
+        hint: *!?,
+        wakeup_cb: ?@c fn (*Loop): void,
+        pre_cb: ?@c fn (*Loop): void,
+        post_cb: ?@c fn (*Loop): void,
         ext_size: u32,
-    ): *Loop?!;
-    fn us_loop_free(loop: *Loop?!): void;
-    fn us_loop_ext(loop: *Loop?!): *any?!;
+    ): ?*Loop;
+    fn us_loop_free(loop: ?*Loop): void;
+    fn us_loop_ext(loop: ?*Loop): *!?;
     fn us_quic_loop_flush_if_pending(loop: *Loop): void;
-    fn us_loop_run(loop: *Loop?!): void;
-    fn us_loop_pump(loop: *Loop?!): void;
-    fn us_wakeup_loop(loop: *Loop?!): void;
-    fn us_loop_integrate(loop: *Loop?!): void;
-    fn us_loop_iteration_number(loop: *Loop?!): i64;
-    fn uws_loop_addPostHandler(loop: *Loop, ctx: *any!, cb: @c ((ctx: *any!, loop: *Loop): void)): void;
-    fn uws_loop_removePostHandler(loop: *Loop, ctx: *any!, cb: @c ((ctx: *any!, loop: *Loop): void)): void;
-    fn uws_loop_addPreHandler(loop: *Loop, ctx: *any!, cb: @c ((ctx: *any!, loop: *Loop): void)): void;
-    fn uws_loop_removePreHandler(loop: *Loop, ctx: *any!, cb: @c ((ctx: *any!, loop: *Loop): void)): void;
-    fn us_loop_run_bun_tick(loop: *Loop?!, timeout_ms: *const bun.timespec?!): void;
+    fn us_loop_run(loop: ?*Loop): void;
+    fn us_loop_pump(loop: ?*Loop): void;
+    fn us_wakeup_loop(loop: ?*Loop): void;
+    fn us_loop_integrate(loop: ?*Loop): void;
+    fn us_loop_iteration_number(loop: ?*Loop): i64;
+    fn uws_loop_addPostHandler(loop: *Loop, ctx: *!, cb: @c fn (*!, *Loop): void): void;
+    fn uws_loop_removePostHandler(loop: *Loop, ctx: *!, cb: @c fn (*!, *Loop): void): void;
+    fn uws_loop_addPreHandler(loop: *Loop, ctx: *!, cb: @c fn (*!, *Loop): void): void;
+    fn uws_loop_removePreHandler(loop: *Loop, ctx: *!, cb: @c fn (*!, *Loop): void): void;
+    fn us_loop_run_bun_tick(loop: ?*Loop, timeout_ms: ?*const bun.timespec): void;
     fn us_internal_free_closed_sockets(loop: *Loop): void;
     fn us_loop_close_all_groups(loop: *Loop): i32;
     fn uws_get_loop(): *Loop;
-    fn uws_get_loop_with_native(native: *any!): *WindowsLoop;
-    fn uws_loop_defer(loop: *Loop, ctx: *any!, cb: @c ((ctx: *any!): void)): void;
+    fn uws_get_loop_with_native(native: *!): *WindowsLoop;
+    fn uws_loop_defer(loop: *Loop, ctx: *!, cb: @c fn (*!): void): void;
     fn uws_res_clear_corked_socket(loop: *Loop): void;
     fn uws_loop_date_header_timer_update(loop: *Loop): void;
 }
 
-export class LoopHandler<UserType> {
+export class LoopHandler {
     loop: *Loop,
-    cb: @c ((data: *any!, loop: *Loop): void),
+    cb: @c fn (*!, *Loop): void,
 
     pub fn removePost(this): void {
-        uws_loop_removePostHandler(this.loop, this as *any!, this.cb);
+        uws_loop_removePostHandler(this.loop, this as *!, this.cb);
     }
 
     pub fn removePre(this): void {
-        uws_loop_removePreHandler(this.loop, this as *any!, this.cb);
+        uws_loop_removePreHandler(this.loop, this as *!, this.cb);
     }
 }
 
@@ -122,14 +122,22 @@ export @extern class PosixLoop {
         us_quic_loop_flush_if_pending(this as *Loop);
     }
 
-    pub static fn create<Handler>(): *Loop {
+    pub static fn create(@comptime Handler: type): *Loop {
+        let mut pre_cb = null;
+        if (reflect.hasMethod(Handler, "pre")) {
+            pre_cb = Handler.pre;
+        }
+        let mut post_cb = null;
+        if (reflect.hasMethod(Handler, "post")) {
+            post_cb = Handler.post;
+        }
         return us_create_loop(
             null,
             Handler.wakeup,
-            if (reflect.hasMethod(Handler, "pre")) Handler.pre else null,
-            if (reflect.hasMethod(Handler, "post")) Handler.post else null,
+            pre_cb,
+            post_cb,
             0,
-        )!;
+        ).?;
     }
 
     pub fn wakeup(*this): void {
@@ -141,8 +149,10 @@ export @extern class PosixLoop {
     }
 
     pub fn tickWithoutIdle(*this): void {
-        let ts = bun.timespec { sec = 0, nsec = 0 };
-        us_loop_run_bun_tick(this as *Loop, &ts);
+        zig {
+            const ts = bun.timespec{ .sec = 0, .nsec = 0 };
+            c.us_loop_run_bun_tick(self, &ts);
+        }
     }
 
     pub fn tickWithTimeout(*this, timespec: *const bun.timespec?): void {
@@ -157,13 +167,15 @@ export @extern class PosixLoop {
         return us_loop_close_all_groups(this as *Loop) != 0;
     }
 
-    pub fn nextTick<UserType>(*this, user_data: UserType, deferCallback: fn(UserType): void): void {
-        let Handler = struct {
-            @c pub fn callback(data: *any!): void {
-                deferCallback(data as UserType);
-            }
-        };
-        uws_loop_defer(this as *Loop, user_data as *any!, Handler.callback);
+    pub fn nextTick(*this, @comptime UserType: type, user_data: UserType, @comptime deferCallback: anytype): void {
+        zig {
+            const Handler = struct {
+                pub fn callback(data: *anyopaque) callconv(.c) void {
+                    deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
+                }
+            };
+            c.uws_loop_defer(self, user_data, Handler.callback);
+        }
     }
 
     pub fn run(*this): void {
@@ -235,14 +247,22 @@ export @extern class WindowsLoop {
         us_quic_loop_flush_if_pending(this as *Loop);
     }
 
-    pub static fn create<Handler>(): *WindowsLoop {
+    pub static fn create(@comptime Handler: type): *WindowsLoop {
+        let mut pre_cb = null;
+        if (reflect.hasMethod(Handler, "pre")) {
+            pre_cb = Handler.pre;
+        }
+        let mut post_cb = null;
+        if (reflect.hasMethod(Handler, "post")) {
+            post_cb = Handler.post;
+        }
         return us_create_loop(
             null,
             Handler.wakeup,
-            if (reflect.hasMethod(Handler, "pre")) Handler.pre else null,
-            if (reflect.hasMethod(Handler, "post")) Handler.post else null,
+            pre_cb,
+            post_cb,
             0,
-        )! as *WindowsLoop;
+        ).? as *WindowsLoop;
     }
 
     pub fn run(*this): void {
@@ -265,13 +285,15 @@ export @extern class WindowsLoop {
         return us_loop_close_all_groups(this as *Loop) != 0;
     }
 
-    pub fn nextTick<UserType>(*this, user_data: UserType, deferCallback: fn(UserType): void): void {
-        let Handler = struct {
-            @c pub fn callback(data: *any!): void {
-                deferCallback(data as UserType);
-            }
-        };
-        uws_loop_defer(this as *Loop, user_data as *any!, Handler.callback);
+    pub fn nextTick(*this, @comptime UserType: type, user_data: UserType, @comptime deferCallback: anytype): void {
+        zig {
+            const Handler = struct {
+                pub fn callback(data: *anyopaque) callconv(.c) void {
+                    deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
+                }
+            };
+            c.uws_loop_defer(self, user_data, Handler.callback);
+        }
     }
 
     pub fn updateDate(*this): void {

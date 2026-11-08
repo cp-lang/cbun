@@ -1,16 +1,14 @@
 // src/http/h3_client/encode.cp
 // Request-side framing for the HTTP/3 client in CP language
 
-zig {
-    const bun = @import("bun");
-    const quic = bun.uws.quic;
-}
+const bun = @import("bun");
+const quic = bun.uws.quic;
 
 import { ClientSession } from "./ClientSession.cp";
 import { Stream } from "./Stream.cp";
 import { HTTPClient } from "../http.cp";
 
-export fn writeRequest(session: *ClientSession, stream: *Stream, qs: *quic.Stream): !void {
+export fn writeRequest(session: *ClientSession, stream: *Stream, qs: *quic.Stream): ! {
     if (client := stream.client) {
         const request = client.buildRequest(client.state.original_request_body.len());
         if (client.verbose != .none) {
@@ -42,12 +40,10 @@ export fn writeRequest(session: *ClientSession, stream: *Stream, qs: *quic.Strea
         headers.items.len = 4;
         for (h of request.headers) {
             if (qpack_class := bun.uws.quic.Qpack.classify(h.name)) {
-                zig {
-                    switch (qpack_class) {
-                        .forbidden => {},
-                        .host => authority = h.value,
-                        .indexed => |i| _ = headers.appendAssumeCapacity(bun.uws.quic.Header.init(i.name, h.value, i.index)),
-                    }
+                switch (qpack_class) {
+                    .forbidden => {},
+                    .host => authority = h.value,
+                    .indexed(i) => _ = headers.appendAssumeCapacity(bun.uws.quic.Header.init(i.name, h.value, i.index)),
                 }
             } else {
                 const dst = lower[lower_len..lower_len + h.name.len];
@@ -100,19 +96,19 @@ export fn writeRequest(session: *ClientSession, stream: *Stream, qs: *quic.Strea
     }
 }
 
-export fn drainSendBody(stream: *Stream, qs: *quic.Stream): void {
+export fn drainSendBody(stream: *Stream, qs: *quic.Stream) {
     if (stream.request_body_done) return;
     if (client := stream.client) {
         if (stream.is_streaming_body) {
             const body = &client.state.original_request_body.stream;
             if (sb := body.buffer) {
-                const buffer = sb.acquire();
+                let buffer = sb.acquire();
                 const data = buffer.slice();
                 let written: usize = 0;
                 while (written < data.len) {
                     const w = qs.write(data[written..]);
                     if (w <= 0) break;
-                    written += @as(usize, @intCast(w));
+                    written += w as usize;
                 }
                 buffer.cursor += written;
                 const drained = buffer.isEmpty();
@@ -139,7 +135,7 @@ export fn drainSendBody(stream: *Stream, qs: *quic.Stream): void {
         while (stream.pending_body.len > 0) {
             const w = qs.write(stream.pending_body);
             if (w <= 0) break;
-            stream.pending_body = stream.pending_body[@as(usize, @intCast(w))..];
+            stream.pending_body = stream.pending_body[w as usize..];
         }
         if (stream.pending_body.len == 0) {
             stream.request_body_done = true;

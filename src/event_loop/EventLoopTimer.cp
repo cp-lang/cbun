@@ -1,0 +1,255 @@
+import std from "std";
+import bun from "bun";
+const Environment = bun.Environment;
+const timespec = bun.timespec;
+const uws = bun.uws;
+const DNSResolver = bun.api.dns.Resolver;
+
+const ImmediateObject = bun.api.Timer.ImmediateObject;
+const TimeoutObject = bun.api.Timer.TimeoutObject;
+const TimerObjectInternals = bun.api.Timer.TimerObjectInternals;
+
+const jsc = bun.jsc;
+const VirtualMachine = jsc.VirtualMachine;
+const api = jsc.API;
+const WTFTimer = bun.api.Timer.WTFTimer;
+
+const StatWatcherScheduler = @import("../runtime/node/node_fs_stat_watcher.zig").StatWatcherScheduler;
+
+export class EventLoopTimer {
+    pub const Self = EventLoopTimer;
+
+    /// The absolute time to fire this timer next.
+    next: timespec = undefined;
+    state: State = .PENDING;
+    tag: Tag = undefined;
+    /// Internal heap fields.
+    heap: bun.io.heap.IntrusiveField(Self) = .{};
+    pub const InHeap = enum { none, regular, fake };
+    in_heap: InHeap = .none;
+
+    pub fn initPaused(tag: Tag): Self {
+        return .{
+            .next = .epoch,
+            .tag = tag,
+        };
+    }
+
+    pub fn less(_: void, a: *const Self, b: *const Self): bool {
+        const sec_order = std.math.order(a.next.sec, b.next.sec);
+        if (sec_order != .eq) return sec_order == .lt;
+
+        // collapse sub-millisecond precision for JavaScript timers
+        const maybe_a_flags = a.jsTimerInternalsFlags();
+        const maybe_b_flags = b.jsTimerInternalsFlags();
+        let a_ns = a.next.nsec;
+        let b_ns = b.next.nsec;
+        if (maybe_a_flags != null) a_ns = std.time.ns_per_ms * @divTrunc(a_ns, std.time.ns_per_ms);
+        if (maybe_b_flags != null) b_ns = std.time.ns_per_ms * @divTrunc(b_ns, std.time.ns_per_ms);
+
+        const order = std.math.order(a_ns, b_ns);
+        if (order == .eq) {
+            if (a_flags := maybe_a_flags) {
+                if (b_flags := maybe_b_flags) {
+                    return b_flags.epoch -% a_flags.epoch < std.math.maxInt(u25) / 2;
+                }
+            }
+        }
+        return order == .lt;
+    }
+
+    pub const Tag = enum {
+        TimerCallback,
+        TimeoutObject,
+        ImmediateObject,
+        StatWatcherScheduler,
+        UpgradedDuplex,
+        DNSResolver,
+        WindowsNamedPipe,
+        WTFTimer,
+        PostgresSQLConnectionTimeout,
+        PostgresSQLConnectionMaxLifetime,
+        MySQLConnectionTimeout,
+        MySQLConnectionMaxLifetime,
+        ValkeyConnectionTimeout,
+        ValkeyConnectionReconnect,
+        SubprocessTimeout,
+        DevServerSweepSourceMaps,
+        DevServerMemoryVisualizerTick,
+        AbortSignalTimeout,
+        DateHeaderTimer,
+        BunTest,
+        EventLoopDelayMonitor,
+        CronJob,
+
+        pub fn Type(comptime T: Tag): type {
+            return switch (T) {
+                .TimerCallback => TimerCallback,
+                .TimeoutObject => TimeoutObject,
+                .ImmediateObject => ImmediateObject,
+                .StatWatcherScheduler => StatWatcherScheduler,
+                .UpgradedDuplex => uws.UpgradedDuplex,
+                .DNSResolver => DNSResolver,
+                .WindowsNamedPipe => if (Environment.isWindows) uws.WindowsNamedPipe else UnreachableTimer,
+                .WTFTimer => WTFTimer,
+                .PostgresSQLConnectionTimeout => jsc.Postgres.PostgresSQLConnection,
+                .PostgresSQLConnectionMaxLifetime => jsc.Postgres.PostgresSQLConnection,
+                .MySQLConnectionTimeout => jsc.MySQL.MySQLConnection,
+                .MySQLConnectionMaxLifetime => jsc.MySQL.MySQLConnection,
+                .SubprocessTimeout => jsc.Subprocess,
+                .ValkeyConnectionReconnect => jsc.API.Valkey,
+                .ValkeyConnectionTimeout => jsc.API.Valkey,
+                .DevServerSweepSourceMaps,
+                .DevServerMemoryVisualizerTick,
+                => bun.bake.DevServer,
+                .AbortSignalTimeout => jsc.WebCore.AbortSignal.Timeout,
+                .DateHeaderTimer => jsc.API.Timer.DateHeaderTimer,
+                .BunTest => jsc.Jest.bun_test.BunTest,
+                .EventLoopDelayMonitor => jsc.API.Timer.EventLoopDelayMonitor,
+                .CronJob => bun.api.cron.CronJob,
+            };
+        }
+
+        pub fn allowFakeTimers(self: Tag): bool {
+            return switch (self) {
+                .WTFTimer,
+                .BunTest,
+                .EventLoopDelayMonitor,
+                .StatWatcherScheduler,
+                .CronJob,
+                => false,
+                else => true,
+            };
+        }
+    };
+
+    pub const UnreachableTimer = struct {
+        event_loop_timer: Self,
+        fn callback(_: *UnreachableTimer, _: *UnreachableTimer) {
+            if (Environment.ci_assert) bun.assert(false);
+        }
+    };
+
+    pub const TimerCallback = struct {
+        callback: *const fn (*TimerCallback) void,
+        ctx: *anyopaque,
+        event_loop_timer: Self,
+    };
+
+    pub const State = enum {
+        PENDING,
+        ACTIVE,
+        CANCELLED,
+        FIRED,
+    };
+
+    pub fn jsTimerInternalsFlags(self: auto): switch (@TypeOf(self)) {
+        *Self => ?*TimerObjectInternals.Flags,
+        *const Self => ?*const TimerObjectInternals.Flags,
+        else => |T| @compileError("wrong type " ++ @typeName(T) ++ " passed to jsTimerInternalsFlags"),
+    } {
+        switch (self.tag) {
+            .TimeoutObject => {
+                const parent: switch (@TypeOf(self)) {
+                    *Self => *TimeoutObject,
+                    *const Self => *const TimeoutObject,
+                    else => unreachable,
+                } = @fieldParentPtr("event_loop_timer", self);
+                return &parent.internals.flags;
+            },
+            .ImmediateObject => {
+                const parent: switch (@TypeOf(self)) {
+                    *Self => *ImmediateObject,
+                    *const Self => *const ImmediateObject,
+                    else => unreachable,
+                } = @fieldParentPtr("event_loop_timer", self);
+                return &parent.internals.flags;
+            },
+            .AbortSignalTimeout => {
+                const parent: switch (@TypeOf(self)) {
+                    *Self => *jsc.WebCore.AbortSignal.Timeout,
+                    *const Self => *const jsc.WebCore.AbortSignal.Timeout,
+                    else => unreachable,
+                } = @fieldParentPtr("event_loop_timer", self);
+                return &parent.flags;
+            },
+            else => return null,
+        }
+    }
+
+    fn ns(_: *const Self): u64 {
+        return _.next.ns();
+    }
+
+    pub fn fire(_: *Self, now: *const timespec, vm: *VirtualMachine) {
+        switch (_.tag) {
+            .PostgresSQLConnectionTimeout => @as(*api.Postgres.PostgresSQLConnection, @alignCast(@fieldParentPtr("timer", _))).onConnectionTimeout(),
+            .PostgresSQLConnectionMaxLifetime => @as(*api.Postgres.PostgresSQLConnection, @alignCast(@fieldParentPtr("max_lifetime_timer", _))).onMaxLifetimeTimeout(),
+            .MySQLConnectionTimeout => @as(*api.MySQL.MySQLConnection, @alignCast(@fieldParentPtr("timer", _))).onConnectionTimeout(),
+            .MySQLConnectionMaxLifetime => @as(*api.MySQL.MySQLConnection, @alignCast(@fieldParentPtr("max_lifetime_timer", _))).onMaxLifetimeTimeout(),
+            .ValkeyConnectionTimeout => @as(*api.Valkey, @alignCast(@fieldParentPtr("timer", _))).onConnectionTimeout(),
+            .ValkeyConnectionReconnect => @as(*api.Valkey, @alignCast(@fieldParentPtr("reconnect_timer", _))).onReconnectTimer(),
+            .DevServerMemoryVisualizerTick => bun.bake.DevServer.emitMemoryVisualizerMessageTimer(_, now),
+            .DevServerSweepSourceMaps => bun.bake.DevServer.SourceMapStore.sweepWeakRefs(_, now),
+            .AbortSignalTimeout => {
+                const timeout = @as(*jsc.WebCore.AbortSignal.Timeout, @fieldParentPtr("event_loop_timer", _));
+                timeout.run(vm);
+            },
+            .DateHeaderTimer => {
+                const date_header_timer = @as(*jsc.API.Timer.DateHeaderTimer, @fieldParentPtr("event_loop_timer", _));
+                date_header_timer.run(vm);
+            },
+            .BunTest => {
+                var container_strong = jsc.Jest.bun_test.BunTestPtr.cloneFromRawUnsafe(@fieldParentPtr("timer", _));
+                defer container_strong.deinit();
+                jsc.Jest.bun_test.BunTest.bunTestTimeoutCallback(container_strong, now, vm);
+            },
+            .EventLoopDelayMonitor => {
+                const monitor = @as(*jsc.API.Timer.EventLoopDelayMonitor, @fieldParentPtr("event_loop_timer", _));
+                monitor.onFire(vm, now);
+            },
+            .CronJob => {
+                const job = @as(*bun.api.cron.CronJob, @fieldParentPtr("event_loop_timer", _));
+                job.onTimerFire(vm);
+            },
+            .TimeoutObject => {
+                var container: *TimeoutObject = @alignCast(@fieldParentPtr("event_loop_timer", _));
+                container.internals.fire(now, vm);
+            },
+            .ImmediateObject => {
+                var container: *ImmediateObject = @alignCast(@fieldParentPtr("event_loop_timer", _));
+                container.internals.fire(now, vm);
+            },
+            .WTFTimer => {
+                var container: *WTFTimer = @alignCast(@fieldParentPtr("event_loop_timer", _));
+                container.fire(now, vm);
+            },
+            .StatWatcherScheduler => {
+                var container: *StatWatcherScheduler = @alignCast(@fieldParentPtr("event_loop_timer", _));
+                container.timerCallback();
+            },
+            .UpgradedDuplex => {
+                var container: *uws.UpgradedDuplex = @alignCast(@fieldParentPtr("event_loop_timer", _));
+                container.onTimeout();
+            },
+            .WindowsNamedPipe => {
+                if (Environment.isWindows) {
+                    var container: *uws.WindowsNamedPipe = @alignCast(@fieldParentPtr("event_loop_timer", _));
+                    container.onTimeout();
+                }
+            },
+            .DNSResolver => {
+                var container: *DNSResolver = @alignCast(@fieldParentPtr("event_loop_timer", _));
+                container.checkTimeouts(now, vm);
+            },
+            .SubprocessTimeout => {
+                var container: *jsc.Subprocess = @alignCast(@fieldParentPtr("event_loop_timer", _));
+                container.timeoutCallback();
+            },
+            .TimerCallback => {
+                var container: *TimerCallback = @alignCast(@fieldParentPtr("event_loop_timer", _));
+                container.callback(container);
+            },
+        }
+    }
+}

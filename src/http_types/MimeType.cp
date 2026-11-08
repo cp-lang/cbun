@@ -87,21 +87,21 @@ export enum Category {
     chemical,
     multipart,
 
-    fn isCode(this): bool {
+    pub fn isCode(this): bool {
         return match (this) {
             .wasm, .json, .css, .html, .javascript => true,
             else => false,
         };
     }
 
-    fn isTextLike(this): bool {
+    pub fn isTextLike(this): bool {
         return match (this) {
             .javascript, .html, .text, .css, .json => true,
             else => false,
         };
     }
 
-    fn autosetFilename(this): bool {
+    pub fn autosetFilename(this): bool {
         return match (this) {
             .wasm, .font, .image, .audio, .video, .javascript, .html, .text, .css, .json => false,
             else => true,

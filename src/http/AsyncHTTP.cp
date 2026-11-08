@@ -1,10 +1,8 @@
 // src/http/AsyncHTTP.cp
 // Fast asynchronous HTTP task orchestration in CP language
 
-zig {
-    const bun = @import("bun");
-    pub const PercentEncoding = @import("../url/url.zig").PercentEncoding;
-}
+const bun = @import("bun");
+pub const PercentEncoding = @import("../url/url.zig").PercentEncoding;
 
 import { Headers } from "./Headers.cp";
 import { HTTPThread } from "./HTTPThread.cp";
@@ -37,15 +35,11 @@ export struct Options {
     tls_props: bun.api.server.ServerConfig.SSLConfig.SharedPtr? = null,
 }
 
-zig {
-    pub const Channel8 = bun.threading.Channel(HTTPClientResult, .{ .Static = 8 });
-    pub const Channel1000 = bun.threading.Channel(HTTPClientResult, .{ .Static = 1000 });
-}
+pub const Channel8 = bun.threading.Channel(HTTPClientResult, { Static: 8 });
+pub const Channel1000 = bun.threading.Channel(HTTPClientResult, { Static: 1000 });
 
 struct Preconnect {
-    zig {
-        pub const new = bun.TrivialNew(Preconnect);
-    }
+    pub const new = bun.TrivialNew(Preconnect);
 
     async_http: AsyncHTTP,
     response_buffer: bun.MutableString,
@@ -128,12 +122,10 @@ export @root @value struct AsyncHTTP {
 
     signals: HTTPClient.Signals = {},
 
-    zig {
-        pub var active_requests_count = std.atomic.Value(usize).init(0);
-        pub var max_simultaneous_requests = std.atomic.Value(usize).init(256);
-    }
+    pub var active_requests_count = std.atomic.Value(usize).init(0);
+    pub var max_simultaneous_requests = std.atomic.Value(usize).init(256);
 
-    static fn loadEnv(allocator: std.mem.Allocator, logger: anytype, env: anytype): void {
+    static fn loadEnv(allocator: std.mem.Allocator, logger: auto, env: auto) {
         if (max_http_requests := env.get("BUN_CONFIG_MAX_HTTP_REQUESTS")) {
             const max = std.fmt.parseInt(u16, max_http_requests, 10) catch {
                 logger.addErrorFmt(
@@ -195,20 +187,18 @@ export @root @value struct AsyncHTTP {
             is_url_owned: is_url_owned,
         });
 
-        zig {
-            preconnect_ptr.async_http = AsyncHTTP.init(
-                bun.default_allocator,
-                .GET,
-                url,
-                .{},
-                "",
-                &preconnect_ptr.response_buffer,
-                "",
-                HTTPClientResult.Callback.New(*Preconnect, Preconnect.onResult).init(preconnect_ptr),
-                .manual,
-                .{},
-            );
-        }
+        preconnect_ptr.async_http = AsyncHTTP.init(
+            bun.default_allocator,
+            .GET,
+            url,
+            Headers.Entry.List.empty,
+            "",
+            &preconnect_ptr.response_buffer,
+            "",
+            HTTPClientResult.Callback.New(*Preconnect, Preconnect.onResult).init(preconnect_ptr),
+            .manual,
+            Options{},
+        );
         preconnect_ptr.async_http.client.flags.is_preconnect_only = true;
 
         bun.http.http_thread.schedule(bun.ThreadPool.Batch.from(&preconnect_ptr.async_http.task));
@@ -231,7 +221,7 @@ export @root @value struct AsyncHTTP {
             async_http_id = bun.http.async_http_id_monotonic.fetchAdd(1, .monotonic);
         }
 
-        let mut async_http = AsyncHTTP{
+        let async_http = AsyncHTTP{
             allocator: allocator,
             url: url,
             method: method,
@@ -402,12 +392,10 @@ export @root @value struct AsyncHTTP {
 
         let ctx = bun.default_allocator.create(SingleHTTPChannel)?;
         ctx.* = SingleHTTPChannel.init();
-        zig {
-            self.result_callback = HTTPClientResult.Callback.New(
-                *SingleHTTPChannel,
-                sendSyncCallback,
-            ).init(ctx);
-        }
+        this.result_callback = HTTPClientResult.Callback.New(
+            *SingleHTTPChannel,
+            sendSyncCallback,
+        ).init(ctx);
 
         let batch = ThreadPoolBatch{};
         this.schedule(bun.default_allocator, &batch);
@@ -418,12 +406,10 @@ export @root @value struct AsyncHTTP {
             return err;
         }
         bun.assert(result.metadata != null);
-        zig {
-            return result.metadata.?.response;
-        }
+        return result.metadata.?.response;
     }
 
-    fn onAsyncHTTPCallback(*this, async_http: *AsyncHTTP, result: HTTPClientResult): void {
+    fn onAsyncHTTPCallback(*this, async_http: *AsyncHTTP, result: HTTPClientResult) {
         bun.assert(this.real != null);
 
         let callback = this.result_callback;
@@ -462,12 +448,10 @@ export @root @value struct AsyncHTTP {
         } else {
             {
                 this.client.deinit();
-                zig {
-                    const threadlocal_http: *bun.http.ThreadlocalAsyncHTTP = @fieldParentPtr("async_http", async_http);
-                    defer threadlocal_http.deinit();
-                    bun.Output.scoped(.AsyncHTTP, .visible)("onAsyncHTTPCallback: {D}", .{self.elapsed});
-                    callback.function(callback.ctx, async_http, result);
-                }
+                const threadlocal_http: *bun.http.ThreadlocalAsyncHTTP = @fieldParentPtr("async_http", async_http);
+                defer threadlocal_http.deinit();
+                bun.Output.scoped(.AsyncHTTP, .visible)("onAsyncHTTPCallback: {D}", [this.elapsed]);
+                callback.function(callback.ctx, async_http, result);
             }
 
             const active_requests = AsyncHTTP.active_requests_count.fetchSub(1, .monotonic);
@@ -479,20 +463,16 @@ export @root @value struct AsyncHTTP {
         }
     }
 
-    zig {
-        pub fn startAsyncHTTP(task: *bun.ThreadPool.Task) void {
-            const this_ptr: *AsyncHTTP = @fieldParentPtr("task", task);
-            this_ptr.onStart();
-        }
+    static fn startAsyncHTTP(task: *bun.ThreadPool.Task) {
+        const this_ptr: *AsyncHTTP = @fieldParentPtr("task", task);
+        this_ptr.onStart();
     }
 
-    fn onStart(*this): void {
+    fn onStart(*this) {
         AsyncHTTP.active_requests_count.fetchAdd(1, .monotonic);
         this.err = null;
         this.state.store(.sending, .monotonic);
-        zig {
-            self.client.result_callback = HTTPClient.HTTPClientResult.Callback.New(*AsyncHTTP, onAsyncHTTPCallback).init(self);
-        }
+        this.client.result_callback = HTTPClient.HTTPClientResult.Callback.New(*AsyncHTTP, onAsyncHTTPCallback).init(this);
         this.elapsed = bun.http.http_thread.timer.read();
         if (this.response_buffer.list.capacity == 0) {
             this.response_buffer.allocator = bun.http.default_allocator;

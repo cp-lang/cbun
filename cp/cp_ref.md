@@ -5278,3 +5278,445 @@ CP 全面废止 C 风格类型关键字与前置问号指针语法，统一使�
 ---
 
 _本规范由 CP 架构设计委员会制定，作为全体编译器研发、运行时对接与开发者生态的唯一最高准则。_
+
+#### 17.5 高性能网络套接字与异步流式 I/O 设计模式 (High-Performance Sockets & Asynchronous Stream I/O Patterns)
+
+在编写跨平台、高吞吐的底层网络套接字（Socket）服务时，CP 语言提供了以下规范与最佳实践：
+
+##### 17.5.1 接收者 `_` 在高频事件回调中的应用
+在事件循环（Event Loop）触发的密集网络回调中，统一使用 `_` 作为接收者（`this`）的紧凑代称，代码更清晰易读：
+
+```typescript
+export class TCPSocket {
+    socket: SocketHandle;
+    bytes_written: u64 = 0;
+
+    pub fn onWritable(_: *TCPSocket): void {
+        if (_.socket.isDetached()) return;
+        _.internalFlush();
+    }
+
+    pub fn onData(_: *TCPSocket, data: []const u8): void {
+        _.processPayload(data);
+    }
+}
+```
+
+##### 17.5.2 泛型与参数化类工厂模式
+通过编译期布尔或类型参数单态化生成不同协议层（如 TCP / TLS）的高性能网络抽象：
+
+```typescript
+pub fn NewSocket(comptime ssl: bool): type {
+    return class {
+        const This = @This();
+        socket: SocketHandle;
+        flags: SocketFlags = .{};
+
+        pub fn memoryCost(_: *This): usize {
+            const ssl_cost: usize = if (ssl and !_.flags.bypass_tls) 40 * 1024 else 0;
+            return @sizeOf(This) + ssl_cost;
+        }
+
+        pub fn release(_: *This): void {
+            _.socket.close();
+            bun.destroy(_);
+        }
+
+        pub fn deinit(_: *This): void {
+            _.release();
+        }
+    };
+}
+
+pub const TCPSocket = NewSocket(false);
+pub const TLSSocket = NewSocket(true);
+```
+
+##### 17.5.3 表达式块在安全状态转换中的应用
+在套接字协议原地升级（如 TCP -> TLS 协商）或复杂选项提取时，使用表达式块 `({ ... break val; })` 消除未初始化可变变量：
+
+```typescript
+const secure_context: JSValue = ({
+    if (try opts.getTruthy(globalObject, "secureContext")) |v| break v;
+    if (try opts.getTruthy(globalObject, "tls")) |t| {
+        if (t.isObject()) {
+            if (try t.getTruthy(globalObject, "secureContext")) |v| break v;
+        }
+    }
+    break .zero;
+});
+```
+
+#### 17.6 现代 HTTP/WebSocket 服务端架构与请求上下文设计模式 (Modern HTTP/WebSocket Server Architecture & Request Context Patterns)
+
+在构建高并发、低延迟的 HTTP 与 WebSocket 服务端运行时（如 `src/runtime/server/`），CP 语言推荐以下架构与内存安全设计模式：
+
+##### 17.6.1 统一接收者 `_` 与高频请求分发
+在请求处理器与事件回调密集调用的核心上下文类型（如 `RequestContext`、`WebSocketServerContext`）中，使用 `_` 作为统一接收者，消除冗余解引用并确保单写多读借用安全：
+
+```typescript
+export class RequestContext {
+    arena: MemoryArena;
+    request_headers: Headers;
+    response_body: ?ResponseStream;
+
+    pub fn respondWith(_: *RequestContext, response: JSValue): void {
+        if (_.response_body != null) return;
+        _.processResponse(response);
+    }
+
+    pub fn release(_: *RequestContext): void {
+        _.arena.deinit();
+        _.request_headers.release();
+    }
+}
+```
+
+##### 17.6.2 表达式块安全驱动的路由决策与状态迁移
+通过带值块级表达式 `({ ... break val; })` 封装路由匹配（文件路由、静态预编译路由、通配路由）逻辑，保持上下文变量的不变性：
+
+```typescript
+const match_result: RouteResult = ({
+    if (try static_routes.find(path)) |entry| break entry;
+    if (try file_router.match(path)) |file_entry| break file_entry;
+    break RouteResult.notFound;
+});
+```
+
+##### 17.6.3 静态文件路由与零拷贝流式分发
+对于文件响应（`FileResponseStream`、`RangeRequest`），通过 RAII 自动析构 `release(*_)` 与 Comptime 借用分析，实现从磁盘到网络缓冲区的高效管道传输，并在流生命周期终止时自动释放文件描述符与分片切片资源：
+
+```typescript
+export class FileResponseStream {
+    fd: FileDescriptor;
+    offset: u64 = 0;
+    length: u64;
+
+    pub fn release(_: *FileResponseStream): void {
+        if (_.fd.isValid()) {
+            _.fd.close();
+        }
+    }
+}
+```
+
+#### 17.7 高性能事件循环与多线程任务调度设计模式 (High-Performance Event Loop & Multi-Threaded Task Scheduling Patterns)
+
+在构建低延迟、高并发的异步事件驱动内核（如 `src/event_loop/`）时，CP 语言提供了以下关键设计范式：
+
+##### 17.7.1 统一接收者 `_` 在高频事件排空（Drain）与轮询中的应用
+在事件循环高频流转的每个周期中，`_` 作为接收者（`this`）的紧凑代称，消除了冗余的方法调用解引用，并保障单写多读并发安全：
+
+```typescript
+export class MiniEventLoop {
+    tasks: Queue = undefined;
+    concurrent_tasks: ConcurrentTaskQueue = .{};
+    loop: *uws.Loop = undefined;
+
+    pub fn tickOnce(_: *MiniEventLoop, context: *any!): void {
+        if (_.tickConcurrentWithCount() == 0 and _.tasks.count == 0) {
+            defer _.onAfterEventLoop();
+            _.loop.inc();
+            _.loop.tick();
+            _.loop.dec();
+        }
+
+        while (_.tasks.readItem()) |task| {
+            task.run(context);
+        }
+    }
+
+    pub fn release(_: *MiniEventLoop): void {
+        _.tasks.deinit();
+        bun.assert(_.concurrent_tasks.isEmpty());
+    }
+}
+```
+
+##### 17.7.2 紧凑指针打包（Pointer Packing）与硬件级原子并发队列
+利用指针低位对齐位编码元数据（如 `auto_delete` 标志），配合 `@atomicLoad` / `@atomicStore` 实现跨线程零开销无锁并发任务调度：
+
+```typescript
+export class ConcurrentTask {
+    task: Task = undefined;
+    next: PackedNextPtr = .none;
+
+    pub const PackedNextPtr = enum(usize) {
+        none = 0,
+        auto_delete = 1,
+        _,
+
+        pub inline fn init(ptr: ?*ConcurrentTask, auto_del: bool): PackedNextPtr {
+            const ptr_bits = if (ptr) |p| @intFromPtr(p) else 0;
+            return @enumFromInt(ptr_bits | @intFromBool(auto_del));
+        }
+
+        pub inline fn getPtr(_: PackedNextPtr): ?*ConcurrentTask {
+            const addr = @intFromEnum(_) & ~@as(usize, 1);
+            return if (addr == 0) null else @ptrFromInt(addr);
+        }
+    };
+}
+```
+
+##### 17.7.3 确定性析构与微任务后延迟队列（Deferred Task Queue）
+利用 Comptime RAII 自动析构 `release(*_)` 管理哈希表与队列生命周期，杜绝跨事件循环轮询造成的内存残留：
+
+```typescript
+export class DeferredTaskQueue {
+    map: std.AutoArrayHashMapUnmanaged(*any?!, DeferredRepeatingTask) = .{};
+
+    pub fn release(_: *DeferredTaskQueue): void {
+        _.map.deinit(bun.default_allocator);
+    }
+
+    pub fn deinit(_: *DeferredTaskQueue): void {
+        _.release();
+    }
+}
+```
+
+
+
+#### 17.8 高精度定时器与 URL 规范解析架构模式 (High-Precision Timers & URL Specification Parsing Patterns)
+
+在构建跨平台运行时的时间调度子系统（如 `src/runtime/timer/`）与 URL 解析处理内核（如 `src/url/`）时，CP 语言提供了以下经典架构范式：
+
+##### 17.8.1 统一接收者 `_` 在高频定时器堆操作中的应用
+在最小堆定时器树和微秒级延迟监控（`EventLoopDelayMonitor`、`DateHeaderTimer`）中，使用 `_` 作为统一接收者，结合 Comptime RAII 自动析构 `release(*_)`，彻底根除高频定时任务的句柄遗漏与内存残留：
+
+```typescript
+export class DateHeaderTimer {
+    date_header_bytes: [DateHeaderLength]u8 = undefined;
+    has_registered_timer: bool = false;
+
+    pub fn release(_: *DateHeaderTimer): void {
+        if (_.has_registered_timer) {
+            _.unregister();
+        }
+    }
+
+    pub fn deinit(_: *DateHeaderTimer): void {
+        _.release();
+    }
+}
+```
+
+##### 17.8.2 带值块级表达式驱动的 URL 状态机解析
+WHATWG URL 规范解析器（`URL.parse`）中存在大量复杂的条件分支与层级回退。CP 语言推荐使用表达式块 `({ ... break val; })` 替代标签跳转，确保局部不可变性与解析状态单向流动：
+
+```typescript
+export class URL {
+    href: string = "";
+    origin: string = "";
+    pathname: string = "/";
+
+    pub fn displayProtocol(_: *const URL): string {
+        if (_.protocol.len > 0) return _.protocol;
+        if (_.getPort()) |port| {
+            if (port == 443) return "https";
+        }
+        return "http";
+    }
+}
+```
+
+##### 17.8.3 零分配查询参数扫描器与哈希索引表 (Zero-Allocation QueryStringMap)
+通过 `MultiArrayList` 结构体切片布局与紧凑字符串指针（`StringPointer`），结合自动 RAII 释放，实现亚微秒级参数查询：
+
+```typescript
+export class QueryStringMap {
+    allocator: std.mem.Allocator;
+    slice: string;
+    buffer: []u8;
+    list: Param.List;
+
+    pub fn release(_: *QueryStringMap): void {
+        if (_.buffer.len > 0) _.allocator.free(_.buffer);
+        if (_.list.len > 0) _.list.deinit(_.allocator);
+    }
+}
+```
+
+#### 17.9 C-ABI 回调跳板工厂与局部函数单态化架构规范 (C-Trampoline & Local Callback Factory Patterns)
+
+在系统级编程及网络异步库（如 `c-ares` DNS 解析、`libuv`、`uSockets`）开发中，C 底层函数接口通常需要传递符合 C 符号约定（`callconv(.c)`）的无状态回调函数指针，并通过 `ctx: *!?`（或 `*any!?`）传递弱类型上下文。CP 语言通过**编译期单态化（Comptime Monomorphization）+ 局部 `@c fn` 声明提升 + 极简指针缩写**提供了零开销、类型安全的 C 回调跳板（C-Trampoline / C-Closure）支持：
+
+##### 17.9.1 局部 `@c fn` 声明与跳板生成
+开发者可在工厂函数内部直接声明局部 `@c fn`，并直接返回该函数的只读借用（`&handle` 获取静态 C 函数指针）。编译器会在转译阶段自动将其单态化提升为 Zig 局部静态结构体 `struct { pub fn handle(...) callconv(.c) void { ... } }.handle`，并自动豁免局部变量借用逃逸检查：
+
+```typescript
+pub type ares_host_callback = @c fn (*!?, i32, i32, *!?);
+
+pub fn hostCallbackWrapper(@comptime Type: type, @comptime callback: anytype): ares_host_callback {
+    @c fn handle(ctx: *!?, status: i32, timeouts: i32, hostent: *!?): void {
+        unsafe {
+            let this_ptr = ctx.? as *Type;
+            callback(this_ptr, status, timeouts, hostent);
+        }
+    }
+    return &handle;
+}
+```
+
+##### 17.9.2 原生 `as` 指针转换与极简指针语法
+1. **极简弱类型指针缩写**：`*!?`（等价于 `*any!?`，对应 Zig `?*anyopaque`，即 C 语言 `void*`），`*!`（对应 `*anyopaque`）；
+2. **纯正 `as` 运算符**：支持 `let this_ptr = ctx.? as *Type;` 以及 `let raw_ctx = &my_ctx as *!?;`，编译器智能识别指针目标类型，自动生成安全的 `@as(Target, @ptrCast(@alignCast(source)))` 机器码，消除底层噪点；
+3. **函数类型签名极简化**：支持省略形参名（如 `@c fn (*!?, i32, i32, *!?)`），且当返回值为 `void` 时可省略 `: void`。
+
+#### 17.10 JavaScriptCore 虚拟机事件循环与任务桥接架构模式 (JSC Event Loop & Task Bridging Architecture Patterns)
+
+在连接 JavaScriptCore (JSC) 虚拟机与系统事件循环（如 `src/jsc/event_loop.cp` 与 `src/jsc/Task.cp`）时，CP 语言提供了以下经典高并发与防泄漏架构范式：
+
+##### 17.10.1 统一接收者 `_` 在高频任务队列排空（Drain）中的应用
+在主线程任务轮询与微任务深度控制（`enter` / `exit`）中，使用 `_` 作为统一接收者，彻底切除冗余解引用并确保单写多读借用安全：
+
+```typescript
+export class EventLoop {
+    tasks: Queue = undefined;
+    entered_event_loop_count: isize = 0;
+
+    pub fn enter(_: *EventLoop): void {
+        _.entered_event_loop_count += 1;
+        _.debug.enter();
+    }
+
+    pub fn exit(_: *EventLoop): void {
+        const count = _.entered_event_loop_count;
+        defer _.debug.exit();
+        if (count == 1 and !_.virtual_machine.is_inside_deferred_task_queue) {
+            _.drainMicrotasksWithGlobal(_.global, _.virtual_machine.jsc_vm) catch {};
+        }
+        _.entered_event_loop_count -= 1;
+    }
+}
+```
+
+##### 17.10.2 标记指针联合体（TaggedPointerUnion）类型分发
+通过紧凑无额外内存分配的指针标记联合体封装 90+ 种系统、文件、网络、进程任务，在 `tickQueueWithCount` 中结合 `try` 错误传播与异常防护：
+
+```typescript
+pub fn tickQueueWithCount(_: *EventLoop, virtual_machine: *VirtualMachine, counter: *u32): bun.JSTerminated!void {
+    while (_.tasks.readItem()) |task| {
+        defer counter.* += 1;
+        switch (task.tag()) {
+            @field(Task.Tag, @typeName(CppTask)) => {
+                var any: *CppTask = task.get(CppTask).?;
+                any.run(_.global) catch |err| try reportErrorOrTerminate(_.global, err);
+            },
+            else => {},
+        }
+        try _.drainMicrotasksWithGlobal(_.global, _.global.vm());
+    }
+}
+```
+
+##### 17.10.3 跨线程工作池任务（WorkTask / ConcurrentPromiseTask）与 RAII 自动回收
+在后台计算与 Promise 响应桥接中，利用 Comptime RAII 自动析构 `release(*_)` 释放强引用并从宿主循环解注册：
+
+```typescript
+pub fn WorkTask(comptime Context: type): type {
+    return struct {
+        ctx: *Context;
+        ref: Async.KeepAlive = .{};
+
+        pub fn release(*_): void {
+            _.ref.unref(_.event_loop.virtual_machine);
+            bun.destroy(_);
+        }
+
+        pub fn deinit(*_): void {
+            _.release();
+        }
+    };
+}
+```
+
+#### 17.11 多线程系统并发原语与工作窃取线程池架构模式 (Multi-threaded System Concurrency Primitives & Work-Stealing ThreadPool Patterns)
+
+在构建高吞吐底层系统软件（如 `src/threading/` 模块）时，CP 语言提供了以下多线程系统级并发、无锁侵入式队列与工作窃取线程池架构范式：
+
+##### 17.11.1 跨平台 Futex 与用户态轻量互斥原语抽象
+统一封装 Linux `sys_futex`、Darwin `__ulock_wait2`、Windows `RtlWaitOnAddress` 等平台原语，并利用原子变量内存序（`.acquire` / `.release` / `.monotonic`）保障同步性能与零额外堆分配：
+
+```typescript
+export class Futex {
+    pub const Word = u32;
+
+    pub fn wait(ptr: *const Atomic(Word), expect: Word, timeout_ns: ?u64): FutexError!void {
+        if (comptime Environment.isWindows) {
+            return waitWindows(ptr, expect, timeout_ns);
+        } else if (comptime Environment.isMac) {
+            return waitDarwin(ptr, expect, timeout_ns);
+        } else if (comptime Environment.isLinux) {
+            return waitLinux(ptr, expect, timeout_ns);
+        }
+    }
+
+    pub fn wake(ptr: *const Atomic(Word), max: u32): void {
+        if (comptime Environment.isWindows) {
+            wakeWindows(ptr, max);
+        } else if (comptime Environment.isMac) {
+            wakeDarwin(ptr, max);
+        } else if (comptime Environment.isLinux) {
+            wakeLinux(ptr, max);
+        }
+    }
+}
+```
+
+##### 17.11.2 侵入式无锁并发队列（UnboundedQueue）与缓存行对齐
+在 MPSC/MPMC 场景中，将链表指针侵入式嵌入任务节点，并利用平台缓存行大小（`cache_line_length`）对齐原子头尾指针，消除伪共享（False Sharing）：
+
+```typescript
+pub fn UnboundedQueue(comptime T: type, comptime next_field: meta.FieldEnum(T)): type {
+    return struct {
+        const Self = @This();
+        pub const queue_padding_length = cache_line_length / 2;
+
+        back: std.atomic.Value(?*T) align(queue_padding_length) = .init(null);
+        front: std.atomic.Value(?*T) align(queue_padding_length) = .init(null);
+
+        pub fn push(_: *Self, item: *T): void {
+            _.pushBatch(item, item);
+        }
+
+        pub fn pop(_: *Self): ?*T {
+            var first = _.front.load(.acquire) orelse return null;
+            // 环形原子替换与 CAS 检索...
+            return first;
+        }
+    };
+}
+```
+
+##### 17.11.3 工作窃取线程池（Work-Stealing ThreadPool）与本地环形缓冲区
+线程池工作线程维护本地单生产多消费（SPMC）有界环形任务缓冲区（`Buffer`），本地队列为空时按需从全局队列或其他线程缓冲区窃取（Steal）半数任务，通过 `.acq_rel` 消除高争用场景下的调度瓶颈：
+
+```typescript
+export class ThreadPool {
+    sync: Atomic(Sync) = .init(.{});
+    idle_event: Event = .{};
+    join_event: Event = .{};
+    run_queue: Node.Queue = .{};
+    wait_group: WaitGroup = .init();
+
+    pub fn schedule(_: *ThreadPool, batch: Batch): void {
+        _.scheduleImpl(batch, false);
+    }
+
+    pub fn release(*_): void {
+        _.shutdown();
+        _.join();
+        bun.memory.deinit(&_.sync);
+        bun.memory.deinit(&_.idle_event);
+        bun.memory.deinit(&_.join_event);
+        bun.memory.deinit(&_.run_queue);
+        bun.memory.deinit(&_.wait_group);
+    }
+
+    pub fn deinit(*_): void {
+        _.release();
+    }
+}
+```

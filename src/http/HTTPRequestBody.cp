@@ -8,7 +8,7 @@ export @value struct StreamBody {
     buffer: *ThreadSafeStreamBuffer? = null,
     ended: bool = false,
 
-    fn detach(*this): void {
+    fn detach(*this) {
         if (buf := this.buffer) {
             this.buffer = null;
             buf.deref();
@@ -25,7 +25,7 @@ export enum HTTPRequestBody {
         return this.* == .stream;
     }
 
-    pub fn deinit(*this): void {
+    pub fn deinit(*this) {
         switch (this.*) {
             .sendfile, .bytes => {},
             .stream => this.stream.detach(),

@@ -1,19 +1,17 @@
 // src/string/escapeRegExp.cp
 // Bun escapeRegExp module ported to CP (Concurrent Plus) language
 
-zig {
-    const bun = @import("bun");
-    const Environment = bun.Environment;
-    const strings = bun.strings;
+const bun = @import("bun");
+const Environment = bun.Environment;
+const strings = bun.strings;
 
-    pub const jsEscapeRegExp = @import("../jsc/bun_string_jsc.zig").jsEscapeRegExp;
-    pub const jsEscapeRegExpForPackageNameMatching = @import("../jsc/bun_string_jsc.zig").jsEscapeRegExpForPackageNameMatching;
-}
+pub const jsEscapeRegExp = @import("../jsc/bun_string_jsc.zig").jsEscapeRegExp;
+pub const jsEscapeRegExpForPackageNameMatching = @import("../jsc/bun_string_jsc.zig").jsEscapeRegExpForPackageNameMatching;
 
 const special_characters: string = "|\\{}()[]^$+*?.-";
 
-pub fn escapeRegExp(input: string, writer: *std.Io.Writer): void ! std.Io.Writer.Error {
-    let mut remain = input;
+pub fn escapeRegExp(input: string, writer: *std.Io.Writer): !void {
+    let remain = input;
 
     while (true) {
         let i_opt = strings.indexOfAny(remain, special_characters);
@@ -42,8 +40,8 @@ pub fn escapeRegExp(input: string, writer: *std.Io.Writer): void ! std.Io.Writer
 }
 
 /// '*' becomes '.*' instead of '\\*'
-pub fn escapeRegExpForPackageNameMatching(input: string, writer: *std.Io.Writer): void ! std.Io.Writer.Error {
-    let mut remain = input;
+pub fn escapeRegExpForPackageNameMatching(input: string, writer: *std.Io.Writer): !void {
+    let remain = input;
 
     while (true) {
         let i_opt = strings.indexOfAny(remain, special_characters);

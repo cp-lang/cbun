@@ -19,8 +19,8 @@ fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
     const T = @TypeOf(v);
     if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
 }
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
-fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const HTTPContext = @import("./HTTPContext.zig").HTTPContext;
@@ -45,18 +45,18 @@ pub fn isEligible(url: bun.URL) bool {
 }
 
 pub fn write(self: *SendFile, socket: anytype) Status {
-        const adjusted_count_temporary = @min(@as(u64, self.remain), @as(u63, std.math.maxInt(u63)));
+        const adjusted_count_temporary = @min(cp_cast_int(u64, self.remain), @as(u63, std.math.maxInt(u63)));
         _ = &adjusted_count_temporary;
-        const adjusted_count = @as(u63, @intCast(adjusted_count_temporary));
+        const adjusted_count = @as(u63, adjusted_count_temporary);
         _ = &adjusted_count;
         if (bun.Environment.isLinux) {
-            var signed_offset: i64 = @intCast(self.offset);
+            var signed_offset: i64 = cp_cast_int(i64, self.offset);
             _ = &signed_offset;
             const begin = self.offset;
             _ = &begin;
             const val = std.os.linux.sendfile(socket.fd().cast(), self.fd.cast(), (&signed_offset), self.remain);
             _ = &val;
-            self.offset = @as(u64, @intCast(signed_offset));
+            self.offset = cp_cast_int(u64, signed_offset);
             const errcode = bun.sys.getErrno(val);
             _ = &errcode;
             var diff: usize = 0;
@@ -79,11 +79,11 @@ pub fn write(self: *SendFile, socket: anytype) Status {
             if (bun.Environment.isFreeBSD) {
                 var sbytes: *anyopaque = 0;
                 _ = &sbytes;
-                const signed_offset: i64 = @bitCast(@as(u64, self.offset));
+                const signed_offset: i64 = @bitCast(cp_cast_int(u64, self.offset));
                 _ = &signed_offset;
                 const errcode = bun.sys.getErrno(std.c.sendfile(self.fd.cast(), socket.fd().cast(), signed_offset, adjusted_count, null, (&sbytes), 0));
                 _ = &errcode;
-                const wrote = @as(u64, @intCast(sbytes));
+                const wrote = cp_cast_int(u64, sbytes);
                 _ = &wrote;
                 self.offset = (self.offset + wrote);
                 if ((self.remain > wrote)) {
@@ -101,11 +101,11 @@ pub fn write(self: *SendFile, socket: anytype) Status {
                 if (bun.Environment.isPosix) {
                     var sbytes: *anyopaque = adjusted_count;
                     _ = &sbytes;
-                    const signed_offset: i64 = @bitCast(@as(u64, self.offset));
+                    const signed_offset: i64 = @bitCast(cp_cast_int(u64, self.offset));
                     _ = &signed_offset;
                     const errcode = bun.sys.getErrno(std.c.sendfile(self.fd.cast(), socket.fd().cast(), signed_offset, (&sbytes), null, 0));
                     _ = &errcode;
-                    const wrote = @as(u64, @intCast(sbytes));
+                    const wrote = cp_cast_int(u64, sbytes);
                     _ = &wrote;
                     self.offset = (self.offset + wrote);
                     if ((self.remain > wrote)) {

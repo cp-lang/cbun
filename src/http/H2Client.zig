@@ -19,23 +19,23 @@ fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
     const T = @TypeOf(v);
     if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
 }
-pub var live_sessions = std.atomic.Value(i32).init(0);
-    pub var live_streams = std.atomic.Value(i32).init(0);
-pub const Stream = @import("./h2_client/Stream.zig");
-    pub const ClientSession = @import("./h2_client/ClientSession.zig");
-    pub const PendingConnect = @import("./h2_client/PendingConnect.zig");
-    pub const TestingAPIs = @import("../http_jsc/headers_jsc.zig").H2TestingAPIs;
 pub const local_initial_window_size: u31 = cp_shl(1, 24);
 pub const local_max_header_list_size: u32 = (256 * 1024);
 pub const write_buffer_high_water: usize = (256 * 1024);
 pub const write_buffer_control_limit: usize = (1024 * 1024);
-fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub var live_sessions = std.atomic.Value(i32).init(0);
+pub var live_streams = std.atomic.Value(i32).init(0);
+pub const Stream = @import("./h2_client/Stream.zig");
+pub const ClientSession = @import("./h2_client/ClientSession.zig");
+pub const PendingConnect = @import("./h2_client/PendingConnect.zig");
+pub const TestingAPIs = @import("../http_jsc/headers_jsc.zig").H2TestingAPIs;
 fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
     const T = @TypeOf(val);
     if (comptime @typeInfo(T) == .comptime_int) return val << shift;
     if (comptime @typeInfo(T) == .int) {
         const ShiftType = std.math.Log2Int(T);
-        return val << @as(ShiftType, @truncate(shift));
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val << @as(ShiftType, @truncate(u_shift));
     }
     return val << shift;
 }
@@ -44,7 +44,8 @@ fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
     if (comptime @typeInfo(T) == .comptime_int) return val >> shift;
     if (comptime @typeInfo(T) == .int) {
         const ShiftType = std.math.Log2Int(T);
-        return val >> @as(ShiftType, @truncate(shift));
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val >> @as(ShiftType, @truncate(u_shift));
     }
     return val >> shift;
 }

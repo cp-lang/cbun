@@ -547,7 +547,6 @@ pub const QueryStringMap = struct {
                 if (target_i >= target.len) return result;
                 if (real_i + 1 >= this.map.list.len) return result;
             }
-
             return result;
         }
     };

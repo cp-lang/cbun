@@ -19,18 +19,10 @@ fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
     const T = @TypeOf(v);
     if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
 }
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
-    const strings = bun.strings;
-    const log = bun.Output.scoped(.h2_client, .hidden);
-    const forbidden_response_fields = bun.ComptimeStringMap(void, .{
-        .{ "connection", {} },
-        .{ "keep-alive", {} },
-        .{ "proxy-connection", {} },
-        .{ "te", {} },
-        .{ "transfer-encoding", {} },
-        .{ "upgrade", {} },
-    });
-fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const strings = bun.strings;
+const log = bun.Output.scoped(.h2_client, .hidden);
 fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
 fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
 pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
@@ -58,7 +50,7 @@ pub fn parseFrames(session: *ClientSession, buf: []const u8) usize {
                 session.fatal_error = error.HTTP2FrameSizeError;
                 break;
             }
-            const frame_len = (wire.FrameHeader.byteSize + @as(usize, header.length));
+            const frame_len = (wire.FrameHeader.byteSize + cp_cast_int(usize, header.length));
             _ = &frame_len;
             if ((remaining.len < frame_len)) {
                 break;
@@ -123,12 +115,12 @@ if ((unit.value > wire.MAX_WINDOW_SIZE)) {
                 session.fatal_error = error.HTTP2FlowControlError;
                 return;
             }
-            const delta = (@as(i64, unit.value) - @as(i64, session.remote_initial_window_size));
+            const delta = (cp_cast_int(i64, unit.value) - cp_cast_int(i64, session.remote_initial_window_size));
             _ = &delta;
             session.remote_initial_window_size = unit.value;
             for (session.streams.values()) |s| {
                 _ = &s;
-                const next = (@as(i64, s.send_window) + delta);
+                const next = (cp_cast_int(i64, s.send_window) + delta);
                 _ = &next;
                 if ((next > wire.MAX_WINDOW_SIZE)) {
                     session.fatal_error = error.HTTP2FlowControlError;
@@ -162,7 +154,7 @@ if ((header.length != 4)) {
                 session.fatal_error = error.HTTP2ProtocolError;
                 return;
             }
-            const next = (@as(i64, session.conn_send_window) + inc);
+            const next = (cp_cast_int(i64, session.conn_send_window) + inc);
             _ = &next;
             if ((next > wire.MAX_WINDOW_SIZE)) {
                 session.fatal_error = error.HTTP2FlowControlError;
@@ -178,7 +170,7 @@ if ((header.length != 4)) {
                     stream.fatal_error = error.HTTP2ProtocolError;
                     return;
                 }
-                const next = (@as(i64, stream.send_window) + inc);
+                const next = (cp_cast_int(i64, stream.send_window) + inc);
                 _ = &next;
                 if ((next > wire.MAX_WINDOW_SIZE)) {
                     _ = stream.rst(.FLOW_CONTROL_ERROR);
@@ -329,8 +321,7 @@ if (((session.expecting_continuation == 0) or (header.streamIdentifier != sessio
         }
 },
 .HTTP_FRAME_DATA => {
-session.conn_unacked_bytes +|= header.length;
-
+session.conn_unacked_bytes = (session.conn_unacked_bytes + header.length);
         const stream_id: u31 = @intCast(header.streamIdentifier);
         _ = &stream_id;
         if (session.streams.get(stream_id)) |stream| {
@@ -345,8 +336,7 @@ session.conn_unacked_bytes +|= header.length;
                 stream.fatal_error = ((stream.fatal_error) orelse (error.HTTP2ProtocolError));
                 return;
             }
-            stream.unacked_bytes +|= header.length;
-
+            stream.unacked_bytes = (stream.unacked_bytes + header.length);
             var fragment = payload;
             _ = &fragment;
             if (((header.flags & @intFromEnum(wire.DataFrameFlags.PADDED)) != 0)) {
@@ -424,7 +414,7 @@ if ((header.streamIdentifier != 0)) {
         var it = session.streams.iterator();
         _ = &it;
         while (it.next()) |e| {
-            const s = e.value_ptr.*;
+            var s = e.value_ptr.*;
             _ = &s;
             if ((s.id > session.goaway_last_stream_id)) {
                 if (graceful) {
@@ -586,7 +576,7 @@ pub fn isMalformedResponseField(name: []const u8) bool {
                 return true;
             }
         }
-        return forbidden_response_fields.has(name);
+        return (((((strings.eqlComptime(name, "connection") or strings.eqlComptime(name, "keep-alive")) or strings.eqlComptime(name, "proxy-connection")) or strings.eqlComptime(name, "te")) or strings.eqlComptime(name, "transfer-encoding")) or strings.eqlComptime(name, "upgrade"));
 }
 
 pub fn errorCodeFor(err: anyerror) wire.ErrorCode {
