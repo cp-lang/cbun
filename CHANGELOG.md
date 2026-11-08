@@ -960,3 +960,46 @@
   - `test/js/bun/sourcemap/internal-sourcemap.test.ts` (4 pass, 0 fail, 32 expect calls)；
   - `test/js/bun/http/serve-if-none-match.test.ts` (17 pass, 0 fail, 46 expect calls)。
 
+### 2026-11-08 全库 CP 源码覆盖审查与上游编译器升级清单编制
+- 全库 206 个 `.cp` 模块全面审计：
+  - 181 个模块（87.9%）达成 100% 纯正 CP；
+  - 25 个模块（12.1%）保留 `zig {}`，共计 61 处代码块；
+  - 深入排查并确立 5 类技术需求（内联汇编、threadlocal 存储修饰符、辨识联合 union(enum)、编译期映射表/引用计数宏、标量与枚举智能转换）；
+- 编制《CP 编译器 (`cpc`) 核心特性升级任务清单》：
+  - 覆盖语法设计、AST 节点变更、Parser 产生式、Sema 类型检查、Zig 0.15.2 发射模板与全流程自动化测试验收标准。
+
+
+## 2026-11-09 (底层三大核心基石模块 src/io, src/aio, src/sys 全量 23 模块 CP 迁移完成)
+
+### 核心模块重构与迁移 (全量 23 模块 100% AST 校验与格式化通过)
+
+#### 第一推荐：I/O 管道与流式读写模块组 (`src/io/`，8 模块)
+1. `src/io/MaxBuf.cp` -> `MaxBuf.zig` (ast-check PASS, fmt PASS)
+2. `src/io/pipes.cp` -> `pipes.zig` (ast-check PASS, fmt PASS)
+3. `src/io/openForWriting.cp` -> `openForWriting.zig` (ast-check PASS, fmt PASS)
+4. `src/io/heap.cp` -> `heap.zig` (ast-check PASS, fmt PASS)
+5. `src/io/source.cp` -> `source.zig` (ast-check PASS, fmt PASS)
+6. `src/io/io.cp` -> `io.zig` (ast-check PASS, fmt PASS)
+7. `src/io/PipeReader.cp` -> `PipeReader.zig` (ast-check PASS, fmt PASS)
+8. `src/io/PipeWriter.cp` -> `PipeWriter.zig` (ast-check PASS, fmt PASS)
+
+#### 第二推荐：异步事件循环与看门狗模块组 (`src/aio/`，4 模块)
+9. `src/aio/stub_event_loop.cp` -> `stub_event_loop.zig` (ast-check PASS, fmt PASS)
+10. `src/aio/ParentDeathWatchdog.cp` -> `ParentDeathWatchdog.zig` (ast-check PASS, fmt PASS)
+11. `src/aio/windows_event_loop.cp` -> `windows_event_loop.zig` (ast-check PASS, fmt PASS)
+12. `src/aio/posix_event_loop.cp` -> `posix_event_loop.zig` (ast-check PASS, fmt PASS)
+
+#### 第三推荐：系统调用与文件抽象层模块组 (`src/sys/`，11 模块)
+13. `src/sys/SignalCode.cp` -> `SignalCode.zig` (ast-check PASS, fmt PASS)
+14. `src/sys/coreutils_error_map.cp` -> `coreutils_error_map.zig` (ast-check PASS, fmt PASS)
+15. `src/sys/libuv_error_map.cp` -> `libuv_error_map.zig` (ast-check PASS, fmt PASS)
+16. `src/sys/PosixStat.cp` -> `PosixStat.zig` (ast-check PASS, fmt PASS)
+17. `src/sys/Error.cp` -> `Error.zig` (ast-check PASS, fmt PASS)
+18. `src/sys/tmp.cp` -> `tmp.zig` (ast-check PASS, fmt PASS)
+19. `src/sys/copy_file.cp` -> `copy_file.zig` (ast-check PASS, fmt PASS)
+20. `src/sys/fd.cp` -> `fd.zig` (ast-check PASS, fmt PASS)
+21. `src/sys/dir.cp` -> `dir.zig` (100% Pure CP, ast-check PASS, fmt PASS)
+22. `src/sys/walker_skippable.cp` -> `walker_skippable.zig` (ast-check PASS, fmt PASS)
+23. `src/sys/File.cp` -> `File.zig` (ast-check PASS, fmt PASS)
+
+

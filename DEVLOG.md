@@ -2342,3 +2342,94 @@ Level 2 (聚合根模块，依赖上述全部 3 个模块):
 - Ninja 增量编译 100/100 阶段全面点绿，96 个 `bun-zig.*.o` 成功生成，链接器成功产出 `./build/debug/bun-debug` 可执行文件；
 - 运行原生测试套件 `test/js/bun/util/filesystem_router.test.ts`、`escapeRegExp.test.ts`、`internal-sourcemap.test.ts`、`serve-if-none-match.test.ts` 全部 43 项测试、1,573 个 expect calls 100% 绿灯全过！
 
+---
+
+### 十、 全库尚未迁移的 `zig {}` 模块统计与上游编译器能力扩展方案 (2026-11-08)
+
+#### 1. 现状统计与分类
+在达成全量 Object 增量构建通过与原生测试验证后，对代码库中的 `.cp` 文件进行覆盖审查：
+- 全库 `.cp` 文件总数：**206 个**；
+- 纯正 CP 文件（不含 `zig {}`）：**181 个（87.9%）**；
+- 保留 `zig {}` 语块的文件：**25 个（12.1%）**；
+- 残留 `zig {}` 语块总数：**61 处**。
+
+#### 2. 61 处 `zig {}` 技术背景分析
+经系统分析，25 个模块保留 `zig {}` 的主要原因是由于当前 CP 编译器（`cpc`）在底层特定系统级语法方面的特性待扩展：
+1. **WebAssembly 原子等待指令（`asm volatile`）**：
+   - 对应模块：`src/threading/Futex.cp:282`；
+   - 背景：WebAssembly 环境下多线程原子等待需使用 `memory.atomic.wait32` 指令，当前 CP 尚需内联汇编 AST 节点与解析支持。
+2. **线程局部存储修饰符（`threadlocal var`）**：
+   - 对应模块：`src/http_types/URLPath.cp:47`；
+   - 背景：高效 URL 解析缓存需使用线程局部存储变量，当前 CP 变量声明需扩展 `threadlocal` 存储属性。
+3. **辨识联合（Tagged / Discriminated Union）**：
+   - 对应模块：`src/uws_sys/quic/Header.cp:60`；
+   - 背景：QUIC 协议头解析需使用带有效载荷的联合体 `union(enum)`，当前 CP 需支持此类联合语法。
+4. **编译期静态查找表与引用计数工具**：
+   - 对应模块：`src/s3_signing/acl.cp`、`src/http_types/MimeType.cp`、`src/s3_signing/credentials.cp`；
+   - 背景：代码库使用了 `bun.ComptimeStringMap` 生成编译期映射表，以及 `bun.ptr.RefCount` 实现引用计数管理。
+5. **整型与枚举类型双向转换**：
+   - 对应模块：`src/uws_sys/ConnectingSocket.cp`、`src/uws_sys/SocketKind.cp`；
+   - 背景：CP 在类型强转时若源为整型、目标为枚举，需自动生成 Zig 的 `@enumFromInt`；若源为枚举、目标为整型，需自动生成 `@intFromEnum`。
+
+#### 3. 协作方案与推进计划
+明确与上游编译器团队（`cp agy`）的技术对接，编制《CP 编译器 (`cpc`) 语法特性升级任务清单》，推进 `cpc` 前端 AST、Parser、Sema 及 Codegen 的 5 项能力演进。待上游编译器部署后，将完成剩余语块的 CP 化转换。
+
+---
+
+### 十一、 底层三大基石模块 (`src/io/`, `src/aio/`, `src/sys/`) 全量 23 模块 CP 重构与全工程构建绿灯 (2026-11-09)
+
+#### 1. 任务背景与三大推荐模块定位
+在底层/基础模块迁移战略中，针对文件、网络、加密与事件循环的核心基座，按序全量推进三大推荐模块：
+1. **第一推荐：I/O 管道与流式读写模块组 (`src/io/`，8 个模块)**：
+   - `MaxBuf.cp`, `pipes.cp`, `openForWriting.cp`, `heap.cp`, `source.cp`, `io.cp`, `PipeReader.cp`, `PipeWriter.cp`
+2. **第二推荐：异步事件循环与看门狗模块组 (`src/aio/`，4 个模块)**：
+   - `stub_event_loop.cp`, `ParentDeathWatchdog.cp`, `windows_event_loop.cp`, `posix_event_loop.cp`
+3. **第三推荐：系统调用与文件抽象层模块组 (`src/sys/`，11 个模块)**：
+   - `SignalCode.cp`, `coreutils_error_map.cp`, `libuv_error_map.cp`, `PosixStat.cp`, `Error.cp`, `tmp.cp`, `copy_file.cp`, `fd.cp`, `dir.cp` (100% 纯正 CP), `walker_skippable.cp`, `File.cp`
+
+#### 2. 精准修复与技术收敛要点
+- **`src/io/PipeWriter.cp`**：针对 `WindowsBufferedWriter` 与 `PosixStreamingWriter`，正确补充 `if (@hasDecl(function_table, "onReady"))` 与 `onWritable` 检查，消除部分结构体缺失 `onReady` 导致编译失败的问题。
+- **`src/io/pipes.cp`**：修复 `PollOrFd` 重置时对 Zig 0.15.2 `void` 类型变量直接赋值 `.{ .closed = {} }` 的语法规范。
+- **`src/io/openForWriting.cp`**：对齐原版 `openForWriting` 函数参数契约 `ctx: Ctx` 与 `isatty = std.posix.isatty(fd.native())`。
+- **`src/aio/ParentDeathWatchdog.cp`**：
+  - 修复 `snapshotChildren` 返回类型为 `[]const std.c.pid_t`，打通与 `process.zig` 的类型契约；
+  - 修正 `setenv` 的 `[*:0]const u8` 声明与 `sync_pgids` 可变切片操作。
+- **`src/sys/SignalCode.cp`**：还原 `SignalCode` 枚举静态/单参数方法签名，避免额外生成 `self` 接收者。
+- **`src/sys/copy_file.cp`**：确保系统底层文件句柄 `fd_t` 保持数值标量传递语义，防止编译器将其推断为指针类型。
+
+#### 3. 验收成果与全绿灯回归
+- 全量 23 个模块 100% 通过 `/data/dev/cp/cap/bin/cpc ... -o ... --lib` 转译；
+- 全量 23 个生成的 `.zig` 模块 100% 通过 `vendor/zig/zig ast-check` 语法树检查（0 错误）与 `vendor/zig/zig fmt` 格式化；
+- 执行 `bun bd` 增量构建，96 个 `bun-zig.*.o` 目标文件 100% 构建成功，链接产出 `bun-debug`；
+- 运行原生测试套件全面通过：
+  - `test/js/bun/util/filesystem_router.test.ts`：**20 pass, 0 fail (1,491 expect calls 100% 绿灯)**；
+  - `test/js/bun/http/serve-if-none-match.test.ts`：**17 pass, 0 fail (46 expect calls 100% 绿灯)**；
+  - `test/js/bun/sourcemap/internal-sourcemap.test.ts`：**4 pass, 0 fail (32 expect calls 100% 绿灯)**。
+
+---
+
+## 2026-11-09 架构设计决策：RFC-002 生成模板消除与转译代码精简选型（方案 A vs 方案 B）
+
+### 1. 背景与问题剖析
+在对 23 个基础模块的代码膨胀率全面审计中发现，当前 `cpc` 编译器在 `--lib` 模式下转译时，每个文件头部会统一生成约 42~49 行的辅助模板：
+- `cpc/src/codegen.rs` 第 1835-1840 行：无条件硬编码注入 `CpOptType`, `CpUnwrapOpt`, `cp_opt_is_null`, `cp_opt_unwrap`（`if true`）；
+- `cpc/src/codegen.rs` 第 3057 行：无条件硬编码注入 `pub fn cp_string_from(val: anytype) []const u8`。
+该模板导致纯结构体或纯枚举等小型叶子文件（如 `dir.cp`、`PosixStat.cp`）行数虚增高达 800%，且在 23 个模块中累计制造了 1,000+ 行未引用的死代码。
+
+### 2. 方案对比与评估
+- **方案 A（AST 精细化按需注入 / Tree-Shaking 垫片）**：
+  - 在 `cpc/src/codegen.rs` 的 `ModuleFeatures::scan` 中进行精确特征探测：
+    - 仅当 AST 中检测到模板字符串插值（`${val}`）时才输出 `cp_string_from`；
+    - 仅当 AST 中使用了可选值解包运算符时才输出 `cp_opt_unwrap` 等辅助函数；
+  - **优势**：
+    1. **零构建侵入与自包含自治**：生成的单个 `.zig` 文件依然完全独立，不依赖任何外部 runtime 模块，无需修改 Bun 复杂的 CMake/Ninja/Zig build 多层构建配置；
+    2. **完全向后兼容**：任何模块原地替换，零相对路径断裂风险；
+    3. **极佳瘦身效果**：小型叶子文件立即恢复 4~15 行纯净状态，整体膨胀率直接收敛至 0% 甚至负数。
+- **方案 B（集中抽取为 `@import("cp_runtime")` 共享运行时库）**：
+  - 将所有辅助函数抽离至统一单例 `cp_runtime.zig`，各模块头部只写 `const cp = @import("cp_runtime");`；
+  - **致命缺陷**：由于 Bun 的代码分布在 `src/io/`、`src/sys/`、`src/aio/`、`src/runtime/`、`src/jsc/` 等不同深度的目录，若采用相对路径引入极易发生层级计算混乱与路径断裂；若采用模块别名注入，则必须大动干戈侵入 Bun 底层 root module 构建图谱，严重破坏渐进式独立迁移原则。
+
+### 3. 终极决策
+**坚定选择【方案 A：AST 精细化按需注入】**。该方案具备零构建风险、零外部依赖、极低实现代价与极致代码纯净度，是现阶段 Bun 渐进式平滑迁移到 CP 语言的最优解。
+
+
