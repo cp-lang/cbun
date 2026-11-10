@@ -8,8 +8,15 @@
 //! calling `start()`. Exactly one of `on_complete` / `on_error` fires, exactly
 //! once; after it fires the caller must not touch `resp` body methods again.
 
-const FileResponseStream = @This();
+import std from "std";
+import bun from "bun";
+const Async = bun.Async;
+const jsc = bun.jsc;
+const uws = bun.uws;
+const AnyResponse = uws.AnyResponse;
+const log = bun.Output.scoped(.FileResponseStream, .hidden);
 
+export @root struct FileResponseStream {
 ref_count: RefCount,
 resp: AnyResponse,
 vm: *jsc.VirtualMachine,
@@ -28,13 +35,15 @@ max_size: ?u64 = null,
 eof_task: ?jsc.AnyTask = null,
 sendfile: Sendfile = .{},
 
-state: packed struct(u8) {
+const State = packed struct(u8) {
     response_done: bool = false,
     finished: bool = false,
     errored: bool = false,
     resp_detached: bool = false,
     _: u4 = 0,
-} = .{},
+};
+
+state: State = .{},
 
 const Mode = enum { reader, sendfile };
 
@@ -160,20 +169,19 @@ pub fn onReadChunk(_: *FileResponseStream, chunk_: []const u8, state_: bun.io.Re
 
     if (_.state.response_done) return false;
 
-    const chunk, const state = ({
-        if (_.max_size) |*max| {
-            const c = chunk_[0..@min(chunk_.len, max.*)];
-            max.* -|= c.len;
-            if (state_ != .eof and max.* == 0) {
-                if (comptime !bun.Environment.isPosix) _.reader.pause();
-                _.eof_task = jsc.AnyTask.New(FileResponseStream, FileResponseStream.onReaderDone).init(_);
-                _.vm.eventLoop().enqueueTask(jsc.Task.init(&_.eof_task.?));
-                break .{ c, .eof };
-            }
-            break .{ c, state_ };
+    var chunk = chunk_;
+    var state = state_;
+    if (_.max_size) |*max| {
+        const c = chunk_[0..@min(chunk_.len, max.*)];
+        max.* = max.* -| c.len;
+        chunk = c;
+        if (state_ != .eof && max.* == 0) {
+            if (comptime !bun.Environment.isPosix) _.reader.pause();
+            _.eof_task = jsc.AnyTask.New(FileResponseStream, FileResponseStream.onReaderDone).init(_);
+            _.vm.eventLoop().enqueueTask(jsc.Task.init(&_.eof_task.?));
+            state = .eof;
         }
-        break .{ chunk_, state_ };
-    });
+    }
 
     _.resp.timeout(_.idle_timeout);
 
@@ -246,7 +254,7 @@ fn onSendfile(_: *FileResponseStream): bool {
             const errno = bun.sys.getErrno(rc);
             const sent: u64 = @intCast(@max(@as(i64, @intCast(off)) - @as(i64, @intCast(_.sendfile.offset)), 0));
             _.sendfile.offset = @intCast(off);
-            _.sendfile.remain -|= sent;
+            _.sendfile.remain = _.sendfile.remain -| sent;
 
             switch (errno) {
                 .SUCCESS => {
@@ -277,7 +285,7 @@ fn onSendfile(_: *FileResponseStream): bool {
             ));
             const sent: u64 = @intCast(sbytes);
             _.sendfile.offset += sent;
-            _.sendfile.remain -|= sent;
+            _.sendfile.remain = _.sendfile.remain -| sent;
 
             switch (errno) {
                 .SUCCESS => {
@@ -402,14 +410,4 @@ pub fn loop(_: *FileResponseStream): *Async.Loop {
 const RefCount = bun.ptr.RefCount(@This(), "ref_count", deinit, .{});
 pub const ref = RefCount.ref;
 pub const deref = RefCount.deref;
-
-const log = bun.Output.scoped(.FileResponseStream, .hidden);
-
-import std from "std";
-
-import bun from "bun";
-const Async = bun.Async;
-const jsc = bun.jsc;
-
-const uws = bun.uws;
-const AnyResponse = uws.AnyResponse;
+}

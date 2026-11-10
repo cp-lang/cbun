@@ -2,7 +2,16 @@
 const std = @import("std");
 const string = []const u8;
 
-fn PathBufferPoolT(comptime T: type) type {
+const Environment = bun.Environment;
+const ObjectPool = bun.ObjectPool;
+const PathBuffer = bun.PathBuffer;
+const WPathBuffer = bun.WPathBuffer;
+pub const path_buffer_pool = PathBufferPoolT(PathBuffer);
+pub const w_path_buffer_pool = PathBufferPoolT(WPathBuffer);
+pub const os_path_buffer_pool = (if (Environment.isWindows) w_path_buffer_pool else path_buffer_pool);
+pub const bun = @import("bun");
+
+pub fn PathBufferPoolT(comptime T: type) type {
     return struct {
         const Pool = ObjectPool(T, null, true, 4);
 
@@ -20,13 +29,3 @@ fn PathBufferPoolT(comptime T: type) type {
         }
     };
 }
-
-pub const path_buffer_pool = PathBufferPoolT(PathBuffer);
-pub const w_path_buffer_pool = PathBufferPoolT(WPathBuffer);
-pub const os_path_buffer_pool = if (Environment.isWindows) w_path_buffer_pool else path_buffer_pool;
-
-const bun = @import("bun");
-const Environment = bun.Environment;
-const ObjectPool = bun.ObjectPool;
-const PathBuffer = bun.PathBuffer;
-const WPathBuffer = bun.WPathBuffer;

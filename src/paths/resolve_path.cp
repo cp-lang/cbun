@@ -1,7 +1,6 @@
 @tls let parser_join_input_buffer: [4096]u8 = undefined;
 @tls let parser_buffer: [1024]u8 = undefined;
-
-zig {
+pub @tls let join_buf: [4096]u8 = undefined;
 pub fn z(input: []const u8, output: *bun.PathBuffer) [:0]const u8 {
     if (input.len > bun.MAX_PATH_BYTES) {
         if (comptime bun.Environment.allow_assert) @panic("path too long");
@@ -54,7 +53,7 @@ const LastSeparatorFunction = fn (slice: []const u8) ?usize;
 const LastSeparatorFunctionT = fn (comptime T: type, slice: anytype) ?usize;
 
 inline fn @"is .."(slice: []const u8) bool {
-    return slice.len >= 2 and @as(u16, @bitCast(slice[0..2].*)) == comptime std.mem.readInt(u16, "..", .little);
+    return slice.len >= 2 and slice[0] == '.' and slice[1] == '.';
 }
 
 inline fn @"is .. with type"(comptime T: type, slice: []const T) bool {
@@ -90,8 +89,8 @@ pub fn isParentOrEqual(parent_: []const u8, child: []const u8) ParentEqual {
 }
 
 pub fn getIfExistsLongestCommonPathGeneric(input: []const []const u8, comptime platform: Platform) ?[]const u8 {
-    const separator = comptime platform.separator();
-    const isPathSeparator = comptime platform.getSeparatorFunc();
+    const separator = platform.separator();
+    const isPathSeparator = platform.getSeparatorFunc();
 
     const nqlAtIndexFn = switch (platform) {
         else => nqlAtIndex,
@@ -116,7 +115,7 @@ pub fn getIfExistsLongestCommonPathGeneric(input: []const []const u8, comptime p
         },
         inline 2, 3, 4, 5, 6, 7, 8 => |N| {
             while (index < min_length) : (index += 1) {
-                if (nqlAtIndexFn(comptime N, index, input)) {
+                if (nqlAtIndexFn(N, index, input)) {
                     if (last_common_separator == null) return null;
                     break;
                 }
@@ -150,11 +149,11 @@ pub fn getIfExistsLongestCommonPathGeneric(input: []const []const u8, comptime p
     }
 
     if (index == 0) {
-        return &([_]u8{separator});
+        return &[separator];
     }
 
     if (last_common_separator == null) {
-        return &([_]u8{'.'});
+        return &['.'];
     }
 
     // The above won't work for a case like this:
@@ -181,8 +180,8 @@ pub fn getIfExistsLongestCommonPathGeneric(input: []const []const u8, comptime p
 // or as an extra step at the end?
 // only boether to check if this function appears in benchmarking
 pub fn longestCommonPathGeneric(input: []const []const u8, comptime platform: Platform) []const u8 {
-    const separator = comptime platform.separator();
-    const isPathSeparator = comptime platform.getSeparatorFunc();
+    const separator = platform.separator();
+    const isPathSeparator = platform.getSeparatorFunc();
 
     const nqlAtIndexFn = switch (platform) {
         else => nqlAtIndex,
@@ -219,7 +218,7 @@ pub fn longestCommonPathGeneric(input: []const []const u8, comptime platform: Pl
             }
 
             while (index < min_length) : (index += 1) {
-                if (nqlAtIndexFn(comptime n, index, input)) {
+                if (nqlAtIndexFn(n, index, input)) {
                     break;
                 }
                 if (@call(bun.callmod_inline, isPathSeparator, .{input[0][index]})) {
@@ -262,7 +261,7 @@ pub fn longestCommonPathGeneric(input: []const []const u8, comptime platform: Pl
     }
 
     if (index == 0) {
-        return &([_]u8{separator});
+        return &[separator];
     }
 
     var idx = input.len; // Use this value as an invalid value.
@@ -349,7 +348,7 @@ pub fn relativeToCommonPath(
         break :k from_root.len;
     } else null;
 
-    const separator = comptime platform.separator();
+    const separator = platform.separator();
 
     const common_path = if (platform == .windows)
         common_path_[win_root_len..]
@@ -367,7 +366,7 @@ pub fn relativeToCommonPath(
                     normalized_to.len > 3 and
                     normalized_to[normalized_to.len - 1] == separator)
                 {
-                    normalized_to.len -= 1;
+                    normalized_to = normalized_to[0 .. normalized_to.len - 1];
                 }
 
                 if (always_copy) {
@@ -411,10 +410,13 @@ pub fn relativeToCommonPath(
         while (i <= normalized_from.len) : (i += 1) {
             if (i == normalized_from.len or (normalized_from[i] == separator and i + 1 < normalized_from.len)) {
                 if (out_slice.len == 0) {
-                    buf[0..2].* = "..".*;
+                    buf[0] = '.';
+                    buf[1] = '.';
                     out_slice.len = 2;
                 } else {
-                    buf[out_slice.len..][0..3].* = (&[_]u8{separator} ++ "..").*;
+                    buf[out_slice.len] = separator;
+                    buf[out_slice.len + 1] = '.';
+                    buf[out_slice.len + 2] = '.';
                     out_slice.len += 3;
                 }
             }
@@ -448,23 +450,24 @@ pub fn relativeToCommonPath(
     return out_slice;
 }
 
-pub fn relativeNormalizedBuf(buf: []u8, from: []const u8, to: []const u8, comptime platform: Platform, comptime always_copy: bool) []const u8 {
-    if ((if (platform == .windows)
-        strings.eqlCaseInsensitiveASCII(from, to, true)
-    else
-        from.len == to.len and strings.eqlLong(from, to, true)))
-    {
+pub fn relativeNormalizedBuf(buf: []u8, from_: []const u8, to_: []const u8, comptime platform: Platform, comptime always_copy: bool) []const u8 {
+    const is_same = if (platform == .windows) {
+        strings.eqlCaseInsensitiveASCII(from_, to_, true)
+    } else {
+        (from_.len == to_.len and strings.eqlLong(from_, to_, true))
+    };
+    if (is_same) {
         return "";
     }
 
-    const two = [_][]const u8{ from, to };
+    const two = [from_, to_];
     const common_path = longestCommonPathGeneric(&two, platform);
 
-    return relativeToCommonPath(common_path, from, to, buf, always_copy, platform);
+    return relativeToCommonPath(common_path, from_, to_, buf, always_copy, platform);
 }
 
-pub fn relativeNormalized(from: []const u8, to: []const u8, comptime platform: Platform, comptime always_copy: bool) []const u8 {
-    return relativeNormalizedBuf(relative_to_common_path_buf(), from, to, platform, always_copy);
+pub fn relativeNormalized(from_: []const u8, to_: []const u8, comptime platform: Platform, comptime always_copy: bool) []const u8 {
+    return relativeNormalizedBuf(relative_to_common_path_buf(), from_, to_, platform, always_copy);
 }
 
 pub fn dirname(str: []const u8, comptime platform: Platform) []const u8 {
@@ -496,77 +499,77 @@ pub fn dirnameW(str: []const u16) []const u16 {
     return str[0..separator];
 }
 
-pub fn relative(from: []const u8, to: []const u8) []const u8 {
-    return relativePlatform(from, to, .auto, false);
+pub fn relative(from_: []const u8, to_: []const u8) []const u8 {
+    return relativePlatform(from_, to_, .auto, false);
 }
 
-pub fn relativeZ(from: []const u8, to: []const u8) [:0]const u8 {
-    return relativeBufZ(relative_to_common_path_buf(), from, to);
+pub fn relativeZ(from_: []const u8, to_: []const u8) [:0]const u8 {
+    return relativeBufZ(relative_to_common_path_buf(), from_, to_);
 }
 
-pub fn relativeBufZ(buf: []u8, from: []const u8, to: []const u8) [:0]const u8 {
-    const rel = relativePlatformBuf(buf, from, to, .auto, true);
+pub fn relativeBufZ(buf: []u8, from_: []const u8, to_: []const u8) [:0]const u8 {
+    const rel = relativePlatformBuf(buf, from_, to_, .auto, true);
     buf[rel.len] = 0;
     return buf[0..rel.len :0];
 }
 
-pub fn relativePlatformBuf(buf: []u8, from: []const u8, to: []const u8, comptime platform: Platform, comptime always_copy: bool) []const u8 {
-    const relative_from_buf = &relative_bufs.get().relative_from_buf;
-    const relative_to_buf = &relative_bufs.get().relative_to_buf;
-    const normalized_from = if (platform.isAbsolute(from)) brk: {
+pub fn relativePlatformBuf(buf: []u8, from_: []const u8, to_: []const u8, comptime platform: Platform, comptime always_copy: bool) []const u8 {
+    var relative_from_buf = &relative_bufs.get().relative_from_buf;
+    var relative_to_buf = &relative_bufs.get().relative_to_buf;
+    const normalized_from = if (platform.isAbsolute(from_)) brk: {
         if (platform == .loose and bun.Environment.isWindows) {
-            const normalized = normalizeStringBuf(from, relative_from_buf[1..], true, .windows, true);
+            const normalized = normalizeStringBuf(from_, relative_from_buf[1..], true, .windows, true);
             platformToPosixInPlace(u8, normalized);
             break :brk normalized;
         }
-        const path = normalizeStringBuf(from, relative_from_buf[1..], true, platform, true);
+        const path = normalizeStringBuf(from_, relative_from_buf[1..], true, platform, true);
         if (platform == .windows) break :brk path;
         relative_from_buf[0] = platform.separator();
         break :brk relative_from_buf[0 .. path.len + 1];
     } else joinAbsStringBuf(
         Fs.FileSystem.instance.top_level_dir,
         relative_from_buf,
-        &[_][]const u8{
-            normalizeStringBuf(from, relative_from_buf[1..], true, platform, true),
-        },
+        &[
+            normalizeStringBuf(from_, relative_from_buf[1..], true, platform, true),
+        ],
         platform,
     );
 
-    const normalized_to = if (platform.isAbsolute(to)) brk: {
+    const normalized_to = if (platform.isAbsolute(to_)) brk: {
         if (platform == .loose and bun.Environment.isWindows) {
-            const normalized = normalizeStringBuf(to, relative_to_buf[1..], true, .windows, true);
+            const normalized = normalizeStringBuf(to_, relative_to_buf[1..], true, .windows, true);
             platformToPosixInPlace(u8, normalized);
             break :brk normalized;
         }
-        const path = normalizeStringBuf(to, relative_to_buf[1..], true, platform, true);
+        const path = normalizeStringBuf(to_, relative_to_buf[1..], true, platform, true);
         if (platform == .windows) break :brk path;
         relative_to_buf[0] = platform.separator();
         break :brk relative_to_buf[0 .. path.len + 1];
     } else joinAbsStringBuf(
         Fs.FileSystem.instance.top_level_dir,
         relative_to_buf,
-        &[_][]const u8{
-            normalizeStringBuf(to, relative_to_buf[1..], true, platform, true),
-        },
+        &[
+            normalizeStringBuf(to_, relative_to_buf[1..], true, platform, true),
+        ],
         platform,
     );
 
     return relativeNormalizedBuf(buf, normalized_from, normalized_to, platform, always_copy);
 }
 
-pub fn relativePlatform(from: []const u8, to: []const u8, comptime platform: Platform, comptime always_copy: bool) []const u8 {
-    return relativePlatformBuf(relative_to_common_path_buf(), from, to, platform, always_copy);
+pub fn relativePlatform(from_: []const u8, to_: []const u8, comptime platform: Platform, comptime always_copy: bool) []const u8 {
+    return relativePlatformBuf(relative_to_common_path_buf(), from_, to_, platform, always_copy);
 }
 
-pub fn relativeAlloc(allocator: std.mem.Allocator, from: []const u8, to: []const u8) ![]const u8 {
-    const result = relativePlatform(from, to, .auto, false);
-    return try allocator.dupe(u8, result);
+pub fn relativeAlloc(allocator: std.mem.Allocator, from_: []const u8, to_: []const u8) ![]const u8 {
+    const result = relativePlatform(from_, to_, .auto, false);
+    return allocator.dupe(u8, result)?;
 }
 
-pub fn windowsVolumeNameLen(path: []const u8) struct { usize, usize } {
+pub fn windowsVolumeNameLen(path: []const u8): [usize, usize] {
     return windowsVolumeNameLenT(u8, path);
 }
-pub fn windowsVolumeNameLenT(comptime T: type, path: []const T) struct { usize, usize } {
+pub fn windowsVolumeNameLenT(comptime T: type, path: []const T): [usize, usize] {
     if (path.len < 2) return .{ 0, 0 };
     const c = path[0];
     if (path[1] == ':') {
@@ -683,7 +686,7 @@ pub fn normalizeStringGeneric(
     return normalizeStringGenericT(u8, path_, buf, allow_above_root, separator, isSeparator, preserve_trailing_slash);
 }
 
-fn separatorAdapter(comptime T: type, func: anytype) fn (T) bool {
+fn separatorAdapter(comptime T: type, comptime func: anytype) fn (T) bool {
     return struct {
         fn call(char: T) bool {
             return func(T, char);
@@ -710,7 +713,7 @@ pub fn normalizeStringGenericT(
     });
 }
 
-pub fn NormalizeOptions(comptime T: type) type {
+pub fn NormalizeOptions(comptime T: type): type {
     return struct {
         allow_above_root: bool = false,
         separator: T = std.fs.path.sep,
@@ -733,8 +736,10 @@ pub fn normalizeStringGenericTZ(
     path_: []const T,
     buf: []T,
     comptime options: NormalizeOptions(T),
-) if (options.zero_terminate) [:0]T else []T {
-    const isWindows, const sep_str = comptime .{ options.separator == std.fs.path.sep_windows, &[_]u8{options.separator} };
+): if (options.zero_terminate) [:0]T else []T {
+    const isWindows = options.separator == std.fs.path.sep_windows;
+    const sep_str = &[options.separator];
+    _ = sep_str;
 
     if (isWindows and bun.Environment.isDebug) {
         assert(!strings.hasPrefixComptimeType(T, path_, strings.literal(T, ":\\")));
@@ -744,10 +749,12 @@ pub fn normalizeStringGenericTZ(
     var dotdot: usize = 0;
     var path_begin: usize = 0;
 
-    const volLen, const indexOfThirdUNCSlash = if (isWindows)
+    const vol = if (isWindows)
         windowsVolumeNameLenT(T, path_)
     else
         .{ 0, 0 };
+    const volLen = vol[0];
+    const indexOfThirdUNCSlash = vol[1];
 
     if (isWindows) {
         if (volLen > 0) {
@@ -757,10 +764,12 @@ pub fn normalizeStringGenericTZ(
             }
             if (path_[1] != ':') {
                 if (options.add_nt_prefix) {
-                    @memcpy(buf[buf_i .. buf_i + 4], strings.literal(T, "UNC" ++ sep_str));
+                    @memcpy(buf[buf_i .. buf_i + 3], strings.literal(T, "UNC"));
+                    buf[buf_i + 3] = options.separator;
                     buf_i += 2;
                 } else {
-                    @memcpy(buf[buf_i .. buf_i + 2], strings.literal(T, sep_str ++ sep_str));
+                    buf[buf_i] = options.separator;
+                    buf[buf_i + 1] = options.separator;
                 }
                 if (indexOfThirdUNCSlash > 0) {
                     @memcpy(buf[buf_i + 2 .. buf_i + indexOfThirdUNCSlash + 1], path_[2 .. indexOfThirdUNCSlash + 1]);
@@ -778,15 +787,15 @@ pub fn normalizeStringGenericTZ(
 
                 if (path_begin >= path_.len) {
                     if (options.zero_terminate) {
-                        buf[buf_i] = 0;
+                        buf[buf_i] = @as(T, 0);
                         return buf[0..buf_i :0];
                     } else {
                         return buf[0..buf_i];
                     }
                 }
             } else {
-                buf[buf_i] = std.ascii.toUpper(@truncate(path_[0]));
-                buf[buf_i + 1] = ':';
+                buf[buf_i] = @as(T, std.ascii.toUpper(@truncate(path_[0])));
+                buf[buf_i + 1] = @as(T, ':');
                 buf_i += 2;
                 dotdot = buf_i;
                 path_begin = 2;
@@ -800,10 +809,12 @@ pub fn normalizeStringGenericTZ(
     }
 
     var r: usize = 0;
-    var path, const buf_start = if (isWindows)
+    const path_info = if (isWindows)
         .{ path_[path_begin..], buf_i }
     else
         .{ path_, 0 };
+    var path = path_info[0];
+    const buf_start = path_info[1];
 
     const n = path.len;
 
@@ -836,10 +847,13 @@ pub fn normalizeStringGenericTZ(
                 }
             } else if (options.allow_above_root) {
                 if (buf_i > buf_start) {
-                    buf[buf_i..][0..3].* = (strings.literal(T, sep_str ++ "..")).*;
+                    buf[buf_i] = options.separator;
+                    buf[buf_i + 1] = @as(T, '.');
+                    buf[buf_i + 2] = @as(T, '.');
                     buf_i += 3;
                 } else {
-                    buf[buf_i..][0..2].* = (strings.literal(T, "..")).*;
+                    buf[buf_i] = @as(T, '.');
+                    buf[buf_i + 1] = @as(T, '.');
                     buf_i += 2;
                 }
                 dotdot = buf_i;
@@ -853,10 +867,10 @@ pub fn normalizeStringGenericTZ(
             buf_i += 1;
         }
 
-        const from = r;
+        const from_ = r;
         while (r < n and !options.isSeparator(path[r])) : (r += 1) {}
-        const count = r - from;
-        @memcpy(buf[buf_i..][0..count], path[from..][0..count]);
+        const count = r - from_;
+        @memcpy(buf[buf_i..][0..count], path[from_..][0..count]);
         buf_i += count;
     }
 
@@ -868,12 +882,12 @@ pub fn normalizeStringGenericTZ(
     }
 
     if (isWindows and buf_i == 2 and buf[1] == ':') {
-        buf[buf_i] = if (path.len > 0 and path[0] == '\\') '\\' else '.';
+        buf[buf_i] = if (path.len > 0 and path[0] == '\\') @as(T, '\\') else @as(T, '.');
         buf_i += 1;
     }
 
     if (options.zero_terminate) {
-        buf[buf_i] = 0;
+        buf[buf_i] = @as(T, 0);
     }
 
     const result = if (options.zero_terminate) buf[0..buf_i :0] else buf[0..buf_i];
@@ -976,8 +990,8 @@ pub const Platform = enum {
 
     pub fn trailingSeparator(comptime platform: Platform) [2]u8 {
         return switch (platform) {
-            .nt, .windows => ".\\".*,
-            .posix, .loose => "./".*,
+            .nt, .windows => [_]u8{ '.', '\\' },
+            .posix, .loose => [_]u8{ '.', '/' },
         };
     }
 
@@ -1041,7 +1055,7 @@ pub fn normalizeBufZ(str: []const u8, buf: []u8, comptime platform: Platform) [:
 
 pub fn normalizeBufT(comptime T: type, str: []const T, buf: []T, comptime platform: Platform) []T {
     if (str.len == 0) {
-        buf[0] = '.';
+        buf[0] = @as(T, '.');
         return buf[0..1];
     }
 
@@ -1113,11 +1127,11 @@ pub fn normalizeStringBufT(
 }
 
 pub fn normalizeStringAlloc(allocator: std.mem.Allocator, str: []const u8, comptime allow_above_root: bool, comptime platform: Platform) ![]const u8 {
-    return try allocator.dupe(u8, normalizeString(str, allow_above_root, platform));
+    return allocator.dupe(u8, normalizeString(str, allow_above_root, platform))?;
 }
 
-pub fn joinAbs2(_cwd: []const u8, comptime platform: Platform, part: anytype, part2: anytype) []const u8 {
-    const parts = [_][]const u8{ part, part2 };
+pub fn joinAbs2(_cwd: []const u8, comptime platform: Platform, part: []const u8, part2: []const u8) []const u8 {
+    const parts = [part, part2];
     const slice = joinAbsString(_cwd, &parts, platform);
     return slice;
 }
@@ -1144,7 +1158,7 @@ pub fn joinAbsStringZ(_cwd: []const u8, parts: anytype, comptime platform: Platf
     );
 }
 
-pub threadlocal var join_buf: [4096]u8 = undefined;
+// pub threadlocal var join_buf: [4096]u8 = undefined; (declared at module level)
 pub fn join(_parts: anytype, comptime platform: Platform) []const u8 {
     return joinStringBuf(&join_buf, _parts, platform);
 }
@@ -1185,7 +1199,7 @@ pub fn joinStringBufZ(buf: []u8, parts: anytype, comptime platform: Platform) [:
 pub fn joinStringBufT(comptime T: type, buf: []T, parts: anytype, comptime platform: Platform) []const T {
     var written: usize = 0;
     var temp_buf_: [4096]T = undefined;
-    var temp_buf: []T = &temp_buf_;
+    var temp_buf: []T = temp_buf_[0..];
     var free_temp_buf = false;
     defer {
         if (free_temp_buf) {
@@ -1204,13 +1218,13 @@ pub fn joinStringBufT(comptime T: type, buf: []T, parts: anytype, comptime platf
         free_temp_buf = true;
     }
 
-    temp_buf[0] = 0;
+    temp_buf[0] = @as(T, 0);
 
     for (parts) |part| {
         if (part.len == 0) continue;
 
         if (written > 0) {
-            temp_buf[written] = platform.separator();
+            temp_buf[written] = @as(T, platform.separator());
             written += 1;
         }
 
@@ -1225,7 +1239,7 @@ pub fn joinStringBufT(comptime T: type, buf: []T, parts: anytype, comptime platf
     }
 
     if (written == 0) {
-        buf[0] = '.';
+        buf[0] = @as(T, '.');
         return buf[0..1];
     }
 
@@ -1251,12 +1265,15 @@ const JoinScratch = struct {
     }
 };
 
+type SliceU8 = []const u8;
+type SliceZU8 = [:0]const u8;
+
 pub fn joinAbsStringBuf(cwd: []const u8, buf: []u8, _parts: anytype, comptime platform: Platform) []const u8 {
-    return _joinAbsStringBuf(false, []const u8, cwd, buf, _parts, platform);
+    return _joinAbsStringBuf(false, SliceU8, cwd, buf, _parts, platform);
 }
 
 pub fn joinAbsStringBufChecked(cwd: []const u8, buf: []u8, parts: []const []const u8, comptime platform: Platform) ?[]const u8 {
-    comptime if (platform == .nt) @compileError("joinAbsStringBufChecked does not support .nt (the \\\\?\\ prefix is not accounted for in scratch sizing)");
+    if (platform == .nt) @compileError("joinAbsStringBufChecked does not support .nt (the \\\\?\\ prefix is not accounted for in scratch sizing)");
     var total: usize = cwd.len + 2;
     for (parts) |p| total += p.len + 1;
     if (total < buf.len) return joinAbsStringBuf(cwd, buf, parts, platform);
@@ -1272,19 +1289,19 @@ pub fn joinAbsStringBufChecked(cwd: []const u8, buf: []u8, parts: []const []cons
 }
 
 pub fn joinAbsStringBufZ(cwd: []const u8, buf: []u8, _parts: anytype, comptime platform: Platform) [:0]const u8 {
-    return _joinAbsStringBuf(true, [:0]const u8, cwd, buf, _parts, platform);
+    return _joinAbsStringBuf(true, SliceZU8, cwd, buf, _parts, platform);
 }
 
 pub fn joinAbsStringBufZNT(cwd: []const u8, buf: []u8, _parts: anytype, comptime platform: Platform) [:0]const u8 {
     if ((platform == .auto or platform == .loose or platform == .windows) and bun.Environment.isWindows) {
-        return _joinAbsStringBuf(true, [:0]const u8, cwd, buf, _parts, .nt);
+        return _joinAbsStringBuf(true, SliceZU8, cwd, buf, _parts, .nt);
     }
 
-    return _joinAbsStringBuf(true, [:0]const u8, cwd, buf, _parts, platform);
+    return _joinAbsStringBuf(true, SliceZU8, cwd, buf, _parts, platform);
 }
 
 pub fn joinAbsStringBufZTrailingSlash(cwd: []const u8, buf: []u8, _parts: anytype, comptime platform: Platform) [:0]const u8 {
-    const out = _joinAbsStringBuf(true, [:0]const u8, cwd, buf, _parts, platform);
+    const out = _joinAbsStringBuf(true, SliceZU8, cwd, buf, _parts, platform);
     if (out.len + 2 < buf.len and out.len > 0 and out[out.len - 1] != platform.separator()) {
         buf[out.len] = platform.separator();
         buf[out.len + 1] = 0;
@@ -1303,7 +1320,7 @@ fn _joinAbsStringBuf(comptime is_sentinel: bool, comptime ReturnType: type, _cwd
 
     if (platform == .nt) {
         const end_path = _joinAbsStringBufWindows(is_sentinel, ReturnType, _cwd, buf[4..], _parts);
-        buf[0..4].* = "\\\\?\\".*;
+        bun.copy(u8, buf[0..4], "\\\\?\\");
         if (comptime is_sentinel) {
             buf[end_path.len + 4] = 0;
             return buf[0 .. end_path.len + 4 :0];
@@ -1319,7 +1336,7 @@ fn _joinAbsStringBuf(comptime is_sentinel: bool, comptime ReturnType: type, _cwd
         return _cwd;
     }
 
-    if ((comptime platform == .loose or platform == .posix) and
+    if ((platform == .loose or platform == .posix) and
         parts.len == 1 and
         parts[0].len == 1 and
         parts[0][0] == std.fs.path.sep_posix)
@@ -1351,7 +1368,7 @@ fn _joinAbsStringBuf(comptime is_sentinel: bool, comptime ReturnType: type, _cwd
     }
 
     var scratch: JoinScratch = undefined;
-    const temp_buf = scratch.init(cwd.len, parts);
+    var temp_buf = scratch.init(cwd.len, parts);
     defer scratch.deinit();
 
     bun.copy(u8, temp_buf, cwd);
@@ -1373,18 +1390,18 @@ fn _joinAbsStringBuf(comptime is_sentinel: bool, comptime ReturnType: type, _cwd
         out += part.len;
     }
 
-    const leading_separator: []const u8 = if (platform.leadingSeparatorIndex(temp_buf[0..out])) |i| brk: {
-        const outdir = temp_buf[0 .. i + 1];
+    var leading_separator: string = "/";
+    if (platform.leadingSeparatorIndex(temp_buf[0..out])) |i| {
+        var outdir = temp_buf[0 .. i + 1];
         if (platform == .loose) {
-            for (outdir) |*c| {
-                if (c.* == '\\') {
-                    c.* = '/';
+            for (outdir, 0..) |_, idx| {
+                if (outdir[idx] == '\\') {
+                    outdir[idx] = '/';
                 }
             }
         }
-
-        break :brk outdir;
-    } else "/";
+        leading_separator = @as(string, outdir);
+    }
 
     const result = normalizeStringBuf(
         temp_buf[leading_separator.len..out],
@@ -1420,7 +1437,7 @@ fn _joinAbsStringBufWindows(
         return cwd;
     }
 
-    const root, const set_cwd, const n_start = base: {
+    const base_info = base: {
         const root = root: {
             var n = parts.len;
             while (n > 0) {
@@ -1452,12 +1469,15 @@ fn _joinAbsStringBufWindows(
             break :base .{ root, "/", 0 };
         }
     };
+    const root = base_info[0];
+    const set_cwd = base_info[1];
+    const n_start = base_info[2];
 
     if (set_cwd.len > 0)
         assert(isSepAny(set_cwd[0]));
 
     var scratch: JoinScratch = undefined;
-    const temp_buf = scratch.init(root.len + set_cwd.len, parts[n_start..]);
+    var temp_buf = scratch.init(root.len + set_cwd.len, parts[n_start..]);
     defer scratch.deinit();
 
     @memcpy(temp_buf[0..root.len], root);
@@ -1630,7 +1650,7 @@ pub fn normalizeStringNodeT(
     comptime platform: Platform,
 ) []const T {
     if (str.len == 0) {
-        buf[0] = '.';
+        buf[0] = @as(T, '.');
         return buf[0..1];
     }
 
@@ -1644,38 +1664,39 @@ pub fn normalizeStringNodeT(
         str,
         buf_,
         true,
-        comptime platform.separator(),
-        comptime platform.getSeparatorFuncT(),
+        platform.separator(),
+        platform.getSeparatorFuncT(),
         false,
     ) else normalizeStringGenericT(
         T,
         str,
         buf_,
         false,
-        comptime platform.separator(),
-        comptime platform.getSeparatorFuncT(),
+        platform.separator(),
+        platform.getSeparatorFuncT(),
         false,
     );
 
     if (out.len == 0) {
         if (is_absolute) {
-            buf[0] = platform.separator();
+            buf[0] = @as(T, platform.separator());
             return buf[0..1];
         }
 
         if (trailing_separator) {
             const sep = platform.trailingSeparator();
-            buf[0..2].* = .{ sep[0], sep[1] };
+            buf[0] = @as(T, sep[0]);
+            buf[1] = @as(T, sep[1]);
             return buf[0..2];
         }
 
-        buf[0] = '.';
+        buf[0] = @as(T, '.');
         return buf[0..1];
     }
 
     if (trailing_separator) {
         if (!platform.isSeparatorT(T, out[out.len - 1])) {
-            buf_[out.len] = platform.separator();
+            buf_[out.len] = @as(T, platform.separator());
             out = buf_[0 .. out.len + 1];
         }
     }
@@ -1684,7 +1705,7 @@ pub fn normalizeStringNodeT(
         if (platform == .windows) {
             return out;
         }
-        buf[0] = platform.separator();
+        buf[0] = @as(T, platform.separator());
         out = buf[0 .. out.len + 1];
     }
 
@@ -1693,7 +1714,7 @@ pub fn normalizeStringNodeT(
 
 pub fn basename(path: []const u8) []const u8 {
     if (path.len == 0)
-        return &[_]u8{};
+        return "";
 
     var end_index: usize = path.len - 1;
     while (isSepAny(path[end_index])) {
@@ -1726,10 +1747,10 @@ pub fn lastIndexOfSepT(comptime T: type, path: []const T) ?usize {
 
 pub fn nextDirname(path_: []const u8) ?[]const u8 {
     var path = path_;
-    var root_prefix: []const u8 = "";
+    var root_prefix: string = "";
     if (path.len > 3) {
         if (path[1] == ':' and isSepAny(path[2])) {
-            root_prefix = path[0..3];
+            root_prefix = @as(string, path[0..3]);
         }
     }
 
@@ -1909,7 +1930,7 @@ pub fn platformToPosixInPlace(comptime T: type, path_buffer: []T) void {
     if (std.fs.path.sep == '/') return;
     var idx: usize = 0;
     while (std.mem.indexOfScalarPos(T, path_buffer, idx, std.fs.path.sep)) |index| : (idx = index + 1) {
-        path_buffer[index] = '/';
+        path_buffer[index] = @as(T, '/');
     }
 }
 
@@ -1918,7 +1939,7 @@ pub fn dangerouslyConvertPathToPosixInPlace(comptime T: type, path: []T) void {
     if (comptime bun.Environment.isWindows) {
         if (path.len > "C:".len and isDriveLetter(path[0]) and path[1] == ':' and isSepAny(path[2])) {
             switch (path[0]) {
-                'a'...'z' => path[0] = 'A' + (path[0] - 'a'),
+                'a'...'z' => path[0] = path[0] - @as(T, 'a') + @as(T, 'A'),
                 'A'...'Z' => {},
                 else => unreachable,
             }
@@ -1926,14 +1947,14 @@ pub fn dangerouslyConvertPathToPosixInPlace(comptime T: type, path: []T) void {
     }
 
     while (std.mem.indexOfScalarPos(T, path, idx, std.fs.path.sep_windows)) |index| : (idx = index + 1) {
-        path[index] = '/';
+        path[index] = @as(T, '/');
     }
 }
 
 pub fn dangerouslyConvertPathToWindowsInPlace(comptime T: type, path: []T) void {
     var idx: usize = 0;
     while (std.mem.indexOfScalarPos(T, path, idx, std.fs.path.sep_posix)) |index| : (idx = index + 1) {
-        path[index] = '\\';
+        path[index] = @as(T, '\\');
     }
 }
 
@@ -1941,7 +1962,7 @@ pub fn pathToPosixBuf(comptime T: type, path: []const T, buf: []T) []T {
     var idx: usize = 0;
     while (std.mem.indexOfScalarPos(T, path, idx, std.fs.path.sep_windows)) |index| : (idx = index + 1) {
         @memcpy(buf[idx..index], path[idx..index]);
-        buf[index] = std.fs.path.sep_posix;
+        buf[index] = @as(T, std.fs.path.sep_posix);
     }
     @memcpy(buf[idx..path.len], path[idx..path.len]);
     return buf[0..path.len];
@@ -1952,7 +1973,7 @@ pub fn platformToPosixBuf(comptime T: type, path: []const T, buf: []T) []const T
     var idx: usize = 0;
     while (std.mem.indexOfScalarPos(T, path, idx, std.fs.path.sep)) |index| : (idx = index + 1) {
         @memcpy(buf[idx..index], path[idx..index]);
-        buf[index] = '/';
+        buf[index] = @as(T, '/');
     }
     @memcpy(buf[idx..path.len], path[idx..path.len]);
     return buf[0..path.len];
@@ -1962,7 +1983,7 @@ pub fn posixToPlatformInPlace(comptime T: type, path_buffer: []T) void {
     if (std.fs.path.sep == '/') return;
     var idx: usize = 0;
     while (std.mem.indexOfScalarPos(T, path_buffer, idx, '/')) |index| : (idx = index + 1) {
-        path_buffer[index] = std.fs.path.sep;
+        path_buffer[index] = @as(T, std.fs.path.sep);
     }
 }
 
@@ -1972,4 +1993,3 @@ const std = @import("std");
 const bun = @import("bun");
 const assert = bun.assert;
 const strings = bun.strings;
-}

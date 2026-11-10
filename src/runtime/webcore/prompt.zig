@@ -2,36 +2,19 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
-comptime {
-        const js_alert = jsc.toJSHostFn(alert);
-        @export(&js_alert, .{ .name = "WebCore__alert" });
-        const js_prompt = jsc.toJSHostFn(prompt.call);
-        @export(&js_prompt, .{ .name = "WebCore__prompt" });
-        const js_confirm = jsc.toJSHostFn(confirm);
-        @export(&js_confirm, .{ .name = "WebCore__confirm" });
-    }
 const ManagedList = std.array_list.Managed;
 const JSGlobalObject = jsc.JSGlobalObject;
 const JSValue = jsc.JSValue;
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+comptime {
+    const js_alert = jsc.toJSHostFn(alert);
+    _ = @export((&js_alert), .{ .name = "WebCore__alert" });
+    const js_prompt = jsc.toJSHostFn(prompt.call);
+    _ = @export((&js_prompt), .{ .name = "WebCore__prompt" });
+    const js_confirm = jsc.toJSHostFn(confirm);
+    _ = @export((&js_confirm), .{ .name = "WebCore__confirm" });
 
+}
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 pub const default_allocator = @import("bun").default_allocator;
 pub const assert = @import("bun").assert;
 pub const Environment = @import("bun").Environment;
@@ -53,7 +36,6 @@ pub fn readUntilDelimiterArrayListAppendAssumeCapacity(reader: anytype, array_li
                     return error.StreamTooLong;
                 }
                 const byte: u8 = try reader.readByte();
-                _ = &byte;
                 if ((byte == delimiter)) {
                     return;
                 }
@@ -64,7 +46,6 @@ pub fn readUntilDelimiterArrayListAppendAssumeCapacity(reader: anytype, array_li
 pub fn readUntilDelimiterArrayListInfinity(reader: anytype, array_list: *ManagedList(u8), delimiter: u8) !void {
             while (true) {
                 const byte: u8 = try reader.readByte();
-                _ = &byte;
                 if ((byte == delimiter)) {
                     return;
                 }
@@ -74,17 +55,13 @@ pub fn readUntilDelimiterArrayListInfinity(reader: anytype, array_list: *Managed
 
 pub fn call(globalObject: *JSGlobalObject, callframe: *jsc.CallFrame) JSError!JSValue {
             const arguments = callframe.arguments_old(3).slice();
-            _ = &arguments;
             var state = heap.stackFallback(2048, default_allocator);
             _ = &state;
             const allocator = state.get();
-            _ = &allocator;
             var output = Output.writer();
             _ = &output;
             const has_message = (arguments.len != 0);
-            _ = &has_message;
             const has_default = (arguments.len >= 2);
-            _ = &has_default;
             var default_val = JSValue.@"null";
             _ = &default_val;
             if (has_default) {
@@ -92,31 +69,29 @@ pub fn call(globalObject: *JSGlobalObject, callframe: *jsc.CallFrame) JSError!JS
             }
             if (has_message) {
                 const message = try arguments[0].toSlice(globalObject, allocator);
-                _ = &message;
                 defer {
                 _ = message.deinit();
                 }
-                _ = (blk_catch_4: { break :blk_catch_4 ((output.writeAll(message.slice())) catch |__ce_4| { _ = &__ce_4; return JSValue.@"null"; }); });
+                _ = (blk_catch_0: { break :blk_catch_0 ((output.writeAll(message.slice())) catch |__ce_0| { _ = &__ce_0; return JSValue.@"null"; }); });
             }
             var prompt_prefix: []const u8 = "Prompt ";
             _ = &prompt_prefix;
             if (has_message) {
                 prompt_prefix = " ";
             }
-            _ = (blk_catch_5: { break :blk_catch_5 ((output.writeAll(prompt_prefix)) catch |__ce_5| { _ = &__ce_5; return JSValue.@"false"; }); });
+            _ = (blk_catch_1: { break :blk_catch_1 ((output.writeAll(prompt_prefix)) catch |__ce_1| { _ = &__ce_1; return JSValue.@"false"; }); });
             if (has_default) {
                 const default_string = try arguments[1].toSlice(globalObject, allocator);
-                _ = &default_string;
                 defer {
                 _ = default_string.deinit();
                 }
-                _ = (blk_catch_7: { break :blk_catch_7 ((output.print("[{s}] ", .{ default_string.slice() })) catch |__ce_7| { _ = &__ce_7; return JSValue.@"false"; }); });
+                _ = (blk_catch_2: { break :blk_catch_2 ((output.print("[{s}] ", .{ default_string.slice() })) catch |__ce_2| { _ = &__ce_2; return JSValue.@"false"; }); });
             }
             _ = Output.flush();
             var original_mode: ?windows.DWORD = null;
             _ = &original_mode;
             if (comptime Environment.isWindows) {
-                original_mode = (blk_catch_8: { break :blk_catch_8 ((windows.updateStdioModeFlags(.std_in, .{ .unset = c.ENABLE_VIRTUAL_TERMINAL_INPUT })) catch |__ce_8| { _ = &__ce_8; break :blk_catch_8 null; }); });
+                original_mode = (blk_catch_3: { break :blk_catch_3 ((windows.updateStdioModeFlags(.std_in, .{ .unset = c.ENABLE_VIRTUAL_TERMINAL_INPUT })) catch |__ce_3| { _ = &__ce_3; break :blk_catch_3 null; }); });
             }
             defer {
             {
@@ -129,24 +104,21 @@ pub fn call(globalObject: *JSGlobalObject, callframe: *jsc.CallFrame) JSError!JS
             }
             }
             const reader = Output.buffered_stdin.reader();
-            _ = &reader;
             var second_byte: ?u8 = null;
             _ = &second_byte;
-            const first_byte = (blk_catch_9: { break :blk_catch_9 ((reader.readByte()) catch |__ce_9| { _ = &__ce_9; return JSValue.@"null"; }); });
-            _ = &first_byte;
+            const first_byte = (blk_catch_4: { break :blk_catch_4 ((reader.readByte()) catch |__ce_4| { _ = &__ce_4; return JSValue.@"null"; }); });
             if ((first_byte == 10)) {
                 return default_val;
             } else {
                 if ((first_byte == 13)) {
-                    const second = (blk_catch_10: { break :blk_catch_10 ((reader.readByte()) catch |__ce_10| { _ = &__ce_10; return JSValue.@"null"; }); });
-                    _ = &second;
+                    const second = (blk_catch_5: { break :blk_catch_5 ((reader.readByte()) catch |__ce_5| { _ = &__ce_5; return JSValue.@"null"; }); });
                     second_byte = second;
                     if ((second == 10)) {
                         return default_val;
                     }
                 }
             }
-            var input: ManagedList(u8) = (blk_catch_11: { break :blk_catch_11 ((ManagedList(u8).initCapacity(allocator, 2048)) catch |__ce_11| { _ = &__ce_11; return JSValue.@"null"; }); });
+            var input: ManagedList(u8) = (blk_catch_6: { break :blk_catch_6 ((ManagedList(u8).initCapacity(allocator, 2048)) catch |__ce_6| { _ = &__ce_6; return JSValue.@"null"; }); });
             _ = &input;
             defer {
             _ = input.deinit();
@@ -156,14 +128,14 @@ pub fn call(globalObject: *JSGlobalObject, callframe: *jsc.CallFrame) JSError!JS
                 _ = &second;
                 _ = input.appendAssumeCapacity(second);
             }
-            _ = (blk_catch_12: { break :blk_catch_12 ((readUntilDelimiterArrayListAppendAssumeCapacity(reader, (&input), 10, 2048)) catch |e| { _ = &e; if ((e != error.StreamTooLong)) {
+            _ = (blk_catch_7: { break :blk_catch_7 ((readUntilDelimiterArrayListAppendAssumeCapacity(reader, (&input), 10, 2048)) catch |e| { _ = &e; if ((e != error.StreamTooLong)) {
                 return JSValue.@"null";
             }
-            _ = (blk_catch_13: { break :blk_catch_13 ((input.ensureTotalCapacity(4096)) catch |__ce_13| { _ = &__ce_13; return JSValue.@"null"; }); });
-            break :blk_catch_12 @as(void, (blk_catch_14: { break :blk_catch_14 ((readUntilDelimiterArrayListAppendAssumeCapacity(reader, (&input), 10, 4096)) catch |e2| { _ = &e2; if ((e2 != error.StreamTooLong)) {
+            _ = (blk_catch_8: { break :blk_catch_8 ((input.ensureTotalCapacity(4096)) catch |__ce_8| { _ = &__ce_8; return JSValue.@"null"; }); });
+            break :blk_catch_7 @as(void, (blk_catch_9: { break :blk_catch_9 ((readUntilDelimiterArrayListAppendAssumeCapacity(reader, (&input), 10, 4096)) catch |e2| { _ = &e2; if ((e2 != error.StreamTooLong)) {
                 return JSValue.@"null";
             }
-            break :blk_catch_14 @as(void, (blk_catch_15: { break :blk_catch_15 ((readUntilDelimiterArrayListInfinity(reader, (&input), 10)) catch |__ce_15| { _ = &__ce_15; return JSValue.@"null"; }); })); }); })); }); });
+            break :blk_catch_9 @as(void, (blk_catch_10: { break :blk_catch_10 ((readUntilDelimiterArrayListInfinity(reader, (&input), 10)) catch |__ce_10| { _ = &__ce_10; return JSValue.@"null"; }); })); }); })); }); });
             if (((input.items.len > 0) and (input.items[@as(usize, @intCast((input.items.len - 1)))] == 13))) {
                 input.items.len = (input.items.len - 1);
             }
@@ -181,23 +153,19 @@ pub fn call(globalObject: *JSGlobalObject, callframe: *jsc.CallFrame) JSError!JS
 
 pub fn alert(globalObject: *JSGlobalObject, callframe: *jsc.CallFrame) JSError!JSValue {
         const arguments = callframe.arguments_old(1).slice();
-        _ = &arguments;
         var output = Output.writer();
         _ = &output;
         const has_message = (arguments.len != 0);
-        _ = &has_message;
         if (has_message) {
             var state = heap.stackFallback(2048, default_allocator);
             _ = &state;
             const allocator = state.get();
-            _ = &allocator;
             const message = try arguments[0].toSlice(globalObject, allocator);
-            _ = &message;
             defer {
             _ = message.deinit();
             }
             if ((message.len > 0)) {
-                _ = (blk_catch_17: { break :blk_catch_17 ((output.writeAll(message.slice())) catch |__ce_17| { _ = &__ce_17; return JSValue.js_undefined; }); });
+                _ = (blk_catch_11: { break :blk_catch_11 ((output.writeAll(message.slice())) catch |__ce_11| { _ = &__ce_11; return JSValue.js_undefined; }); });
             }
         }
         var enter_msg: []const u8 = "Alert [Enter] ";
@@ -205,7 +173,7 @@ pub fn alert(globalObject: *JSGlobalObject, callframe: *jsc.CallFrame) JSError!J
         if (has_message) {
             enter_msg = " [Enter] ";
         }
-        _ = (blk_catch_18: { break :blk_catch_18 ((output.writeAll(enter_msg)) catch |__ce_18| { _ = &__ce_18; return JSValue.js_undefined; }); });
+        _ = (blk_catch_12: { break :blk_catch_12 ((output.writeAll(enter_msg)) catch |__ce_12| { _ = &__ce_12; return JSValue.js_undefined; }); });
         _ = Output.flush();
         var stdin = fs.File.stdin();
         _ = &stdin;
@@ -214,10 +182,8 @@ pub fn alert(globalObject: *JSGlobalObject, callframe: *jsc.CallFrame) JSError!J
         var stdin_reader = stdin.readerStreaming((&stdin_buf));
         _ = &stdin_reader;
         const reader = (&stdin_reader.interface);
-        _ = &reader;
         while (true) {
-            const byte = (blk_catch_19: { break :blk_catch_19 ((reader.takeByte()) catch |__ce_19| { _ = &__ce_19; break; }); });
-            _ = &byte;
+            const byte = (blk_catch_13: { break :blk_catch_13 ((reader.takeByte()) catch |__ce_13| { _ = &__ce_13; break; }); });
             if ((byte == 10)) {
                 break;
             }
@@ -227,29 +193,25 @@ pub fn alert(globalObject: *JSGlobalObject, callframe: *jsc.CallFrame) JSError!J
 
 pub fn confirm(globalObject: *JSGlobalObject, callframe: *jsc.CallFrame) JSError!JSValue {
         const arguments = callframe.arguments_old(1).slice();
-        _ = &arguments;
         var output = Output.writer();
         _ = &output;
         const has_message = (arguments.len != 0);
-        _ = &has_message;
         if (has_message) {
             var state = heap.stackFallback(1024, default_allocator);
             _ = &state;
             const allocator = state.get();
-            _ = &allocator;
             const message = try arguments[0].toSlice(globalObject, allocator);
-            _ = &message;
             defer {
             _ = message.deinit();
             }
-            _ = (blk_catch_21: { break :blk_catch_21 ((output.writeAll(message.slice())) catch |__ce_21| { _ = &__ce_21; return JSValue.@"false"; }); });
+            _ = (blk_catch_14: { break :blk_catch_14 ((output.writeAll(message.slice())) catch |__ce_14| { _ = &__ce_14; return JSValue.@"false"; }); });
         }
         var confirm_msg: []const u8 = "Confirm [y/N] ";
         _ = &confirm_msg;
         if (has_message) {
             confirm_msg = " [y/N] ";
         }
-        _ = (blk_catch_22: { break :blk_catch_22 ((output.writeAll(confirm_msg)) catch |__ce_22| { _ = &__ce_22; return JSValue.@"false"; }); });
+        _ = (blk_catch_15: { break :blk_catch_15 ((output.writeAll(confirm_msg)) catch |__ce_15| { _ = &__ce_15; return JSValue.@"false"; }); });
         _ = Output.flush();
         var stdin = fs.File.stdin();
         _ = &stdin;
@@ -258,29 +220,24 @@ pub fn confirm(globalObject: *JSGlobalObject, callframe: *jsc.CallFrame) JSError
         var stdin_reader = stdin.readerStreaming((&stdin_buf));
         _ = &stdin_reader;
         const reader = (&stdin_reader.interface);
-        _ = &reader;
-        const first_byte = (blk_catch_23: { break :blk_catch_23 ((reader.takeByte()) catch |__ce_23| { _ = &__ce_23; return JSValue.@"false"; }); });
-        _ = &first_byte;
+        const first_byte = (blk_catch_16: { break :blk_catch_16 ((reader.takeByte()) catch |__ce_16| { _ = &__ce_16; return JSValue.@"false"; }); });
         switch (first_byte) {
 10 => {
 return JSValue.@"false";
 },
 13 => {
-const next_byte = (blk_catch_24: { break :blk_catch_24 ((reader.takeByte()) catch |__ce_24| { _ = &__ce_24; return JSValue.@"false"; }); });
-        _ = &next_byte;
+const next_byte = (blk_catch_17: { break :blk_catch_17 ((reader.takeByte()) catch |__ce_17| { _ = &__ce_17; return JSValue.@"false"; }); });
         if ((next_byte == 10)) {
             return JSValue.@"false";
         }
 },
 'y', 'Y' => {
-const next_byte = (blk_catch_25: { break :blk_catch_25 ((reader.takeByte()) catch |__ce_25| { _ = &__ce_25; return JSValue.@"false"; }); });
-        _ = &next_byte;
+const next_byte = (blk_catch_18: { break :blk_catch_18 ((reader.takeByte()) catch |__ce_18| { _ = &__ce_18; return JSValue.@"false"; }); });
         if ((next_byte == 10)) {
             return JSValue.@"true";
         } else {
             if ((next_byte == 13)) {
-                const second_byte = (blk_catch_26: { break :blk_catch_26 ((reader.takeByte()) catch |__ce_26| { _ = &__ce_26; return JSValue.@"false"; }); });
-                _ = &second_byte;
+                const second_byte = (blk_catch_19: { break :blk_catch_19 ((reader.takeByte()) catch |__ce_19| { _ = &__ce_19; return JSValue.@"false"; }); });
                 if ((second_byte == 10)) {
                     return JSValue.@"true";
                 }
@@ -291,7 +248,7 @@ else => {
 
 },
 }
-        while ((blk_catch_27: { break :blk_catch_27 ((reader.takeByte()) catch |__ce_27| { _ = &__ce_27; break :blk_catch_27 null; }); })) |b| {
+        while ((blk_catch_20: { break :blk_catch_20 ((reader.takeByte()) catch |__ce_20| { _ = &__ce_20; break :blk_catch_20 null; }); })) |b| {
             if (((b == 10) or (b == 13))) {
                 break;
             }

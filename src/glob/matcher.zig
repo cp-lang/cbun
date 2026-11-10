@@ -3,415 +3,442 @@ const std = @import("std");
 const string = []const u8;
 
 const Brace = struct {
-    open_brace_idx: u32,
-    branch_idx: u32,
-};
+        open_brace_idx: u32,
+        branch_idx: u32,
+    };
 const BraceStack = bun.BoundedArray(Brace, 10);
-
 const MatchResult = enum {
-    no_match,
-    match,
+        no_match,
+        match,
 
-    negate_no_match,
-    negate_match,
+        negate_no_match,
+        negate_match,
 
-    pub fn matches(this: MatchResult) bool {
-        return this == .match or this == .negate_match;
-    }
-};
-
+        pub fn matches(this: MatchResult) bool {
+            return this == MatchResult.match or this == MatchResult.negate_match;
+        }
+    };
 const State = struct {
-    path_index: u32 = 0,
-    glob_index: u32 = 0,
+        path_index: u32 = 0,
+        glob_index: u32 = 0,
 
-    wildcard: Wildcard = .{},
-    globstar: Wildcard = .{},
+        wildcard: Wildcard = .{},
+        globstar: Wildcard = .{},
 
-    brace_depth: u8 = 0,
+        brace_depth: u8 = 0,
 
-    inline fn backtrack(self: *State) void {
-        self.path_index = self.wildcard.path_index;
-        self.glob_index = self.wildcard.glob_index;
-        self.brace_depth = self.wildcard.brace_depth;
-    }
-
-    inline fn skipToSeparator(self: *State, path: []const u8, is_end_invalid: bool) void {
-        if (self.path_index == path.len) {
-            self.wildcard.path_index += 1;
-            return;
+        inline fn backtrack(self: *State) void {
+            self.path_index = self.wildcard.path_index;
+            self.glob_index = self.wildcard.glob_index;
+            self.brace_depth = self.wildcard.brace_depth;
         }
 
-        var path_index = self.path_index;
-        while (path_index < path.len and !isSeparator(path[path_index])) {
-            path_index += 1;
+        inline fn skipToSeparator(self: *State, path: []const u8, is_end_invalid: bool) void {
+            if (self.path_index == path.len) {
+                self.wildcard.path_index += 1;
+                return;
+            }
+
+            var path_index = self.path_index;
+            while (path_index < path.len and !isSeparator(path[path_index])) {
+                path_index += 1;
+            }
+
+            if (is_end_invalid or path_index != path.len) {
+                path_index += 1;
+            }
+
+            self.wildcard.path_index = path_index;
+            self.globstar = self.wildcard;
         }
-
-        if (is_end_invalid or path_index != path.len) {
-            path_index += 1;
-        }
-
-        self.wildcard.path_index = path_index;
-        self.globstar = self.wildcard;
-    }
-};
-
+    };
 const Wildcard = struct {
-    glob_index: u32 = 0,
-    path_index: u32 = 0,
-    brace_depth: u8 = 0,
-};
+        glob_index: u32 = 0,
+        path_index: u32 = 0,
+        brace_depth: u8 = 0,
+    };
+const BraceIndex = struct {
+        start: u32 = 0,
+        end: u32 = 0,
+    };
+fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_array_lit(comptime Elem: type, init_slice: []const Elem) []const Elem { const buf = std.heap.page_allocator.alloc(Elem, init_slice.len) catch unreachable; if (init_slice.len > 0) @memcpy(buf, init_slice); return buf; }
+fn CpArrayElemType(comptime PtrT: type) type { const S0 = @typeInfo(PtrT).pointer.child; const S1 = if (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one) @typeInfo(S0).pointer.child else S0; return @typeInfo(S1).pointer.child; }
+fn cp_array_push(arr_ptr: anytype, item: anytype) void { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const SliceT = @TypeOf(target_ptr.*); const Elem = @typeInfo(SliceT).pointer.child; const old_slice = target_ptr.*; const new_slice = std.heap.page_allocator.alloc(Elem, old_slice.len + 1) catch unreachable; if (old_slice.len > 0) @memcpy(new_slice[0..old_slice.len], old_slice); new_slice[old_slice.len] = @as(Elem, cp_val(item)); target_ptr.* = new_slice; }
+fn cp_array_pop(arr_ptr: anytype) ?CpArrayElemType(@TypeOf(arr_ptr)) { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const s = target_ptr.*; if (s.len == 0) return null; const last = s[s.len - 1]; target_ptr.* = s[0 .. s.len - 1]; return last; }
+fn cp_container_clear(ptr: anytype) void { const S0 = @TypeOf(ptr.*); if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one and @typeInfo(@typeInfo(S0).pointer.child) == .@"struct" and @hasDecl(@typeInfo(S0).pointer.child, "clear"))) { ptr.*.clear(); } else { const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) ptr.* else ptr; target_ptr.* = target_ptr.*[0..0]; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+
+pub const bun = @import("bun");
 
 pub fn match(glob: []const u8, path: []const u8) MatchResult {
-    var state = State{};
-
-    var negated = false;
-    while (state.glob_index < glob.len and glob[state.glob_index] == '!') {
-        negated = !negated;
-        state.glob_index += 1;
-    }
-
-    var brace_stack = BraceStack.init(0) catch unreachable;
-    const matched = globMatchImpl(&state, glob, 0, path, &brace_stack);
-
-    if (negated) {
-        return if (matched) .negate_no_match else .negate_match;
-    } else {
-        return if (matched) .match else .no_match;
-    }
+        var state = State{  };
+        _ = &state;
+        var negated = false;
+        _ = &negated;
+        while (((state.glob_index < glob.len) and (glob[@as(usize, @intCast(state.glob_index))] == 33))) {
+            negated = (!negated);
+            state.glob_index = (state.glob_index + 1);
+        }
+        var brace_stack = ((BraceStack.init(0)) catch unreachable);
+        _ = &brace_stack;
+        const matched = globMatchImpl((&state), glob, 0, path, (&brace_stack));
+        if (negated) {
+            return (if (matched) MatchResult.negate_no_match else MatchResult.negate_match);
+        } else {
+            return (if (matched) MatchResult.match else MatchResult.no_match);
+        }
 }
 
-inline fn globMatchImpl(state: *State, glob: []const u8, glob_start: u32, path: []const u8, brace_stack: *BraceStack) bool {
-    main_loop: while (state.glob_index < glob.len or state.path_index < path.len) {
-        if (state.glob_index < glob.len) fallthrough: {
-            const char = glob[state.glob_index];
-            to_else: {
-                switch (char) {
-                    '*' => {
-                        const is_globstar =
-                            state.glob_index + 1 < glob.len and glob[state.glob_index + 1] == '*';
-                        if (is_globstar) {
-                            skipGlobstars(glob, &state.glob_index);
-                        }
-
-                        state.wildcard.glob_index = state.glob_index;
-                        state.wildcard.path_index = state.path_index + if (state.path_index < path.len) bun.strings.wtf8ByteSequenceLength(path[state.path_index]) else 1;
-                        state.wildcard.brace_depth = state.brace_depth;
-
-                        var in_globstar = false;
-                        if (is_globstar) {
-                            state.glob_index += 2;
-
-                            const is_end_invalid = state.glob_index < glob.len;
-
-                            if (is_end_invalid and state.path_index == path.len and glob.len - state.glob_index == 2 and isSeparator(glob[state.glob_index]) and glob[state.glob_index + 1] == '*') {
-                                continue;
-                            }
-
-                            if ((state.glob_index -| glob_start < 3 or glob[state.glob_index - 3] == '/') and (!is_end_invalid or glob[state.glob_index] == '/')) {
-                                if (is_end_invalid) {
-                                    state.glob_index += 1;
-                                }
-
-                                state.skipToSeparator(path, is_end_invalid);
-                                in_globstar = true;
-                            }
-                        } else {
-                            state.glob_index += 1;
-                        }
-
-                        if (!in_globstar and state.path_index < path.len and isSeparator(path[state.path_index])) {
-                            state.wildcard = state.globstar;
-                        }
-
-                        continue;
-                    },
-                    '?' => if (state.path_index < path.len) {
-                        if (!isSeparator(path[state.path_index])) {
-                            state.glob_index += 1;
-                            state.path_index += bun.strings.wtf8ByteSequenceLength(path[state.path_index]);
+pub inline fn globMatchImpl(state: *State, glob: []const u8, glob_start: u32, path: []const u8, brace_stack: *BraceStack) bool {
+        main_loop: while (((state.glob_index < glob.len) or (state.path_index < path.len))) {
+            if ((state.glob_index < glob.len)) {
+                _ = fallthrough: {
+                const char = glob[@as(usize, @intCast(state.glob_index))];
+                _ = to_else: {
+                break :to_else (switch (char) {
+'*' => {
+{
+                    const is_globstar = (((state.glob_index + 1) < glob.len) and (glob[@as(usize, @intCast((state.glob_index + 1)))] == 42));
+                    if (is_globstar) {
+                        _ = skipGlobstars(glob, (&state.glob_index));
+                    }
+                    state.wildcard.glob_index = state.glob_index;
+                    state.wildcard.path_index = (state.path_index + (if ((state.path_index < path.len)) bun.strings.wtf8ByteSequenceLength(path[@as(usize, @intCast(state.path_index))]) else 1));
+                    state.wildcard.brace_depth = state.brace_depth;
+                    var in_globstar = false;
+                    _ = &in_globstar;
+                    if (is_globstar) {
+                        state.glob_index = (state.glob_index + 2);
+                        const is_end_invalid = (state.glob_index < glob.len);
+                        if (((((is_end_invalid and (state.path_index == path.len)) and ((glob.len - state.glob_index) == 2)) and isSeparator(glob[@as(usize, @intCast(state.glob_index))])) and (glob[@as(usize, @intCast((state.glob_index + 1)))] == 42))) {
                             continue;
                         }
-                        break :fallthrough;
-                    } else break :to_else,
-                    '[' => if (state.path_index < path.len) {
-                        state.glob_index += 1;
-
-                        var negated = false;
-                        if (state.glob_index < glob.len and (glob[state.glob_index] == '^' or glob[state.glob_index] == '!')) {
-                            negated = true;
-                            state.glob_index += 1;
-                        }
-
-                        var first = true;
-                        var is_match = false;
-
-                        const len = bun.strings.wtf8ByteSequenceLength(path[state.path_index]);
-                        const c = bun.strings.decodeWTF8RuneT(path[state.path_index..].ptr[0..4], len, u32, 0xFFFD);
-
-                        while (state.glob_index < glob.len and (first or glob[state.glob_index] != ']')) {
-                            var low: u32 = glob[state.glob_index];
-                            var low_len: u8 = 1;
-                            if (!getUnicode(&low, &low_len, glob, &state.glob_index)) {
-                                return false;
+                        if (((((state.glob_index -| glob_start) < 3) or (glob[@as(usize, @intCast((state.glob_index - 3)))] == 47)) and ((!is_end_invalid) or (glob[@as(usize, @intCast(state.glob_index))] == 47)))) {
+                            if (is_end_invalid) {
+                                state.glob_index = (state.glob_index + 1);
                             }
-
-                            state.glob_index += low_len;
-
-                            const high = if (state.glob_index + 1 < glob.len and glob[state.glob_index] == '-' and glob[state.glob_index + 1] != ']') blk: {
-                                state.glob_index += 1;
-
-                                var high: u32 = glob[state.glob_index];
-                                var high_len: u8 = 1;
-                                if (!getUnicode(&high, &high_len, glob, &state.glob_index)) {
-                                    return false;
-                                }
-
-                                state.glob_index += high_len;
-                                break :blk high;
-                            } else low;
-
-                            if (low <= c and c <= high) {
-                                is_match = true;
-                            }
-
-                            first = false;
+                            _ = state.skipToSeparator(path, is_end_invalid);
+                            in_globstar = true;
                         }
-
-                        if (state.glob_index >= glob.len) {
-                            return false;
-                        }
-
-                        state.glob_index += 1;
-                        if (is_match != negated) {
-                            state.path_index += len;
-                            continue;
-                        }
-                        break :fallthrough;
-                    } else break :to_else,
-                    '{' => {
-                        for (brace_stack.slice()) |brace| {
-                            if (brace.open_brace_idx == state.glob_index) {
-                                state.glob_index = brace.branch_idx;
-                                state.brace_depth += 1;
-                                continue :main_loop;
-                            }
-                        }
-                        return matchBrace(state, glob, path, brace_stack);
-                    },
-                    ',' => if (state.brace_depth > 0) {
-                        skipBranch(state, glob);
-                        continue;
-                    } else break :to_else,
-                    '}' => if (state.brace_depth > 0) {
-                        skipBranch(state, glob);
-                        continue;
-                    } else break :to_else,
-                    else => break :to_else,
-                }
-            }
-            if (state.path_index < path.len) {
-                var cc: u8 = char;
-                if (!unescape(&cc, glob, &state.glob_index)) {
-                    return false;
-                }
-                const cc_len = bun.strings.wtf8ByteSequenceLength(cc);
-
-                const is_match = if (cc == '/')
-                    isSeparator(path[state.path_index])
-                else if (cc_len > 1)
-                    state.path_index + cc_len <= path.len and std.mem.eql(u8, path[state.path_index..][0..cc_len], glob[state.glob_index..][0..cc_len])
-                else
-                    path[state.path_index] == cc;
-
-                if (is_match) {
-                    state.glob_index += cc_len;
-                    state.path_index += cc_len;
-
-                    if (cc == '/') {
+                    } else {
+                        state.glob_index = (state.glob_index + 1);
+                    }
+                    if ((((!in_globstar) and (state.path_index < path.len)) and isSeparator(path[@as(usize, @intCast(state.path_index))]))) {
                         state.wildcard = state.globstar;
                     }
-
                     continue;
                 }
+},
+'?' => {
+if ((state.path_index < path.len)) {
+                    if ((!isSeparator(path[@as(usize, @intCast(state.path_index))]))) {
+                        state.glob_index = (state.glob_index + 1);
+                        state.path_index = (state.path_index + bun.strings.wtf8ByteSequenceLength(path[@as(usize, @intCast(state.path_index))]));
+                        continue;
+                    }
+                    break :fallthrough;
+                } else {
+                    break :to_else;
+                }
+},
+'[' => {
+if ((state.path_index < path.len)) {
+                    state.glob_index = (state.glob_index + 1);
+                    var negated = false;
+                    _ = &negated;
+                    if (((state.glob_index < glob.len) and ((glob[@as(usize, @intCast(state.glob_index))] == 94) or (glob[@as(usize, @intCast(state.glob_index))] == 33)))) {
+                        negated = true;
+                        state.glob_index = (state.glob_index + 1);
+                    }
+                    var first = true;
+                    _ = &first;
+                    var is_match = false;
+                    _ = &is_match;
+                    const len = bun.strings.wtf8ByteSequenceLength(path[@as(usize, @intCast(state.path_index))]);
+                    const rune = bun.strings.decodeWTF8RuneT(path[state.path_index..].ptr[0..4], len, u32, 65533);
+                    while (((state.glob_index < glob.len) and (first or (glob[@as(usize, @intCast(state.glob_index))] != 93)))) {
+                        var low: u32 = glob[@as(usize, @intCast(state.glob_index))];
+                        _ = &low;
+                        var low_len: u8 = 1;
+                        _ = &low_len;
+                        if ((!getUnicode((&low), (&low_len), glob, (&state.glob_index)))) {
+                            return false;
+                        }
+                        state.glob_index = (state.glob_index + low_len);
+                        const high = (if (((((state.glob_index + 1) < glob.len) and (glob[@as(usize, @intCast(state.glob_index))] == 45)) and (glob[@as(usize, @intCast((state.glob_index + 1)))] != 93))) blk: {
+                        state.glob_index = (state.glob_index + 1);
+                        var high: u32 = glob[@as(usize, @intCast(state.glob_index))];
+                        _ = &high;
+                        var high_len: u8 = 1;
+                        _ = &high_len;
+                        if ((!getUnicode((&high), (&high_len), glob, (&state.glob_index)))) {
+                            return false;
+                        }
+                        state.glob_index = (state.glob_index + high_len);
+                        break :blk high;
+} else low);
+                        if (((low <= rune) and (rune <= high))) {
+                            is_match = true;
+                        }
+                        first = false;
+                    }
+                    if ((state.glob_index >= glob.len)) {
+                        return false;
+                    }
+                    state.glob_index = (state.glob_index + 1);
+                    if ((is_match != negated)) {
+                        state.path_index = (state.path_index + len);
+                        continue;
+                    }
+                    break :fallthrough;
+                } else {
+                    break :to_else;
+                }
+},
+'{' => {
+{
+                    for (cp_iter_slice(brace_stack.slice())) |brace| {
+                        _ = &brace;
+                        if ((brace.open_brace_idx == state.glob_index)) {
+                            state.glob_index = brace.branch_idx;
+                            state.brace_depth = (state.brace_depth + 1);
+                            continue :main_loop;
+                        }
+                    }
+                    return matchBrace(state, glob, path, brace_stack);
+                }
+},
+',' => {
+if ((state.brace_depth > 0)) {
+                    _ = skipBranch(state, glob);
+                    continue;
+                } else {
+                    break :to_else;
+                }
+},
+'}' => {
+if ((state.brace_depth > 0)) {
+                    _ = skipBranch(state, glob);
+                    continue;
+                } else {
+                    break :to_else;
+                }
+},
+else => break :to_else,
+});
+
+};
+                if ((state.path_index < path.len)) {
+                    var cc: u8 = char;
+                    _ = &cc;
+                    if ((!unescape((&cc), glob, (&state.glob_index)))) {
+                        return false;
+                    }
+                    const cc_len = bun.strings.wtf8ByteSequenceLength(cc);
+                    const is_match = (if ((cc == 47)) isSeparator(path[@as(usize, @intCast(state.path_index))]) else (if ((cc_len > 1)) (((state.path_index + cc_len) <= path.len) and std.mem.eql(u8, path[state.path_index..][0..cc_len], glob[state.glob_index..][0..cc_len])) else (path[@as(usize, @intCast(state.path_index))] == cc)));
+                    if (is_match) {
+                        state.glob_index = (state.glob_index + cc_len);
+                        state.path_index = (state.path_index + cc_len);
+                        if ((cc == 47)) {
+                            state.wildcard = state.globstar;
+                        }
+                        continue;
+                    }
+                }
+};
             }
+            if (((state.wildcard.path_index > 0) and (state.wildcard.path_index <= path.len))) {
+                _ = state.backtrack();
+                continue;
+            }
+            return false;
         }
-
-        if (state.wildcard.path_index > 0 and state.wildcard.path_index <= path.len) {
-            state.backtrack();
-            continue;
-        }
-
-        return false;
-    }
-
-    return true;
+        return true;
 }
 
-fn matchBrace(state: *State, glob: []const u8, path: []const u8, brace_stack: *BraceStack) bool {
-    var brace_depth: i16 = 0;
-    var in_brackets = false;
-
-    const open_brace_index = state.glob_index;
-
-    var branch_index: u32 = 0;
-
-    while (state.glob_index < glob.len) {
-        switch (glob[state.glob_index]) {
-            '{' => if (!in_brackets) {
-                brace_depth += 1;
-                if (brace_depth == 1) {
-                    branch_index = state.glob_index + 1;
-                }
-            },
-            '}' => if (!in_brackets) {
-                brace_depth -= 1;
-                if (brace_depth == 0) {
-                    if (matchBraceBranch(state, glob, path, open_brace_index, branch_index, brace_stack)) {
-                        return true;
-                    }
-                    break;
-                }
-            },
-            ',' => if (brace_depth == 1) {
+pub fn matchBrace(state: *State, glob: []const u8, path: []const u8, brace_stack: *BraceStack) bool {
+        var brace_depth: i16 = 0;
+        _ = &brace_depth;
+        var in_brackets = false;
+        _ = &in_brackets;
+        const open_brace_index = state.glob_index;
+        var branch_index: u32 = 0;
+        _ = &branch_index;
+        while ((state.glob_index < glob.len)) {
+            switch (glob[@as(usize, @intCast(state.glob_index))]) {
+'{' => {
+_ = (if ((!in_brackets)) ({
+            brace_depth = (brace_depth + 1);
+            if ((brace_depth == 1)) {
+                branch_index = (state.glob_index + 1);
+            }
+}) else null);
+},
+'}' => {
+_ = (if ((!in_brackets)) ({
+            brace_depth = (brace_depth - 1);
+            if ((brace_depth == 0)) {
                 if (matchBraceBranch(state, glob, path, open_brace_index, branch_index, brace_stack)) {
                     return true;
                 }
-                branch_index = state.glob_index + 1;
-            },
-            '[' => if (!in_brackets) {
+                break;
+            }
+}) else null);
+},
+',' => {
+if ((brace_depth == 1)) {
+                if (matchBraceBranch(state, glob, path, open_brace_index, branch_index, brace_stack)) {
+                    return true;
+                }
+                branch_index = (state.glob_index + 1);
+            }
+},
+'[' => {
+if ((!in_brackets)) {
                 in_brackets = true;
-            },
-            ']' => in_brackets = false,
-            0x5C => state.glob_index += 1,
-            else => {},
+            }
+},
+']' => {
+in_brackets = false;
+},
+'\\' => {
+state.glob_index = (state.glob_index + 1);
+},
+else => {
+
+},
+}
+            state.glob_index = (state.glob_index + 1);
         }
-        state.glob_index += 1;
-    }
-
-    return false;
-}
-
-fn matchBraceBranch(state: *State, glob: []const u8, path: []const u8, open_brace_index: u32, branch_index: u32, brace_stack: *BraceStack) bool {
-    brace_stack.append(Brace{ .open_brace_idx = open_brace_index, .branch_idx = branch_index }) catch
         return false;
-
-    var branch_state = state.*;
-    branch_state.glob_index = branch_index;
-    branch_state.brace_depth = @intCast(brace_stack.len);
-
-    const matched = globMatchImpl(&branch_state, glob, branch_index, path, brace_stack);
-
-    _ = brace_stack.pop();
-
-    return matched;
 }
 
-fn skipBranch(state: *State, glob: []const u8) void {
-    var in_brackets = false;
-    const end_brace_depth = state.brace_depth - 1;
-    while (state.glob_index < glob.len) {
-        switch (glob[state.glob_index]) {
-            '{' => if (!in_brackets) {
-                state.brace_depth += 1;
-            },
-            '}' => if (!in_brackets) {
-                state.brace_depth -= 1;
-                if (state.brace_depth == end_brace_depth) {
-                    state.glob_index += 1;
+pub fn matchBraceBranch(state: *State, glob: []const u8, path: []const u8, open_brace_index: u32, branch_index: u32, brace_stack: *BraceStack) bool {
+        _ = (blk_catch_1: { break :blk_catch_1 ((brace_stack.append(Brace{ .open_brace_idx = open_brace_index, .branch_idx = branch_index })) catch |__ce_1| { _ = &__ce_1; return false; }); });
+        var branch_state = state.*;
+        _ = &branch_state;
+        branch_state.glob_index = branch_index;
+        branch_state.brace_depth = @intCast(brace_stack.len);
+        const matched = globMatchImpl((&branch_state), glob, branch_index, path, brace_stack);
+        _ = brace_stack.pop();
+        return matched;
+}
+
+pub fn skipBranch(state: *State, glob: []const u8) void {
+        var in_brackets = false;
+        _ = &in_brackets;
+        const end_brace_depth = (state.brace_depth - 1);
+        while ((state.glob_index < glob.len)) {
+            switch (glob[@as(usize, @intCast(state.glob_index))]) {
+'{' => {
+if ((!in_brackets)) {
+                state.brace_depth = (state.brace_depth + 1);
+            }
+},
+'}' => {
+if ((!in_brackets)) {
+                state.brace_depth = (state.brace_depth - 1);
+                if ((state.brace_depth == end_brace_depth)) {
+                    state.glob_index = (state.glob_index + 1);
                     return;
                 }
-            },
-            '[' => if (!in_brackets) {
+            }
+},
+'[' => {
+if ((!in_brackets)) {
                 in_brackets = true;
-            },
-            ']' => in_brackets = false,
-            0x5C => state.glob_index += 1,
-            else => {},
+            }
+},
+']' => {
+in_brackets = false;
+},
+'\\' => {
+state.glob_index = (state.glob_index + 1);
+},
+else => {
+
+},
+}
+            state.glob_index = (state.glob_index + 1);
         }
-        state.glob_index += 1;
-    }
 }
 
-inline fn isSeparator(c: u8) bool {
-    if (comptime @import("builtin").os.tag == .windows) return c == '/' or c == 0x5C;
-    return c == '/';
+pub inline fn isSeparator(c: u8) bool {
+        if (comptime (@import("builtin").os.tag == .windows)) {
+            return ((c == 47) or (c == 92));
+        }
+        return (c == 47);
 }
 
-inline fn unescape(c: *u8, glob: []const u8, glob_index: *u32) bool {
-    if (c.* == 0x5C) {
-        glob_index.* += 1;
-        if (glob_index.* >= glob.len)
-            return false;
-
-        c.* = switch (glob[glob_index.*]) {
-            'a' => 0x61,
-            'b' => 0x08,
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            else => |cc| cc,
-        };
-    }
-
-    return true;
-}
-
-inline fn getUnicode(c: *u32, clen: *u8, glob: []const u8, glob_index: *u32) bool {
-    bun.debugAssert(clen.* == 1);
-    switch (c.*) {
-        0x0...0x5B, 0x5D...0x7F => {
-            return true;
-        },
-        0x5C => {
-            glob_index.* += 1;
-            if (glob_index.* >= glob.len)
+pub inline fn unescape(c: *u8, glob: []const u8, glob_index: *u32) bool {
+        if ((c.* == 92)) {
+            glob_index.* = (glob_index.* + 1);
+            if ((glob_index.* >= glob.len)) {
                 return false;
-
-            c.* = switch (glob[glob_index.*]) {
-                'a' => 0x61,
-                'b' => 0x08,
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                else => |cc| brk: {
-                    const len = bun.strings.wtf8ByteSequenceLength(cc);
-                    clen.* = len;
-                    if (len == 1) {
-                        break :brk cc;
-                    }
-
-                    break :brk bun.strings.decodeWTF8RuneT(glob[glob_index.*..].ptr[0..4], len, u32, 0xFFFD);
-                },
-            };
-        },
-        else => {
-            const len = bun.strings.wtf8ByteSequenceLength(@truncate(c.*));
-            clen.* = len;
-
-            c.* = bun.strings.decodeWTF8RuneT(glob[glob_index.*..].ptr[0..4], len, u32, 0xFFFD);
-        },
-    }
-
-    return true;
+            }
+            c.* = @truncate((switch (glob[@as(usize, @intCast(glob_index.*))]) {
+'a' => 97,
+'b' => 8,
+'n' => 10,
+'r' => 13,
+'t' => 9,
+else => glob[@as(usize, @intCast(glob_index.*))],
+}));
+        }
+        return true;
 }
 
-inline fn skipGlobstars(glob: []const u8, glob_index: *u32) void {
-    glob_index.* += 2;
-
-    while (glob_index.* + 4 <= glob.len and std.mem.eql(u8, glob[glob_index.*..][0..4], "/**/")) {
-        glob_index.* += 3;
-    }
-
-    if (glob_index.* + 3 == glob.len and std.mem.eql(u8, glob[glob_index.*..][0..3], "/**")) {
-        glob_index.* += 3;
-    }
-
-    glob_index.* -= 2;
+pub inline fn getUnicode(c: *u32, clen: *u8, glob: []const u8, glob_index: *u32) bool {
+        _ = bun.debugAssert((clen.* == 1));
+        switch (c.*) {
+0...91, 93...127 => {
+return true;
+},
+'\\' => {
+glob_index.* = (glob_index.* + 1);
+        if ((glob_index.* >= glob.len)) {
+            return false;
+        }
+        c.* = @truncate((switch (glob[@as(usize, @intCast(glob_index.*))]) {
+'a' => 97,
+'b' => 8,
+'n' => 10,
+'r' => 13,
+'t' => 9,
+else => brk: {
+        const cc = glob[@as(usize, @intCast(glob_index.*))];
+        const len = bun.strings.wtf8ByteSequenceLength(cc);
+        clen.* = len;
+        if ((len == 1)) {
+            break :brk cc;
+        }
+        break :brk bun.strings.decodeWTF8RuneT(glob[glob_index.*..].ptr[0..4], len, u32, 65533);
+},
+}));
+},
+else => {
+const len = bun.strings.wtf8ByteSequenceLength(@truncate(c.*));
+        clen.* = len;
+        c.* = bun.strings.decodeWTF8RuneT(glob[glob_index.*..].ptr[0..4], len, u32, 65533);
+},
+}
+        return true;
 }
 
-const BraceIndex = struct {
-    start: u32 = 0,
-    end: u32 = 0,
-};
-
-const bun = @import("bun");
+pub inline fn skipGlobstars(glob: []const u8, glob_index: *u32) void {
+        glob_index.* = (glob_index.* + 2);
+        while ((((glob_index.* + 4) <= glob.len) and std.mem.eql(u8, glob[glob_index.*..][0..4], "/**/"))) {
+            glob_index.* = (glob_index.* + 3);
+        }
+        if ((((glob_index.* + 3) == glob.len) and std.mem.eql(u8, glob[glob_index.*..][0..3], "/**"))) {
+            glob_index.* = (glob_index.* + 3);
+        }
+        glob_index.* = (glob_index.* - 2);
+}

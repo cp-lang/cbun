@@ -45,8 +45,8 @@ export @root @value struct ProxyTunnel {
                 const ssl_ptr = wrapper.ssl ?? return;
                 const _hostname = client.hostname ?? client.url.hostname;
 
-                let mut hostname: cstring = "";
-                let mut hostname_needs_free = false;
+                var hostname: [:0]const u8 = "";
+                var hostname_needs_free = false;
                 if (!bun.strings.isIPAddress(_hostname)) {
                     if (_hostname.len < bun.http.temp_hostname.len) {
                         bun.copy(u8, bun.http.temp_hostname[0.._hostname.len], _hostname);
@@ -140,11 +140,11 @@ export @root @value struct ProxyTunnel {
             client.state.request_stage = .proxy_headers;
             client.state.request_sent_len = 0;
 
-            let mut cert_code: cstring = "";
+            var cert_code: [:0]const u8 = "";
             if (code := ssl_error.code) {
                 cert_code = code[0..bun.len(code):0];
             }
-            let mut cert_reason: cstring = "";
+            var cert_reason: [:0]const u8 = "";
             if (reason := ssl_error.reason) {
                 cert_reason = reason[0..bun.len(reason):0];
             }

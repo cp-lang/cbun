@@ -2,247 +2,183 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) {
-        return v.?;
-    } else {
-        return v;
-    }
-}
-const Walker = @This();
-
-stack: std.array_list.Managed(StackItem),
-name_buffer: NameBufferList,
-skip_filenames: []const u64 = &[_]u64{},
-skip_dirnames: []const u64 = &[_]u64{},
-skip_all: []const u64 = &[_]u64{},
-seed: u64 = 0,
-resolve_unknown_entry_types: bool = false,
-
-const NameBufferList = std.array_list.Managed(bun.OSPathChar);
-
-const WrappedIterator = DirIterator.NewWrappedIterator(if (Environment.isWindows) .u16 else .u8);
-
-pub const WalkerEntry = struct {
-    /// The containing directory. This can be used to operate directly on `basename`
-    /// rather than `path`, avoiding `error.NameTooLong` for deeply nested paths.
-    /// The directory remains open until `next` or `deinit` is called.
-    dir: FD,
-    basename: OSPathSliceZ,
-    path: OSPathSliceZ,
-    kind: std.fs.Dir.Entry.Kind,
-};
-
-const StackItem = struct {
-    iter: WrappedIterator,
-    dirname_len: usize,
-};
-
-/// After each call to this function, and on deinit(), the memory returned
-/// from this function becomes invalid. A copy must be made in order to keep
-/// a reference to the path.
-pub fn next(self: *Walker) bun.sys.Maybe(?WalkerEntry) {
-    while (self.stack.items.len != 0) {
-        // `top` becomes invalid after appending to `self.stack`
-        var top = &self.stack.items[self.stack.items.len - 1];
-        var dirname_len = top.dirname_len;
-        switch (top.iter.next()) {
-            .err => |err| return .initErr(err),
-            .result => |res| {
-                if (res) |base| {
-                    // Some filesystems (NFS, FUSE, bind mounts) don't provide
-                    // d_type and return DT_UNKNOWN. Optionally resolve via
-                    // fstatat so callers get accurate types for recursion.
-                    // This only affects POSIX; Windows always provides types.
-                    const kind: @TypeOf(base.kind) = if (comptime !Environment.isWindows)
-                        (if (base.kind == .unknown and self.resolve_unknown_entry_types) brk: {
-                            const dir_fd = top.iter.iter.dir;
-                            break :brk switch (bun.sys.lstatat(dir_fd, base.name.sliceAssumeZ())) {
-                                .result => |stat_buf| bun.sys.kindFromMode(stat_buf.mode),
-                                .err => continue, // skip entries we can't stat
-                            };
-                        } else base.kind)
-                    else
-                        base.kind;
-
-                    switch (kind) {
-                        .directory => {
-                            if (std.mem.indexOfScalar(
-                                u64,
-                                self.skip_dirnames,
-                                // avoid hashing if there will be 0 results
-                                if (self.skip_dirnames.len > 0) bun.hashWithSeed(self.seed, std.mem.sliceAsBytes(base.name.slice())) else 0,
-                            ) != null) continue;
-                        },
-                        .file => {
-                            if (std.mem.indexOfScalar(
-                                u64,
-                                self.skip_filenames,
-                                // avoid hashing if there will be 0 results
-                                if (self.skip_filenames.len > 0) bun.hashWithSeed(self.seed, std.mem.sliceAsBytes(base.name.slice())) else 0,
-                            ) != null) continue;
-                        },
-
-                        // we don't know what it is for a symlink
-                        .sym_link => {
-                            if (std.mem.indexOfScalar(
-                                u64,
-                                self.skip_all,
-                                // avoid hashing if there will be 0 results
-                                if (self.skip_all.len > 0) bun.hashWithSeed(self.seed, std.mem.sliceAsBytes(base.name.slice())) else 0,
-                            ) != null) continue;
-                        },
-
-                        else => {},
-                    }
-
-                    self.name_buffer.shrinkRetainingCapacity(dirname_len);
-                    if (self.name_buffer.items.len != 0) {
-                        bun.handleOom(self.name_buffer.append(path.sep));
-                        dirname_len += 1;
-                    }
-                    bun.handleOom(self.name_buffer.appendSlice(base.name.slice()));
-                    const cur_len = self.name_buffer.items.len;
-                    bun.handleOom(self.name_buffer.append(0));
-
-                    if (kind == .directory) {
-                        const new_dir = switch (bun.openDirForIterationOSPath(top.iter.iter.dir, base.name.slice())) {
-                            .result => |fd| fd,
-                            .err => |err| return .initErr(err),
-                        };
-                        {
-                            self.stack.append(StackItem{
-                                .iter = DirIterator.iterate(new_dir, if (Environment.isWindows) .u16 else .u8),
-                                .dirname_len = cur_len,
-                            }) catch |err| bun.handleOom(err);
-                            top = &self.stack.items[self.stack.items.len - 1];
-                        }
-                    }
-                    return .initResult(WalkerEntry{
-                        .dir = top.iter.iter.dir,
-                        .basename = self.name_buffer.items[dirname_len..cur_len :0],
-                        .path = self.name_buffer.items[0..cur_len :0],
-                        .kind = kind,
-                    });
-                } else {
-                    var item = self.stack.pop().?;
-                    if (self.stack.items.len != 0) {
-                        item.iter.iter.dir.close();
-                    }
-                }
-            },
-        }
-    }
-    return .initResult(null);
-}
-
-pub fn deinit(self: *Walker) void {
-    if (self.stack.items.len > 0) {
-        for (self.stack.items[1..]) |*item| {
-            if (self.stack.items.len != 0) {
-                item.iter.iter.dir.close();
-            }
-        }
-        self.stack.deinit();
-    }
-
-    self.name_buffer.allocator.free(self.skip_all);
-    self.name_buffer.deinit();
-}
-
-/// Recursively iterates over a directory.
-/// `self` must have been opened with `OpenDirOptions{.iterate = true}`.
-/// Must call `Walker.deinit` when done.
-/// The order of returned file system entries is undefined.
-/// `self` will not be closed after walking it.
-pub fn walk(
-    self: FD,
-    allocator: Allocator,
-    skip_filenames: []const OSPathSlice,
-    skip_dirnames: []const OSPathSlice,
-) OOM!Walker {
-    var name_buffer = NameBufferList.init(allocator);
-    errdefer name_buffer.deinit();
-
-    var stack = std.array_list.Managed(Walker.StackItem).init(allocator);
-    errdefer stack.deinit();
-
-    var skip_names = try allocator.alloc(u64, skip_filenames.len + skip_dirnames.len);
-    const seed = skip_filenames.len + skip_dirnames.len;
-    var skip_name_i: usize = 0;
-
-    for (skip_filenames) |name| {
-        skip_names[skip_name_i] = bun.hashWithSeed(seed, std.mem.sliceAsBytes(name));
-        skip_name_i += 1;
-    }
-    const skip_filenames_ = skip_names[0..skip_name_i];
-    var skip_dirnames_ = skip_names[skip_name_i..];
-
-    for (skip_dirnames, 0..) |name, i| {
-        skip_dirnames_[i] = bun.hashWithSeed(seed, std.mem.sliceAsBytes(name));
-    }
-
-    try stack.append(Walker.StackItem{
-        .iter = DirIterator.iterate(self, if (Environment.isWindows) .u16 else .u8),
-        .dirname_len = 0,
-    });
-
-    return Walker{
-        .stack = stack,
-        .name_buffer = name_buffer,
-        .skip_all = skip_names,
-        .seed = seed,
-        .skip_filenames = skip_filenames_,
-        .skip_dirnames = skip_dirnames_,
-    };
-}
-
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const Allocator = std.mem.Allocator;
 const path = std.fs.path;
-
 const DirIterator = bun.DirIterator;
 const Environment = bun.Environment;
 const FD = bun.FD;
 const OOM = bun.OOM;
 const OSPathSlice = bun.OSPathSlice;
 const OSPathSliceZ = bun.OSPathSliceZ;
-pub fn cp_string_from(val: anytype) []const u8 {
-    const T = @TypeOf(val);
-    if (comptime T == []const u8) {
-        return val;
-    } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) {
-        return std.mem.span(val);
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) {
-        return val;
-    } else if (comptime (@typeInfo(T) == .@"enum")) {
-        return @tagName(val);
-    } else if (comptime T == bool) {
-        return if (val) "true" else "false";
-    } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0";
-    } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0";
-    } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) {
-        return val.toString();
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) {
-        return val.toString();
-    } else {
-        return @typeName(T);
-    }
-}
+fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_array_lit(comptime Elem: type, init_slice: []const Elem) []const Elem { const buf = std.heap.page_allocator.alloc(Elem, init_slice.len) catch unreachable; if (init_slice.len > 0) @memcpy(buf, init_slice); return buf; }
+fn CpArrayElemType(comptime PtrT: type) type { const S0 = @typeInfo(PtrT).pointer.child; const S1 = if (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one) @typeInfo(S0).pointer.child else S0; return @typeInfo(S1).pointer.child; }
+fn cp_array_push(arr_ptr: anytype, item: anytype) void { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const SliceT = @TypeOf(target_ptr.*); const Elem = @typeInfo(SliceT).pointer.child; const old_slice = target_ptr.*; const new_slice = std.heap.page_allocator.alloc(Elem, old_slice.len + 1) catch unreachable; if (old_slice.len > 0) @memcpy(new_slice[0..old_slice.len], old_slice); new_slice[old_slice.len] = @as(Elem, cp_val(item)); target_ptr.* = new_slice; }
+fn cp_array_pop(arr_ptr: anytype) ?CpArrayElemType(@TypeOf(arr_ptr)) { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const s = target_ptr.*; if (s.len == 0) return null; const last = s[s.len - 1]; target_ptr.* = s[0 .. s.len - 1]; return last; }
+fn cp_container_clear(ptr: anytype) void { const S0 = @TypeOf(ptr.*); if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one and @typeInfo(@typeInfo(S0).pointer.child) == .@"struct" and @hasDecl(@typeInfo(S0).pointer.child, "clear"))) { ptr.*.clear(); } else { const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) ptr.* else ptr; target_ptr.* = target_ptr.*[0..0]; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@"struct".fields.len; return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
+pub fn CpUnpackSliceType(comptime T: type, comptime start_idx: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
+pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
 
 pub const bun = @import("bun");
+pub const Walker = @This();
+
+stack: std.array_list.Managed(StackItem),
+name_buffer: NameBufferList,
+skip_filenames: []const u64 = (&.{  }),
+skip_dirnames: []const u64 = (&.{  }),
+skip_all: []const u64 = (&.{  }),
+seed: u64 = 0,
+resolve_unknown_entry_types: bool = false,
+
+pub fn next(self: Walker) bun.sys.Maybe(?WalkerEntry) {
+        while ((self.stack.items.len != 0)) {
+            var top = (&self.stack.items[@as(usize, @intCast((self.stack.items.len - 1)))]);
+            _ = &top;
+            var dirname_len = top.dirname_len;
+            _ = &dirname_len;
+            switch (top.iter.next()) {
+.err => |e| {
+return .{ .initErr = e };
+},
+.result => |res| {
+if (res) |base| {
+                _ = &base;
+                const kind: @TypeOf(base.kind) = (if (comptime (!Environment.isWindows)) (if (((base.kind == .unknown) and self.resolve_unknown_entry_types)) brk: {
+                const dir_fd = top.iter.iter.dir;
+                break :brk (switch (bun.sys.lstatat(dir_fd, (if (comptime @typeInfo(@TypeOf(base)) == .@"enum" or @typeInfo(@TypeOf(base)) == .@"union") @tagName(base) else base.name).sliceAssumeZ())) {
+.result => |stat_buf| bun.sys.kindFromMode(stat_buf.mode),
+.err => |_| continue,
+});
+} else base.kind) else base.kind);
+                switch (kind) {
+.directory => {
+if ((std.mem.indexOfScalar(u64, self.skip_dirnames, (if ((self.skip_dirnames.len > 0)) bun.hashWithSeed(self.seed, std.mem.sliceAsBytes((if (comptime @typeInfo(@TypeOf(base)) == .@"enum" or @typeInfo(@TypeOf(base)) == .@"union") @tagName(base) else base.name).slice())) else 0)) != null)) {
+                    continue;
+                }
+},
+.file => {
+if ((std.mem.indexOfScalar(u64, self.skip_filenames, (if ((self.skip_filenames.len > 0)) bun.hashWithSeed(self.seed, std.mem.sliceAsBytes((if (comptime @typeInfo(@TypeOf(base)) == .@"enum" or @typeInfo(@TypeOf(base)) == .@"union") @tagName(base) else base.name).slice())) else 0)) != null)) {
+                    continue;
+                }
+},
+.sym_link => {
+if ((std.mem.indexOfScalar(u64, self.skip_all, (if ((self.skip_all.len > 0)) bun.hashWithSeed(self.seed, std.mem.sliceAsBytes((if (comptime @typeInfo(@TypeOf(base)) == .@"enum" or @typeInfo(@TypeOf(base)) == .@"union") @tagName(base) else base.name).slice())) else 0)) != null)) {
+                    continue;
+                }
+},
+else => {
+
+},
+}
+                _ = self.name_buffer.shrinkRetainingCapacity(dirname_len);
+                if ((self.name_buffer.items.len != 0)) {
+                    _ = bun.handleOom(self.name_buffer.append(path.sep));
+                    dirname_len = (dirname_len + 1);
+                }
+                _ = bun.handleOom(self.name_buffer.appendSlice((if (comptime @typeInfo(@TypeOf(base)) == .@"enum" or @typeInfo(@TypeOf(base)) == .@"union") @tagName(base) else base.name).slice()));
+                const cur_len = self.name_buffer.items.len;
+                _ = bun.handleOom(self.name_buffer.append(0));
+                if ((kind == .directory)) {
+                    const new_dir = (switch (bun.openDirForIterationOSPath(top.iter.iter.dir, (if (comptime @typeInfo(@TypeOf(base)) == .@"enum" or @typeInfo(@TypeOf(base)) == .@"union") @tagName(base) else base.name).slice())) {
+.result => |fd| fd,
+.err => |e| {
+return .{ .initErr = e };
+},
+});
+                    {
+                        _ = (blk_catch_0: { break :blk_catch_0 ((self.stack.append(StackItem{ .iter = DirIterator.iterate(new_dir, iter_kind), .dirname_len = cur_len })) catch |e| { _ = &e; break :blk_catch_0 bun.handleOom(e); }); });
+                        top = (&self.stack.items[@as(usize, @intCast((self.stack.items.len - 1)))]);
+                    }
+                }
+                return .{ .initResult = WalkerEntry{ .dir = top.iter.iter.dir, .basename = self.name_buffer.items[dirname_len..cur_len :0], .path = self.name_buffer.items[0..cur_len :0], .kind = kind } };
+            } else {
+                var item = (self.stack.pop()).?;
+                _ = &item;
+                if ((self.stack.items.len != 0)) {
+                    _ = item.iter.iter.dir.close();
+                }
+            }
+},
+}
+        }
+        return .{ .initResult = null };
+}
+
+pub fn deinit(self: Walker) void {
+        if ((self.stack.items.len > 0)) {
+            for (cp_iter_slice(self.stack.items[1..])) |item| {
+                _ = &item;
+                if ((self.stack.items.len != 0)) {
+                    _ = item.iter.iter.dir.close();
+                }
+            }
+            _ = self.stack.deinit();
+        }
+        _ = self.name_buffer.allocator.free(self.skip_all);
+        _ = self.name_buffer.deinit();
+}
+
+pub fn walk(self: Walker, allocator: Allocator, skip_filenames: []const OSPathSlice, skip_dirnames: []const OSPathSlice) OOM!Walker {
+        var name_buffer = NameBufferList.init(allocator);
+        _ = &name_buffer;
+        errdefer {
+        _ = name_buffer.deinit();
+        }
+        var stack = std.array_list.Managed(Walker.StackItem).init(allocator);
+        _ = &stack;
+        errdefer {
+        _ = stack.deinit();
+        }
+        var skip_names = try allocator.alloc(u64, (skip_filenames.len + skip_dirnames.len));
+        _ = &skip_names;
+        const seed = (skip_filenames.len + skip_dirnames.len);
+        var skip_name_i: usize = 0;
+        _ = &skip_name_i;
+        for (cp_iter_slice(skip_filenames)) |name| {
+            _ = &name;
+            skip_names[cp_cast_int(usize, skip_name_i)] = bun.hashWithSeed(seed, std.mem.sliceAsBytes(name));
+            skip_name_i = (skip_name_i + 1);
+        }
+        const skip_filenames_ = skip_names[0..skip_name_i];
+        var skip_dirnames_ = skip_names[skip_name_i..];
+        _ = &skip_dirnames_;
+        var mut_i: usize = 0;
+        _ = &mut_i;
+        for (cp_iter_slice(skip_dirnames)) |name| {
+            _ = &name;
+            skip_dirnames_[cp_cast_int(usize, mut_i)] = bun.hashWithSeed(seed, std.mem.sliceAsBytes(name));
+            mut_i = (mut_i + 1);
+        }
+        _ = try stack.append(Walker{ .StackItem = .{ .iter = DirIterator.iterate(self, iter_kind), .dirname_len = 0 } });
+        return Walker{ .stack = stack, .name_buffer = name_buffer, .skip_all = skip_names, .seed = seed, .skip_filenames = skip_filenames_, .skip_dirnames = skip_dirnames_ };
+}
+const NameBufferList = std.array_list.Managed(bun.OSPathChar);
+const iter_kind = if (Environment.isWindows) .u16 else .u8;
+const WrappedIterator = DirIterator.NewWrappedIterator(iter_kind);
+pub const WalkerEntry = struct {
+        /// The containing directory. This can be used to operate directly on `basename`
+        /// rather than `path`, avoiding `error.NameTooLong` for deeply nested paths.
+        /// The directory remains open until `next` or `deinit` is called.
+        dir: FD,
+        basename: OSPathSliceZ,
+        path: OSPathSliceZ,
+        kind: std.fs.Dir.Entry.Kind,
+    };
+const StackItem = struct {
+        iter: WrappedIterator,
+        dirname_len: usize,
+    };

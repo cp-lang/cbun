@@ -22,11 +22,11 @@ export class VTable {
     on_handshake: ?@c fn (*us_socket_t, i32, bun.uws.us_bun_verify_error_t, *!?): void = null,
 }
 
-export enum ConnectResult {
-    socket(*us_socket_t),
-    connecting(*ConnectingSocket),
-    failed,
-}
+pub const ConnectResult = union(enum) {
+    socket: *us_socket_t,
+    connecting: *ConnectingSocket,
+    failed: void,
+};
 
 @c {
     fn us_socket_group_init(g: *SocketGroup, loop: *Loop, vt: ?*const VTable, owner: *!?): void;
@@ -128,15 +128,11 @@ export @extern class SocketGroup {
     ): ConnectResult {
         let has_dns_resolved: i32 = 0;
         let ptr = us_socket_group_connect(this, kind as u8, ssl_ctx, host, port, options, socket_ext_size, &has_dns_resolved);
-        if (ptr == null) return ConnectResult.failed;
+        if (ptr == null) return .{ .failed = {} };
         if (has_dns_resolved != 0) {
-            unsafe {
-                return ConnectResult.socket(ptr.? as *us_socket_t);
-            }
+            return .{ .socket = @ptrCast(ptr.?) };
         } else {
-            unsafe {
-                return ConnectResult.connecting(ptr.? as *ConnectingSocket);
-            }
+            return .{ .connecting = @ptrCast(ptr.?) };
         }
     }
 
@@ -159,7 +155,7 @@ export @extern class SocketGroup {
         fd: bun.FD,
         ipc: bool,
     ): *us_socket_t? {
-        let mut ipc_int: i32 = 0;
+        var ipc_int: i32 = 0;
         if (ipc) {
             ipc_int = 1;
         }

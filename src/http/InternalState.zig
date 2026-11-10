@@ -2,29 +2,11 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
 const MutableString = bun.MutableString;
 pub const HTTPResponseMetadata = @import("./http.zig").HTTPResponseMetadata;
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 pub const CertificateInfo = @import("./CertificateInfo.zig").CertificateInfo;
 pub const Decompressor = @import("./Decompressor.zig").Decompressor;
 pub const Encoding = @import("../http_types/Encoding.zig").Encoding;
@@ -40,6 +22,10 @@ pub const HTTPStage = enum {
     proxy_handshake,
     proxy_headers,
     proxy_body,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 };
 
 pub const Stage = enum(u8) {
@@ -47,6 +33,10 @@ pub const Stage = enum(u8) {
     connect,
     done,
     fail,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 };
 
 pub const InternalStateFlags = packed struct(u8) {
@@ -100,15 +90,14 @@ pub fn reset(self: *InternalState, allocator: std.mem.Allocator) void {
         _ = self.compressed_body.deinit();
         _ = self.response_message_buffer.deinit();
         const body_msg = self.body_out_str;
-        _ = &body_msg;
         if (body_msg) |body| {
             _ = &body;
-            _ = cp_opt_unwrap(body).reset();
+            _ = (body).?.reset();
         }
         _ = self.decompressor.deinit();
         if (self.cloned_metadata) |*cloned_meta| {
             _ = &cloned_meta;
-            _ = cloned_meta.deinit(allocator);
+            _ = (cloned_meta.*).deinit(allocator);
             self.cloned_metadata = null;
         }
         if (self.certificate_info) |info| {
@@ -161,7 +150,6 @@ pub fn decompressBytes(self: *InternalState, buffer: []const u8, body_out: *bun.
                     if (((estimated_size > deflater.shared_buffer.len) and (estimated_size < ((32 * 1024) * 1024)))) {
                         _ = try body_out.list.ensureTotalCapacityPrecise(body_out.allocator, estimated_size);
                         const result = deflater.decompressor.decompress(buffer, body_out.list.allocatedSlice(), .gzip);
-                        _ = &result;
                         if ((result.status == .success)) {
                             body_out.list.items.len = result.written;
                             still_needs_to_decompress = false;
@@ -176,7 +164,6 @@ pub fn decompressBytes(self: *InternalState, buffer: []const u8, body_out: *bun.
                         enc = .gzip;
                     }
                     const result = deflater.decompressor.decompress(buffer, (&deflater.shared_buffer), enc);
-                    _ = &result;
                     if ((result.status == .success)) {
                         _ = try body_out.list.ensureTotalCapacityPrecise(body_out.allocator, result.written);
                         _ = body_out.list.appendSliceAssumeCapacity(deflater.shared_buffer[0..result.written]);
@@ -194,14 +181,11 @@ pub fn decompressBytes(self: *InternalState, buffer: []const u8, body_out: *bun.
                 _ = try body_out.growBy(grow_len);
             }
             _ = try self.decompressor.updateBuffers(self.encoding, buffer, body_out);
-            self.decompressor.readAll(self.isDone()) catch |err| {
-                _ = &err;
-                if ((self.isDone() or (error.ShortRead != err))) {
-                    _ = bun.Output.prettyErrorln("<r><red>Decompression error: {s}<r>", .{ bun.asByteSlice(@errorName(err)) });
-                    _ = bun.Output.flush();
-                    return err;
-                }
-            };
+            _ = (blk_catch_0: { break :blk_catch_0 ((self.decompressor.readAll(self.isDone())) catch |err| { _ = &err; if ((self.isDone() or (error.ShortRead != err))) {
+                _ = bun.Output.prettyErrorln("<r><red>Decompression error: {s}<r>", .{ bun.asByteSlice(@errorName(err)) });
+                _ = bun.Output.flush();
+                return err;
+            } }); });
         }
 }
 
@@ -214,7 +198,6 @@ pub fn processBodyBuffer(self: *InternalState, buffer: bun.MutableString, is_fin
             return false;
         }
         const body_msg = self.body_out_str;
-        _ = &body_msg;
         if (body_msg) |body_out| {
             _ = &body_out;
             switch (self.encoding) {
@@ -222,17 +205,14 @@ Encoding.brotli, Encoding.gzip, Encoding.deflate, Encoding.zstd => {
 _ = try self.decompress(buffer, body_out, is_final_chunk);
 },
 else => {
-if ((!cp_opt_unwrap(body_out).owns(buffer.list.items))) {
-                cp_opt_unwrap(body_out).append(buffer.list.items) catch |err| {
-                    _ = &err;
-                    _ = bun.Output.prettyErrorln("<r><red>Failed to append to body buffer: {s}<r>", .{ bun.asByteSlice(@errorName(err)) });
-                    _ = bun.Output.flush();
-                    return err;
-                };
+if ((!(body_out).?.owns(buffer.list.items))) {
+                _ = (blk_catch_1: { break :blk_catch_1 (((body_out).?.append(buffer.list.items)) catch |err| { _ = &err; _ = bun.Output.prettyErrorln("<r><red>Failed to append to body buffer: {s}<r>", .{ bun.asByteSlice(@errorName(err)) });
+                _ = bun.Output.flush();
+                return err; }); });
             }
 },
 }
-            return (cp_opt_unwrap(body_out).list.items.len > 0);
+            return ((body_out).?.list.items.len > 0);
         }
         return false;
 }

@@ -1,37 +1,37 @@
 // src/boringssl/boringssl.cp
 // BoringSSL bindings and X.509 verification in CP language
 
-zig {
-    pub const boring = @import("../boringssl_sys/boringssl.zig");
-    pub const c = boring;
-    pub const builtin = @import("builtin");
-    pub const ERR_toJS = @import("../runtime/crypto/boringssl_jsc.zig").ERR_toJS;
-    const std = @import("std");
-    const bun = @import("bun");
-    const strings = bun.strings;
+export import boring from "../boringssl_sys/boringssl.zig";
+export const c = boring;
+export import builtin from "builtin";
+export const ERR_toJS = @import("../runtime/crypto/boringssl_jsc.zig").ERR_toJS;
+import std from "std";
+import bun from "bun";
+const strings = bun.strings;
 
-    const INET6_ADDRSTRLEN = if (bun.Environment.isWindows) 65 else 46;
-    pub const OutIPBuf = *[INET6_ADDRSTRLEN + 1]u8;
-    pub const IPTextBuf = [INET6_ADDRSTRLEN + 1]u8;
-    pub const CStrPtr = [*:0]u8;
-    pub const GeneralNameStack = *boring.struct_stack_st_GENERAL_NAME;
-    pub const SSL_CTX_Ptr = ?*boring.SSL_CTX;
-    pub const SSL_Ptr = *boring.SSL;
-    pub const X509_Ptr = *boring.X509;
-    pub const ASN1_OCTET_STRING_Ptr = *boring.ASN1_OCTET_STRING;
-    pub export fn OPENSSL_memory_alloc(size: usize) ?*anyopaque {
-        return bun.mimalloc.mi_malloc(size);
-    }
+const INET6_ADDRSTRLEN = if (bun.Environment.isWindows) 65 else 46;
+const INET6_ADDRSTRLEN_BUF = if (bun.Environment.isWindows) 66 else 47;
+export type OutIPBuf = *[INET6_ADDRSTRLEN_BUF]u8;
+export type IPTextBuf = [INET6_ADDRSTRLEN_BUF]u8;
+export type CStrPtr = [*:0]u8;
+export type GeneralNameStack = *boring.struct_stack_st_GENERAL_NAME;
+export type SSL_CTX_Ptr = *boring.SSL_CTX?;
+export type SSL_Ptr = *boring.SSL;
+export type X509_Ptr = *boring.X509;
+export type ASN1_OCTET_STRING_Ptr = *boring.ASN1_OCTET_STRING;
 
-    pub export fn OPENSSL_memory_free(ptr: *anyopaque) void {
-        const len = bun.mimalloc.mi_usable_size(ptr);
-        @memset(@as([*]u8, @ptrCast(ptr))[0..len], 0);
-        bun.mimalloc.mi_free(ptr);
-    }
+export fn OPENSSL_memory_alloc(size: usize): *anyopaque? {
+    return bun.mimalloc.mi_malloc(size);
+}
 
-    pub export fn OPENSSL_memory_get_size(ptr: ?*const anyopaque) usize {
-        return bun.mimalloc.mi_usable_size(ptr);
-    }
+export fn OPENSSL_memory_free(ptr: *anyopaque): void {
+    const len = bun.mimalloc.mi_usable_size(ptr);
+    @memset(@as([*]u8, ptr)[0..len], 0);
+    bun.mimalloc.mi_free(ptr);
+}
+
+export fn OPENSSL_memory_get_size(ptr: *anyopaque?): usize {
+    return bun.mimalloc.mi_usable_size(ptr);
 }
 
 import * as X509 from "../runtime/api/bun/x509.cp";

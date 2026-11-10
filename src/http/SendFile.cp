@@ -29,13 +29,13 @@ export @root @value struct SendFile {
         const adjusted_count = adjusted_count_temporary as u63;
 
         if (bun.Environment.isLinux) {
-            let mut signed_offset: i64 = this.offset as i64;
+            var signed_offset: i64 = this.offset as i64;
             const begin = this.offset;
             const val = std.os.linux.sendfile(socket.fd().cast(), this.fd.cast(), &signed_offset, this.remain);
             this.offset = signed_offset as u64;
 
             const errcode = bun.sys.getErrno(val);
-            let mut diff: usize = 0;
+            var diff: usize = 0;
             if (this.offset > begin) {
                 diff = this.offset - begin;
             }
@@ -52,7 +52,7 @@ export @root @value struct SendFile {
                 return { err: bun.errnoToZigErr(errcode) };
             }
         } else if (bun.Environment.isFreeBSD) {
-            let mut sbytes: any = 0;
+            var sbytes: any = 0;
             const signed_offset: i64 = @bitCast(@as(u64, this.offset));
             const errcode = bun.sys.getErrno(std.c.sendfile(
                 this.fd.cast(),
@@ -77,7 +77,7 @@ export @root @value struct SendFile {
                 return { err: bun.errnoToZigErr(errcode) };
             }
         } else if (bun.Environment.isPosix) {
-            let mut sbytes: any = adjusted_count;
+            var sbytes: any = adjusted_count;
             const signed_offset: i64 = @bitCast(@as(u64, this.offset));
             const errcode = bun.sys.getErrno(std.c.sendfile(
                 this.fd.cast(),

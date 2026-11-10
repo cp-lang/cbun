@@ -2,50 +2,84 @@
 const std = @import("std");
 const string = []const u8;
 
-    const Environment = bun.Environment;
-    const log = bun.Output.scoped(.Loop, .visible);
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+pub const FieldInfo = struct {
+    name: []const u8,
+    typeName: []const u8,
+    meta: *Map,
+};
 
-    const c = struct {
-        pub extern fn us_create_loop(
-            hint: ?*anyopaque,
-            wakeup_cb: ?*const fn (*Loop) callconv(.c) void,
-            pre_cb: ?*const fn (*Loop) callconv(.c) void,
-            post_cb: ?*const fn (*Loop) callconv(.c) void,
-            ext_size: c_uint,
-        ) ?*Loop;
-        pub extern fn us_loop_free(loop: ?*Loop) void;
-        pub extern fn us_loop_ext(loop: ?*Loop) ?*anyopaque;
-        pub extern fn us_quic_loop_flush_if_pending(loop: *Loop) void;
-        pub extern fn us_loop_run(loop: ?*Loop) void;
-        pub extern fn us_loop_pump(loop: ?*Loop) void;
-        pub extern fn us_wakeup_loop(loop: ?*Loop) void;
-        pub extern fn us_loop_integrate(loop: ?*Loop) void;
-        pub extern fn us_loop_iteration_number(loop: ?*Loop) c_longlong;
-        pub extern fn uws_loop_addPostHandler(loop: *Loop, ctx: *anyopaque, cb: *const (fn (ctx: *anyopaque, loop: *Loop) callconv(.c) void)) void;
-        pub extern fn uws_loop_removePostHandler(loop: *Loop, ctx: *anyopaque, cb: *const (fn (ctx: *anyopaque, loop: *Loop) callconv(.c) void)) void;
-        pub extern fn uws_loop_addPreHandler(loop: *Loop, ctx: *anyopaque, cb: *const (fn (ctx: *anyopaque, loop: *Loop) callconv(.c) void)) void;
-        pub extern fn uws_loop_removePreHandler(loop: *Loop, ctx: *anyopaque, cb: *const (fn (ctx: *anyopaque, loop: *Loop) callconv(.c) void)) void;
-        pub extern fn us_loop_run_bun_tick(loop: ?*Loop, timouetMs: ?*const bun.timespec) void;
-        pub extern fn us_internal_free_closed_sockets(loop: *Loop) void;
-        pub extern fn us_loop_close_all_groups(loop: *Loop) c_int;
-        pub extern fn uws_get_loop() *Loop;
-        pub extern fn uws_get_loop_with_native(*anyopaque) *WindowsLoop;
-        pub extern fn uws_loop_defer(loop: *Loop, ctx: *anyopaque, cb: *const (fn (ctx: *anyopaque) callconv(.c) void)) void;
-        pub extern fn uws_res_clear_corked_socket(loop: *Loop) void;
-        pub extern fn uws_loop_date_header_timer_update(loop: *Loop) void;
-    };
-pub const Loop = if (bun.Environment.isWindows) WindowsLoop else PosixLoop;
+pub const MethodInfo = struct {
+    name: []const u8,
+    returnTypeName: []const u8,
+    paramNames: []const []const u8,
+    isAsync: bool,
+    isStatic: bool,
+    meta: *Map,
+};
+
+pub const TypeInfo = struct {
+    name: []const u8,
+    isRef: bool,
+    fields: []const FieldInfo,
+    methods: []const MethodInfo,
+    meta: *Map,
+    pub fn getField(self: *const TypeInfo, field_name: []const u8) ?FieldInfo {
+        for (self.fields) |f| {
+            if (std.mem.eql(u8, f.name, field_name)) return f;
+        }
+        return null;
+    }
+    pub fn getMethod(self: *const TypeInfo, method_name: []const u8) ?MethodInfo {
+        for (self.methods) |m| {
+            if (std.mem.eql(u8, m.name, method_name)) return m;
+        }
+        return null;
+    }
+};
 
 pub const bun = @import("bun");
 pub const InternalLoopData = @import("./InternalLoopData.zig").InternalLoopData;
+pub const LoopHandler = struct {
+    loop: *Loop,
+    cb: *const fn (*anyopaque, *Loop) callconv(.c) void,
+    
+pub fn _create(allocator: std.mem.Allocator) !*LoopHandler { const self_ptr = try allocator.create(LoopHandler); self_ptr.* = undefined; return self_ptr; }
+
+pub fn init(self: *LoopHandler, loop: *Loop, cb: *const fn (*anyopaque, *Loop) callconv(.c) void) void {
+            self.loop = loop;
+            self.cb = cb;
+    }
+
+pub fn removePost(self: *const LoopHandler) void {
+            {
+                _ = uws_loop_removePostHandler(self.loop, @as(*anyopaque, @ptrCast(@alignCast(self))), self.cb);
+            }
+    }
+
+pub fn removePre(self: *const LoopHandler) void {
+            {
+                _ = uws_loop_removePreHandler(self.loop, @as(*anyopaque, @ptrCast(@alignCast(self))), self.cb);
+            }
+    }
+};
+
 pub const PosixLoop = extern struct {
+    internal_loop_data: InternalLoopData align(16),
+    num_polls: i32 = 0,
+    num_ready_polls: i32 = 0,
+    current_ready_poll: i32 = 0,
+    fd: i32 = 0,
+    active: u32 = 0,
+    pending_wakeups: u32 = 0,
+    ready_polls: [1024]bun.EpollEvent align(16),
 
 pub fn uncork(self: *PosixLoop) void {
-            c.uws_res_clear_corked_socket(self);
+            _ = uws_res_clear_corked_socket(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
 pub fn updateDate(self: *PosixLoop) void {
-            c.uws_loop_date_header_timer_update(self);
+            _ = uws_loop_date_header_timer_update(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
 pub fn iterationNumber(self: *const PosixLoop) u64 {
@@ -53,25 +87,23 @@ pub fn iterationNumber(self: *const PosixLoop) u64 {
     }
 
 pub fn inc(self: *PosixLoop) void {
-            log("inc {d} + 1 = {d}", .{ self.num_polls, self.num_polls + 1 });
-            self.num_polls += 1;
+            self.num_polls = (self.num_polls + 1);
     }
 
 pub fn dec(self: *PosixLoop) void {
-            log("dec {d} - 1 = {d}", .{ self.num_polls, self.num_polls - 1 });
-            self.num_polls -= 1;
+            self.num_polls = (self.num_polls - 1);
     }
 
 pub fn ref(self: *PosixLoop) void {
-            log("ref {d} + 1 = {d} | {d} + 1 = {d}", .{ self.num_polls, self.num_polls + 1, self.active, self.active + 1 });
-            self.num_polls += 1;
-            self.active += 1;
+            self.num_polls = (self.num_polls + 1);
+            self.active = (self.active + 1);
     }
 
 pub fn unref(self: *PosixLoop) void {
-            log("unref {d} - 1 = {d} | {d} - 1 = {d}", .{ self.num_polls, self.num_polls - 1, self.active, self.active -| 1 });
-            self.num_polls -= 1;
-            self.active -|= 1;
+            self.num_polls = (self.num_polls - 1);
+            if ((self.active > 0)) {
+                self.active = (self.active - 1);
+            }
     }
 
 pub fn isActive(self: *const PosixLoop) bool {
@@ -79,78 +111,89 @@ pub fn isActive(self: *const PosixLoop) bool {
     }
 
 pub fn addActive(self: *PosixLoop, value: u32) void {
-            log("add {d} + {d} = {d}", .{ self.active, value, self.active +| value });
-            self.active +|= value;
+            self.active = (self.active + value);
     }
 
 pub fn subActive(self: *PosixLoop, value: u32) void {
-            log("sub {d} - {d} = {d}", .{ self.active, value, self.active -| value });
-            self.active -|= value;
+            if ((self.active > value)) {
+                self.active = (self.active - value);
+            } else {
+                self.active = 0;
+            }
     }
 
 pub fn unrefCount(self: *PosixLoop, count: i32) void {
-            log("unref x {d}", .{count});
-            self.num_polls -= count;
-            self.active -|= @as(u32, @intCast(count));
+            self.num_polls = (self.num_polls - count);
+            var c_u32 = (if (comptime @typeInfo(@TypeOf(count)) == .@"enum") cp_cast_int(u32, @intFromEnum(count)) else cp_cast_int(u32, count));
+            _ = &c_u32;
+            if ((self.active > c_u32)) {
+                self.active = (self.active - c_u32);
+            } else {
+                self.active = 0;
+            }
     }
 
 pub fn get() *Loop {
-            return c.uws_get_loop();
+            return uws_get_loop();
     }
 
 pub fn drainQuicIfNecessary(self: *PosixLoop) void {
             if ((self.internal_loop_data.quic_head == null)) {
                 return;
             }
-            c.us_quic_loop_flush_if_pending(self);
+            _ = us_quic_loop_flush_if_pending(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
-pub fn create(comptime Handler: anytype) *Loop {
-            return c.us_create_loop(
-                null,
-                Handler.wakeup,
-                if (@hasDecl(Handler, "pre")) Handler.pre else null,
-                if (@hasDecl(Handler, "post")) Handler.post else null,
-                0,
-            ).?;
+pub fn create(comptime Handler: type) *Loop {
+            var mut_pre_cb = (if (@hasDecl(Handler, "pre")) Handler.pre else null);
+            var __mut_pre_cb_moved = false; _ = &__mut_pre_cb_moved;
+            defer if (!__mut_pre_cb_moved) { const T = @TypeOf(mut_pre_cb); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = mut_pre_cb.release() catch {}; } else { mut_pre_cb.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = mut_pre_cb; _drop_val.release(); } };
+            var mut_post_cb = (if (@hasDecl(Handler, "post")) Handler.post else null);
+            var __mut_post_cb_moved = false; _ = &__mut_post_cb_moved;
+            defer if (!__mut_post_cb_moved) { const T = @TypeOf(mut_post_cb); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = mut_post_cb.release() catch {}; } else { mut_post_cb.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = mut_post_cb; _drop_val.release(); } };
+            return (us_create_loop(null, Handler.wakeup, mut_pre_cb, mut_post_cb, 0)).?;
     }
 
 pub fn wakeup(self: *PosixLoop) void {
-            return c.us_wakeup_loop(self);
+            _ = us_wakeup_loop(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
 pub fn tick(self: *PosixLoop) void {
-            c.us_loop_run_bun_tick(self, null);
+            _ = us_loop_run_bun_tick(@as(*Loop, @ptrCast(@alignCast(self))), null);
     }
 
 pub fn tickWithoutIdle(self: *PosixLoop) void {
-            const timespec = bun.timespec{ .sec = 0, .nsec = 0 };
-            c.us_loop_run_bun_tick(self, &timespec);
+            const ts: bun.timespec = .{ sec = 0, nsec = 0 };
+            _ = us_loop_run_bun_tick(@as(*Loop, @ptrCast(@alignCast(self))), (&ts));
     }
 
 pub fn tickWithTimeout(self: *PosixLoop, timespec: ?*const bun.timespec) void {
-            c.us_loop_run_bun_tick(self, timespec);
+            _ = us_loop_run_bun_tick(@as(*Loop, @ptrCast(@alignCast(self))), timespec);
     }
 
 pub fn drainClosedSockets(self: *PosixLoop) void {
-            c.us_internal_free_closed_sockets(self);
+            _ = us_internal_free_closed_sockets(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
 pub fn closeAllGroups(self: *PosixLoop) bool {
-            return c.us_loop_close_all_groups(self) != 0;
+            return (us_loop_close_all_groups(@as(*Loop, @ptrCast(@alignCast(self)))) != 0);
     }
 
-pub fn nextTick(self: *PosixLoop, comptime UserType: type, user_data: *UserType, comptime deferCallback: anytype) void {
+pub fn nextTick(self: *PosixLoop, comptime UserType: type, user_data: UserType, comptime deferCallback: anytype) void {
             const Handler = struct {
-                pub fn callback(data: *anyopaque) callconv(.c) void {
-                    deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
-                }
-            };
-            c.uws_loop_defer(self, user_data, Handler.callback);
+            pub fn callback(data: *anyopaque) callconv(.c) void {
+                deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
+            }
+        };
+            var __Handler_moved = false; _ = &__Handler_moved;
+            defer if (!__Handler_moved) { const T = @TypeOf(Handler); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = Handler.release() catch {}; } else { Handler.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = Handler; _drop_val.release(); } };
+            {
+                _ = uws_loop_defer(@as(*Loop, @ptrCast(@alignCast(self))), @as(*anyopaque, @ptrCast(@alignCast(user_data))), Handler.callback);
+            }
     }
 
 pub fn run(self: *PosixLoop) void {
-            c.us_loop_run(self);
+            _ = us_loop_run(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
 pub fn shouldEnableDateHeaderTimer(self: *const PosixLoop) bool {
@@ -162,82 +205,41 @@ pub fn release(self: *PosixLoop) void {
     }
 
 pub fn deinit(self: *PosixLoop) void {
-            c.us_loop_free(self);
+            _ = us_loop_free(@as(*Loop, @ptrCast(@alignCast(self))));
     }
-    internal_loop_data: InternalLoopData align(16),
-            num_polls: i32,
-            num_ready_polls: i32,
-            current_ready_poll: i32,
-            fd: i32,
-            active: u32 = 0,
-            pending_wakeups: u32 = 0,
-            ready_polls: [1024]EventType align(16),
-    
-            const EventType = switch (Environment.os) {
-                .linux => std.os.linux.epoll_event,
-                .mac => std.posix.system.kevent64_s,
-                .freebsd => std.c.Kevent,
-                .windows => *anyopaque,
-                .wasm => @compileError("Unsupported OS"),
-            };
-    
-            pub const wake = wakeup;
-    
-            fn NewHandler(comptime UserType: type, comptime callback_fn: fn (UserType) void) type {
-                return struct {
-                    loop: *Loop,
-                    pub fn removePost(handler: @This()) void {
-                        return c.uws_loop_removePostHandler(handler.loop, callback);
-                    }
-                    pub fn removePre(handler: @This()) void {
-                        return c.uws_loop_removePostHandler(handler.loop, callback);
-                    }
-                    pub fn callback(data: *anyopaque, _: *Loop) callconv(.c) void {
-                        callback_fn(@as(UserType, @ptrCast(@alignCast(data))));
-                    }
-                };
-            }
-    pub fn addPostHandler(this: *PosixLoop, comptime UserType: type, ctx: UserType, comptime callback: fn (UserType) void) NewHandler(UserType, callback) {
-                const Handler = NewHandler(UserType, callback);
-                c.uws_loop_addPostHandler(this, ctx, Handler.callback);
-                return Handler{
-                    .loop = this,
-                };
-            }
-    
-            pub fn addPreHandler(this: *PosixLoop, comptime UserType: type, ctx: UserType, comptime callback: fn (UserType) void) NewHandler(UserType, callback) {
-                const Handler = NewHandler(UserType, callback);
-                c.uws_loop_addPreHandler(this, ctx, Handler.callback);
-                return Handler{
-                    .loop = this,
-                };
-            }
 };
 
 pub const WindowsLoop = extern struct {
+    internal_loop_data: InternalLoopData align(16),
+    uv_loop: *bun.windows.libuv.Loop,
+    is_default: i32 = 0,
+    pre: *bun.windows.libuv.uv_prepare_t,
+    check: *bun.windows.libuv.uv_check_t,
 
 pub fn shouldEnableDateHeaderTimer(self: *const WindowsLoop) bool {
             return self.internal_loop_data.shouldEnableDateHeaderTimer();
     }
 
 pub fn uncork(self: *WindowsLoop) void {
-            c.uws_res_clear_corked_socket(self);
+            _ = uws_res_clear_corked_socket(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
 pub fn get() *WindowsLoop {
-            return c.uws_get_loop_with_native(bun.windows.libuv.Loop.get());
+            {
+                return uws_get_loop_with_native(@as(*anyopaque, @ptrCast(@alignCast(bun.windows.libuv.Loop.get()))));
+            }
     }
 
 pub fn iterationNumber(self: *const WindowsLoop) u64 {
             return self.internal_loop_data.iteration_nr;
     }
 
-pub fn addActive(self: *const WindowsLoop, val: u32) void {
-            self.uv_loop.addActive(val);
+pub fn addActive(self: *WindowsLoop, val: u32) void {
+            _ = self.uv_loop.addActive(val);
     }
 
-pub fn subActive(self: *const WindowsLoop, val: u32) void {
-            self.uv_loop.subActive(val);
+pub fn subActive(self: *WindowsLoop, val: u32) void {
+            _ = self.uv_loop.subActive(val);
     }
 
 pub fn isActive(self: *const WindowsLoop) bool {
@@ -245,66 +247,70 @@ pub fn isActive(self: *const WindowsLoop) bool {
     }
 
 pub fn wakeup(self: *WindowsLoop) void {
-            c.us_wakeup_loop(self);
+            _ = us_wakeup_loop(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
 pub fn tickWithTimeout(self: *WindowsLoop, timespec: ?*const bun.timespec) void {
-            _ = timespec;
-            c.us_loop_run(self);
+        _ = timespec;
+            _ = us_loop_run(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
 pub fn tickWithoutIdle(self: *WindowsLoop) void {
-            c.us_loop_pump(self);
+            _ = us_loop_pump(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
 pub fn drainQuicIfNecessary(self: *WindowsLoop) void {
             if ((self.internal_loop_data.quic_head == null)) {
                 return;
             }
-            c.us_quic_loop_flush_if_pending(self);
+            _ = us_quic_loop_flush_if_pending(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
-pub fn create(comptime Handler: anytype) *WindowsLoop {
-            return c.us_create_loop(
-                null,
-                Handler.wakeup,
-                if (@hasDecl(Handler, "pre")) Handler.pre else null,
-                if (@hasDecl(Handler, "post")) Handler.post else null,
-                0,
-            ).?;
+pub fn create(comptime Handler: type) *WindowsLoop {
+            var mut_pre_cb = (if (@hasDecl(Handler, "pre")) Handler.pre else null);
+            var __mut_pre_cb_moved = false; _ = &__mut_pre_cb_moved;
+            defer if (!__mut_pre_cb_moved) { const T = @TypeOf(mut_pre_cb); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = mut_pre_cb.release() catch {}; } else { mut_pre_cb.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = mut_pre_cb; _drop_val.release(); } };
+            var mut_post_cb = (if (@hasDecl(Handler, "post")) Handler.post else null);
+            var __mut_post_cb_moved = false; _ = &__mut_post_cb_moved;
+            defer if (!__mut_post_cb_moved) { const T = @TypeOf(mut_post_cb); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = mut_post_cb.release() catch {}; } else { mut_post_cb.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = mut_post_cb; _drop_val.release(); } };
+            return @as(*WindowsLoop, @ptrCast(@alignCast((us_create_loop(null, Handler.wakeup, mut_pre_cb, mut_post_cb, 0)).?)));
     }
 
 pub fn run(self: *WindowsLoop) void {
-            c.us_loop_run(self);
+            _ = us_loop_run(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
 pub fn inc(self: *WindowsLoop) void {
-            self.uv_loop.inc();
+            _ = self.uv_loop.inc();
     }
 
 pub fn dec(self: *WindowsLoop) void {
-            self.uv_loop.dec();
+            _ = self.uv_loop.dec();
     }
 
 pub fn drainClosedSockets(self: *WindowsLoop) void {
-            c.us_internal_free_closed_sockets(self);
+            _ = us_internal_free_closed_sockets(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
 pub fn closeAllGroups(self: *WindowsLoop) bool {
-            return c.us_loop_close_all_groups(self) != 0;
+            return (us_loop_close_all_groups(@as(*Loop, @ptrCast(@alignCast(self)))) != 0);
     }
 
-pub fn nextTick(self: *WindowsLoop, comptime UserType: type, user_data: *UserType, comptime deferCallback: anytype) void {
+pub fn nextTick(self: *WindowsLoop, comptime UserType: type, user_data: UserType, comptime deferCallback: anytype) void {
             const Handler = struct {
-                pub fn callback(data: *anyopaque) callconv(.c) void {
-                    deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
-                }
-            };
-            c.uws_loop_defer(self, user_data, Handler.callback);
+            pub fn callback(data: *anyopaque) callconv(.c) void {
+                deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
+            }
+        };
+            var __Handler_moved = false; _ = &__Handler_moved;
+            defer if (!__Handler_moved) { const T = @TypeOf(Handler); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = Handler.release() catch {}; } else { Handler.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = Handler; _drop_val.release(); } };
+            {
+                _ = uws_loop_defer(@as(*Loop, @ptrCast(@alignCast(self))), @as(*anyopaque, @ptrCast(@alignCast(user_data))), Handler.callback);
+            }
     }
 
 pub fn updateDate(self: *WindowsLoop) void {
-            c.uws_loop_date_header_timer_update(self);
+            _ = uws_loop_date_header_timer_update(@as(*Loop, @ptrCast(@alignCast(self))));
     }
 
 pub fn release(self: *WindowsLoop) void {
@@ -312,34 +318,50 @@ pub fn release(self: *WindowsLoop) void {
     }
 
 pub fn deinit(self: *WindowsLoop) void {
-            c.us_loop_free(self);
+            _ = us_loop_free(@as(*Loop, @ptrCast(@alignCast(self))));
     }
-    const uv = bun.windows.libuv;
-            internal_loop_data: InternalLoopData align(16),
-            uv_loop: *uv.Loop,
-            is_default: c_int,
-            pre: *uv.uv_prepare_t,
-            check: *uv.uv_check_t,
-    
-            pub const wake = wakeup;
-            pub const tick = run;
-            pub const wait = run;
-            pub const ref = inc;
-            pub const unref = dec;
-    
-            fn NewHandler(comptime UserType: type, comptime callback_fn: fn (UserType) void) type {
-                return struct {
-                    loop: *Loop,
-                    pub fn removePost(handler: @This()) void {
-                        return c.uws_loop_removePostHandler(handler.loop, callback);
-                    }
-                    pub fn removePre(handler: @This()) void {
-                        return c.uws_loop_removePostHandler(handler.loop, callback);
-                    }
-                    pub fn callback(data: *anyopaque, _: *Loop) callconv(.c) void {
-                        callback_fn(@as(UserType, @ptrCast(@alignCast(data))));
-                    }
-                };
-            }
 };
 
+pub const Loop = *PosixLoop;
+
+pub extern "c" fn us_create_loop(hint: ?*anyopaque, wakeup_cb: ?*const fn (*Loop) callconv(.c) void, pre_cb: ?*const fn (*Loop) callconv(.c) void, post_cb: ?*const fn (*Loop) callconv(.c) void, ext_size: u32) callconv(.c) ?*Loop;
+
+pub extern "c" fn us_loop_free(loop: ?*Loop) callconv(.c) void;
+
+pub extern "c" fn us_loop_ext(loop: ?*Loop) callconv(.c) ?*anyopaque;
+
+pub extern "c" fn us_quic_loop_flush_if_pending(loop: *Loop) callconv(.c) void;
+
+pub extern "c" fn us_loop_run(loop: ?*Loop) callconv(.c) void;
+
+pub extern "c" fn us_loop_pump(loop: ?*Loop) callconv(.c) void;
+
+pub extern "c" fn us_wakeup_loop(loop: ?*Loop) callconv(.c) void;
+
+pub extern "c" fn us_loop_integrate(loop: ?*Loop) callconv(.c) void;
+
+pub extern "c" fn us_loop_iteration_number(loop: ?*Loop) callconv(.c) i64;
+
+pub extern "c" fn uws_loop_addPostHandler(loop: *Loop, ctx: *anyopaque, cb: *const fn (*anyopaque, *Loop) callconv(.c) void) callconv(.c) void;
+
+pub extern "c" fn uws_loop_removePostHandler(loop: *Loop, ctx: *anyopaque, cb: *const fn (*anyopaque, *Loop) callconv(.c) void) callconv(.c) void;
+
+pub extern "c" fn uws_loop_addPreHandler(loop: *Loop, ctx: *anyopaque, cb: *const fn (*anyopaque, *Loop) callconv(.c) void) callconv(.c) void;
+
+pub extern "c" fn uws_loop_removePreHandler(loop: *Loop, ctx: *anyopaque, cb: *const fn (*anyopaque, *Loop) callconv(.c) void) callconv(.c) void;
+
+pub extern "c" fn us_loop_run_bun_tick(loop: ?*Loop, timeout_ms: ?*const bun.timespec) callconv(.c) void;
+
+pub extern "c" fn us_internal_free_closed_sockets(loop: *Loop) callconv(.c) void;
+
+pub extern "c" fn us_loop_close_all_groups(loop: *Loop) callconv(.c) i32;
+
+pub extern "c" fn uws_get_loop() callconv(.c) *Loop;
+
+pub extern "c" fn uws_get_loop_with_native(native: *anyopaque) callconv(.c) *WindowsLoop;
+
+pub extern "c" fn uws_loop_defer(loop: *Loop, ctx: *anyopaque, cb: *const fn (*anyopaque) callconv(.c) void) callconv(.c) void;
+
+pub extern "c" fn uws_res_clear_corked_socket(loop: *Loop) callconv(.c) void;
+
+pub extern "c" fn uws_loop_date_header_timer_update(loop: *Loop) callconv(.c) void;

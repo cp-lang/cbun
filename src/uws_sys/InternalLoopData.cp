@@ -47,13 +47,17 @@ export @extern class InternalLoopData {
 
     pub fn setParentEventLoop(*this, parent: anytype): void {
         switch (parent) {
-            .js(ptr) => {
+            .js => |ptr| {
                 this.parent_tag = 1;
-                this.parent_ptr = ptr as *any!;
+                unsafe {
+                    this.parent_ptr = ptr as *any!;
+                }
             },
-            .mini(ptr) => {
+            .mini => |ptr| {
                 this.parent_tag = 2;
-                this.parent_ptr = ptr as *any!;
+                unsafe {
+                    this.parent_ptr = ptr as *any!;
+                }
             },
         }
     }
@@ -61,8 +65,8 @@ export @extern class InternalLoopData {
     pub fn getParent(*this): bun.jsc.EventLoopHandle {
         let parent = this.parent_ptr ?? bun.Output.panic("Parent loop not set - pointer is null");
         return switch (this.parent_tag) {
-            1 => bun.jsc.EventLoopHandle { js = parent as *bun.jsc.EventLoop },
-            2 => bun.jsc.EventLoopHandle { mini = parent as *bun.jsc.MiniEventLoop },
+            1 => bun.jsc.EventLoopHandle { js = unsafe { parent as *bun.jsc.EventLoop } },
+            2 => bun.jsc.EventLoopHandle { mini = unsafe { parent as *bun.jsc.MiniEventLoop } },
             else => bun.Output.panic("Parent loop not set or corrupted"),
         };
     }

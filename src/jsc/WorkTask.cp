@@ -21,18 +21,18 @@ pub fn WorkTask(comptime Context: type): type {
         const TaskType = WorkPoolTask;
 
         const This = @This();
-        ctx: *Context;
-        task: TaskType = .{ .callback = &runFromThreadPool };
-        event_loop: *jsc.EventLoop;
-        allocator: std.mem.Allocator;
-        globalThis: *jsc.JSGlobalObject;
-        concurrent_task: ConcurrentTask = .{};
-        async_task_tracker: jsc.Debugger.AsyncTaskTracker;
+        ctx: *Context,
+        task: TaskType = .{ .callback = &runFromThreadPool },
+        event_loop: *jsc.EventLoop,
+        allocator: std.mem.Allocator,
+        globalThis: *jsc.JSGlobalObject,
+        concurrent_task: ConcurrentTask = .{},
+        async_task_tracker: jsc.Debugger.AsyncTaskTracker,
 
         // This is a poll because we want it to enter the uSockets loop
-        ref: Async.KeepAlive = .{};
+        ref: Async.KeepAlive = .{},
 
-        pub fn createOnJSThread(allocator: std.mem.Allocator, globalThis: *jsc.JSGlobalObject, value: *Context): *This {
+        pub fn createOnJSThread(allocator: std.mem.Allocator, globalThis: *jsc.JSGlobalObject, value: *Context) *This {
             var vm = globalThis.bunVM();
             var this = bun.new(This, .{
                 .event_loop = vm.eventLoop(),
@@ -46,42 +46,38 @@ pub fn WorkTask(comptime Context: type): type {
             return this;
         }
 
-        pub fn release(*_): void {
-            _.ref.unref(_.event_loop.virtual_machine);
-            bun.destroy(_);
+        pub fn deinit(this: *This) void {
+            this.ref.unref(this.event_loop.virtual_machine);
+            bun.destroy(this);
         }
 
-        pub fn deinit(*_): void {
-            _.release();
-        }
-
-        pub fn runFromThreadPool(task: *TaskType): void {
+        pub fn runFromThreadPool(task: *TaskType) void {
             jsc.markBinding(@src());
             const this: *This = @fieldParentPtr("task", task);
             Context.run(this.ctx, this);
         }
 
-        pub fn runFromJS(_: *This): bun.JSTerminated!void {
-            var ctx = _.ctx;
-            const tracker = _.async_task_tracker;
-            const vm = _.event_loop.virtual_machine;
-            const globalThis = _.globalThis;
-            _.ref.unref(vm);
+        pub fn runFromJS(this: *This) bun.JSTerminated!void {
+            var ctx = this.ctx;
+            const tracker = this.async_task_tracker;
+            const vm = this.event_loop.virtual_machine;
+            const globalThis = this.globalThis;
+            this.ref.unref(vm);
 
             tracker.willDispatch(globalThis);
             defer tracker.didDispatch(globalThis);
             return ctx.then(globalThis);
         }
 
-        pub fn schedule(_: *This): void {
-            const vm = _.event_loop.virtual_machine;
-            _.ref.ref(vm);
-            _.async_task_tracker.didSchedule(_.globalThis);
-            WorkPool.schedule(&_.task);
+        pub fn schedule(this: *This) void {
+            const vm = this.event_loop.virtual_machine;
+            this.ref.ref(vm);
+            this.async_task_tracker.didSchedule(this.globalThis);
+            WorkPool.schedule(&this.task);
         }
 
-        pub fn onFinish(_: *This): void {
-            _.event_loop.enqueueTaskConcurrent(_.concurrent_task.from(_, .manual_deinit));
+        pub fn onFinish(this: *This) void {
+            this.event_loop.enqueueTaskConcurrent(this.concurrent_task.from(this, .manual_deinit));
         }
     };
 }

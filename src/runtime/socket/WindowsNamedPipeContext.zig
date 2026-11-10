@@ -1,307 +1,351 @@
-const WindowsNamedPipeContext = @This();
-
-ref_count: RefCount,
-named_pipe: uws.WindowsNamedPipe,
-socket: SocketType,
-
-// task used to deinit the context in the next tick, vm is used to enqueue the task
-vm: *jsc.VirtualMachine,
-globalThis: *jsc.JSGlobalObject,
-task: jsc.AnyTask,
-task_event: EventState = .none,
-is_open: bool = false,
-
-const RefCount = bun.ptr.RefCount(@This(), "ref_count", scheduleDeinit, .{});
-pub const ref = RefCount.ref;
-pub const deref = RefCount.deref;
-
-fn scheduleDeinit(this: *WindowsNamedPipeContext) void {
-    this.deinitInNextTick();
-}
-
-pub const EventState = enum(u8) {
-    deinit,
-    none,
-};
-
-pub const SocketType = union(enum) {
-    tls: *TLSSocket,
-    tcp: *TCPSocket,
-    none: void,
-};
-
-pub const new = bun.TrivialNew(WindowsNamedPipeContext);
-const log = Output.scoped(.WindowsNamedPipeContext, .visible);
-
-fn onOpen(this: *WindowsNamedPipeContext) void {
-    this.is_open = true;
-    switch (this.socket) {
-        .tls => |tls| {
-            const socket = TLSSocket.Socket.fromNamedPipe(&this.named_pipe);
-            tls.onOpen(socket);
-        },
-        .tcp => |tcp| {
-            const socket = TCPSocket.Socket.fromNamedPipe(&this.named_pipe);
-            tcp.onOpen(socket);
-        },
-        .none => {},
-    }
-}
-
-fn onData(this: *WindowsNamedPipeContext, decoded_data: []const u8) void {
-    switch (this.socket) {
-        .tls => |tls| {
-            const socket = TLSSocket.Socket.fromNamedPipe(&this.named_pipe);
-            tls.onData(socket, decoded_data);
-        },
-        .tcp => |tcp| {
-            const socket = TCPSocket.Socket.fromNamedPipe(&this.named_pipe);
-            tcp.onData(socket, decoded_data);
-        },
-        .none => {},
-    }
-}
-
-fn onHandshake(this: *WindowsNamedPipeContext, success: bool, ssl_error: uws.us_bun_verify_error_t) void {
-    switch (this.socket) {
-        .tls => |tls| {
-            const socket = TLSSocket.Socket.fromNamedPipe(&this.named_pipe);
-            tls.onHandshake(socket, @intFromBool(success), ssl_error) catch {};
-        },
-        .tcp => |tcp| {
-            const socket = TCPSocket.Socket.fromNamedPipe(&this.named_pipe);
-            tcp.onHandshake(socket, @intFromBool(success), ssl_error) catch {};
-        },
-        .none => {},
-    }
-}
-
-fn onEnd(this: *WindowsNamedPipeContext) void {
-    switch (this.socket) {
-        .tls => |tls| {
-            const socket = TLSSocket.Socket.fromNamedPipe(&this.named_pipe);
-            tls.onEnd(socket);
-        },
-        .tcp => |tcp| {
-            const socket = TCPSocket.Socket.fromNamedPipe(&this.named_pipe);
-            tcp.onEnd(socket);
-        },
-        .none => {},
-    }
-}
-
-fn onWritable(this: *WindowsNamedPipeContext) void {
-    switch (this.socket) {
-        .tls => |tls| {
-            const socket = TLSSocket.Socket.fromNamedPipe(&this.named_pipe);
-            tls.onWritable(socket);
-        },
-        .tcp => |tcp| {
-            const socket = TCPSocket.Socket.fromNamedPipe(&this.named_pipe);
-            tcp.onWritable(socket);
-        },
-        .none => {},
-    }
-}
-
-fn onError(this: *WindowsNamedPipeContext, err: bun.sys.Error) void {
-    if (this.is_open) {
-        switch (this.socket) {
-            .tls => |tls| {
-                tls.handleError(err.toJS(this.globalThis) catch return);
-            },
-            .tcp => |tcp| {
-                tcp.handleError(err.toJS(this.globalThis) catch return);
-            },
-            else => {},
-        }
-    } else {
-        switch (this.socket) {
-            .tls => |tls| {
-                tls.handleConnectError(err.errno) catch {};
-            },
-            .tcp => |tcp| {
-                tcp.handleConnectError(err.errno) catch {};
-            },
-            else => {},
-        }
-    }
-}
-
-fn onTimeout(this: *WindowsNamedPipeContext) void {
-    switch (this.socket) {
-        .tls => |tls| {
-            const socket = TLSSocket.Socket.fromNamedPipe(&this.named_pipe);
-            tls.onTimeout(socket);
-        },
-        .tcp => |tcp| {
-            const socket = TCPSocket.Socket.fromNamedPipe(&this.named_pipe);
-            tcp.onTimeout(socket);
-        },
-        .none => {},
-    }
-}
-
-fn onClose(this: *WindowsNamedPipeContext) void {
-    const socket = this.socket;
-    this.socket = .none;
-    switch (socket) {
-        .tls => |tls| {
-            tls.onClose(TLSSocket.Socket.fromNamedPipe(&this.named_pipe), 0, null) catch {};
-            tls.deref();
-        },
-        .tcp => |tcp| {
-            tcp.onClose(TCPSocket.Socket.fromNamedPipe(&this.named_pipe), 0, null) catch {};
-            tcp.deref();
-        },
-        .none => {},
-    }
-
-    this.deref();
-}
-
-fn runEvent(this: *WindowsNamedPipeContext) void {
-    switch (this.task_event) {
-        .deinit => {
-            this.deinit();
-        },
-        .none => @panic("Invalid event state"),
-    }
-}
-
-fn deinitInNextTick(this: *WindowsNamedPipeContext) void {
-    bun.assert(this.task_event != .deinit);
-    this.task_event = .deinit;
-    this.vm.enqueueTask(jsc.Task.init(&this.task));
-}
-
-pub fn create(globalThis: *jsc.JSGlobalObject, socket: SocketType) *WindowsNamedPipeContext {
-    const vm = globalThis.bunVM();
-    const this = WindowsNamedPipeContext.new(.{
-        .ref_count = .init(),
-        .vm = vm,
-        .globalThis = globalThis,
-        .task = undefined,
-        .socket = socket,
-        .named_pipe = undefined,
-    });
-
-    // named_pipe owns the pipe (PipeWriter owns the pipe and will close and deinit it)
-    this.named_pipe = uws.WindowsNamedPipe.from(bun.new(uv.Pipe, std.mem.zeroes(uv.Pipe)), .{
-        .ctx = this,
-        .ref_ctx = @ptrCast(&WindowsNamedPipeContext.ref),
-        .deref_ctx = @ptrCast(&WindowsNamedPipeContext.deref),
-        .onOpen = @ptrCast(&WindowsNamedPipeContext.onOpen),
-        .onData = @ptrCast(&WindowsNamedPipeContext.onData),
-        .onHandshake = @ptrCast(&WindowsNamedPipeContext.onHandshake),
-        .onEnd = @ptrCast(&WindowsNamedPipeContext.onEnd),
-        .onWritable = @ptrCast(&WindowsNamedPipeContext.onWritable),
-        .onError = @ptrCast(&WindowsNamedPipeContext.onError),
-        .onTimeout = @ptrCast(&WindowsNamedPipeContext.onTimeout),
-        .onClose = @ptrCast(&WindowsNamedPipeContext.onClose),
-    }, vm);
-    this.task = jsc.AnyTask.New(WindowsNamedPipeContext, WindowsNamedPipeContext.runEvent).init(this);
-
-    switch (socket) {
-        .tls => |tls| {
-            tls.ref();
-        },
-        .tcp => |tcp| {
-            tcp.ref();
-        },
-        .none => {},
-    }
-
-    return this;
-}
-
-/// `owned_ctx` is one `SSL_CTX_up_ref` ADOPTED by `named_pipe.open` (kept on
-/// success, freed by it on failure). Prefer it over `ssl_config` so a memoised
-/// `tls.createSecureContext` reaches this path with its trust store intact —
-/// on this branch `[buntls]` returns `{secureContext}` only, so `ssl_config`
-/// alone would be empty.
-pub fn open(globalThis: *jsc.JSGlobalObject, fd: bun.FD, ssl_config: ?jsc.API.ServerConfig.SSLConfig, owned_ctx: ?*BoringSSL.SSL_CTX, socket: SocketType) !*uws.WindowsNamedPipe {
-    // TODO: reuse the same context for multiple connections when possibles
-
-    const this = WindowsNamedPipeContext.create(globalThis, socket);
-
-    errdefer {
-        switch (socket) {
-            .tls => |tls| {
-                tls.handleConnectError(@intFromEnum(bun.sys.SystemErrno.ENOENT)) catch {};
-            },
-            .tcp => |tcp| {
-                tcp.handleConnectError(@intFromEnum(bun.sys.SystemErrno.ENOENT)) catch {};
-            },
-            .none => {},
-        }
-        this.deref();
-    }
-    try this.named_pipe.open(fd, ssl_config, owned_ctx).unwrap();
-    return &this.named_pipe;
-}
-
-/// See `open` for `owned_ctx` ownership.
-pub fn connect(globalThis: *jsc.JSGlobalObject, path: []const u8, ssl_config: ?jsc.API.ServerConfig.SSLConfig, owned_ctx: ?*BoringSSL.SSL_CTX, socket: SocketType) !*uws.WindowsNamedPipe {
-    // TODO: reuse the same context for multiple connections when possibles
-
-    const this = WindowsNamedPipeContext.create(globalThis, socket);
-    errdefer {
-        switch (socket) {
-            .tls => |tls| {
-                tls.handleConnectError(@intFromEnum(bun.sys.SystemErrno.ENOENT)) catch {};
-            },
-            .tcp => |tcp| {
-                tcp.handleConnectError(@intFromEnum(bun.sys.SystemErrno.ENOENT)) catch {};
-            },
-            .none => {},
-        }
-        this.deref();
-    }
-
-    if (path[path.len - 1] == 0) {
-        // is already null terminated
-        const slice_z = path[0 .. path.len - 1 :0];
-        try this.named_pipe.connect(slice_z, ssl_config, owned_ctx).unwrap();
-    } else {
-        var path_buf: bun.PathBuffer = undefined;
-        // we need to null terminate the path
-        const len = @min(path.len, path_buf.len - 1);
-
-        @memcpy(path_buf[0..len], path[0..len]);
-        path_buf[len] = 0;
-        const slice_z = path_buf[0..len :0];
-        try this.named_pipe.connect(slice_z, ssl_config, owned_ctx).unwrap();
-    }
-    return &this.named_pipe;
-}
-
-pub fn deinit(this: *WindowsNamedPipeContext) void {
-    log("deinit", .{});
-    const socket = this.socket;
-    this.socket = .none;
-    switch (socket) {
-        .tls => |tls| {
-            tls.deref();
-        },
-        .tcp => |tcp| {
-            tcp.deref();
-        },
-        else => {},
-    }
-
-    this.named_pipe.deinit();
-    bun.destroy(this);
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const Output = bun.Output;
 const jsc = bun.jsc;
 const uws = bun.uws;
 const BoringSSL = bun.BoringSSL.c;
 const uv = bun.windows.libuv;
+const log = Output.scoped(.WindowsNamedPipeContext, .visible);
+fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@"struct".fields.len; return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
+pub fn CpUnpackSliceType(comptime T: type, comptime start_idx: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
+pub const bun = @import("bun");
+pub const WindowsNamedPipeContext = struct {
+    ref_count: RefCount,
+    named_pipe: uws.WindowsNamedPipe,
+    socket: SocketType,
+    vm: *jsc.VirtualMachine,
+    globalThis: *jsc.JSGlobalObject,
+    task: jsc.AnyTask,
+    task_event: EventState = .none,
+    is_open: bool = false,
+
+pub fn scheduleDeinit(self: *WindowsNamedPipeContext) void {
+            _ = self.deinitInNextTick();
+    }
+
+pub fn onOpen(self: *WindowsNamedPipeContext) void {
+            self.is_open = true;
+            switch (self.socket) {
+.tls => |tls| {
+const socket = TLSSocket.Socket.fromNamedPipe((&self.named_pipe));
+            var __socket_moved = false; _ = &__socket_moved;
+            defer if (!__socket_moved) { const T = @TypeOf(socket); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = socket.release() catch {}; } else { socket.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = socket; _drop_val.release(); } };
+            _ = tls.onOpen(socket);
+},
+.tcp => |tcp| {
+const socket = TCPSocket.Socket.fromNamedPipe((&self.named_pipe));
+            var __socket_moved = false; _ = &__socket_moved;
+            defer if (!__socket_moved) { const T = @TypeOf(socket); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = socket.release() catch {}; } else { socket.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = socket; _drop_val.release(); } };
+            _ = tcp.onOpen(socket);
+},
+.none => {
+
+},
+}
+    }
+
+pub fn onData(self: *WindowsNamedPipeContext, decoded_data: []const u8) void {
+            switch (self.socket) {
+.tls => |tls| {
+const socket = TLSSocket.Socket.fromNamedPipe((&self.named_pipe));
+            var __socket_moved = false; _ = &__socket_moved;
+            defer if (!__socket_moved) { const T = @TypeOf(socket); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = socket.release() catch {}; } else { socket.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = socket; _drop_val.release(); } };
+            _ = tls.onData(socket, decoded_data);
+},
+.tcp => |tcp| {
+const socket = TCPSocket.Socket.fromNamedPipe((&self.named_pipe));
+            var __socket_moved = false; _ = &__socket_moved;
+            defer if (!__socket_moved) { const T = @TypeOf(socket); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = socket.release() catch {}; } else { socket.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = socket; _drop_val.release(); } };
+            _ = tcp.onData(socket, decoded_data);
+},
+.none => {
+
+},
+}
+    }
+
+pub fn onHandshake(self: *WindowsNamedPipeContext, success: bool, ssl_error: uws.us_bun_verify_error_t) void {
+            switch (self.socket) {
+.tls => |tls| {
+const socket = TLSSocket.Socket.fromNamedPipe((&self.named_pipe));
+            var __socket_moved = false; _ = &__socket_moved;
+            defer if (!__socket_moved) { const T = @TypeOf(socket); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = socket.release() catch {}; } else { socket.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = socket; _drop_val.release(); } };
+            _ = (blk_catch_0: { break :blk_catch_0 ((tls.onHandshake(socket, @intFromBool(success), ssl_error)) catch |__ce_0| { _ = &__ce_0;  }); });
+},
+.tcp => |tcp| {
+const socket = TCPSocket.Socket.fromNamedPipe((&self.named_pipe));
+            var __socket_moved = false; _ = &__socket_moved;
+            defer if (!__socket_moved) { const T = @TypeOf(socket); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = socket.release() catch {}; } else { socket.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = socket; _drop_val.release(); } };
+            _ = (blk_catch_1: { break :blk_catch_1 ((tcp.onHandshake(socket, @intFromBool(success), ssl_error)) catch |__ce_1| { _ = &__ce_1;  }); });
+},
+.none => {
+
+},
+}
+    }
+
+pub fn onEnd(self: *WindowsNamedPipeContext) void {
+            switch (self.socket) {
+.tls => |tls| {
+const socket = TLSSocket.Socket.fromNamedPipe((&self.named_pipe));
+            var __socket_moved = false; _ = &__socket_moved;
+            defer if (!__socket_moved) { const T = @TypeOf(socket); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = socket.release() catch {}; } else { socket.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = socket; _drop_val.release(); } };
+            _ = tls.onEnd(socket);
+},
+.tcp => |tcp| {
+const socket = TCPSocket.Socket.fromNamedPipe((&self.named_pipe));
+            var __socket_moved = false; _ = &__socket_moved;
+            defer if (!__socket_moved) { const T = @TypeOf(socket); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = socket.release() catch {}; } else { socket.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = socket; _drop_val.release(); } };
+            _ = tcp.onEnd(socket);
+},
+.none => {
+
+},
+}
+    }
+
+pub fn onWritable(self: *WindowsNamedPipeContext) void {
+            switch (self.socket) {
+.tls => |tls| {
+const socket = TLSSocket.Socket.fromNamedPipe((&self.named_pipe));
+            var __socket_moved = false; _ = &__socket_moved;
+            defer if (!__socket_moved) { const T = @TypeOf(socket); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = socket.release() catch {}; } else { socket.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = socket; _drop_val.release(); } };
+            _ = tls.onWritable(socket);
+},
+.tcp => |tcp| {
+const socket = TCPSocket.Socket.fromNamedPipe((&self.named_pipe));
+            var __socket_moved = false; _ = &__socket_moved;
+            defer if (!__socket_moved) { const T = @TypeOf(socket); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = socket.release() catch {}; } else { socket.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = socket; _drop_val.release(); } };
+            _ = tcp.onWritable(socket);
+},
+.none => {
+
+},
+}
+    }
+
+pub fn onError(self: *WindowsNamedPipeContext, err: bun.sys.Error) void {
+            if (self.is_open) {
+                switch (self.socket) {
+.tls => |tls| {
+_ = tls.handleError((blk_catch_2: { break :blk_catch_2 ((err.toJS(self.globalThis)) catch |__ce_2| { _ = &__ce_2; return; }); }));
+},
+.tcp => |tcp| {
+_ = tcp.handleError((blk_catch_3: { break :blk_catch_3 ((err.toJS(self.globalThis)) catch |__ce_3| { _ = &__ce_3; return; }); }));
+},
+else => {
+
+},
+}
+            } else {
+                switch (self.socket) {
+.tls => |tls| {
+_ = (blk_catch_4: { break :blk_catch_4 ((tls.handleConnectError(err.errno)) catch |__ce_4| { _ = &__ce_4;  }); });
+},
+.tcp => |tcp| {
+_ = (blk_catch_5: { break :blk_catch_5 ((tcp.handleConnectError(err.errno)) catch |__ce_5| { _ = &__ce_5;  }); });
+},
+else => {
+
+},
+}
+            }
+    }
+
+pub fn onTimeout(self: *WindowsNamedPipeContext) void {
+            switch (self.socket) {
+.tls => |tls| {
+const socket = TLSSocket.Socket.fromNamedPipe((&self.named_pipe));
+            var __socket_moved = false; _ = &__socket_moved;
+            defer if (!__socket_moved) { const T = @TypeOf(socket); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = socket.release() catch {}; } else { socket.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = socket; _drop_val.release(); } };
+            _ = tls.onTimeout(socket);
+},
+.tcp => |tcp| {
+const socket = TCPSocket.Socket.fromNamedPipe((&self.named_pipe));
+            var __socket_moved = false; _ = &__socket_moved;
+            defer if (!__socket_moved) { const T = @TypeOf(socket); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = socket.release() catch {}; } else { socket.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = socket; _drop_val.release(); } };
+            _ = tcp.onTimeout(socket);
+},
+.none => {
+
+},
+}
+    }
+
+pub fn onClose(self: *WindowsNamedPipeContext) void {
+            const socket = self.socket;
+            self.socket = .none;
+            switch (socket) {
+.tls => |tls| {
+_ = (blk_catch_6: { break :blk_catch_6 ((tls.onClose(TLSSocket.Socket.fromNamedPipe((&self.named_pipe)), 0, null)) catch |__ce_6| { _ = &__ce_6;  }); });
+            _ = tls.deref();
+},
+.tcp => |tcp| {
+_ = (blk_catch_7: { break :blk_catch_7 ((tcp.onClose(TCPSocket.Socket.fromNamedPipe((&self.named_pipe)), 0, null)) catch |__ce_7| { _ = &__ce_7;  }); });
+            _ = tcp.deref();
+},
+.none => {
+
+},
+}
+            _ = self.deref();
+    }
+
+pub fn runEvent(self: *WindowsNamedPipeContext) void {
+            switch (self.task_event) {
+.deinit => {
+_ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
+},
+.none => {
+_ = @panic("Invalid event state");
+},
+}
+    }
+
+pub fn deinitInNextTick(self: *WindowsNamedPipeContext) void {
+            _ = bun.assert((self.task_event != .deinit));
+            self.task_event = .deinit;
+            _ = self.vm.enqueueTask(jsc.Task.init((&self.task)));
+    }
+
+pub fn create(self: WindowsNamedPipeContext, globalThis: *jsc.JSGlobalObject, socket: SocketType) *WindowsNamedPipeContext {
+        _ = &self;
+            var vm = globalThis.bunVM();
+            var __vm_moved = false; _ = &__vm_moved;
+            defer if (!__vm_moved) { const T = @TypeOf(vm); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = vm.release() catch {}; } else { vm.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = vm; _drop_val.release(); } };
+            var obj = WindowsNamedPipeContext.new(.{ .ref_count = .init, .vm = vm, .globalThis = globalThis, .task = undefined, .socket = socket, .named_pipe = undefined });
+            var __obj_moved = false; _ = &__obj_moved;
+            defer if (!__obj_moved) { const T = @TypeOf(obj); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = obj.release() catch {}; } else { obj.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = obj; _drop_val.release(); } };
+            obj.named_pipe = uws.WindowsNamedPipe.from(bun.new(uv.Pipe, std.mem.zeroes(uv.Pipe)), .{ .ctx = obj, .ref_ctx = @ptrCast((&WindowsNamedPipeContext.ref)), .deref_ctx = @ptrCast((&WindowsNamedPipeContext.deref)), .onOpen = @ptrCast((&WindowsNamedPipeContext.onOpen)), .onData = @ptrCast((&WindowsNamedPipeContext.onData)), .onHandshake = @ptrCast((&WindowsNamedPipeContext.onHandshake)), .onEnd = @ptrCast((&WindowsNamedPipeContext.onEnd)), .onWritable = @ptrCast((&WindowsNamedPipeContext.onWritable)), .onError = @ptrCast((&WindowsNamedPipeContext.onError)), .onTimeout = @ptrCast((&WindowsNamedPipeContext.onTimeout)), .onClose = @ptrCast((&WindowsNamedPipeContext.onClose)) }, vm);
+            obj.task = jsc.AnyTask.New(WindowsNamedPipeContext, WindowsNamedPipeContext.runEvent).init(obj);
+            switch (socket) {
+.tls => |tls| {
+_ = tls.ref();
+},
+.tcp => |tcp| {
+_ = tcp.ref();
+},
+.none => {
+
+},
+}
+            __obj_moved = true;
+            return obj;
+    }
+
+pub fn open(self: WindowsNamedPipeContext, globalThis: *jsc.JSGlobalObject, fd: bun.FD, ssl_config: ?jsc.API.ServerConfig.SSLConfig, owned_ctx: ?*BoringSSL.SSL_CTX, socket: SocketType) !*uws.WindowsNamedPipe {
+        _ = &self;
+            var obj = WindowsNamedPipeContext.create(globalThis, socket);
+            var __obj_moved = false; _ = &__obj_moved;
+            defer if (!__obj_moved) { const T = @TypeOf(obj); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = obj.release() catch {}; } else { obj.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = obj; _drop_val.release(); } };
+            errdefer {
+            {
+                switch (socket) {
+.tls => |tls| {
+_ = (blk_catch_8: { break :blk_catch_8 ((tls.handleConnectError(@intFromEnum(bun.sys.SystemErrno.ENOENT))) catch |__ce_8| { _ = &__ce_8;  }); });
+},
+.tcp => |tcp| {
+_ = (blk_catch_9: { break :blk_catch_9 ((tcp.handleConnectError(@intFromEnum(bun.sys.SystemErrno.ENOENT))) catch |__ce_9| { _ = &__ce_9;  }); });
+},
+.none => {
+
+},
+}
+                _ = obj.deref();
+            }
+            }
+            _ = try obj.named_pipe.open(fd, ssl_config, owned_ctx).unwrap();
+            return (&obj.named_pipe);
+    }
+
+pub fn connect(self: WindowsNamedPipeContext, globalThis: *jsc.JSGlobalObject, path: []const u8, ssl_config: ?jsc.API.ServerConfig.SSLConfig, owned_ctx: ?*BoringSSL.SSL_CTX, socket: SocketType) !*uws.WindowsNamedPipe {
+        _ = &self;
+            var obj = WindowsNamedPipeContext.create(globalThis, socket);
+            var __obj_moved = false; _ = &__obj_moved;
+            defer if (!__obj_moved) { const T = @TypeOf(obj); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = obj.release() catch {}; } else { obj.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = obj; _drop_val.release(); } };
+            errdefer {
+            {
+                switch (socket) {
+.tls => |tls| {
+_ = (blk_catch_10: { break :blk_catch_10 ((tls.handleConnectError(@intFromEnum(bun.sys.SystemErrno.ENOENT))) catch |__ce_10| { _ = &__ce_10;  }); });
+},
+.tcp => |tcp| {
+_ = (blk_catch_11: { break :blk_catch_11 ((tcp.handleConnectError(@intFromEnum(bun.sys.SystemErrno.ENOENT))) catch |__ce_11| { _ = &__ce_11;  }); });
+},
+.none => {
+
+},
+}
+                _ = obj.deref();
+            }
+            }
+            if ((path[@as(usize, @intCast((path.len - 1)))] == 0)) {
+                const slice_z = path[0..(path.len - 1) :0];
+                _ = try obj.named_pipe.connect(slice_z, ssl_config, owned_ctx).unwrap();
+            } else {
+                var path_buf: bun.PathBuffer = undefined;
+                _ = &path_buf;
+                const len = @min(path.len, (path_buf.len - 1));
+                var __len_moved = false; _ = &__len_moved;
+                defer if (!__len_moved) { const T = @TypeOf(len); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = len.release() catch {}; } else { len.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = len; _drop_val.release(); } };
+                _ = @memcpy(path_buf[0..len], path[0..len]);
+                path_buf[cp_cast_int(usize, len)] = 0;
+                const slice_z = path_buf[0..len :0];
+                _ = try obj.named_pipe.connect(slice_z, ssl_config, owned_ctx).unwrap();
+            }
+            return (&obj.named_pipe);
+    }
+
+pub fn release(self: *WindowsNamedPipeContext) void {
+            _ = log("release", .{});
+            const socket = self.socket;
+            self.socket = .none;
+            switch (socket) {
+.tls => |tls| {
+_ = tls.deref();
+},
+.tcp => |tcp| {
+_ = tcp.deref();
+},
+else => {
+
+},
+}
+            _ = self.named_pipe.deinit();
+            _ = bun.destroy(self);
+    }
+
+pub fn deinit(self: *WindowsNamedPipeContext) void {
+            _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
+    }
+    const RefCount = bun.ptr.RefCount(@This(), "ref_count", scheduleDeinit, .{});
+    pub const ref = RefCount.ref;
+    pub const deref = RefCount.deref;
+    pub const EventState = enum(u8) {
+            deinit,
+            none,
+        };
+    pub const SocketType = union(enum) {
+            tls: *TLSSocket,
+            tcp: *TCPSocket,
+            none: void,
+        };
+    pub const new = bun.TrivialNew(WindowsNamedPipeContext);
+};
 
 const TCPSocket = jsc.API.TCPSocket;
 const TLSSocket = jsc.API.TLSSocket;

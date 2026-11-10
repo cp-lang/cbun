@@ -110,9 +110,9 @@ export class Listener {
         const sni_ctx: *BoringSSL.SSL_CTX = if (SecureContext.fromJS(tls)) |sc|
             sc.borrow()
         else if (try SSLConfig.fromJS(jsc.VirtualMachine.get(), global, tls)) |ssl_config| ({
-            let mut cfg = ssl_config;
+            var cfg = ssl_config;
             defer cfg.deinit();
-            let mut create_err: uws.create_bun_socket_error_t = .none;
+            var create_err: uws.create_bun_socket_error_t = .none;
             break jsc.VirtualMachine.get().rareData().sslCtxCache().getOrCreate(&cfg, &create_err) orelse {
                 if (create_err != .none) return global.throwValue(create_err.toJS(global));
                 return global.throwValue(bun.BoringSSL.ERR_toJS(global, BoringSSL.ERR_get_error()));
@@ -279,8 +279,8 @@ export class Listener {
         }
         const socket = _.listener.uws;
 
-        let mut buf: [64]u8 = [_]u8{0} ** 64;
-        let mut text_buf: [512]u8 = undefined;
+        var buf: [64]u8 = [_]u8{0} ** 64;
+        var text_buf: [512]u8 = undefined;
         const address_bytes: []const u8 = socket.getLocalAddress(&buf) catch return .js_undefined;
         const address_zig: std.net.Address = switch (address_bytes.len) {
             4 => std.net.Address.initIp4(address_bytes[0..4].*, 0),
@@ -354,7 +354,7 @@ pub fn listen(globalObject: *jsc.JSGlobalObject, opts: JSValue): bun.JSError!JSV
 
     const vm = jsc.VirtualMachine.get();
 
-    let mut socket_config = try SocketConfig.fromJS(vm, opts, globalObject, true);
+    var socket_config = try SocketConfig.fromJS(vm, opts, globalObject, true);
     defer socket_config.deinitExcludingHandlers();
 
     const handlers = &socket_config.handlers;
@@ -367,13 +367,13 @@ pub fn listen(globalObject: *jsc.JSGlobalObject, opts: JSValue): bun.JSError!JSV
     const socket_flags = socket_config.socketFlags();
 
     if (Environment.isWindows and port == null) {
-        let mut buf: bun.PathBuffer = undefined;
+        var buf: bun.PathBuffer = undefined;
         if (normalizePipeName(hostname_or_unix.slice(), buf[0..])) |pipe_name| {
             const connection: Listener.UnixOrHost = .{
                 .unix = bun.handleOom(hostname_or_unix.intoOwnedSlice(bun.default_allocator)),
             };
 
-            let mut socket: Listener = .{
+            var socket: Listener = .{
                 .handlers = handlers.*,
                 .connection = connection,
                 .ssl = ssl_enabled,
@@ -418,7 +418,7 @@ pub fn listen(globalObject: *jsc.JSGlobalObject, opts: JSValue): bun.JSError!JSV
 
     vm.eventLoop().ensureWaker();
 
-    let mut this_ptr: *Listener = bun.handleOom(handlers.vm.allocator.create(Listener));
+    var this_ptr: *Listener = bun.handleOom(handlers.vm.allocator.create(Listener));
     this_ptr.* = .{
         .handlers = handlers.*,
         .connection = undefined,
@@ -427,7 +427,7 @@ pub fn listen(globalObject: *jsc.JSGlobalObject, opts: JSValue): bun.JSError!JSV
     };
     this_ptr.group.init(uws.Loop.get(), null, this_ptr);
     bun.asan.registerRootRegion(&this_ptr.group, @sizeOf(uws.SocketGroup));
-    let mut listener_allocated = true;
+    var listener_allocated = true;
     errdefer if (listener_allocated) {
         if (this_ptr.secure_ctx) |c| BoringSSL.SSL_CTX_free(c);
         if (this_ptr.protos) |p| bun.default_allocator.free(p);
@@ -437,7 +437,7 @@ pub fn listen(globalObject: *jsc.JSGlobalObject, opts: JSValue): bun.JSError!JSV
     };
 
     if (ssl) |ssl_cfg| {
-        let mut create_err: uws.create_bun_socket_error_t = .none;
+        var create_err: uws.create_bun_socket_error_t = .none;
         this_ptr.secure_ctx = ssl_cfg.asUSockets().createSSLContext(&create_err) orelse {
             return globalObject.throwValue(create_err.toJS(globalObject));
         };
@@ -446,11 +446,11 @@ pub fn listen(globalObject: *jsc.JSGlobalObject, opts: JSValue): bun.JSError!JSV
 
     const hostname = bun.handleOom(hostname_or_unix.intoOwnedSlice(bun.default_allocator));
     errdefer bun.default_allocator.free(hostname);
-    let mut connection: Listener.UnixOrHost = if (port) |port_| .{
+    var connection: Listener.UnixOrHost = if (port) |port_| .{
         .host = .{ .host = hostname, .port = port_ },
     } else if (socket_config.fd) |fd| .{ .fd = fd } else .{ .unix = hostname };
 
-    let mut errno: c_int = 0;
+    var errno: c_int = 0;
     const listen_socket: *uws.ListenSocket = ({
         switch (connection) {
             .host => |host| {
@@ -522,7 +522,7 @@ pub fn onNamePipeCreated(comptime ssl: bool, listener: *Listener): *NewSocket(ss
     const Socket = NewSocket(ssl);
     bun.assert(ssl == listener.ssl);
 
-    let mut this_socket = Socket.new(.{
+    var this_socket = Socket.new(.{
         .ref_count = .init(),
         .handlers = &listener.handlers,
         .socket = Socket.Socket.detached,
@@ -574,7 +574,7 @@ pub fn connectInner(globalObject: *jsc.JSGlobalObject, prev_maybe_tcp: ?*TCPSock
     }
     const vm = globalObject.bunVM();
 
-    let mut socket_config = try SocketConfig.fromJS(vm, opts, globalObject, false);
+    var socket_config = try SocketConfig.fromJS(vm, opts, globalObject, false);
     defer socket_config.deinitExcludingHandlers();
 
     const handlers = &socket_config.handlers;
@@ -588,7 +588,7 @@ pub fn connectInner(globalObject: *jsc.JSGlobalObject, prev_maybe_tcp: ?*TCPSock
 
     vm.eventLoop().ensureWaker();
 
-    let mut connection: Listener.UnixOrHost = ({
+    var connection: Listener.UnixOrHost = ({
         if (try opts.getTruthy(globalObject, "fd")) |fd_| {
             if (fd_.isNumber()) {
                 const fd = fd_.asFileDescriptor();
@@ -605,7 +605,7 @@ pub fn connectInner(globalObject: *jsc.JSGlobalObject, prev_maybe_tcp: ?*TCPSock
     });
     errdefer connection.deinit();
 
-    let mut owned_ssl_ctx: ?*BoringSSL.SSL_CTX = null;
+    var owned_ssl_ctx: ?*BoringSSL.SSL_CTX = null;
     if (ssl_enabled) {
         const native_sc: ?*SecureContext = ({
             const tls_js = (try opts.getTruthy(globalObject, "tls")) orelse break null;
@@ -618,8 +618,8 @@ pub fn connectInner(globalObject: *jsc.JSGlobalObject, prev_maybe_tcp: ?*TCPSock
     errdefer if (owned_ssl_ctx) |c| BoringSSL.SSL_CTX_free(c);
 
     if (Environment.isWindows) {
-        let mut buf: bun.PathBuffer = undefined;
-        let mut pipe_name: ?[]const u8 = null;
+        var buf: bun.PathBuffer = undefined;
+        var pipe_name: ?[]const u8 = null;
         const isNamedPipe = switch (connection) {
             .unix => |slice| ({
                 pipe_name = normalizePipeName(slice, buf[0..]);
@@ -650,12 +650,12 @@ pub fn connectInner(globalObject: *jsc.JSGlobalObject, prev_maybe_tcp: ?*TCPSock
             handlers_ptr.* = handlers.*;
             handlers_ptr.mode = .client;
 
-            let mut promise = jsc.JSPromise.create(globalObject);
+            var promise = jsc.JSPromise.create(globalObject);
             const promise_value = promise.toJS();
             handlers_ptr.promise.set(globalObject, promise_value);
 
             if (ssl_enabled) {
-                let mut tls = if (prev_maybe_tls) |prev| ({
+                var tls = if (prev_maybe_tls) |prev| ({
                     if (prev.handlers) |prev_handlers| {
                         prev_handlers.deinit();
                         handlers.vm.allocator.destroy(prev_handlers);
@@ -712,7 +712,7 @@ pub fn connectInner(globalObject: *jsc.JSGlobalObject, prev_maybe_tcp: ?*TCPSock
                 };
                 tls.socket = TLSSocket.Socket.fromNamedPipe(named_pipe);
             } else {
-                let mut tcp = if (prev_maybe_tcp) |prev| ({
+                var tcp = if (prev_maybe_tcp) |prev| ({
                     bun.assert(prev.this_value.isNotEmpty());
                     if (prev.handlers) |prev_handlers| {
                         prev_handlers.deinit();
@@ -764,7 +764,7 @@ pub fn connectInner(globalObject: *jsc.JSGlobalObject, prev_maybe_tcp: ?*TCPSock
 
     if (ssl_enabled and owned_ssl_ctx == null) {
         if (ssl) |ssl_cfg| {
-            let mut create_err: uws.create_bun_socket_error_t = .none;
+            var create_err: uws.create_bun_socket_error_t = .none;
             owned_ssl_ctx = vm.rareData().sslCtxCache().getOrCreate(ssl_cfg, &create_err) orelse {
                 return globalObject.throwValue(create_err.toJS(globalObject));
             };
@@ -777,7 +777,7 @@ pub fn connectInner(globalObject: *jsc.JSGlobalObject, prev_maybe_tcp: ?*TCPSock
     handlers_ptr.* = handlers.*;
     handlers_ptr.mode = .client;
 
-    let mut promise = jsc.JSPromise.create(globalObject);
+    var promise = jsc.JSPromise.create(globalObject);
     const promise_value = promise.toJS();
     handlers_ptr.promise.set(globalObject, promise_value);
 
@@ -934,7 +934,7 @@ pub const WindowsNamedPipeListeningContext = if (Environment.isWindows) struct {
             .vm = globalThis.bunVM(),
             .listener = listener,
         });
-        let mut pipe_initialized = false;
+        var pipe_initialized = false;
         errdefer {
             if (pipe_initialized) this_ctx.closePipeAndDeinit() else this_ctx.release();
         }
@@ -943,7 +943,7 @@ pub const WindowsNamedPipeListeningContext = if (Environment.isWindows) struct {
             bun.BoringSSL.load();
 
             const ctx_opts: uws.SocketContext.BunSocketContextOptions = ssl_options.asUSockets();
-            let mut err: uws.create_bun_socket_error_t = .none;
+            var err: uws.create_bun_socket_error_t = .none;
             this_ctx.ctx = ctx_opts.createSSLContext(&err) orelse return error.InvalidOptions;
         }
 
@@ -956,7 +956,7 @@ pub const WindowsNamedPipeListeningContext = if (Environment.isWindows) struct {
             const slice_z = path[0 .. path.len - 1 :0];
             this_ctx.uvPipe.listenNamedPipe(slice_z, backlog, this_ctx, onClientConnect).unwrap() catch return error.FailedToBindPipe;
         } else {
-            let mut path_buf: bun.PathBuffer = undefined;
+            var path_buf: bun.PathBuffer = undefined;
             const len = @min(path.len, path_buf.len - 1);
 
             @memcpy(path_buf[0..len], path[0..len]);

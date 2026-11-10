@@ -18,15 +18,15 @@ fn dataURLResponse(
     globalThis: *JSGlobalObject,
     allocator: sys.Allocator,
 ): JSValue {
-    let mut data_url = _data_url;
+    var data_url = _data_url;
 
     let data = data_url.decodeData(allocator) catch {
         let err = globalThis.createError("failed to fetch the data URL", .{});
         return JSPromise.dangerouslyCreateRejectedPromiseValueWithoutNotifyingVM(globalThis, err);
     };
-    let mut blob = Blob.init(data, allocator, globalThis);
+    var blob = Blob.init(data, allocator, globalThis);
 
-    let mut allocated = false;
+    var allocated = false;
     let mime_type = http.MimeType.init(data_url.mime_type, allocator, &allocated);
     blob.content_type = mime_type.value;
     if (allocated) {
@@ -57,7 +57,7 @@ fn dataURLResponse(
         return globalObject.throwNotEnoughArguments("fetch.preconnect", 1, arguments.len);
     }
 
-    let mut url_str = try jsc.URL.hrefFromJS(arguments[0], globalObject);
+    var url_str = try jsc.URL.hrefFromJS(arguments[0], globalObject);
     defer url_str.deref();
 
     if (globalObject.hasException()) return JSValue.zero;
@@ -124,10 +124,10 @@ fn fetchImpl(
     analytics.Features.fetch += 1;
     let vm = VirtualMachine.get();
 
-    let mut upgraded_connection = false;
-    let mut force_http2 = false;
-    let mut force_http3 = false;
-    let mut force_http1 = false;
+    var upgraded_connection = false;
+    var force_http2 = false;
+    var force_http3 = false;
+    var force_http1 = false;
     let allocator = default_allocator;
 
     if (arguments.len == 0) {
@@ -135,40 +135,40 @@ fn fetchImpl(
         return JSPromise.dangerouslyCreateRejectedPromiseValueWithoutNotifyingVM(globalThis, err);
     }
 
-    let mut headers: ?Headers = null;
-    let mut method = Method.GET;
-    let mut args = CallFrame.ArgumentsSlice.init(vm, arguments.slice());
+    var headers: ?Headers = null;
+    var method = Method.GET;
+    var args = CallFrame.ArgumentsSlice.init(vm, arguments.slice());
 
-    let mut url = ZigURL {};
+    var url = ZigURL {};
     let first_arg = args.nextEat().?;
 
-    let mut body: FetchTasklet.HTTPRequestBody = FetchTasklet.HTTPRequestBody.Empty;
-    let mut disable_timeout = false;
-    let mut disable_keepalive = false;
-    let mut disable_decompression = false;
-    let mut verbose: http.HTTPVerboseLevel = if (vm.log.level.atLeast(.debug)) .headers else .none;
+    var body: FetchTasklet.HTTPRequestBody = FetchTasklet.HTTPRequestBody.Empty;
+    var disable_timeout = false;
+    var disable_keepalive = false;
+    var disable_decompression = false;
+    var verbose: http.HTTPVerboseLevel = if (vm.log.level.atLeast(.debug)) .headers else .none;
     if (verbose == .none) {
         verbose = vm.getVerboseFetch();
     }
 
-    let mut proxy: ?ZigURL = null;
-    let mut redirect_type: FetchRedirect = FetchRedirect.follow;
-    let mut signal: ?*webcore.AbortSignal = null;
-    let mut hostname: ?[]u8 = null;
-    let mut range: ?[]u8 = null;
-    let mut unix_socket_path = ZigString.Slice.empty;
-    let mut url_proxy_buffer: []const u8 = "";
+    var proxy: ?ZigURL = null;
+    var redirect_type: FetchRedirect = FetchRedirect.follow;
+    var signal: ?*webcore.AbortSignal = null;
+    var hostname: ?[]u8 = null;
+    var range: ?[]u8 = null;
+    var unix_socket_path = ZigString.Slice.empty;
+    var url_proxy_buffer: []const u8 = "";
 
     enum URLType {
         remote,
         file,
         blob,
     }
-    let mut url_type = URLType.remote;
+    var url_type = URLType.remote;
 
-    let mut ssl_config: ?ServerConfig.SSLConfig.SharedPtr = null;
-    let mut reject_unauthorized = vm.getTLSRejectUnauthorized();
-    let mut check_server_identity: JSValue = JSValue.zero;
+    var ssl_config: ?ServerConfig.SSLConfig.SharedPtr = null;
+    var reject_unauthorized = vm.getTLSRejectUnauthorized();
+    var check_server_identity: JSValue = JSValue.zero;
 
     defer {
         if (signal) |sig| {
@@ -211,7 +211,7 @@ fn fetchImpl(
 
     let request_init_object: ?JSValue = if (request == null and url_str_optional == null and first_arg.isObject()) first_arg else null;
 
-    let mut url_str = if (url_str_optional) |str| {
+    var url_str = if (url_str_optional) |str| {
         str;
     } else if (request) |req| {
         sys.handleOom(req.ensureURL());
@@ -231,10 +231,10 @@ fn fetchImpl(
     }
 
     if (url_str.hasPrefixComptime("data:")) {
-        let mut url_slice = url_str.toUTF8WithoutRef(allocator);
+        var url_slice = url_str.toUTF8WithoutRef(allocator);
         defer url_slice.deinit();
 
-        let mut data_url = DataURL.parseWithoutCheck(url_slice.slice()) catch {
+        var data_url = DataURL.parseWithoutCheck(url_slice.slice()) catch {
             let err = ctx.createError("failed to fetch the data URL", .{});
             return JSPromise.dangerouslyCreateRejectedPromiseValueWithoutNotifyingVM(globalThis, err);
         };
@@ -329,7 +329,7 @@ fn fetchImpl(
         return JSPromise.dangerouslyCreateRejectedPromiseValueWithoutNotifyingVM(globalThis, err);
     }
 
-    let mut promise = JSPromise.Strong.init(globalThis);
+    var promise = JSPromise.Strong.init(globalThis);
     let promise_val = promise.value();
 
     _ = FetchTasklet.queue(
@@ -377,7 +377,7 @@ fn fetchImpl(
 }
 
 fn setHeaders(headers: *?Headers, new_headers: []const picohttp.Header, allocator: sys.Allocator): void {
-    let mut old = headers.*;
+    var old = headers.*;
     headers.* = sys.handleOom(Headers.fromPicoHttpHeaders(new_headers, allocator));
     if (old) |*h| {
         h.deinit();

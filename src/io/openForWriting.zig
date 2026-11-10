@@ -2,185 +2,103 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) {
-        return v.?;
-    } else {
-        return v;
-    }
-}
-pub fn openForWriting(
-    dir: bun.FD,
-    input_path: anytype,
-    input_flags: i32,
-    mode: bun.Mode,
-    pollable: *bool,
-    is_socket: *bool,
-    force_sync: bool,
-    out_nonblocking: *bool,
-    comptime Ctx: type,
-    ctx: Ctx,
-    comptime onForceSyncOrIsaTTY: *const fn (Ctx) void,
-    comptime isPollable: *const fn (mode: bun.Mode) bool,
-) bun.sys.Maybe(bun.FD) {
-    return openForWritingImpl(
-        dir,
-        input_path,
-        input_flags,
-        mode,
-        pollable,
-        is_socket,
-        force_sync,
-        out_nonblocking,
-        Ctx,
-        ctx,
-        onForceSyncOrIsaTTY,
-        isPollable,
-        bun.sys.openat,
-    );
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const Environment = bun.Environment;
+fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@"struct".fields.len; return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
+pub fn CpUnpackSliceType(comptime T: type, comptime start_idx: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
+pub const bun = @import("bun");
+const SentinelConstU8 = [:0]const u8;
+const SentinelU8 = [:0]u8;
+
+pub fn openForWriting(dir: bun.FD, input_path: anytype, input_flags: i32, mode: bun.Mode, pollable: *bool, is_socket: *bool, force_sync: bool, out_nonblocking: *bool, comptime Ctx: type, ctx: anytype, comptime onForceSyncOrIsaTTY: anytype, comptime isPollable: *const fn (bun.Mode) bool) bun.sys.Maybe(bun.FD) {
+        return openForWritingImpl(dir, input_path, input_flags, mode, pollable, is_socket, force_sync, out_nonblocking, Ctx, ctx, onForceSyncOrIsaTTY, isPollable, bun.sys.openat);
 }
 
-pub fn openForWritingImpl(
-    dir: bun.FD,
-    input_path: anytype,
-    input_flags: i32,
-    mode: bun.Mode,
-    pollable: *bool,
-    is_socket: *bool,
-    force_sync: bool,
-    out_nonblocking: *bool,
-    comptime Ctx: type,
-    ctx: Ctx,
-    comptime onForceSyncOrIsaTTY: *const fn (Ctx) void,
-    comptime isPollable: *const fn (mode: bun.Mode) bool,
-    comptime openat: *const fn (dir: bun.FD, path: [:0]const u8, flags: i32, mode: bun.Mode) bun.sys.Maybe(bun.FD),
-) bun.sys.Maybe(bun.FD) {
-    const PathT = @TypeOf(input_path);
-    if (PathT != bun.webcore.PathOrFileDescriptor and PathT != [:0]const u8 and PathT != [:0]u8) {
-        @compileError("Only string or PathOrFileDescriptor is supported but got: " ++ @typeName(PathT));
-    }
+pub fn openForWritingImpl(dir: bun.FD, input_path: anytype, input_flags: i32, mode: bun.Mode, pollable: *bool, is_socket: *bool, force_sync: bool, out_nonblocking: *bool, comptime Ctx: type, ctx: anytype, comptime onForceSyncOrIsaTTY: anytype, comptime isPollable: *const fn (bun.Mode) bool, comptime openat: *const fn (bun.FD, [:0]const u8, i32, bun.Mode) bun.sys.Maybe(bun.FD)) bun.sys.Maybe(bun.FD) {
+        _ = Ctx;
+        const PathT = @TypeOf(input_path);
+        if ((((PathT != bun.webcore.PathOrFileDescriptor) and (PathT != SentinelConstU8)) and (PathT != SentinelU8))) {
+            _ = @compileError(("Only string or PathOrFileDescriptor is supported but got: " + @typeName(PathT)));
+        }
+        var isatty = false;
+        _ = &isatty;
+        var is_nonblocking = false;
+        _ = &is_nonblocking;
+        const result = (if ((PathT == bun.webcore.PathOrFileDescriptor)) blk: {
+        break :blk (switch (input_path) {
+.path => |path| brk: {
+        is_nonblocking = true;
+        break :brk bun.sys.openatA(dir, path.slice(), input_flags, mode);
+},
+.fd => |fd_| bun.sys.dupWithFlags(fd_, 0),
+});
 
-    // TODO: this should be concurrent.
-    var isatty = false;
-    var is_nonblocking = false;
-    const result =
-        switch (PathT) {
-            bun.webcore.PathOrFileDescriptor => switch (input_path) {
-                .path => |path| brk: {
-                    is_nonblocking = true;
-                    break :brk bun.sys.openatA(dir, path.slice(), input_flags, mode);
-                },
-                .fd => |fd_| brk: {
-                    const duped = bun.sys.dupWithFlags(fd_, 0);
+} else blk: {
+        break :blk openat(dir, input_path, input_flags, mode);
 
-                    break :brk duped;
-                },
-            },
-            [:0]const u8, [:0]u8 => openat(dir, input_path, input_flags, mode),
-            else => unreachable,
-        };
-    const fd = switch (result) {
-        .err => |err| return .{ .err = err },
-        .result => |fd| fd,
-    };
-
-    if (comptime Environment.isPosix) {
-        switch (bun.sys.fstat(fd)) {
-            .err => |err| {
-                fd.close();
-                return .{ .err = err };
-            },
-            .result => |stat| {
-                // pollable.* = bun.sys.isPollable(stat.mode);
-                pollable.* = isPollable(stat.mode);
-                if (!pollable.*) {
-                    isatty = std.posix.isatty(fd.native());
-                }
-
-                if (isatty) {
-                    pollable.* = true;
-                }
-
-                is_socket.* = std.posix.S.ISSOCK(stat.mode);
-
-                if (force_sync or isatty) {
-                    // Prevents interleaved or dropped stdout/stderr output for terminals.
-                    // As noted in the following reference, local TTYs tend to be quite fast and
-                    // this behavior has become expected due historical functionality on OS X,
-                    // even though it was originally intended to change in v1.0.2 (Libuv 1.2.1).
-                    // Ref: https://github.com/nodejs/node/pull/1771#issuecomment-119351671
-                    _ = bun.sys.updateNonblocking(fd, false);
-                    is_nonblocking = false;
-                    // this.force_sync = true;
-                    // this.writer.force_sync = true;
-                    onForceSyncOrIsaTTY(ctx);
-                } else if (!is_nonblocking) {
-                    const flags = switch (bun.sys.getFcntlFlags(fd)) {
-                        .result => |flags| flags,
-                        .err => |err| {
-                            fd.close();
-                            return .{ .err = err };
-                        },
-                    };
-                    is_nonblocking = (flags & @as(@TypeOf(flags), bun.O.NONBLOCK)) != 0;
-
-                    if (!is_nonblocking) {
-                        if (bun.sys.setNonblocking(fd) == .result) {
+});
+        const fd = (switch (result) {
+.err => |err| {
+return .{ .err = err };
+},
+.result => |fd_val| fd_val,
+});
+        if (comptime Environment.isPosix) {
+            switch (bun.sys.fstat(fd)) {
+.err => |err| {
+_ = fd.close();
+            return .{ .err = err };
+},
+.result => |stat| {
+pollable.* = isPollable(stat.mode);
+            if ((!pollable.*)) {
+                isatty = std.posix.isatty(fd.native());
+            }
+            if (isatty) {
+                pollable.* = true;
+            }
+            is_socket.* = std.posix.S.ISSOCK(stat.mode);
+            if ((force_sync or isatty)) {
+                _ = bun.sys.updateNonblocking(fd, false);
+                is_nonblocking = false;
+                _ = onForceSyncOrIsaTTY(ctx);
+            } else {
+                if ((!is_nonblocking)) {
+                    const flags = (switch (bun.sys.getFcntlFlags(fd)) {
+.result => |fl| fl,
+.err => |err| {
+{
+                        _ = fd.close();
+                        return .{ .err = err };
+                    }
+},
+});
+                    is_nonblocking = ((flags & (if (comptime @typeInfo(@TypeOf(flags)) == .@"enum") @as(@TypeOf(flags), @enumFromInt(bun.O.NONBLOCK)) else @as(@TypeOf(flags), bun.O.NONBLOCK))) != 0);
+                    if ((!is_nonblocking)) {
+                        if ((bun.sys.setNonblocking(fd) == .result)) {
                             is_nonblocking = true;
                         }
                     }
                 }
-
-                out_nonblocking.* = is_nonblocking and pollable.*;
-            },
+            }
+            out_nonblocking.* = (is_nonblocking and pollable.*);
+},
+}
+            return .{ .result = fd };
         }
-
-        return .{ .result = fd };
-    }
-
-    if (comptime Environment.isWindows) {
-        pollable.* = (bun.windows.GetFileType(fd.cast()) & bun.windows.FILE_TYPE_PIPE) != 0 and !force_sync;
-        return .{ .result = fd };
-    }
+        if (comptime Environment.isWindows) {
+            pollable.* = (((bun.windows.GetFileType(fd.cast()) & bun.windows.FILE_TYPE_PIPE) != 0) and (!force_sync));
+            return .{ .result = fd };
+        }
 }
-const Environment = bun.Environment;
-pub fn cp_string_from(val: anytype) []const u8 {
-    const T = @TypeOf(val);
-    if (comptime T == []const u8) {
-        return val;
-    } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) {
-        return std.mem.span(val);
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) {
-        return val;
-    } else if (comptime (@typeInfo(T) == .@"enum")) {
-        return @tagName(val);
-    } else if (comptime T == bool) {
-        return if (val) "true" else "false";
-    } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0";
-    } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0";
-    } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) {
-        return val.toString();
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) {
-        return val.toString();
-    } else {
-        return @typeName(T);
-    }
-}
-
-pub const bun = @import("bun");

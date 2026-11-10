@@ -53,11 +53,9 @@ export @opaque class Socket {
         return us_create_udp_socket(loop, data_cb, drain_cb, close_cb, recv_error_cb, host, port, options, err, user_data);
     }
 
-    zig {
-        pub fn send(this: *Socket, payloads: []const [*]const u8, lengths: []const usize, addresses: []const ?*const anyopaque) c_int {
-            bun.assert(payloads.len == lengths.len and payloads.len == addresses.len);
-            return us_udp_socket_send(this, payloads.ptr, lengths.ptr, addresses.ptr, @intCast(payloads.len));
-        }
+    pub fn send(*this, payloads: [*]const u8[], lengths: usize[], addresses: ?*const anyopaque[]): i32 {
+        bun.assert(payloads.len == lengths.len && payloads.len == addresses.len);
+        return us_udp_socket_send(this, payloads.ptr, lengths.ptr, addresses.ptr, payloads.len as i32);
     }
 
     pub fn user(*this): *!? {
@@ -81,10 +79,7 @@ export @opaque class Socket {
     }
 
     pub fn setBroadcast(*this, enabled: bool): i32 {
-        let mut en: i32 = 0;
-        if (enabled) {
-            en = 1;
-        }
+        let en: i32 = if (enabled) 1 else 0;
         return us_udp_socket_set_broadcast(this, en);
     }
 
@@ -97,25 +92,22 @@ export @opaque class Socket {
     }
 
     pub fn setMulticastLoopback(*this, enabled: bool): i32 {
-        let mut en: i32 = 0;
-        if (enabled) {
-            en = 1;
-        }
+        let en: i32 = if (enabled) 1 else 0;
         return us_udp_socket_set_multicast_loopback(this, en);
     }
 
-    zig {
-        pub fn setMulticastInterface(this: *Socket, iface: *const std.posix.sockaddr.storage) c_int {
-            return us_udp_socket_set_multicast_interface(this, iface);
-        }
+    pub fn setMulticastInterface(*this, iface: *const std.posix.sockaddr.storage): i32 {
+        return us_udp_socket_set_multicast_interface(this, iface);
+    }
 
-        pub fn setMembership(this: *Socket, address: *const std.posix.sockaddr.storage, iface: ?*const std.posix.sockaddr.storage, drop: bool) c_int {
-            return us_udp_socket_set_membership(this, address, iface, @intFromBool(drop));
-        }
+    pub fn setMembership(*this, address: *const std.posix.sockaddr.storage, iface: ?*const std.posix.sockaddr.storage, drop: bool): i32 {
+        let d: i32 = if (drop) 1 else 0;
+        return us_udp_socket_set_membership(this, address, iface, d);
+    }
 
-        pub fn setSourceSpecificMembership(this: *Socket, source: *const std.posix.sockaddr.storage, group: *const std.posix.sockaddr.storage, iface: ?*const std.posix.sockaddr.storage, drop: bool) c_int {
-            return us_udp_socket_set_source_specific_membership(this, source, group, iface, @intFromBool(drop));
-        }
+    pub fn setSourceSpecificMembership(*this, source: *const std.posix.sockaddr.storage, group: *const std.posix.sockaddr.storage, iface: ?*const std.posix.sockaddr.storage, drop: bool): i32 {
+        let d: i32 = if (drop) 1 else 0;
+        return us_udp_socket_set_source_specific_membership(this, source, group, iface, d);
     }
 
     pub fn boundPort(*this): i32 {
@@ -133,9 +125,7 @@ export @opaque class Socket {
 
 export @opaque class PacketBuffer {
     pub fn getPeer(*this, index: i32): *std.posix.sockaddr.storage {
-        zig {
-            return us_udp_packet_buffer_peer(self, index);
-        }
+        return us_udp_packet_buffer_peer(this, index);
     }
 
     pub fn getPayload(*this, index: i32): u8[] {

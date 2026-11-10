@@ -2,27 +2,8 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
 const bun = @import("bun");
 pub const LSHPACK_MAX_HEADER_SIZE: usize = 65536;
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
 pub const lshpack_header = extern struct {
     name: ?[*]u8 = null,
     name_len: usize = 0,
@@ -34,8 +15,6 @@ pub const lshpack_header = extern struct {
 
 pub const HPACK = struct {
     self: *anyopaque,
-    
-pub fn _create(allocator: std.mem.Allocator) !*HPACK { const self_ptr = try allocator.create(HPACK); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(max_capacity: u32) *HPACK {
             return ((lshpack_wrapper_init(bun.mimalloc.mi_malloc, bun.mimalloc.mi_free, max_capacity)) orelse (bun.outOfMemory()));
@@ -45,14 +24,13 @@ pub fn decode(self: *HPACK, src: []const u8) !DecodeResult {
             var header: lshpack_header = .{};
             _ = &header;
             const offset = lshpack_wrapper_decode(self, src.ptr, src.len, (&header));
-            _ = &offset;
             if ((offset == 0)) {
                 return error.UnableToDecode;
             }
             if ((header.name_len == 0)) {
                 return error.EmptyHeaderName;
             }
-            return DecodeResult{ .name = header.name.?[0..header.name_len], .value = header.value.?[0..header.value_len], .next = offset, .never_index = header.never_index, .well_know = header.hpack_index };
+            return DecodeResult{ .name = (if (comptime @typeInfo(@TypeOf(header)) == .@"enum" or @typeInfo(@TypeOf(header)) == .@"union") @tagName(header) else header.name).?[0..header.name_len], .value = (if (comptime @typeInfo(@TypeOf(header)) == .@"enum") @intFromEnum(header) else header.value).?[0..header.value_len], .next = offset, .never_index = header.never_index, .well_know = header.hpack_index };
     }
 
 pub fn encode(self: *HPACK, name: []const u8, value: []const u8, never_index: bool, dst_buffer: []u8, dst_buffer_offset: usize) !usize {
@@ -62,7 +40,6 @@ pub fn encode(self: *HPACK, name: []const u8, value: []const u8, never_index: bo
                 never_flag = 1;
             }
             const offset = lshpack_wrapper_encode(self, name.ptr, name.len, value.ptr, value.len, never_flag, dst_buffer.ptr, dst_buffer.len, dst_buffer_offset);
-            _ = &offset;
             if ((offset <= 0)) {
                 return error.UnableToEncode;
             }

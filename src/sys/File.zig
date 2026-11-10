@@ -2,478 +2,9 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) {
-        return v.?;
-    } else {
-        return v;
-    }
-}
-const File = @This();
-
-// "handle" matches std.fs.File
-handle: bun.FD,
-
-pub fn openat(dir: bun.FD, path: [:0]const u8, flags: i32, mode: bun.Mode) Maybe(File) {
-    return switch (sys.openat(dir, path, flags, mode)) {
-        .result => |fd| .{ .result = .{ .handle = fd } },
-        .err => |err| .{ .err = err },
-    };
-}
-
-pub fn open(path: [:0]const u8, flags: i32, mode: bun.Mode) Maybe(File) {
-    return File.openat(bun.FD.cwd(), path, flags, mode);
-}
-
-pub fn makeOpen(path: [:0]const u8, flags: i32, mode: bun.Mode) Maybe(File) {
-    return File.makeOpenat(bun.FD.cwd(), path, flags, mode);
-}
-
-pub fn makeOpenat(other: bun.FD, path: [:0]const u8, flags: i32, mode: bun.Mode) Maybe(File) {
-    const fd = switch (sys.openat(other, path, flags, mode)) {
-        .result => |fd| fd,
-        .err => |err| fd: {
-            if (std.fs.path.dirname(path)) |dir_path| {
-                bun.makePath(other.stdDir(), dir_path) catch {};
-                break :fd switch (sys.openat(other, path, flags, mode)) {
-                    .result => |fd| fd,
-                    .err => |err2| return .{ .err = err2 },
-                };
-            }
-
-            return .{ .err = err };
-        },
-    };
-
-    return .{ .result = .{ .handle = fd } };
-}
-
-pub fn openatOSPath(other: bun.FD, path: bun.OSPathSliceZ, flags: i32, mode: bun.Mode) Maybe(File) {
-    return switch (sys.openatOSPath(other, path, flags, mode)) {
-        .result => |fd| .{ .result = .{ .handle = fd } },
-        .err => |err| .{ .err = err },
-    };
-}
-
-pub fn from(other: anytype) File {
-    const T = @TypeOf(other);
-
-    if (T == File) {
-        return other;
-    }
-
-    if (T == std.posix.fd_t) {
-        return .{ .handle = .fromNative(other) };
-    }
-
-    if (T == bun.FD) {
-        return .{ .handle = other };
-    }
-
-    if (T == std.fs.File) {
-        return .{ .handle = .fromStdFile(other) };
-    }
-
-    if (T == std.fs.Dir) {
-        return File{ .handle = .fromStdDir(other) };
-    }
-
-    if (comptime Environment.isLinux) {
-        if (T == u64) {
-            return File{ .handle = .fromNative(@intCast(other)) };
-        }
-    }
-
-    @compileError("Unsupported type " ++ bun.meta.typeName(T));
-}
-
-pub fn write(self: File, buf: []const u8) Maybe(usize) {
-    return sys.write(self.handle, buf);
-}
-
-pub fn read(self: File, buf: []u8) Maybe(usize) {
-    return sys.read(self.handle, buf);
-}
-
-pub fn readAll(self: File, buf: []u8) Maybe(usize) {
-    return sys.readAll(self.handle, buf);
-}
-
-pub fn pwriteAll(self: File, buf: []const u8, initial_offset: i64) Maybe(void) {
-    var remain = buf;
-    var offset = initial_offset;
-    while (remain.len > 0) {
-        const rc = sys.pwrite(self.handle, remain, offset);
-        switch (rc) {
-            .err => |err| return .{ .err = err },
-            .result => |amt| {
-                if (amt == 0) {
-                    return .success;
-                }
-                remain = remain[amt..];
-                offset += @intCast(amt);
-            },
-        }
-    }
-
-    return .success;
-}
-
-pub fn writeAll(self: File, buf: []const u8) Maybe(void) {
-    var remain = buf;
-    while (remain.len > 0) {
-        const rc = sys.write(self.handle, remain);
-        switch (rc) {
-            .err => |err| return .{ .err = err },
-            .result => |amt| {
-                if (amt == 0) {
-                    return .success;
-                }
-                remain = remain[amt..];
-            },
-        }
-    }
-
-    return .success;
-}
-
-pub fn writeFile(
-    relative_dir_or_cwd: anytype,
-    path: bun.OSPathSliceZ,
-    data: []const u8,
-) Maybe(void) {
-    const file = switch (File.openatOSPath(relative_dir_or_cwd, path, bun.O.WRONLY | bun.O.CREAT | bun.O.TRUNC, 0o664)) {
-        .err => |err| return .{ .err = err },
-        .result => |fd| fd,
-    };
-    defer file.close();
-    switch (file.writeAll(data)) {
-        .err => |err| return .{ .err = err },
-        .result => {},
-    }
-    return .success;
-}
-
-pub const ReadError = anyerror;
-
-pub fn closeAndMoveTo(this: File, src: [:0]const u8, dest: [:0]const u8) !void {
-    // On POSIX, close the file after moving it.
-    defer if (Environment.isPosix) this.close();
-    // On Windows, close the file before moving it.
-    if (Environment.isWindows) this.close();
-    const cwd = bun.FD.cwd();
-    try bun.sys.moveFileZWithHandle(this.handle, cwd, src, cwd, dest);
-}
-
-fn stdIoRead(this: File, buf: []u8) ReadError!usize {
-    return try this.read(buf).unwrap();
-}
-
-pub const Reader = std.Io.GenericReader(File, anyerror, stdIoRead);
-
-pub fn reader(self: File) Reader {
-    return Reader{ .context = self };
-}
-
-pub const WriteError = anyerror;
-fn stdIoWrite(this: File, bytes: []const u8) WriteError!usize {
-    try this.writeAll(bytes).unwrap();
-
-    return bytes.len;
-}
-
-fn stdIoWriteQuietDebug(this: File, bytes: []const u8) WriteError!usize {
-    bun.Output.disableScopedDebugWriter();
-    defer bun.Output.enableScopedDebugWriter();
-    try this.writeAll(bytes).unwrap();
-
-    return bytes.len;
-}
-
-pub const Writer = std.Io.GenericWriter(File, anyerror, stdIoWrite);
-pub const QuietWriter = if (Environment.isDebug) std.Io.GenericWriter(File, anyerror, stdIoWriteQuietDebug) else Writer;
-
-pub fn writer(self: File) Writer {
-    return Writer{ .context = self };
-}
-
-pub fn quietWriter(self: File) QuietWriter {
-    return QuietWriter{ .context = self };
-}
-
-pub fn isTty(self: File) bool {
-    return std.posix.isatty(self.handle.cast());
-}
-
-/// Asserts in debug that this File object is valid
-pub fn close(self: File) void {
-    self.handle.close();
-}
-
-pub fn getEndPos(self: File) Maybe(usize) {
-    return getFileSize(self.handle);
-}
-
-pub fn stat(self: File) Maybe(bun.Stat) {
-    return fstat(self.handle);
-}
-
-/// Be careful about using this on Linux or macOS.
-///
-/// File calls stat() internally.
-pub fn kind(self: File) Maybe(std.fs.File.Kind) {
-    if (Environment.isWindows) {
-        const rt = windows.GetFileType(self.handle.cast());
-        if (rt == windows.FILE_TYPE_UNKNOWN) {
-            switch (windows.GetLastError()) {
-                .SUCCESS => {},
-                else => |err| {
-                    return .{ .err = Error.fromCode((SystemErrno.init(err) orelse SystemErrno.EUNKNOWN).toE(), .fstat) };
-                },
-            }
-        }
-
-        return .{
-            .result = switch (rt) {
-                windows.FILE_TYPE_CHAR => .character_device,
-                windows.FILE_TYPE_REMOTE, windows.FILE_TYPE_DISK => .file,
-                windows.FILE_TYPE_PIPE => .named_pipe,
-                windows.FILE_TYPE_UNKNOWN => .unknown,
-                else => .file,
-            },
-        };
-    }
-
-    const st = switch (self.stat()) {
-        .err => |err| return .{ .err = err },
-        .result => |s| s,
-    };
-
-    const m = st.mode & posix.S.IFMT;
-    switch (m) {
-        posix.S.IFBLK => return .{ .result = .block_device },
-        posix.S.IFCHR => return .{ .result = .character_device },
-        posix.S.IFDIR => return .{ .result = .directory },
-        posix.S.IFIFO => return .{ .result = .named_pipe },
-        posix.S.IFLNK => return .{ .result = .sym_link },
-        posix.S.IFREG => return .{ .result = .file },
-        posix.S.IFSOCK => return .{ .result = .unix_domain_socket },
-        else => {
-            return .{ .result = .file };
-        },
-    }
-}
-
-pub const ReadToEndResult = struct {
-    bytes: std.array_list.Managed(u8) = std.array_list.Managed(u8).init(default_allocator),
-    err: ?Error = null,
-
-    pub fn unwrap(self: *const ReadToEndResult) ![]u8 {
-        if (self.err) |err| {
-            try (bun.sys.Maybe(void){ .err = err }).unwrap();
-        }
-        return self.bytes.items;
-    }
-};
-
-pub fn readFillBuf(this: File, buf: []u8) Maybe([]u8) {
-    var read_amount: usize = 0;
-    while (read_amount < buf.len) {
-        switch (if (comptime Environment.isPosix)
-            pread(this.handle, buf[read_amount..], @intCast(read_amount))
-        else
-            sys.read(this.handle, buf[read_amount..])) {
-            .err => |err| {
-                return .{ .err = err };
-            },
-            .result => |bytes_read| {
-                if (bytes_read == 0) {
-                    break;
-                }
-
-                read_amount += bytes_read;
-            },
-        }
-    }
-
-    return .{ .result = buf[0..read_amount] };
-}
-
-pub fn readToEndWithArrayList(this: File, list: *std.array_list.Managed(u8), size_guess: enum { probably_small, unknown_size }) Maybe(usize) {
-    if (size_guess == .probably_small) {
-        bun.handleOom(list.ensureUnusedCapacity(64));
-    } else {
-        list.ensureTotalCapacityPrecise(
-            switch (this.getEndPos()) {
-                .err => |err| {
-                    return .{ .err = err };
-                },
-                .result => |s| s,
-            } + 16,
-        ) catch |err| bun.handleOom(err);
-    }
-
-    var total: i64 = 0;
-    while (true) {
-        if (list.unusedCapacitySlice().len == 0) {
-            bun.handleOom(list.ensureUnusedCapacity(16));
-        }
-
-        switch (if (comptime Environment.isPosix)
-            pread(this.handle, list.unusedCapacitySlice(), total)
-        else
-            sys.read(this.handle, list.unusedCapacitySlice())) {
-            .err => |err| {
-                return .{ .err = err };
-            },
-            .result => |bytes_read| {
-                if (bytes_read == 0) {
-                    break;
-                }
-
-                list.items.len += bytes_read;
-                total += @intCast(bytes_read);
-            },
-        }
-    }
-
-    return .{ .result = @intCast(total) };
-}
-
-/// Use this function on potentially large files.
-/// Calls fstat() on the file to get the size of the file and avoids reallocations + extra read() calls.
-pub fn readToEnd(this: File, allocator: std.mem.Allocator) ReadToEndResult {
-    var list = std.array_list.Managed(u8).init(allocator);
-    return switch (readToEndWithArrayList(this, &list, .unknown_size)) {
-        .err => |err| .{ .err = err, .bytes = list },
-        .result => .{ .err = null, .bytes = list },
-    };
-}
-
-/// Use this function on small files <= 1024 bytes.
-/// File will skip the fstat() call, preallocating 64 bytes instead of the file's size.
-pub fn readToEndSmall(this: File, allocator: std.mem.Allocator) ReadToEndResult {
-    var list = std.array_list.Managed(u8).init(allocator);
-    return switch (readToEndWithArrayList(this, &list, .probably_small)) {
-        .err => |err| .{ .err = err, .bytes = list },
-        .result => .{ .err = null, .bytes = list },
-    };
-}
-
-pub fn getPath(this: File, out_buffer: *bun.PathBuffer) Maybe([]u8) {
-    return getFdPath(this.handle, out_buffer);
-}
-
-/// 1. Normalize the file path
-/// 2. Open a file for reading
-/// 2. Read the file to a buffer
-/// 3. Return the File handle and the buffer
-pub fn readFromUserInput(dir_fd: anytype, input_path: anytype, allocator: std.mem.Allocator) Maybe([]u8) {
-    var buf: bun.PathBuffer = undefined;
-    const normalized = bun.path.joinAbsStringBufZ(
-        bun.fs.FileSystem.instance.top_level_dir,
-        &buf,
-        &.{input_path},
-        .loose,
-    );
-    return readFrom(dir_fd, normalized, allocator);
-}
-
-/// 1. Open a file for reading
-/// 2. Read the file to a buffer
-/// 3. Return the File handle and the buffer
-pub fn readFileFrom(dir_fd: anytype, path: anytype, allocator: std.mem.Allocator) Maybe(struct { File, []u8 }) {
-    const ElementType = std.meta.Elem(@TypeOf(path));
-
-    const rc = brk: {
-        if (comptime Environment.isWindows and ElementType == u16) {
-            break :brk openatWindowsTMaybeNormalize(u16, from(dir_fd).handle, path, O.RDONLY, false);
-        }
-
-        if (comptime ElementType == u8 and std.meta.sentinel(@TypeOf(path)) == null) {
-            break :brk sys.openatA(from(dir_fd).handle, path, O.RDONLY, 0);
-        }
-
-        break :brk sys.openat(from(dir_fd).handle, path, O.RDONLY, 0);
-    };
-
-    const this = switch (rc) {
-        .err => |err| return .{ .err = err },
-        .result => |fd| from(fd),
-    };
-
-    var result = this.readToEnd(allocator);
-
-    if (result.err) |err| {
-        this.close();
-        result.bytes.deinit();
-        return .{ .err = err };
-    }
-
-    if (result.bytes.items.len == 0) {
-        // Don't allocate an empty string.
-        // We won't be modifying an empty slice, anyway.
-        return .{ .result = .{ this, @ptrCast(@constCast("")) } };
-    }
-
-    return .{ .result = .{ this, result.bytes.items } };
-}
-
-/// 1. Open a file for reading relative to a directory
-/// 2. Read the file to a buffer
-/// 3. Close the file
-/// 4. Return the buffer
-pub fn readFrom(dir_fd: anytype, path: anytype, allocator: std.mem.Allocator) Maybe([]u8) {
-    const file, const bytes = switch (readFileFrom(dir_fd, path, allocator)) {
-        .err => |err| return .{ .err = err },
-        .result => |result| result,
-    };
-
-    file.close();
-    return .{ .result = bytes };
-}
-
-const ToSourceOptions = struct {
-    convert_bom: bool = false,
-};
-
-pub fn toSourceAt(dir_fd: anytype, path: anytype, allocator: std.mem.Allocator, opts: ToSourceOptions) Maybe(bun.logger.Source) {
-    var bytes = switch (readFrom(dir_fd, path, allocator)) {
-        .err => |err| return .{ .err = err },
-        .result => |bytes| bytes,
-    };
-
-    if (opts.convert_bom) {
-        if (bun.strings.BOM.detect(bytes)) |bom| {
-            bytes = bun.handleOom(bom.removeAndConvertToUTF8AndFree(allocator, bytes));
-        }
-    }
-
-    return .{ .result = bun.logger.Source.initPathString(path, bytes) };
-}
-
-pub fn toSource(path: anytype, allocator: std.mem.Allocator, opts: ToSourceOptions) Maybe(bun.logger.Source) {
-    return toSourceAt(std.fs.cwd(), path, allocator, opts);
-}
-
 const Environment = bun.Environment;
 const default_allocator = bun.default_allocator;
 const windows = bun.windows;
-
 const sys = bun.sys;
 const Error = bun.sys.Error;
 const Maybe = bun.sys.Maybe;
@@ -484,31 +15,454 @@ const getFdPath = sys.getFdPath;
 const getFileSize = sys.getFileSize;
 const openatWindowsTMaybeNormalize = sys.openatWindowsTMaybeNormalize;
 const pread = sys.pread;
-
 const posix = std.posix;
-pub fn cp_string_from(val: anytype) []const u8 {
-    const T = @TypeOf(val);
-    if (comptime T == []const u8) {
-        return val;
-    } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) {
-        return std.mem.span(val);
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) {
-        return val;
-    } else if (comptime (@typeInfo(T) == .@"enum")) {
-        return @tagName(val);
-    } else if (comptime T == bool) {
-        return if (val) "true" else "false";
-    } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0";
-    } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0";
-    } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) {
-        return val.toString();
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) {
-        return val.toString();
-    } else {
-        return @typeName(T);
-    }
+fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@"struct".fields.len; return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
+pub fn CpUnpackSliceType(comptime T: type, comptime start_idx: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
+pub const bun = @import("bun");
+pub const File = @This();
+
+handle: bun.FD,
+
+pub fn openat(dir: bun.FD, path: [:0]const u8, flags: i32, mode: bun.Mode) Maybe(File) {
+        return (switch (sys.openat(dir, path, flags, mode)) {
+.result => |fd| .{ .initResult = File{ .handle = fd } },
+.err => |e| .{ .initErr = e },
+});
 }
 
-pub const bun = @import("bun");
+pub fn open(path: [:0]const u8, flags: i32, mode: bun.Mode) Maybe(File) {
+        return File.openat(bun.FD.cwd(), path, flags, mode);
+}
+
+pub fn makeOpen(path: [:0]const u8, flags: i32, mode: bun.Mode) Maybe(File) {
+        return File.makeOpenat(bun.FD.cwd(), path, flags, mode);
+}
+
+pub fn makeOpenat(other: bun.FD, path: [:0]const u8, flags: i32, mode: bun.Mode) Maybe(File) {
+        const fd = (switch (sys.openat(other, path, flags, mode)) {
+.result => |fd| fd,
+.err => |e| fd: {
+        if (std.fs.path.dirname(path)) |dir_path| {
+            _ = &dir_path;
+            _ = (blk_catch_0: { break :blk_catch_0 ((bun.makePath(other.stdDir(), dir_path)) catch |__ce_0| { _ = &__ce_0;  }); });
+            break :fd (switch (sys.openat(other, path, flags, mode)) {
+.result => |fd| fd,
+.err => |err2| {
+return .{ .initErr = err2 };
+},
+});
+        }
+        return .{ .initErr = e };
+},
+});
+        return .{ .initResult = File{ .handle = fd } };
+}
+
+pub fn openatOSPath(other: bun.FD, path: bun.OSPathSliceZ, flags: i32, mode: bun.Mode) Maybe(File) {
+        return (switch (sys.openatOSPath(other, path, flags, mode)) {
+.result => |fd| .{ .initResult = File{ .handle = fd } },
+.err => |e| .{ .initErr = e },
+});
+}
+
+pub fn from(other: anytype) File {
+        const T = @TypeOf(other);
+        if ((T == File)) {
+            return other;
+        }
+        if ((T == std.posix.fd_t)) {
+            return File{ .handle = .{ .fromNative = other } };
+        }
+        if ((T == bun.FD)) {
+            return File{ .handle = other };
+        }
+        if ((T == std.fs.File)) {
+            return File{ .handle = .{ .fromStdFile = other } };
+        }
+        if ((T == std.fs.Dir)) {
+            return File{ .handle = .{ .fromStdDir = other } };
+        }
+        if (comptime Environment.isLinux) {
+            if ((T == u64)) {
+                return File{ .handle = .{ .fromNative = @intCast(other) } };
+            }
+        }
+        _ = @compileError(("Unsupported type " + bun.meta.typeName(T)));
+}
+
+pub fn write(self: File, buf: []const u8) Maybe(usize) {
+        return sys.write(self.handle, buf);
+}
+
+pub fn read(self: File, buf: []const u8) Maybe(usize) {
+        return sys.read(self.handle, buf);
+}
+
+pub fn readAll(self: File, buf: []const u8) Maybe(usize) {
+        return sys.readAll(self.handle, buf);
+}
+
+pub fn pwriteAll(self: File, buf: []const u8, initial_offset: i64) Maybe(void) {
+        var remain = buf;
+        _ = &remain;
+        var offset = initial_offset;
+        _ = &offset;
+        while ((remain.len > 0)) {
+            const rc = sys.pwrite(self.handle, remain, offset);
+            switch (rc) {
+.err => |e| {
+return .{ .initErr = e };
+},
+.result => |amt| {
+if ((amt == 0)) {
+                return .success;
+            }
+            remain = remain[amt..];
+            offset = (offset + @intCast(amt));
+},
+}
+        }
+        return .success;
+}
+
+pub fn writeAll(self: File, buf: []const u8) Maybe(void) {
+        var remain = buf;
+        _ = &remain;
+        while ((remain.len > 0)) {
+            const rc = sys.write(self.handle, remain);
+            switch (rc) {
+.err => |e| {
+return .{ .initErr = e };
+},
+.result => |amt| {
+if ((amt == 0)) {
+                return .success;
+            }
+            remain = remain[amt..];
+},
+}
+        }
+        return .success;
+}
+
+pub fn writeFile(relative_dir_or_cwd: anytype, path: bun.OSPathSliceZ, data: []const u8) Maybe(void) {
+        const file = (switch (File.openatOSPath(relative_dir_or_cwd, path, ((bun.O.WRONLY | bun.O.CREAT) | bun.O.TRUNC), 436)) {
+.err => |e| {
+return .{ .initErr = e };
+},
+.result => |fd| fd,
+});
+        defer {
+        _ = file.close();
+        }
+        switch (file.writeAll(data)) {
+.err => |e| {
+return .{ .initErr = e };
+},
+.result => {
+
+},
+}
+        return .success;
+}
+
+pub fn closeAndMoveTo(self: File, src: [:0]const u8, dest: [:0]const u8) !void {
+        defer {
+        if (Environment.isPosix) {
+            _ = self.close();
+        }
+        }
+        if (Environment.isWindows) {
+            _ = self.close();
+        }
+        const cwd = bun.FD.cwd();
+        _ = try bun.sys.moveFileZWithHandle(self.handle, cwd, src, cwd, dest);
+}
+
+pub fn stdIoRead(self: File, buf: []const u8) ReadError!usize {
+        return try self.read(buf).unwrap();
+}
+
+pub fn reader(self: File) Reader {
+        return Reader{ .context = self };
+}
+
+pub fn stdIoWrite(self: File, bytes: []const u8) WriteError!usize {
+        _ = try self.writeAll(bytes).unwrap();
+        return bytes.len;
+}
+
+pub fn stdIoWriteQuietDebug(self: File, bytes: []const u8) WriteError!usize {
+        _ = bun.Output.disableScopedDebugWriter();
+        defer {
+        _ = bun.Output.enableScopedDebugWriter();
+        }
+        _ = try self.writeAll(bytes).unwrap();
+        return bytes.len;
+}
+
+pub fn writer(self: File) Writer {
+        return Writer{ .context = self };
+}
+
+pub fn quietWriter(self: File) QuietWriter {
+        return QuietWriter{ .context = self };
+}
+
+pub fn isTty(self: File) bool {
+        return std.posix.isatty(self.handle.cast());
+}
+
+pub fn close(self: File) void {
+        _ = self.handle.close();
+}
+
+pub fn getEndPos(self: File) Maybe(usize) {
+        return getFileSize(self.handle);
+}
+
+pub fn stat(self: File) Maybe(bun.Stat) {
+        return fstat(self.handle);
+}
+
+pub fn kind(self: File) Maybe(std.fs.File.Kind) {
+        if (Environment.isWindows) {
+            const rt = windows.GetFileType(self.handle.cast());
+            if ((rt == windows.FILE_TYPE_UNKNOWN)) {
+                const last_err = windows.GetLastError();
+                switch (last_err) {
+.SUCCESS => {
+
+},
+else => {
+return .{ .initErr = Error.fromCode(((SystemErrno.init(last_err)) orelse (SystemErrno.EUNKNOWN)).toE(), .fstat) };
+},
+}
+            }
+            return .{ .initResult = (switch (rt) {
+windows.FILE_TYPE_CHAR => .character_device,
+windows.FILE_TYPE_REMOTE, windows.FILE_TYPE_DISK => .file,
+windows.FILE_TYPE_PIPE => .named_pipe,
+windows.FILE_TYPE_UNKNOWN => .unknown,
+else => .file,
+}) };
+        }
+        const st = (switch (self.stat()) {
+.err => |e| {
+return .{ .initErr = e };
+},
+.result => |s| s,
+});
+        const S_IFBLK = posix.S.IFBLK;
+        const S_IFCHR = posix.S.IFCHR;
+        const S_IFDIR = posix.S.IFDIR;
+        const S_IFIFO = posix.S.IFIFO;
+        const S_IFLNK = posix.S.IFLNK;
+        const S_IFREG = posix.S.IFREG;
+        const S_IFSOCK = posix.S.IFSOCK;
+        const m = (st.mode & posix.S.IFMT);
+        switch (m) {
+else => |S_IFBLK| {
+return .{ .initResult = .block_device };
+},
+else => |S_IFCHR| {
+return .{ .initResult = .character_device };
+},
+else => |S_IFDIR| {
+return .{ .initResult = .directory };
+},
+else => |S_IFIFO| {
+return .{ .initResult = .named_pipe };
+},
+else => |S_IFLNK| {
+return .{ .initResult = .sym_link };
+},
+else => |S_IFREG| {
+return .{ .initResult = .file };
+},
+else => |S_IFSOCK| {
+return .{ .initResult = .unix_domain_socket };
+},
+else => {
+return .{ .initResult = .file };
+},
+}
+}
+
+pub fn readFillBuf(self: File, buf: []const u8) Maybe([]u8) {
+        var read_amount: usize = 0;
+        _ = &read_amount;
+        while ((read_amount < buf.len)) {
+            switch ((if (comptime Environment.isPosix) pread(self.handle, buf[read_amount..], @intCast(read_amount)) else sys.read(self.handle, buf[read_amount..]))) {
+.err => |e| {
+return .{ .initErr = e };
+},
+.result => |bytes_read| {
+if ((bytes_read == 0)) {
+                break;
+            }
+            read_amount = (read_amount + bytes_read);
+},
+}
+        }
+        return .{ .initResult = buf[0..read_amount] };
+}
+
+pub fn readToEndWithArrayList(self: File, list: *std.array_list.Managed(u8), size_guess: SizeGuess) Maybe(usize) {
+        if ((size_guess == .probably_small)) {
+            _ = bun.handleOom(list.ensureUnusedCapacity(64));
+        } else {
+            _ = (blk_catch_1: { break :blk_catch_1 ((list.ensureTotalCapacityPrecise(((switch (self.getEndPos()) {
+.err => |e| {
+return .{ .initErr = e };
+},
+.result => |s| s,
+}) + 16))) catch |e| { _ = &e; break :blk_catch_1 bun.handleOom(e); }); });
+        }
+        var total: i64 = 0;
+        _ = &total;
+        while (true) {
+            if ((list.unusedCapacitySlice().len == 0)) {
+                _ = bun.handleOom(list.ensureUnusedCapacity(16));
+            }
+            switch ((if (comptime Environment.isPosix) pread(self.handle, list.unusedCapacitySlice(), total) else sys.read(self.handle, list.unusedCapacitySlice()))) {
+.err => |e| {
+return .{ .initErr = e };
+},
+.result => |bytes_read| {
+if ((bytes_read == 0)) {
+                break;
+            }
+            list.items.len = (list.items.len + bytes_read);
+            total = (total + @intCast(bytes_read));
+},
+}
+        }
+        return .{ .initResult = @intCast(total) };
+}
+
+pub fn readToEnd(self: File, allocator: std.mem.Allocator) ReadToEndResult {
+        var list = std.array_list.Managed(u8).init(allocator);
+        _ = &list;
+        return (switch (self.readToEndWithArrayList(list, .unknown_size)) {
+.err => |e| ReadToEndResult{ .err = e, .bytes = list },
+.result => ReadToEndResult{ .err = null, .bytes = list },
+});
+}
+
+pub fn readToEndSmall(self: File, allocator: std.mem.Allocator) ReadToEndResult {
+        var list = std.array_list.Managed(u8).init(allocator);
+        _ = &list;
+        return (switch (self.readToEndWithArrayList(list, .probably_small)) {
+.err => |e| ReadToEndResult{ .err = e, .bytes = list },
+.result => ReadToEndResult{ .err = null, .bytes = list },
+});
+}
+
+pub fn getPath(self: File, out_buffer: *bun.PathBuffer) Maybe([]u8) {
+        return getFdPath(self.handle, out_buffer);
+}
+
+pub fn readFromUserInput(dir_fd: anytype, input_path: anytype, allocator: std.mem.Allocator) Maybe([]u8) {
+        var buf: bun.PathBuffer = undefined;
+        _ = &buf;
+        const normalized = bun.path.joinAbsStringBufZ(bun.fs.FileSystem.instance.top_level_dir, (&buf), (&.{ input_path }), .loose);
+        return File.readFrom(dir_fd, normalized, allocator);
+}
+
+pub fn readFileFrom(dir_fd: anytype, path_val: anytype, allocator: std.mem.Allocator) Maybe(ReadFileFromResult) {
+        const ElementType = std.meta.Elem(@TypeOf(path_val));
+        const rc = brk: {
+        if (comptime (Environment.isWindows and (ElementType == u16))) {
+            break :brk openatWindowsTMaybeNormalize(u16, File.from(dir_fd).handle, path_val, O.RDONLY, false);
+        }
+        if (comptime ((ElementType == u8) and (std.meta.sentinel(@TypeOf(path_val)) == null))) {
+            break :brk sys.openatA(File.from(dir_fd).handle, path_val, O.RDONLY, 0);
+        }
+        break :brk sys.openat(File.from(dir_fd).handle, path_val, O.RDONLY, 0);
+};
+        const this = (switch (rc) {
+.err => |e| {
+return .{ .initErr = e };
+},
+.result => |fd| File.from(fd),
+});
+        var result = this.readToEnd(allocator);
+        _ = &result;
+        if (result.err) |e| {
+            _ = &e;
+            _ = this.close();
+            _ = result.bytes.deinit();
+            return .{ .initErr = e };
+        }
+        if ((result.bytes.items.len == 0)) {
+            return .{ .initResult = .{ this, @ptrCast(@constCast("")) } };
+        }
+        return .{ .initResult = .{ this, result.bytes.items } };
+}
+
+pub fn readFrom(dir_fd: anytype, path_val: anytype, allocator: std.mem.Allocator) Maybe([]u8) {
+        const res = (switch (File.readFileFrom(dir_fd, path_val, allocator)) {
+.err => |e| {
+return .{ .initErr = e };
+},
+.result => |r| r,
+});
+        const file = res[0];
+        const bytes = res[1];
+        _ = file.close();
+        return .{ .initResult = bytes };
+}
+
+pub fn toSourceAt(dir_fd: anytype, path_val: anytype, allocator: std.mem.Allocator, opts: ToSourceOptions) Maybe(bun.logger.Source) {
+        var bytes = (switch (File.readFrom(dir_fd, path_val, allocator)) {
+.err => |e| {
+return .{ .initErr = e };
+},
+.result => |b| b,
+});
+        _ = &bytes;
+        if (opts.convert_bom) {
+            if (bun.strings.BOM.detect(bytes)) |bom| {
+                _ = &bom;
+                bytes = bun.handleOom(bom.removeAndConvertToUTF8AndFree(allocator, bytes));
+            }
+        }
+        return .{ .initResult = bun.logger.Source.initPathString(path_val, bytes) };
+}
+
+pub fn toSource(path_val: anytype, allocator: std.mem.Allocator, opts: ToSourceOptions) Maybe(bun.logger.Source) {
+        return File.toSourceAt(std.fs.cwd(), path_val, allocator, opts);
+}
+pub const ReadError = anyerror;
+pub const Reader = std.Io.GenericReader(File, anyerror, stdIoRead);
+pub const WriteError = anyerror;
+pub const Writer = std.Io.GenericWriter(File, anyerror, stdIoWrite);
+pub const QuietWriter = if (Environment.isDebug) std.Io.GenericWriter(File, anyerror, stdIoWriteQuietDebug) else Writer;
+pub const ReadToEndResult = struct {
+        bytes: std.array_list.Managed(u8) = std.array_list.Managed(u8).init(default_allocator),
+        err: ?Error = null,
+
+        pub fn unwrap(self: *const ReadToEndResult): ![]u8 {
+            if (e := self.err) {
+                (bun.sys.Maybe(void){ .err = e }).unwrap()?;
+            }
+            return self.bytes.items;
+        }
+    };
+pub const SizeGuess = enum { probably_small, unknown_size };
+pub const ReadFileFromResult = struct { File, []u8 };
+pub const ToSourceOptions = struct {
+        convert_bom: bool = false,
+    };

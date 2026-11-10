@@ -115,12 +115,11 @@ export @root struct ClientSession {
             if (ctx := ClientContext.get()) {
                 client.flags.h3_retried = true;
                 this.closed = true;
-                const port = this.port;
                 const host = bun.handleOom(bun.default_allocator.dupe(u8, this.hostname));
                 defer bun.default_allocator.free(host);
                 stream.abort();
                 this.detach(stream);
-                if (!ctx.connect(client, host, port)) {
+                if (!ctx.connect(client, host, this.port)) {
                     client.failFromH2(err);
                 }
             } else {

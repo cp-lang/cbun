@@ -17,15 +17,13 @@ const ManagedList = std.array_list.Managed;
 const JSGlobalObject = jsc.JSGlobalObject;
 const JSValue = jsc.JSValue;
 
-zig {
-    comptime {
-        const js_alert = jsc.toJSHostFn(alert);
-        @export(&js_alert, .{ .name = "WebCore__alert" });
-        const js_prompt = jsc.toJSHostFn(prompt.call);
-        @export(&js_prompt, .{ .name = "WebCore__prompt" });
-        const js_confirm = jsc.toJSHostFn(confirm);
-        @export(&js_confirm, .{ .name = "WebCore__confirm" });
-    }
+comptime {
+    const js_alert = jsc.toJSHostFn(alert);
+    @export(&js_alert, .{ .name = "WebCore__alert" });
+    const js_prompt = jsc.toJSHostFn(prompt.call);
+    @export(&js_prompt, .{ .name = "WebCore__prompt" });
+    const js_confirm = jsc.toJSHostFn(confirm);
+    @export(&js_confirm, .{ .name = "WebCore__confirm" });
 }
 
 fn alert(globalObject: *JSGlobalObject, callframe: *jsc.CallFrame): JSError!JSValue {

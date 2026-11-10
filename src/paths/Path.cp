@@ -1,10 +1,18 @@
-zig {
-const Options = struct {
-    check_length: CheckLength = .assume_always_less_than_max_path,
-    sep: PathSeparators = .any,
-    kind: Kind = .any,
-    buf_type: BufType = .pool,
-    unit: Unit = .u8,
+import * as std from "std";
+import * as bun from "bun";
+
+const Environment = bun.Environment;
+const FD = bun.FD;
+const Output = bun.Output;
+const PathBuffer = bun.PathBuffer;
+const WPathBuffer = bun.WPathBuffer;
+
+pub const Options = struct {
+    check_length: CheckLength = CheckLength.assume_always_less_than_max_path,
+    sep: PathSeparators = PathSeparators.any,
+    kind: Kind = Kind.any,
+    buf_type: BufType = BufType.pool,
+    unit: Unit = Unit.u8,
 
     const Unit = enum {
         u8,
@@ -33,7 +41,7 @@ const Options = struct {
 
     const PathSeparators = enum {
         any,
-        auto,
+        @"auto",
         posix,
         windows,
 
@@ -177,23 +185,31 @@ const Options = struct {
     }
 };
 
-pub fn AbsPath(comptime opts: Options) type {
-    var copy = opts;
-    copy.kind = .abs;
-    return Path(copy);
+pub fn AbsPath(comptime opts: Options): type {
+    return Path(Options{
+        .check_length = opts.check_length,
+        .sep = opts.sep,
+        .kind = Options.Kind.abs,
+        .buf_type = opts.buf_type,
+        .unit = opts.unit,
+    });
 }
 
-pub const AutoAbsPath = Path(.{ .kind = .abs, .sep = .auto });
+pub const AutoAbsPath = Path(Options{ .kind = Options.Kind.abs, .sep = Options.PathSeparators.@"auto" });
 
-pub fn RelPath(comptime opts: Options) type {
-    var copy = opts;
-    copy.kind = .rel;
-    return Path(copy);
+pub fn RelPath(comptime opts: Options): type {
+    return Path(Options{
+        .check_length = opts.check_length,
+        .sep = opts.sep,
+        .kind = Options.Kind.rel,
+        .buf_type = opts.buf_type,
+        .unit = opts.unit,
+    });
 }
 
-pub const AutoRelPath = Path(.{ .kind = .rel, .sep = .auto });
+pub const AutoRelPath = Path(Options{ .kind = Options.Kind.rel, .sep = Options.PathSeparators.@"auto" });
 
-pub fn Path(comptime opts: Options) type {
+pub fn Path(comptime opts: Options): type {
     const Result = opts.ResultFn();
 
     return struct {
@@ -911,14 +927,4 @@ pub fn Path(comptime opts: Options) type {
             return .{ .path = this, .saved_len = this.len() };
         }
     };
-}
-
-const std = @import("std");
-
-const bun = @import("bun");
-const Environment = bun.Environment;
-const FD = bun.FD;
-const Output = bun.Output;
-const PathBuffer = bun.PathBuffer;
-const WPathBuffer = bun.WPathBuffer;
 }

@@ -227,14 +227,7 @@ pub fn tickQueueWithCount(_: *EventLoop, virtual_machine: *VirtualMachine, count
         if (_.debug.js_call_count_outside_tick_queue > _.debug.drain_microtasks_count_outside_tick_queue) {
             if (_.debug.track_last_fn_name) {
                 Output.panic(
-                    \\<b>{d} JavaScript functions<r> were called outside of the microtask queue without draining microtasks.
-                    \\
-                    \\Last function name: {f}
-                    \\
-                    \\Use EventLoop.runCallback() to run JavaScript functions outside of the microtask queue.
-                    \\
-                    \\Failing to do this can lead to a large number of microtasks being queued and not being drained, which can lead to a large amount of memory being used and application slowdown.
-                ,
+                    "<b>{d} JavaScript functions<r> were called outside of the microtask queue without draining microtasks.\n\nLast function name: {f}\n\nUse EventLoop.runCallback() to run JavaScript functions outside of the microtask queue.\n\nFailing to do this can lead to a large number of microtasks being queued and not being drained, which can lead to a large amount of memory being used and application slowdown.",
                     .{
                         _.debug.js_call_count_outside_tick_queue - _.debug.drain_microtasks_count_outside_tick_queue,
                         _.debug.last_fn_name,
@@ -242,12 +235,7 @@ pub fn tickQueueWithCount(_: *EventLoop, virtual_machine: *VirtualMachine, count
                 );
             } else {
                 Output.panic(
-                    \\<b>{d} JavaScript functions<r> were called outside of the microtask queue without draining microtasks. To track the last function name, set the BUN_TRACK_LAST_FN_NAME environment variable.
-                    \\
-                    \\Use EventLoop.runCallback() to run JavaScript functions outside of the microtask queue.
-                    \\
-                    \\Failing to do this can lead to a large number of microtasks being queued and not being drained, which can lead to a large amount of memory being used and application slowdown.
-                ,
+                    "<b>{d} JavaScript functions<r> were called outside of the microtask queue without draining microtasks. To track the last function name, set the BUN_TRACK_LAST_FN_NAME environment variable.\n\nUse EventLoop.runCallback() to run JavaScript functions outside of the microtask queue.\n\nFailing to do this can lead to a large number of microtasks being queued and not being drained, which can lead to a large amount of memory being used and application slowdown.",
                     .{_.debug.js_call_count_outside_tick_queue - _.debug.drain_microtasks_count_outside_tick_queue},
                 );
             }

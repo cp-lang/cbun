@@ -1,8 +1,8 @@
-zig {
-    const bun = @import("bun");
-    const strings = bun.strings;
-    const PercentEncoding = @import("../url/url.zig").PercentEncoding;
-}
+import bun from "bun";
+import std from "std";
+
+const strings = bun.strings;
+import { PercentEncoding } from "../url/url.zig";
 
 export @root struct URLPath {
     extname: string = "",
@@ -47,103 +47,97 @@ export @root struct URLPath {
 @tls let temp_path_buf: [1024]u8 = undefined;
 @tls let big_temp_path_buf: [16384]u8 = undefined;
 
-zig {
-    pub fn parse(possibly_encoded_pathname_: string) !URLPath {
-        var decoded_pathname = possibly_encoded_pathname_;
-        var needs_redirect = false;
+pub fn parse(possibly_encoded_pathname_: string): !URLPath {
+    let decoded_pathname = possibly_encoded_pathname_;
+    let needs_redirect = false;
 
-        if (strings.containsChar(decoded_pathname, '%')) {
-            var possibly_encoded_pathname: []u8 = switch (decoded_pathname.len) {
-                0...1024 => &temp_path_buf,
-                else => &big_temp_path_buf,
-            };
-            possibly_encoded_pathname = possibly_encoded_pathname[0..@min(
-                possibly_encoded_pathname_.len,
-                possibly_encoded_pathname.len,
-            )];
-
-            bun.copy(u8, possibly_encoded_pathname, possibly_encoded_pathname_[0..possibly_encoded_pathname.len]);
-            const clone = possibly_encoded_pathname[0..possibly_encoded_pathname.len];
-
-            var fbs = std.io.fixedBufferStream(possibly_encoded_pathname);
-            const writer = fbs.writer();
-
-            decoded_pathname = possibly_encoded_pathname[0..try PercentEncoding.decodeFaultTolerant(@TypeOf(writer), writer, clone, &needs_redirect, true)];
-        }
-
-        var question_mark_i: i16 = -1;
-        var period_i: i16 = -1;
-
-        var first_segment_end: i16 = std.math.maxInt(i16);
-        var last_slash: i16 = -1;
-
-        var i: i16 = @as(i16, @intCast(decoded_pathname.len)) - 1;
-
-        while (i >= 0) : (i -= 1) {
-            const c = decoded_pathname[@as(usize, @intCast(i))];
-
-            switch (c) {
-                '?' => {
-                    question_mark_i = @max(question_mark_i, i);
-                    if (question_mark_i < period_i) {
-                        period_i = -1;
-                    }
-
-                    if (last_slash > question_mark_i) {
-                        last_slash = -1;
-                    }
-                },
-                '.' => {
-                    period_i = @max(period_i, i);
-                },
-                '/' => {
-                    last_slash = @max(last_slash, i);
-
-                    if (i > 0) {
-                        first_segment_end = @min(first_segment_end, i);
-                    }
-                },
-                else => {},
-            }
-        }
-
-        if (last_slash > period_i) {
-            period_i = -1;
-        }
-
-        const extname = brk: {
-            if (question_mark_i > -1 and period_i > -1) {
-                period_i += 1;
-                break :brk decoded_pathname[@as(usize, @intCast(period_i))..@as(usize, @intCast(question_mark_i))];
-            } else if (period_i > -1) {
-                period_i += 1;
-                break :brk decoded_pathname[@as(usize, @intCast(period_i))..];
-            } else {
-                break :brk &([_]u8{});
-            }
+    if (strings.containsChar(decoded_pathname, '%')) {
+        let possibly_encoded_pathname = match (decoded_pathname.len) {
+            0..1024 => temp_path_buf[0..],
+            else => big_temp_path_buf[0..],
         };
+        possibly_encoded_pathname = possibly_encoded_pathname[0..@min(
+            possibly_encoded_pathname_.len,
+            possibly_encoded_pathname.len,
+        )];
 
-        var path = if (question_mark_i < 0) decoded_pathname[1..] else decoded_pathname[1..@as(usize, @intCast(question_mark_i))];
+        bun.copy(u8, possibly_encoded_pathname, possibly_encoded_pathname_[0..possibly_encoded_pathname.len]);
+        let clone = possibly_encoded_pathname[0..possibly_encoded_pathname.len];
 
-        const first_segment = decoded_pathname[1..@min(@as(usize, @intCast(first_segment_end)), decoded_pathname.len)];
-        const is_source_map = strings.eqlComptime(extname, "map");
-        var backup_extname: string = extname;
-        if (is_source_map and path.len > ".map".len) {
-            if (std.mem.lastIndexOfScalar(u8, path[0 .. path.len - ".map".len], '.')) |j| {
-                backup_extname = path[j + 1 ..];
-                backup_extname = backup_extname[0 .. backup_extname.len - ".map".len];
-                path = path[0 .. j + backup_extname.len + 1];
-            }
-        }
+        let fbs = std.io.fixedBufferStream(possibly_encoded_pathname);
+        let writer = fbs.writer();
 
-        return URLPath{
-            .extname = if (!is_source_map) extname else backup_extname,
-            .is_source_map = is_source_map,
-            .pathname = decoded_pathname,
-            .first_segment = first_segment,
-            .path = if (decoded_pathname.len == 1) "." else path,
-            .query_string = if (question_mark_i > -1) decoded_pathname[@as(usize, @intCast(question_mark_i))..@as(usize, @intCast(decoded_pathname.len))] else "",
-            .needs_redirect = needs_redirect,
-        };
+        decoded_pathname = @as(string, possibly_encoded_pathname[0..PercentEncoding.decodeFaultTolerant(@TypeOf(writer), writer, clone, *needs_redirect, true)?]);
     }
+
+    let question_mark_i: i16 = -1;
+    let period_i: i16 = -1;
+
+    let first_segment_end: i16 = std.math.maxInt(i16);
+    let last_slash: i16 = -1;
+
+    let i: i16 = @as(i16, @intCast(decoded_pathname.len)) - 1;
+
+    while (i >= 0) {
+        let c = decoded_pathname[@as(usize, @intCast(i))];
+
+        match (c) {
+            '?' => {
+                question_mark_i = @max(question_mark_i, i);
+                if (question_mark_i < period_i) {
+                    period_i = -1;
+                }
+
+                if (last_slash > question_mark_i) {
+                    last_slash = -1;
+                }
+            },
+            '.' => {
+                period_i = @max(period_i, i);
+            },
+            '/' => {
+                last_slash = @max(last_slash, i);
+
+                if (i > 0) {
+                    first_segment_end = @min(first_segment_end, i);
+                }
+            },
+            else => {},
+        }
+        i -= 1;
+    }
+
+    if (last_slash > period_i) {
+        period_i = -1;
+    }
+
+    let extname: string = if (question_mark_i > -1 && period_i > -1)
+        decoded_pathname[@as(usize, @intCast(period_i + 1))..@as(usize, @intCast(question_mark_i))]
+    else if (period_i > -1)
+        decoded_pathname[@as(usize, @intCast(period_i + 1))..]
+    else
+        "";
+
+    let path = if (question_mark_i < 0) decoded_pathname[1..] else decoded_pathname[1..@as(usize, @intCast(question_mark_i))];
+
+    let first_segment = decoded_pathname[1..@min(@as(usize, @intCast(first_segment_end)), decoded_pathname.len)];
+    let is_source_map = strings.eqlComptime(extname, "map");
+    let backup_extname: string = extname;
+    if (is_source_map && path.len > ".map".len) {
+        if (j := std.mem.lastIndexOfScalar(u8, path[0..path.len - ".map".len], '.')) {
+            backup_extname = path[j + 1..];
+            backup_extname = backup_extname[0..backup_extname.len - ".map".len];
+            path = path[0..j + backup_extname.len + 1];
+        }
+    }
+
+    return URLPath {
+        extname: if (!is_source_map) extname else backup_extname,
+        is_source_map: is_source_map,
+        pathname: decoded_pathname,
+        first_segment: first_segment,
+        path: if (decoded_pathname.len == 1) "." else path,
+        query_string: if (question_mark_i > -1) decoded_pathname[@as(usize, @intCast(question_mark_i))..@as(usize, @intCast(decoded_pathname.len))] else "",
+        needs_redirect: needs_redirect,
+    };
 }

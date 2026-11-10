@@ -2,44 +2,19 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
-export fn us_socket_free_stream_buffer(buffer: *us_socket_stream_buffer_t) void {
-        buffer.deinit();
-    }
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
 pub const bun = @import("bun");
 pub const SocketGroup = @import("./SocketGroup.zig").SocketGroup;
 pub const SocketKind = @import("./SocketKind.zig").SocketKind;
 pub const us_socket_t = opaque {
 
 pub fn open(self: *us_socket_t, is_client: bool, ip_addr: ?[]const u8) void {
-            var client_int: i32 = 0;
+            var client_int: i32 = (if (is_client) 1 else 0);
             _ = &client_int;
-            if (is_client) {
-                client_int = 1;
-            }
             if ((ip_addr != null)) {
                 var ip = ip_addr.?;
                 _ = &ip;
-                _ = us_socket_open(self, client_int, ip.ptr, cp_cast_int(i32, ip.len));
+                _ = us_socket_open(self, client_int, ip.ptr, (if (comptime @typeInfo(@TypeOf(ip.len)) == .@"enum") cp_cast_int(i32, @intFromEnum(ip.len)) else cp_cast_int(i32, ip.len)));
             } else {
                 _ = us_socket_open(self, client_int, null, 0);
             }
@@ -50,29 +25,29 @@ pub fn close(self: *us_socket_t, code: us_socket_t.CloseCode) void {
     }
 
 pub fn localAddress(self: *us_socket_t, buf: []u8) ![]const u8 {
-            var length: i32 = cp_cast_int(i32, buf.len);
+            var length: i32 = (if (comptime @typeInfo(@TypeOf(buf.len)) == .@"enum") cp_cast_int(i32, @intFromEnum(buf.len)) else cp_cast_int(i32, buf.len));
             _ = &length;
             _ = us_socket_local_address(self, buf.ptr, (&length));
             if ((length < 0)) {
                 var errno = bun.sys.getErrno(length);
                 var __errno_moved = false; _ = &__errno_moved;
-                defer if (!__errno_moved) { const T = @TypeOf(errno); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = errno.release() catch {}; } else { errno.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { errno.release(); } };
+                defer if (!__errno_moved) { const T = @TypeOf(errno); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = errno.release() catch {}; } else { errno.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = errno; _drop_val.release(); } };
                 return bun.errnoToZigErr(errno);
             }
-            return buf[0..cp_cast_int(usize, length)];
+            return buf[0..(if (comptime @typeInfo(@TypeOf(length)) == .@"enum") cp_cast_int(usize, @intFromEnum(length)) else cp_cast_int(usize, length))];
     }
 
 pub fn remoteAddress(self: *us_socket_t, buf: []u8) ![]const u8 {
-            var length: i32 = cp_cast_int(i32, buf.len);
+            var length: i32 = (if (comptime @typeInfo(@TypeOf(buf.len)) == .@"enum") cp_cast_int(i32, @intFromEnum(buf.len)) else cp_cast_int(i32, buf.len));
             _ = &length;
             _ = us_socket_remote_address(self, buf.ptr, (&length));
             if ((length < 0)) {
                 var errno = bun.sys.getErrno(length);
                 var __errno_moved = false; _ = &__errno_moved;
-                defer if (!__errno_moved) { const T = @TypeOf(errno); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = errno.release() catch {}; } else { errno.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { errno.release(); } };
+                defer if (!__errno_moved) { const T = @TypeOf(errno); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = errno.release() catch {}; } else { errno.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = errno; _drop_val.release(); } };
                 return bun.errnoToZigErr(errno);
             }
-            return buf[0..cp_cast_int(usize, length)];
+            return buf[0..(if (comptime @typeInfo(@TypeOf(length)) == .@"enum") cp_cast_int(usize, @intFromEnum(length)) else cp_cast_int(usize, length))];
     }
 
 pub fn ssl(self: *us_socket_t) ?*bun.BoringSSL.c.SSL {
@@ -119,11 +94,11 @@ pub fn adoptTLS(self: *us_socket_t, g: *SocketGroup, k: SocketKind, ssl_ctx: *bu
     }
 
 pub fn write(self: *us_socket_t, data: []const u8) i32 {
-            return us_socket_write(self, data.ptr, cp_cast_int(i32, data.len));
+            return us_socket_write(self, data.ptr, (if (comptime @typeInfo(@TypeOf(data.len)) == .@"enum") cp_cast_int(i32, @intFromEnum(data.len)) else cp_cast_int(i32, data.len)));
     }
 
 pub fn writeFd(self: *us_socket_t, data: []const u8, file_descriptor: bun.FD) i32 {
-            return us_socket_ipc_write_fd(self, data.ptr, cp_cast_int(i32, data.len), file_descriptor.native());
+            return us_socket_ipc_write_fd(self, data.ptr, (if (comptime @typeInfo(@TypeOf(data.len)) == .@"enum") cp_cast_int(i32, @intFromEnum(data.len)) else cp_cast_int(i32, data.len)), file_descriptor.native());
     }
 
 pub fn write2(self: *us_socket_t, first: []const u8, second: []const u8) i32 {
@@ -131,7 +106,7 @@ pub fn write2(self: *us_socket_t, first: []const u8, second: []const u8) i32 {
     }
 
 pub fn rawWrite(self: *us_socket_t, data: []const u8) i32 {
-            return us_socket_raw_write(self, data.ptr, cp_cast_int(i32, data.len));
+            return us_socket_raw_write(self, data.ptr, (if (comptime @typeInfo(@TypeOf(data.len)) == .@"enum") cp_cast_int(i32, @intFromEnum(data.len)) else cp_cast_int(i32, data.len)));
     }
 
 pub fn getFd(self: *us_socket_t) bun.FD {
@@ -187,20 +162,14 @@ pub fn setLongTimeout(self: *us_socket_t, minutes: u32) void {
     }
 
 pub fn setNodelay(self: *us_socket_t, enabled: bool) void {
-            var en: i32 = 0;
+            var en: i32 = (if (enabled) 1 else 0);
             _ = &en;
-            if (enabled) {
-                en = 1;
-            }
             _ = us_socket_nodelay(self, en);
     }
 
 pub fn setKeepalive(self: *us_socket_t, enabled: bool, delay: u32) i32 {
-            var en: i32 = 0;
+            var en: i32 = (if (enabled) 1 else 0);
             _ = &en;
-            if (enabled) {
-                en = 1;
-            }
             return us_socket_keepalive(self, en, delay);
     }
 
@@ -209,11 +178,8 @@ pub fn startTLSHandshake(self: *us_socket_t) void {
     }
 
 pub fn setSslRawTap(self: *us_socket_t, enabled: bool) void {
-            var en: i32 = 0;
+            var en: i32 = (if (enabled) 1 else 0);
             _ = &en;
-            if (enabled) {
-                en = 1;
-            }
             _ = us_socket_set_ssl_raw_tap(self, en);
     }
 
@@ -232,11 +198,11 @@ pub fn getError(self: *us_socket_t) i32 {
 pub fn isEstablished(self: *us_socket_t) bool {
             return (us_socket_is_established(self) > 0);
     }
-    pub const CloseCode = enum(i32) {
-                normal = 0,
-                failure = 1,
-                fast_shutdown = 2,
-            };
+    pub enum CloseCode: i32 {
+            normal = 0,
+            failure = 1,
+            fast_shutdown = 2,
+        }
 };
 
 pub const us_socket_stream_buffer_t = extern struct {
@@ -262,19 +228,11 @@ pub fn wrote(self: *us_socket_stream_buffer_t, written: usize) void {
     }
 
 pub fn toStreamBuffer(self: us_socket_stream_buffer_t) bun.io.StreamBuffer {
-            return .{
-                .list = if (self.list_ptr) |buffer_ptr| .{
-                    .allocator = bun.default_allocator,
-                    .items = buffer_ptr[0..self.list_len],
-                    .capacity = self.list_cap,
-                } else .{
-                    .allocator = bun.default_allocator,
-                    .items = &.{},
-                    .capacity = 0,
-                },
-                .cursor = self.cursor,
-            };
-
+            var items: []const u8 = (if ((self.list_ptr != null)) self.list_ptr.?[0..self.list_len] else (&.{  }));
+            _ = &items;
+            var cap: usize = (if ((self.list_ptr != null)) self.list_cap else 0);
+            _ = &cap;
+            return bun.io.StreamBuffer{ .list = .{ allocator = bun.default_allocator, items = items, capacity = cap }, .cursor = self.cursor };
     }
 
 pub fn release(self: *us_socket_stream_buffer_t) void {
@@ -289,74 +247,78 @@ pub fn deinit(self: *us_socket_stream_buffer_t) void {
 };
 
 
-pub extern "c" fn us_socket_get_native_handle(s: *us_socket_t) ?*anyopaque;
+pub extern "c" fn us_socket_get_native_handle(s: *us_socket_t) callconv(.c) ?*anyopaque;
 
-pub extern "c" fn us_socket_local_port(s: *us_socket_t) i32;
+pub extern "c" fn us_socket_local_port(s: *us_socket_t) callconv(.c) i32;
 
-pub extern "c" fn us_socket_remote_port(s: *us_socket_t) i32;
+pub extern "c" fn us_socket_remote_port(s: *us_socket_t) callconv(.c) i32;
 
-pub extern "c" fn us_socket_remote_address(s: *us_socket_t, buf: [*]u8, length: *i32) void;
+pub extern "c" fn us_socket_remote_address(s: *us_socket_t, buf: [*]u8, length: *i32) callconv(.c) void;
 
-pub extern "c" fn us_socket_local_address(s: *us_socket_t, buf: [*]u8, length: *i32) void;
+pub extern "c" fn us_socket_local_address(s: *us_socket_t, buf: [*]u8, length: *i32) callconv(.c) void;
 
-pub extern "c" fn us_socket_timeout(s: *us_socket_t, seconds: u32) void;
+pub extern "c" fn us_socket_timeout(s: *us_socket_t, seconds: u32) callconv(.c) void;
 
-pub extern "c" fn us_socket_long_timeout(s: *us_socket_t, minutes: u32) void;
+pub extern "c" fn us_socket_long_timeout(s: *us_socket_t, minutes: u32) callconv(.c) void;
 
-pub extern "c" fn us_socket_nodelay(s: *us_socket_t, enable: i32) void;
+pub extern "c" fn us_socket_nodelay(s: *us_socket_t, enable: i32) callconv(.c) void;
 
-pub extern "c" fn us_socket_keepalive(s: *us_socket_t, enable: i32, delay: u32) i32;
+pub extern "c" fn us_socket_keepalive(s: *us_socket_t, enable: i32, delay: u32) callconv(.c) i32;
 
-pub extern "c" fn us_socket_ext(s: *us_socket_t) *anyopaque;
+pub extern "c" fn us_socket_ext(s: *us_socket_t) callconv(.c) *anyopaque;
 
-pub extern "c" fn us_socket_group(s: *us_socket_t) *SocketGroup;
+pub extern "c" fn us_socket_group(s: *us_socket_t) callconv(.c) *SocketGroup;
 
-pub extern "c" fn us_socket_kind(s: *us_socket_t) u8;
+pub extern "c" fn us_socket_kind(s: *us_socket_t) callconv(.c) u8;
 
-pub extern "c" fn us_socket_set_kind(s: *us_socket_t, kind: u8) void;
+pub extern "c" fn us_socket_set_kind(s: *us_socket_t, kind: u8) callconv(.c) void;
 
-pub extern "c" fn us_socket_set_ssl_raw_tap(s: *us_socket_t, enabled: i32) void;
+pub extern "c" fn us_socket_set_ssl_raw_tap(s: *us_socket_t, enabled: i32) callconv(.c) void;
 
-pub extern "c" fn us_socket_is_tls(s: *us_socket_t) i32;
+pub extern "c" fn us_socket_is_tls(s: *us_socket_t) callconv(.c) i32;
 
-pub extern "c" fn us_socket_write(s: *us_socket_t, data: [*]const u8, length: i32) i32;
+pub extern "c" fn us_socket_write(s: *us_socket_t, data: [*]const u8, length: i32) callconv(.c) i32;
 
-pub extern "c" fn us_socket_ipc_write_fd(s: *us_socket_t, data: [*]const u8, length: i32, fd: i32) i32;
+pub extern "c" fn us_socket_ipc_write_fd(s: *us_socket_t, data: [*]const u8, length: i32, fd: i32) callconv(.c) i32;
 
-pub extern "c" fn us_socket_write2(s: *us_socket_t, header: ?[*]const u8, len: usize, payload: ?[*]const u8, payload_len: usize) i32;
+pub extern "c" fn us_socket_write2(s: *us_socket_t, header: ?[*]const u8, len: usize, payload: ?[*]const u8, payload_len: usize) callconv(.c) i32;
 
-pub extern "c" fn us_socket_raw_write(s: *us_socket_t, data: [*]const u8, length: i32) i32;
+pub extern "c" fn us_socket_raw_write(s: *us_socket_t, data: [*]const u8, length: i32) callconv(.c) i32;
 
-pub extern "c" fn us_socket_flush(s: *us_socket_t) void;
+pub extern "c" fn us_socket_flush(s: *us_socket_t) callconv(.c) void;
 
-pub extern "c" fn us_socket_open(s: *us_socket_t, is_client: i32, ip: ?[*]const u8, ip_length: i32) ?*us_socket_t;
+pub extern "c" fn us_socket_open(s: *us_socket_t, is_client: i32, ip: ?[*]const u8, ip_length: i32) callconv(.c) ?*us_socket_t;
 
-pub extern "c" fn us_socket_pause(s: *us_socket_t) void;
+pub extern "c" fn us_socket_pause(s: *us_socket_t) callconv(.c) void;
 
-pub extern "c" fn us_socket_resume(s: *us_socket_t) void;
+pub extern "c" fn us_socket_resume(s: *us_socket_t) callconv(.c) void;
 
-pub extern "c" fn us_socket_close(s: *us_socket_t, code: us_socket_t.CloseCode, reason: ?*anyopaque) ?*us_socket_t;
+pub extern "c" fn us_socket_close(s: *us_socket_t, code: us_socket_t.CloseCode, reason: ?*anyopaque) callconv(.c) ?*us_socket_t;
 
-pub extern "c" fn us_socket_shutdown(s: *us_socket_t) void;
+pub extern "c" fn us_socket_shutdown(s: *us_socket_t) callconv(.c) void;
 
-pub extern "c" fn us_socket_is_closed(s: *us_socket_t) i32;
+pub extern "c" fn us_socket_is_closed(s: *us_socket_t) callconv(.c) i32;
 
-pub extern "c" fn us_socket_shutdown_read(s: *us_socket_t) void;
+pub extern "c" fn us_socket_shutdown_read(s: *us_socket_t) callconv(.c) void;
 
-pub extern "c" fn us_socket_is_shut_down(s: *us_socket_t) i32;
+pub extern "c" fn us_socket_is_shut_down(s: *us_socket_t) callconv(.c) i32;
 
-pub extern "c" fn us_socket_sendfile_needs_more(socket: *us_socket_t) void;
+pub extern "c" fn us_socket_sendfile_needs_more(socket: *us_socket_t) callconv(.c) void;
 
-pub extern "c" fn us_socket_get_fd(s: *us_socket_t) i32;
+pub extern "c" fn us_socket_get_fd(s: *us_socket_t) callconv(.c) i32;
 
-pub extern "c" fn us_socket_verify_error(s: *us_socket_t) bun.uws.us_bun_verify_error_t;
+pub extern "c" fn us_socket_verify_error(s: *us_socket_t) callconv(.c) bun.uws.us_bun_verify_error_t;
 
-pub extern "c" fn us_socket_get_error(s: *us_socket_t) i32;
+pub extern "c" fn us_socket_get_error(s: *us_socket_t) callconv(.c) i32;
 
-pub extern "c" fn us_socket_is_established(s: *us_socket_t) i32;
+pub extern "c" fn us_socket_is_established(s: *us_socket_t) callconv(.c) i32;
 
-pub extern "c" fn us_socket_adopt(s: *us_socket_t, group: *SocketGroup, kind: u8, old_ext_size: i32, ext_size: i32) ?*us_socket_t;
+pub extern "c" fn us_socket_adopt(s: *us_socket_t, group: *SocketGroup, kind: u8, old_ext_size: i32, ext_size: i32) callconv(.c) ?*us_socket_t;
 
-pub extern "c" fn us_socket_adopt_tls(s: *us_socket_t, group: *SocketGroup, kind: u8, ssl_ctx: *bun.uws.SslCtx, sni: ?[*:0]const u8, old_ext_size: i32, ext_size: i32) ?*us_socket_t;
+pub extern "c" fn us_socket_adopt_tls(s: *us_socket_t, group: *SocketGroup, kind: u8, ssl_ctx: *bun.uws.SslCtx, sni: ?[*:0]const u8, old_ext_size: i32, ext_size: i32) callconv(.c) ?*us_socket_t;
 
-pub extern "c" fn us_socket_start_tls_handshake(s: *us_socket_t) void;
+pub extern "c" fn us_socket_start_tls_handshake(s: *us_socket_t) callconv(.c) void;
+
+pub fn us_socket_free_stream_buffer(buffer: *us_socket_stream_buffer_t) void {
+        _ = buffer.deinit();
+}

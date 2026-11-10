@@ -1,4 +1,3 @@
-zig {
 pub const socklen_t = c.socklen_t;
 pub const ares_ssize_t = isize;
 pub const ares_socket_t = if (bun.Environment.isWindows) std.os.windows.ws2_32.SOCKET else c_int;
@@ -617,8 +616,11 @@ pub const ares_nameinfo_callback = ?*const fn (?*anyopaque, c_int, c_int, [*c]u8
 pub const ares_sock_create_callback = ?*const fn (ares_socket_t, c_int, ?*anyopaque) callconv(.c) c_int;
 pub const ares_sock_config_callback = ?*const fn (ares_socket_t, c_int, ?*anyopaque) callconv(.c) c_int;
 pub const ares_addrinfo_callback = *const fn (?*anyopaque, c_int, c_int, ?*AddrInfo) callconv(.c) void;
+pub const ares_malloc_callback = ?*const fn (usize) callconv(.c) ?*anyopaque;
+pub const ares_free_callback = ?*const fn (?*anyopaque) callconv(.c) void;
+pub const ares_realloc_callback = ?*const fn (?*anyopaque, usize) callconv(.c) ?*anyopaque;
 pub extern fn ares_library_init(flags: c_int) c_int;
-pub extern fn ares_library_init_mem(flags: c_int, amalloc: ?*const fn (usize) callconv(.c) ?*anyopaque, afree: ?*const fn (?*anyopaque) callconv(.c) void, arealloc: ?*const fn (?*anyopaque, usize) callconv(.c) ?*anyopaque) c_int;
+pub extern fn ares_library_init_mem(flags: c_int, amalloc: ares_malloc_callback, afree: ares_free_callback, arealloc: ares_realloc_callback) c_int;
 pub extern fn ares_library_initialized() c_int;
 pub extern fn ares_library_cleanup() void;
 pub extern fn ares_version(version: [*c]c_int) [*c]const u8;
@@ -1419,22 +1421,22 @@ pub fn getSockaddr(addr: []const u8, port: u16, sa: *std.posix.sockaddr) c_int {
         @memcpy(buf[0..len], addr[0..len]);
 
         buf[len] = 0;
-        break :brk buf[0..len :0];
+        break :brk buf[0..len :0].ptr;
     };
 
     {
-        const in: *std.posix.sockaddr.in = @ptrCast(@alignCast(sa));
-        if (ares_inet_pton(AF.INET, addr_ptr, &in.addr) == 1) {
-            in.*.family = AF.INET;
-            in.*.port = std.mem.nativeToBig(u16, port);
+        let in_sa: *std.posix.sockaddr.in = @ptrCast(@alignCast(sa));
+        if (ares_inet_pton(AF.INET, addr_ptr, &in_sa.addr) == 1) {
+            in_sa.family = AF.INET;
+            in_sa.port = std.mem.nativeToBig(u16, port);
             return 0;
         }
     }
     {
-        const in6: *std.posix.sockaddr.in6 = @ptrCast(@alignCast(sa));
+        let in6: *std.posix.sockaddr.in6 = @ptrCast(@alignCast(sa));
         if (ares_inet_pton(AF.INET6, addr_ptr, &in6.addr) == 1) {
-            in6.*.family = AF.INET6;
-            in6.*.port = std.mem.nativeToBig(u16, port);
+            in6.family = AF.INET6;
+            in6.port = std.mem.nativeToBig(u16, port);
             return 0;
         }
     }
@@ -1456,4 +1458,3 @@ const fd_set = c.fd_set;
 
 const struct_sockaddr = std.posix.sockaddr;
 const struct_in_addr = std.posix.sockaddr.in;
-}

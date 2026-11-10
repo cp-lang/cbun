@@ -43,7 +43,7 @@ pub fn SSLWrapper(comptime T: type): type {
             onClose: *const fn (T) void,
         };
 
-        pub fn initWithCTX(ctx: *BoringSSL.SSL_CTX, is_client: bool, handlers: Handlers): !This {
+        pub fn initWithCTX(ctx: *BoringSSL.SSL_CTX, is_client: bool, handlers: Handlers) !This {
             bun.BoringSSL.load();
             const ssl = BoringSSL.SSL_new(ctx) orelse return error.OutOfMemory;
             errdefer BoringSSL.SSL_free(ssl);
@@ -76,115 +76,115 @@ pub fn SSLWrapper(comptime T: type): type {
             };
         }
 
-        pub fn init(ssl_options: jsc.API.ServerConfig.SSLConfig, is_client: bool, handlers: Handlers): !This {
+        pub fn init(ssl_options: jsc.API.ServerConfig.SSLConfig, is_client: bool, handlers: Handlers) !This {
             bun.BoringSSL.load();
 
             const ctx_opts: uws.SocketContext.BunSocketContextOptions = ssl_options.asUSockets();
-            let mut err: uws.create_bun_socket_error_t = .none;
+            var err: uws.create_bun_socket_error_t = .none;
             const ssl_ctx = ctx_opts.createSSLContext(&err) orelse return error.InvalidOptions;
             errdefer BoringSSL.SSL_CTX_free(ssl_ctx);
             return try This.initWithCTX(ssl_ctx, is_client, handlers);
         }
 
-        pub fn start(*_): void {
-            _.handlers.onOpen(_.handlers.ctx);
-            _.handleTraffic();
+        pub fn start(this: *This) void {
+            this.handlers.onOpen(this.handlers.ctx);
+            this.handleTraffic();
         }
 
-        pub fn startWithPayload(*_, payload: []const u8): void {
-            _.handlers.onOpen(_.handlers.ctx);
-            _.receiveData(payload);
-            _.handleTraffic();
+        pub fn startWithPayload(this: *This, payload: []const u8) void {
+            this.handlers.onOpen(this.handlers.ctx);
+            this.receiveData(payload);
+            this.handleTraffic();
         }
 
-        pub fn shutdownRead(*_): void {
+        pub fn shutdownRead(this: *This) void {
             const DummyReadHandler = struct {
-                fn onData(_: T, _: []const u8): void {}
+                fn onData(_: T, _: []const u8) void {}
             };
-            _.handlers.onData = DummyReadHandler.onData;
+            this.handlers.onData = DummyReadHandler.onData;
         }
 
-        pub fn shutdown(*_, fast_shutdown: bool): bool {
-            const ssl = _.ssl orelse return false;
-            if (_.flags.sent_ssl_shutdown or _.flags.fatal_error) return _.flags.received_ssl_shutdown;
+        pub fn shutdown(this: *This, fast_shutdown: bool) bool {
+            const ssl = this.ssl orelse return false;
+            if (this.flags.sent_ssl_shutdown or this.flags.fatal_error) return this.flags.received_ssl_shutdown;
 
             const ret = BoringSSL.SSL_shutdown(ssl);
             if (fast_shutdown) {
                 _ = BoringSSL.SSL_shutdown(ssl);
-                _.flags.received_ssl_shutdown = true;
-                if (_.flags.handshake_state != HandshakeState.HANDSHAKE_COMPLETED) {
-                    _.flags.handshake_state = HandshakeState.HANDSHAKE_COMPLETED;
-                    _.triggerHandshakeCallback(false, _.getVerifyError());
+                this.flags.received_ssl_shutdown = true;
+                if (this.flags.handshake_state != HandshakeState.HANDSHAKE_COMPLETED) {
+                    this.flags.handshake_state = HandshakeState.HANDSHAKE_COMPLETED;
+                    this.triggerHandshakeCallback(false, this.getVerifyError());
                 }
 
-                _.triggerCloseCallback();
+                this.triggerCloseCallback();
                 return false;
             }
 
-            _.flags.sent_ssl_shutdown = ret >= 0;
+            this.flags.sent_ssl_shutdown = ret >= 0;
             if (ret < 0) {
                 const err = BoringSSL.SSL_get_error(ssl, ret);
                 BoringSSL.ERR_clear_error();
 
                 if (err == BoringSSL.SSL_ERROR_SSL or err == BoringSSL.SSL_ERROR_SYSCALL) {
-                    _.flags.fatal_error = true;
-                    _.triggerCloseCallback();
+                    this.flags.fatal_error = true;
+                    this.triggerCloseCallback();
                     return false;
                 }
             }
             return ret == 1;
         }
 
-        pub fn flush(*_): usize {
-            _.handleTraffic();
-            const ssl = _.ssl orelse return 0;
+        pub fn flush(this: *This) usize {
+            this.handleTraffic();
+            const ssl = this.ssl orelse return 0;
             const pending = BoringSSL.BIO_ctrl_pending(BoringSSL.SSL_get_wbio(ssl));
             if (pending > 0) return @intCast(pending);
             return 0;
         }
 
-        pub fn hasPendingData(_: *const This): bool {
-            const ssl = _.ssl orelse return false;
+        pub fn hasPendingData(this: *const This) bool {
+            const ssl = this.ssl orelse return false;
             return BoringSSL.BIO_ctrl_pending(BoringSSL.SSL_get_wbio(ssl)) > 0 or BoringSSL.BIO_ctrl_pending(BoringSSL.SSL_get_rbio(ssl)) > 0;
         }
 
-        fn hasPendingRead(_: *const This): bool {
-            const ssl = _.ssl orelse return false;
+        fn hasPendingRead(this: *const This) bool {
+            const ssl = this.ssl orelse return false;
             return BoringSSL.BIO_ctrl_pending(BoringSSL.SSL_get_rbio(ssl)) > 0;
         }
 
-        pub fn isShutdown(_: *const This): bool {
-            return _.flags.closed_notified or _.flags.received_ssl_shutdown or _.flags.sent_ssl_shutdown;
+        pub fn isShutdown(this: *const This) bool {
+            return this.flags.closed_notified or this.flags.received_ssl_shutdown or this.flags.sent_ssl_shutdown;
         }
 
-        pub fn isClosed(_: *const This): bool {
-            return _.flags.received_ssl_shutdown and _.flags.sent_ssl_shutdown;
+        pub fn isClosed(this: *const This) bool {
+            return this.flags.received_ssl_shutdown and this.flags.sent_ssl_shutdown;
         }
 
-        pub fn isAuthorized(*_): bool {
-            if (_.flags.handshake_state == HandshakeState.HANDSHAKE_COMPLETED) {
-                return _.flags.authorized;
+        pub fn isAuthorized(this: *This) bool {
+            if (this.flags.handshake_state == HandshakeState.HANDSHAKE_COMPLETED) {
+                return this.flags.authorized;
             }
             return false;
         }
 
-        pub fn receiveData(*_, data: []const u8): void {
-            const ssl = _.ssl orelse return;
+        pub fn receiveData(this: *This, data: []const u8) void {
+            const ssl = this.ssl orelse return;
 
             const input = BoringSSL.SSL_get_rbio(ssl) orelse return;
             const written = BoringSSL.BIO_write(input, data.ptr, @as(c_int, @intCast(data.len)));
             if (written > -1) {
-                _.handleTraffic();
+                this.handleTraffic();
             }
         }
 
-        pub fn writeData(*_, data: []const u8): !usize {
-            const ssl = _.ssl orelse return error.ConnectionClosed;
+        pub fn writeData(this: *This, data: []const u8) !usize {
+            const ssl = this.ssl orelse return error.ConnectionClosed;
 
-            if (_.flags.sent_ssl_shutdown) return error.ConnectionClosed;
+            if (this.flags.sent_ssl_shutdown) return error.ConnectionClosed;
 
             if (data.len == 0) {
-                _.handleTraffic();
+                this.handleTraffic();
                 return 0;
             }
             const written = BoringSSL.SSL_write(ssl, data.ptr, @as(c_int, @intCast(data.len)));
@@ -193,85 +193,85 @@ pub fn SSLWrapper(comptime T: type): type {
                 BoringSSL.ERR_clear_error();
 
                 if (err == BoringSSL.SSL_ERROR_WANT_READ) {
-                    _.handleTraffic();
+                    this.handleTraffic();
                     return error.WantRead;
                 }
                 if (err == BoringSSL.SSL_ERROR_WANT_WRITE) {
-                    _.handleTraffic();
+                    this.handleTraffic();
                     return error.WantWrite;
                 }
-                _.flags.fatal_error = err == BoringSSL.SSL_ERROR_SSL or err == BoringSSL.SSL_ERROR_SYSCALL;
-                _.triggerCloseCallback();
+                this.flags.fatal_error = err == BoringSSL.SSL_ERROR_SSL or err == BoringSSL.SSL_ERROR_SYSCALL;
+                this.triggerCloseCallback();
                 return error.ConnectionClosed;
             }
-            _.handleTraffic();
+            this.handleTraffic();
             return @intCast(written);
         }
 
-        pub fn release(*_): void {
-            _.flags.closed_notified = true;
-            if (_.ssl) |ssl| {
-                _.ssl = null;
+        pub fn release(this: *This) void {
+            this.flags.closed_notified = true;
+            if (this.ssl) |ssl| {
+                this.ssl = null;
                 _ = BoringSSL.SSL_free(ssl);
             }
-            if (_.ctx) |ctx| {
-                _.ctx = null;
+            if (this.ctx) |ctx| {
+                this.ctx = null;
                 _ = BoringSSL.SSL_CTX_free(ctx);
             }
         }
 
-        pub fn deinit(*_): void {
-            _.release();
+        pub fn deinit(this: *This) void {
+            this.release();
         }
 
-        fn triggerHandshakeCallback(*_, success: bool, result: uws.us_bun_verify_error_t): void {
-            if (_.flags.closed_notified) return;
+        fn triggerHandshakeCallback(this: *This, success: bool, result: uws.us_bun_verify_error_t) void {
+            if (this.flags.closed_notified) return;
 
-            _.flags.authorized = success;
-            _.handlers.onHandshake(_.handlers.ctx, success, result);
+            this.flags.authorized = success;
+            this.handlers.onHandshake(this.handlers.ctx, success, result);
         }
 
-        fn triggerWannaWriteCallback(*_, data: []const u8): void {
-            if (_.flags.closed_notified) return;
+        fn triggerWannaWriteCallback(this: *This, data: []const u8) void {
+            if (this.flags.closed_notified) return;
 
-            _.handlers.write(_.handlers.ctx, data);
+            this.handlers.write(this.handlers.ctx, data);
         }
 
-        fn triggerDataCallback(*_, data: []const u8): void {
-            if (_.flags.closed_notified) return;
+        fn triggerDataCallback(this: *This, data: []const u8) void {
+            if (this.flags.closed_notified) return;
 
-            _.handlers.onData(_.handlers.ctx, data);
+            this.handlers.onData(this.handlers.ctx, data);
         }
 
-        fn triggerCloseCallback(*_): void {
-            if (_.flags.closed_notified) return;
-            _.flags.closed_notified = true;
-            _.handlers.onClose(_.handlers.ctx);
+        fn triggerCloseCallback(this: *This) void {
+            if (this.flags.closed_notified) return;
+            this.flags.closed_notified = true;
+            this.handlers.onClose(this.handlers.ctx);
         }
 
-        fn getVerifyError(*_): uws.us_bun_verify_error_t {
-            if (_.isShutdown()) {
+        fn getVerifyError(this: *This) uws.us_bun_verify_error_t {
+            if (this.isShutdown()) {
                 return .{};
             }
-            const ssl = _.ssl orelse return .{};
+            const ssl = this.ssl orelse return .{};
             return ssl.getVerifyError();
         }
 
-        fn updateHandshakeState(*_): bool {
-            if (_.flags.closed_notified) return false;
-            const ssl = _.ssl orelse return false;
+        fn updateHandshakeState(this: *This) bool {
+            if (this.flags.closed_notified) return false;
+            const ssl = this.ssl orelse return false;
 
             if (BoringSSL.SSL_is_init_finished(ssl) != 0) {
                 if ((BoringSSL.SSL_get_shutdown(ssl) & BoringSSL.SSL_RECEIVED_SHUTDOWN) != 0) {
-                    _.flags.received_ssl_shutdown = true;
-                    _ = _.shutdown(false);
-                    _.triggerCloseCallback();
+                    this.flags.received_ssl_shutdown = true;
+                    _ = this.shutdown(false);
+                    this.triggerCloseCallback();
                     return false;
                 }
                 return true;
             }
 
-            if (_.flags.handshake_state == HandshakeState.HANDSHAKE_RENEGOTIATION_PENDING) {
+            if (this.flags.handshake_state == HandshakeState.HANDSHAKE_RENEGOTIATION_PENDING) {
                 return true;
             }
 
@@ -281,46 +281,46 @@ pub fn SSLWrapper(comptime T: type): type {
                 const err = BoringSSL.SSL_get_error(ssl, result);
                 BoringSSL.ERR_clear_error();
                 if (err == BoringSSL.SSL_ERROR_ZERO_RETURN) {
-                    _.flags.received_ssl_shutdown = true;
-                    _ = _.shutdown(false);
-                    _.handleEndOfRenegotiation();
+                    this.flags.received_ssl_shutdown = true;
+                    _ = this.shutdown(false);
+                    this.handleEndOfRenegotiation();
                     return false;
                 }
                 if (err != BoringSSL.SSL_ERROR_WANT_READ and err != BoringSSL.SSL_ERROR_WANT_WRITE) {
-                    _.flags.fatal_error = err == BoringSSL.SSL_ERROR_SSL or err == BoringSSL.SSL_ERROR_SYSCALL;
+                    this.flags.fatal_error = err == BoringSSL.SSL_ERROR_SSL or err == BoringSSL.SSL_ERROR_SYSCALL;
 
-                    _.flags.handshake_state = HandshakeState.HANDSHAKE_COMPLETED;
-                    _.triggerHandshakeCallback(false, _.getVerifyError());
+                    this.flags.handshake_state = HandshakeState.HANDSHAKE_COMPLETED;
+                    this.triggerHandshakeCallback(false, this.getVerifyError());
 
-                    if (_.flags.fatal_error) {
-                        _.triggerCloseCallback();
+                    if (this.flags.fatal_error) {
+                        this.triggerCloseCallback();
                         return false;
                     }
                     return true;
                 }
-                _.flags.handshake_state = HandshakeState.HANDSHAKE_PENDING;
+                this.flags.handshake_state = HandshakeState.HANDSHAKE_PENDING;
                 return true;
             }
 
-            _.flags.handshake_state = HandshakeState.HANDSHAKE_COMPLETED;
-            _.triggerHandshakeCallback(true, _.getVerifyError());
+            this.flags.handshake_state = HandshakeState.HANDSHAKE_COMPLETED;
+            this.triggerHandshakeCallback(true, this.getVerifyError());
 
             return true;
         }
 
-        fn handleEndOfRenegotiation(*_): void {
-            if (_.flags.handshake_state == HandshakeState.HANDSHAKE_RENEGOTIATION_PENDING and (_.ssl == null or BoringSSL.SSL_is_init_finished(_.ssl) != 0)) {
-                _.flags.handshake_state = HandshakeState.HANDSHAKE_COMPLETED;
-                _.triggerHandshakeCallback(true, _.getVerifyError());
+        fn handleEndOfRenegotiation(this: *This) void {
+            if (this.flags.handshake_state == HandshakeState.HANDSHAKE_RENEGOTIATION_PENDING and (this.ssl == null or BoringSSL.SSL_is_init_finished(this.ssl) != 0)) {
+                this.flags.handshake_state = HandshakeState.HANDSHAKE_COMPLETED;
+                this.triggerHandshakeCallback(true, this.getVerifyError());
             }
         }
 
-        fn handleReading(*_, buffer: *[BUFFER_SIZE]u8): bool {
-            let mut read: usize = 0;
+        fn handleReading(this: *This, buffer: *[BUFFER_SIZE]u8) bool {
+            var read: usize = 0;
 
             while (true) {
                 log("handleReading", .{});
-                const ssl = _.ssl orelse return false;
+                const ssl = this.ssl orelse return false;
 
                 const available = buffer[read..];
                 const just_read = BoringSSL.SSL_read(ssl, available.ptr, @intCast(available.len));
@@ -331,27 +331,27 @@ pub fn SSLWrapper(comptime T: type): type {
 
                     if (err != BoringSSL.SSL_ERROR_WANT_READ and err != BoringSSL.SSL_ERROR_WANT_WRITE) {
                         if (err == BoringSSL.SSL_ERROR_WANT_RENEGOTIATE) {
-                            _.flags.handshake_state = HandshakeState.HANDSHAKE_RENEGOTIATION_PENDING;
+                            this.flags.handshake_state = HandshakeState.HANDSHAKE_RENEGOTIATION_PENDING;
                             if (BoringSSL.SSL_renegotiate(ssl) == 0) {
-                                _.flags.handshake_state = HandshakeState.HANDSHAKE_COMPLETED;
-                                _.triggerHandshakeCallback(false, _.getVerifyError());
-                                _.triggerCloseCallback();
+                                this.flags.handshake_state = HandshakeState.HANDSHAKE_COMPLETED;
+                                this.triggerHandshakeCallback(false, this.getVerifyError());
+                                this.triggerCloseCallback();
                                 return false;
                             }
                             continue;
                         } else if (err == BoringSSL.SSL_ERROR_ZERO_RETURN) {
-                            _.flags.received_ssl_shutdown = true;
-                            _ = _.shutdown(false);
-                            _.handleEndOfRenegotiation();
+                            this.flags.received_ssl_shutdown = true;
+                            _ = this.shutdown(false);
+                            this.handleEndOfRenegotiation();
                         }
-                        _.flags.fatal_error = err == BoringSSL.SSL_ERROR_SSL or err == BoringSSL.SSL_ERROR_SYSCALL;
+                        this.flags.fatal_error = err == BoringSSL.SSL_ERROR_SSL or err == BoringSSL.SSL_ERROR_SYSCALL;
 
                         if (read > 0) {
                             log("triggering data callback (read {d})", .{read});
-                            _.triggerDataCallback(buffer[0..read]);
-                            if (_.ssl == null or _.flags.closed_notified) return false;
+                            this.triggerDataCallback(buffer[0..read]);
+                            if (this.ssl == null or this.flags.closed_notified) return false;
                         }
-                        _.triggerCloseCallback();
+                        this.triggerCloseCallback();
                         return false;
                     } else {
                         log("wanna read/write just break", .{});
@@ -359,35 +359,35 @@ pub fn SSLWrapper(comptime T: type): type {
                     }
                 }
 
-                _.handleEndOfRenegotiation();
+                this.handleEndOfRenegotiation();
 
                 read += @intCast(just_read);
                 if (read == buffer.len) {
                     log("triggering data callback (read {d}) and resetting read buffer", .{read});
-                    _.triggerDataCallback(buffer[0..read]);
-                    if (_.ssl == null or _.flags.closed_notified) return false;
+                    this.triggerDataCallback(buffer[0..read]);
+                    if (this.ssl == null or this.flags.closed_notified) return false;
                     read = 0;
                 }
             }
             if (read > 0) {
                 log("triggering data callback (read {d})", .{read});
-                _.triggerDataCallback(buffer[0..read]);
-                if (_.ssl == null or _.flags.closed_notified) return false;
+                this.triggerDataCallback(buffer[0..read]);
+                if (this.ssl == null or this.flags.closed_notified) return false;
             }
             return true;
         }
 
-        fn handleWriting(*_, buffer: *[BUFFER_SIZE]u8): void {
-            let mut read: usize = 0;
+        fn handleWriting(this: *This, buffer: *[BUFFER_SIZE]u8) void {
+            var read: usize = 0;
             while (true) {
-                const ssl = _.ssl orelse return;
+                const ssl = this.ssl orelse return;
                 const output = BoringSSL.SSL_get_wbio(ssl) orelse return;
                 const available = buffer[read..];
                 const just_read = BoringSSL.BIO_read(output, available.ptr, @intCast(available.len));
                 if (just_read > 0) {
                     read += @intCast(just_read);
                     if (read == buffer.len) {
-                        _.triggerWannaWriteCallback(buffer[0..read]);
+                        this.triggerWannaWriteCallback(buffer[0..read]);
                         read = 0;
                     }
                 } else {
@@ -395,25 +395,25 @@ pub fn SSLWrapper(comptime T: type): type {
                 }
             }
             if (read > 0) {
-                _.triggerWannaWriteCallback(buffer[0..read]);
+                this.triggerWannaWriteCallback(buffer[0..read]);
             }
         }
 
-        fn handleTraffic(*_): void {
-            if (_.updateHandshakeState()) {
-                let mut buffer: [BUFFER_SIZE]u8 = undefined;
-                _.handleWriting(&buffer);
+        fn handleTraffic(this: *This) void {
+            if (this.updateHandshakeState()) {
+                var buffer: [BUFFER_SIZE]u8 = undefined;
+                this.handleWriting(&buffer);
 
-                while (_.hasPendingRead() and _.handleReading(&buffer)) {
-                    _.handleWriting(&buffer);
+                while (this.hasPendingRead() and this.handleReading(&buffer)) {
+                    this.handleWriting(&buffer);
                 }
             }
         }
     };
 }
 
-@c fn alwaysContinueVerify(_: c_int, _: ?*BoringSSL.X509_STORE_CTX): c_int {
+@c fn alwaysContinueVerify(_: c_int, _: ?*BoringSSL.X509_STORE_CTX) c_int {
     return 1;
 }
 
-extern fn us_get_shared_default_ca_store(): ?*BoringSSL.X509_STORE;
+extern fn us_get_shared_default_ca_store() ?*BoringSSL.X509_STORE;

@@ -385,7 +385,7 @@ export struct RouteLoader {
                     }
                     if (is_banned) continue;
 
-                    let abs_parts: [2]string = [entry.dir, entry.base()];
+                    let abs_parts: [2]string = .{ entry.dir, entry.base() };
                     if (_dir_info := resolver.readDirInfoIgnoreError(fs.abs(&abs_parts))) {
                         const dir_info: *const DirInfo = _dir_info;
                         this.load(

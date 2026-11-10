@@ -19,8 +19,8 @@ pub const Raw = union(enum) {
     suffix: u64, // bytes=-N
     bounded: struct { start: u64, end: ?u64 }, // bytes=N-[M]
 
-    pub fn resolve(_: Raw, total: u64): Result {
-        return switch (_) {
+    pub fn resolve(this: Raw, total: u64) Result {
+        return switch (this) {
             .none => .none,
             .suffix => |n| {
                 if (n == 0) return .unsatisfiable;
@@ -40,7 +40,7 @@ pub const Raw = union(enum) {
 
 /// Match WebKit's parseRange (HTTPParsers.cpp): case-insensitive "bytes",
 /// optional whitespace before "=". https://fetch.spec.whatwg.org/#simple-range-header-value
-pub fn parseRaw(header: []const u8): Raw {
+pub fn parseRaw(header: []const u8) Raw {
     var rest = header;
     if (rest.len < 5 or !bun.strings.eqlCaseInsensitiveASCII(rest[0..5], "bytes", false)) return .none;
     rest = bun.strings.trim(rest[5..], " \t");
@@ -63,16 +63,16 @@ pub fn parseRaw(header: []const u8): Raw {
     return .{ .bounded = .{ .start = start, .end = end } };
 }
 
-pub fn parse(header: []const u8, total: u64): Result {
+pub fn parse(header: []const u8, total: u64) Result {
     return parseRaw(header).resolve(total);
 }
 
-pub fn fromRequest(req: uws.AnyRequest, total: u64): Result {
+pub fn fromRequest(req: uws.AnyRequest, total: u64) Result {
     const h = req.header("range") orelse return .none;
     return parse(h, total);
 }
 
-pub fn rawFromRequest(req: uws.AnyRequest): Raw {
+pub fn rawFromRequest(req: uws.AnyRequest) Raw {
     const h = req.header("range") orelse return .none;
     return parseRaw(h);
 }

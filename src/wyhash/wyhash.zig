@@ -2,31 +2,9 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
-const primes = [_]u64{
-        0xa0761d6478bd642f,
-        0xe7037ed1a0b428db,
-        0x8ebc6af09c88c6e3,
-        0x589965cc75374cc3,
-        0x1d8e4e27c47d124f,
-    };
+const primes: [5]u64 = .{ 0xa0761d6478bd642f, 0xe7037ed1a0b428db, 0x8ebc6af09c88c6e3, 6384245875588680899, 2129725606500045391 };
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
     const T = @TypeOf(val);
     if (comptime @typeInfo(T) == .comptime_int) return val << shift;
@@ -47,13 +25,9 @@ fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
     }
     return val >> shift;
 }
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
 pub const WyhashStateless = struct {
     seed: u64,
     msg_len: usize,
-    
-pub fn _create(allocator: std.mem.Allocator) !*WyhashStateless { const self_ptr = try allocator.create(WyhashStateless); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(seed: u64) WyhashStateless {
             return WyhashStateless{ .seed = seed, .msg_len = 0 };
@@ -119,7 +93,7 @@ pub fn final(self: *WyhashStateless, b: []const u8) u64 {
 else => s,
 });
             self.msg_len = (self.msg_len + b.len);
-            return mum((self.seed ^ cp_cast_int(u64, self.msg_len)), primes[4]);
+            return mum((self.seed ^ (if (comptime @typeInfo(@TypeOf(self.msg_len)) == .@"enum") cp_cast_int(u64, @intFromEnum(self.msg_len)) else cp_cast_int(u64, self.msg_len))), primes[4]);
     }
 
 pub fn hash(seed: u64, input: []const u8) u64 {
@@ -136,8 +110,6 @@ pub const Wyhash11 = struct {
     state: WyhashStateless,
     buf: [32]u8,
     buf_len: usize,
-    
-pub fn _create(allocator: std.mem.Allocator) !*Wyhash11 { const self_ptr = try allocator.create(Wyhash11); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(seed: u64) Wyhash11 {
             return Wyhash11{ .state = WyhashStateless.init(seed), .buf = @as([32]u8, @splat(@as(u8, 0))), .buf_len = 0 };
@@ -188,19 +160,19 @@ pub fn hash(seed: u64, input: []const u8) u64 {
 
 
 pub fn read_bytes1(data: []const u8) u64 {
-        return cp_cast_int(u64, data[0]);
+        return (if (comptime @typeInfo(@TypeOf(data[0])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[0])) else cp_cast_int(u64, data[0]));
 }
 
 pub fn read_bytes2(data: []const u8) u64 {
-        return (cp_cast_int(u64, data[0]) | cp_shl(cp_cast_int(u64, data[1]), 8));
+        return ((if (comptime @typeInfo(@TypeOf(data[0])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[0])) else cp_cast_int(u64, data[0])) | cp_shl((if (comptime @typeInfo(@TypeOf(data[1])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[1])) else cp_cast_int(u64, data[1])), 8));
 }
 
 pub fn read_bytes4(data: []const u8) u64 {
-        return (((cp_cast_int(u64, data[0]) | cp_shl(cp_cast_int(u64, data[1]), 8)) | cp_shl(cp_cast_int(u64, data[2]), 16)) | cp_shl(cp_cast_int(u64, data[3]), 24));
+        return ((((if (comptime @typeInfo(@TypeOf(data[0])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[0])) else cp_cast_int(u64, data[0])) | cp_shl((if (comptime @typeInfo(@TypeOf(data[1])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[1])) else cp_cast_int(u64, data[1])), 8)) | cp_shl((if (comptime @typeInfo(@TypeOf(data[2])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[2])) else cp_cast_int(u64, data[2])), 16)) | cp_shl((if (comptime @typeInfo(@TypeOf(data[3])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[3])) else cp_cast_int(u64, data[3])), 24));
 }
 
 pub fn read_bytes8(data: []const u8) u64 {
-        return (((((((cp_cast_int(u64, data[0]) | cp_shl(cp_cast_int(u64, data[1]), 8)) | cp_shl(cp_cast_int(u64, data[2]), 16)) | cp_shl(cp_cast_int(u64, data[3]), 24)) | cp_shl(cp_cast_int(u64, data[4]), 32)) | cp_shl(cp_cast_int(u64, data[5]), 40)) | cp_shl(cp_cast_int(u64, data[6]), 48)) | cp_shl(cp_cast_int(u64, data[7]), 56));
+        return ((((((((if (comptime @typeInfo(@TypeOf(data[0])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[0])) else cp_cast_int(u64, data[0])) | cp_shl((if (comptime @typeInfo(@TypeOf(data[1])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[1])) else cp_cast_int(u64, data[1])), 8)) | cp_shl((if (comptime @typeInfo(@TypeOf(data[2])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[2])) else cp_cast_int(u64, data[2])), 16)) | cp_shl((if (comptime @typeInfo(@TypeOf(data[3])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[3])) else cp_cast_int(u64, data[3])), 24)) | cp_shl((if (comptime @typeInfo(@TypeOf(data[4])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[4])) else cp_cast_int(u64, data[4])), 32)) | cp_shl((if (comptime @typeInfo(@TypeOf(data[5])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[5])) else cp_cast_int(u64, data[5])), 40)) | cp_shl((if (comptime @typeInfo(@TypeOf(data[6])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[6])) else cp_cast_int(u64, data[6])), 48)) | cp_shl((if (comptime @typeInfo(@TypeOf(data[7])) == .@"enum") cp_cast_int(u64, @intFromEnum(data[7])) else cp_cast_int(u64, data[7])), 56));
 }
 
 pub fn read_8bytes_swapped(data: []const u8) u64 {
@@ -208,10 +180,10 @@ pub fn read_8bytes_swapped(data: []const u8) u64 {
 }
 
 pub fn mum(a: u64, b: u64) u64 {
-        var r: u128 = (cp_cast_int(u128, a) * cp_cast_int(u128, b));
+        var r: u128 = ((if (comptime @typeInfo(@TypeOf(a)) == .@"enum") cp_cast_int(u128, @intFromEnum(a)) else cp_cast_int(u128, a)) * (if (comptime @typeInfo(@TypeOf(b)) == .@"enum") cp_cast_int(u128, @intFromEnum(b)) else cp_cast_int(u128, b)));
         _ = &r;
         r = (cp_shr(r, 64) ^ r);
-        return cp_cast_int(u64, r);
+        return (if (comptime @typeInfo(@TypeOf(r)) == .@"enum") cp_cast_int(u64, @intFromEnum(r)) else cp_cast_int(u64, r));
 }
 
 pub fn mix0(a: u64, b: u64, seed: u64) u64 {

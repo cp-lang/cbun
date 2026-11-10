@@ -1,20 +1,32 @@
-zig {
-    const Query = @This();
+import * as std from "std";
+import * as bun from "bun";
 
-    /// Linked-list of AND ranges
-    /// "^1 ^2"
-    /// ----|-----
-    /// That is two Query
-    pub const Op = enum {
-        none,
-        AND,
-        OR,
-    };
+const Allocator = std.mem.Allocator;
+const Environment = bun.Environment;
+const OOM = bun.OOM;
+const assert = bun.assert;
+const default_allocator = bun.default_allocator;
+const strings = bun.strings;
 
-    range: Range = Range{},
+const Range = bun.Semver.Range;
+const SlicedString = bun.Semver.SlicedString;
+const Version = bun.Semver.Version;
 
-    // AND
-    next: ?*Query = null,
+/// Linked-list of AND ranges
+/// "^1 ^2"
+/// ----|-----
+/// That is two Query
+pub const Op = enum {
+    none,
+    AND,
+    OR,
+};
+
+@root
+class Query {
+    range: Range = Range{};
+    next: ?*Query = null;
+}
 
     const Formatter = struct {
         query: *const Query,
@@ -33,7 +45,7 @@ zig {
         }
     };
 
-    pub fn fmt(this: *const Query, buf: []const u8) @This().Formatter {
+    pub fn fmt(this: *const Query, buf: []const u8) Formatter {
         return .{ .query = this, .buffer = buf };
     }
 
@@ -587,7 +599,7 @@ zig {
                     }
 
                     i += 1;
-                    while (i < input.len and input[i] == ' ') : (i += 1) {}
+                    while (i < input.len and input[i] == ' ') { i += 1; }
                 },
                 '<' => {
                     if (input.len > i + 1 and input[i + 1] == '=') {
@@ -598,13 +610,13 @@ zig {
                     }
 
                     i += 1;
-                    while (i < input.len and input[i] == ' ') : (i += 1) {}
+                    while (i < input.len and input[i] == ' ') { i += 1; }
                 },
                 '=', 'v' => {
                     token.tag = .version;
                     is_or = true;
                     i += 1;
-                    while (i < input.len and input[i] == ' ') : (i += 1) {}
+                    while (i < input.len and input[i] == ' ') { i += 1; }
                 },
                 '~' => {
                     token.tag = .tilda;
@@ -612,12 +624,12 @@ zig {
 
                     if (i < input.len and input[i] == '>') i += 1;
 
-                    while (i < input.len and input[i] == ' ') : (i += 1) {}
+                    while (i < input.len and input[i] == ' ') { i += 1; }
                 },
                 '^' => {
                     token.tag = .caret;
                     i += 1;
-                    while (i < input.len and input[i] == ' ') : (i += 1) {}
+                    while (i < input.len and input[i] == ' ') { i += 1; }
                 },
                 '0'...'9', 'X', 'x', '*' => {
                     token.tag = .version;
@@ -626,19 +638,19 @@ zig {
                 '|' => {
                     i += 1;
 
-                    while (i < input.len and input[i] == '|') : (i += 1) {}
-                    while (i < input.len and input[i] == ' ') : (i += 1) {}
+                    while (i < input.len and input[i] == '|') { i += 1; }
+                    while (i < input.len and input[i] == ' ') { i += 1; }
                     is_or = true;
                     token.tag = Token.Tag.none;
                     skip_round = true;
                 },
                 '-' => {
                     i += 1;
-                    while (i < input.len and input[i] == ' ') : (i += 1) {}
+                    while (i < input.len and input[i] == ' ') { i += 1; }
                 },
                 ' ' => {
                     i += 1;
-                    while (i < input.len and input[i] == ' ') : (i += 1) {}
+                    while (i < input.len and input[i] == ' ') { i += 1; }
                     skip_round = true;
                 },
                 else => {
@@ -648,7 +660,7 @@ zig {
                     // skip tagged versions
                     // we are assuming this is the beginning of a tagged version like "boop"
                     // "1.0.0 || boop"
-                    while (i < input.len and input[i] != ' ' and input[i] != '|') : (i += 1) {}
+                    while (i < input.len and input[i] != ' ' and input[i] != '|') { i += 1; }
                     skip_round = true;
                 },
             }
@@ -706,7 +718,7 @@ zig {
                             },
                             .minor => {
                                 // "1.0.0 - 1.x" --> ">=1.0.0 < 2.0.0"
-                                second_version.major +|= 1;
+                                second_version.major = second_version.major +| 1;
                                 second_version.minor = 0;
                                 second_version.patch = 0;
 
@@ -717,7 +729,7 @@ zig {
                             },
                             .patch => {
                                 // "1.0.0 - 1.0.x" --> ">=1.0.0 <1.1.0"
-                                second_version.minor +|= 1;
+                                second_version.minor = second_version.minor +| 1;
                                 second_version.patch = 0;
 
                                 break :brk Range{
@@ -735,19 +747,19 @@ zig {
                     };
 
                     if (is_or) {
-                        try list.orRange(range);
+                        list.orRange(range)?;
                     } else {
-                        try list.andRange(range);
+                        list.andRange(range)?;
                     }
 
                     i += second_parsed.len + 1;
                 } else if (count == 0 and token.tag == .version) {
                     switch (parse_result.wildcard) {
                         .none => {
-                            try list.orVersion(version);
+                            list.orVersion(version)?;
                         },
                         else => {
-                            try list.orRange(token.toRange(parse_result.version));
+                            list.orRange(token.toRange(parse_result.version))?;
                         },
                     }
                 } else if (count == 0) {
@@ -760,11 +772,11 @@ zig {
                         prev_token.tag = .none;
                         continue;
                     }
-                    try list.andRange(token.toRange(parse_result.version));
+                    list.andRange(token.toRange(parse_result.version))?;
                 } else if (is_or) {
-                    try list.orRange(token.toRange(parse_result.version));
+                    list.orRange(token.toRange(parse_result.version))?;
                 } else {
-                    try list.andRange(token.toRange(parse_result.version));
+                    list.andRange(token.toRange(parse_result.version))?;
                 }
 
                 is_or = false;
@@ -776,18 +788,3 @@ zig {
 
         return list;
     }
-
-    const std = @import("std");
-    const Allocator = std.mem.Allocator;
-
-    const bun = @import("bun");
-    const Environment = bun.Environment;
-    const OOM = bun.OOM;
-    const assert = bun.assert;
-    const default_allocator = bun.default_allocator;
-    const strings = bun.strings;
-
-    const Range = bun.Semver.Range;
-    const SlicedString = bun.Semver.SlicedString;
-    const Version = bun.Semver.Version;
-}

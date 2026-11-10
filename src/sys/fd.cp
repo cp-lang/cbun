@@ -13,8 +13,7 @@ const uv_file = bun.windows.libuv.uv_file;
 const E = std.posix.E;
 const fd_t = std.posix.fd_t;
 
-zig {
-    const backing_int = if (is_posix) c_int else u64;
+const backing_int = if (is_posix) c_int else u64;
     const WindowsHandleNumber = u63;
     const HandleNumber = if (is_posix) c_int else WindowsHandleNumber;
 
@@ -578,12 +577,12 @@ zig {
         }
     };
 
-    fn isStdioHandle(id: std.os.windows.DWORD, handle: HANDLE) bool {
+    fn isStdioHandle(id: std.os.windows.DWORD, handle: HANDLE): bool {
         const h = std.os.windows.GetStdHandle(id) catch return false;
         return handle == h;
     }
 
-    fn handleToNumber(handle: fd_t) HandleNumber {
+    fn handleToNumber(handle: fd_t): HandleNumber {
         if (is_posix) {
             return handle;
         } else {
@@ -593,7 +592,7 @@ zig {
         }
     }
 
-    fn numberToHandle(handle: HandleNumber) fd_t {
+    fn numberToHandle(handle: HandleNumber): fd_t {
         if (os == .windows) {
             if (handle == 0) return std.os.windows.INVALID_HANDLE_VALUE;
             return @ptrFromInt(handle);
@@ -602,13 +601,17 @@ zig {
         }
     }
 
-    pub fn uv_get_osfhandle(in: c_int) libuv.uv_os_fd_t {
-        const out = libuv_private.uv_get_osfhandle(in);
+    pub fn uv_get_osfhandle(in_fd: c_int): libuv.uv_os_fd_t {
+        const out = libuv_private.uv_get_osfhandle(in_fd);
         return out;
     }
 
-    pub fn uv_open_osfhandle(in: libuv.uv_os_fd_t) error{SystemFdQuotaExceeded}!c_int {
-        const out = libuv_private.uv_open_osfhandle(in);
+    pub error SystemFdQuotaExceededError {
+        SystemFdQuotaExceeded,
+    }
+
+    pub fn uv_open_osfhandle(in_handle: libuv.uv_os_fd_t): SystemFdQuotaExceededError!c_int {
+        const out = libuv_private.uv_open_osfhandle(in_handle);
         bun.assert(out >= -1);
         if (out == -1) return error.SystemFdQuotaExceeded;
         return out;
@@ -713,4 +716,3 @@ zig {
         extern fn uv_get_osfhandle(fd: c_int) fd_t;
         extern fn uv_open_osfhandle(os_fd: fd_t) c_int;
     };
-}

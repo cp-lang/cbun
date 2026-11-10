@@ -1,4 +1,9 @@
-zig {
+import * as bun from "bun";
+import * as std from "std";
+
+const Win32Error = bun.windows.Win32Error;
+const uv = bun.windows.libuv;
+
 pub const E = enum(u16) {
     SUCCESS = 0,
     PERM = 1,
@@ -288,11 +293,11 @@ pub fn getErrno(rc: anytype) E {
         return bun.windows.translateNTStatusToErrno(rc);
     }
 
-    if (Win32Error.get().toSystemErrno()) |sys| {
+    if (sys := Win32Error.get().toSystemErrno()) {
         return sys.toE();
     }
 
-    if (bun.windows.WSAGetLastError()) |wsa| {
+    if (wsa := bun.windows.WSAGetLastError()) {
         return wsa.toE();
     }
 
@@ -1170,9 +1175,3 @@ pub const UV_E = struct {
     pub const NOEXEC = -uv.UV_ENOEXEC;
 };
 
-const bun = @import("bun");
-const std = @import("std");
-
-const Win32Error = bun.windows.Win32Error;
-const uv = bun.windows.libuv;
-}

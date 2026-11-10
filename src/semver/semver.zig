@@ -2,12 +2,18 @@
 const std = @import("std");
 const string = []const u8;
 
-pub const String = @import("../install_types/SemverString.zig").String;
-pub const ExternalString = @import("../install_types/ExternalString.zig").ExternalString;
-pub const Version = @import("./Version.zig").Version;
-pub const VersionType = @import("./Version.zig").VersionType;
-
-pub const SlicedString = @import("../install_types/SlicedString.zig");
-pub const Range = @import("./SemverRange.zig");
-pub const Query = @import("./SemverQuery.zig");
-pub const SemverObject = @import("../semver_jsc/SemverObject.zig");
+pub const String = semver_string.String;
+pub const ExternalString = external_string.ExternalString;
+pub const Version = version_mod.Version;
+pub const VersionType = version_mod.VersionType;
+pub const SlicedString = sliced_string;
+pub const Range = range_mod;
+pub const Query = query_mod;
+pub const SemverObject = semver_obj;
+pub const semver_string = @import("../install_types/SemverString.zig");
+pub const external_string = @import("../install_types/ExternalString.zig");
+pub const version_mod = @import("./Version.zig");
+pub const sliced_string = @import("../install_types/SlicedString.zig");
+pub const range_mod = @import("./SemverRange.zig");
+pub const query_mod = @import("./SemverQuery.zig");
+pub const semver_obj = @import("../semver_jsc/SemverObject.zig");

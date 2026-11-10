@@ -2,31 +2,13 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
 const strings = bun.strings;
 const log = bun.Output.scoped(.h2_client, .hidden);
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
 fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
 pub const ClientSession = @import("./ClientSession.zig").ClientSession;
 pub const Stream = @import("./Stream.zig").Stream;
 pub const wire = @import("../H2FrameParser.zig");
@@ -38,7 +20,6 @@ pub fn parseFrames(session: *ClientSession, buf: []const u8) usize {
         _ = &consumed;
         while (true) {
             const remaining = buf[consumed..];
-            _ = &remaining;
             if ((remaining.len < wire.FrameHeader.byteSize)) {
                 break;
             }
@@ -50,8 +31,7 @@ pub fn parseFrames(session: *ClientSession, buf: []const u8) usize {
                 session.fatal_error = error.HTTP2FrameSizeError;
                 break;
             }
-            const frame_len = (wire.FrameHeader.byteSize + cp_cast_int(usize, header.length));
-            _ = &frame_len;
+            const frame_len = (wire.FrameHeader.byteSize + (if (comptime @typeInfo(@TypeOf(header.length)) == .@"enum") cp_cast_int(usize, @intFromEnum(header.length)) else cp_cast_int(usize, header.length)));
             if ((remaining.len < frame_len)) {
                 break;
             }
@@ -74,7 +54,7 @@ pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload:
             session.fatal_error = error.HTTP2ProtocolError;
             return;
         }
-        switch (@as(wire.FrameType, @enumFromInt(header.type))) {
+        switch ((if (comptime @typeInfo(wire.FrameType) == .@"enum") @as(wire.FrameType, @enumFromInt(header.type)) else @as(wire.FrameType, header.type))) {
 .HTTP_FRAME_SETTINGS => {
 if ((header.streamIdentifier != 0)) {
             session.fatal_error = error.HTTP2ProtocolError;
@@ -96,32 +76,30 @@ if ((header.streamIdentifier != 0)) {
             var unit: wire.SettingsPayloadUnit = undefined;
             _ = &unit;
             _ = wire.SettingsPayloadUnit.from((&unit), payload[i..(i + wire.SettingsPayloadUnit.byteSize)], 0, true);
-            switch (@as(wire.SettingsType, @enumFromInt(unit.type))) {
+            switch ((if (comptime @typeInfo(wire.SettingsType) == .@"enum") @as(wire.SettingsType, @enumFromInt(unit.type)) else @as(wire.SettingsType, unit.type))) {
 .SETTINGS_MAX_FRAME_SIZE => {
-if (((unit.value < wire.DEFAULT_MAX_FRAME_SIZE) or (unit.value > wire.MAX_FRAME_SIZE))) {
+if ((((if (comptime @typeInfo(@TypeOf(unit)) == .@"enum") @intFromEnum(unit) else unit.value) < wire.DEFAULT_MAX_FRAME_SIZE) or ((if (comptime @typeInfo(@TypeOf(unit)) == .@"enum") @intFromEnum(unit) else unit.value) > wire.MAX_FRAME_SIZE))) {
                 session.fatal_error = error.HTTP2ProtocolError;
                 return;
             }
-            session.remote_max_frame_size = @truncate(unit.value);
+            session.remote_max_frame_size = @truncate((if (comptime @typeInfo(@TypeOf(unit)) == .@"enum") @intFromEnum(unit) else unit.value));
 },
 .SETTINGS_MAX_CONCURRENT_STREAMS => {
-session.remote_max_concurrent_streams = unit.value;
+session.remote_max_concurrent_streams = (if (comptime @typeInfo(@TypeOf(unit)) == .@"enum") @intFromEnum(unit) else unit.value);
 },
 .SETTINGS_HEADER_TABLE_SIZE => {
-session.pending_hpack_enc_capacity = @min(((session.pending_hpack_enc_capacity) orelse (unit.value)), unit.value);
+session.pending_hpack_enc_capacity = @min(((session.pending_hpack_enc_capacity) orelse ((if (comptime @typeInfo(@TypeOf(unit)) == .@"enum") @intFromEnum(unit) else unit.value))), (if (comptime @typeInfo(@TypeOf(unit)) == .@"enum") @intFromEnum(unit) else unit.value));
 },
 .SETTINGS_INITIAL_WINDOW_SIZE => {
-if ((unit.value > wire.MAX_WINDOW_SIZE)) {
+if (((if (comptime @typeInfo(@TypeOf(unit)) == .@"enum") @intFromEnum(unit) else unit.value) > wire.MAX_WINDOW_SIZE)) {
                 session.fatal_error = error.HTTP2FlowControlError;
                 return;
             }
-            const delta = (cp_cast_int(i64, unit.value) - cp_cast_int(i64, session.remote_initial_window_size));
-            _ = &delta;
-            session.remote_initial_window_size = unit.value;
+            const delta = ((if (comptime @typeInfo(@TypeOf((if (comptime @typeInfo(@TypeOf(unit)) == .@"enum") @intFromEnum(unit) else unit.value))) == .@"enum") cp_cast_int(i64, @intFromEnum((if (comptime @typeInfo(@TypeOf(unit)) == .@"enum") @intFromEnum(unit) else unit.value))) else cp_cast_int(i64, (if (comptime @typeInfo(@TypeOf(unit)) == .@"enum") @intFromEnum(unit) else unit.value))) - (if (comptime @typeInfo(@TypeOf(session.remote_initial_window_size)) == .@"enum") cp_cast_int(i64, @intFromEnum(session.remote_initial_window_size)) else cp_cast_int(i64, session.remote_initial_window_size)));
+            session.remote_initial_window_size = (if (comptime @typeInfo(@TypeOf(unit)) == .@"enum") @intFromEnum(unit) else unit.value);
             for (session.streams.values()) |s| {
                 _ = &s;
-                const next = (cp_cast_int(i64, s.send_window) + delta);
-                _ = &next;
+                const next = ((if (comptime @typeInfo(@TypeOf(s.send_window)) == .@"enum") cp_cast_int(i64, @intFromEnum(s.send_window)) else cp_cast_int(i64, s.send_window)) + delta);
                 if ((next > wire.MAX_WINDOW_SIZE)) {
                     session.fatal_error = error.HTTP2FlowControlError;
                     return;
@@ -148,14 +126,12 @@ if ((header.length != 4)) {
             return;
         }
         const inc: i32 = @intCast(wire.UInt31WithReserved.fromBytes(payload[0..4]).uint31);
-        _ = &inc;
         if ((header.streamIdentifier == 0)) {
             if ((inc == 0)) {
                 session.fatal_error = error.HTTP2ProtocolError;
                 return;
             }
-            const next = (cp_cast_int(i64, session.conn_send_window) + inc);
-            _ = &next;
+            const next = ((if (comptime @typeInfo(@TypeOf(session.conn_send_window)) == .@"enum") cp_cast_int(i64, @intFromEnum(session.conn_send_window)) else cp_cast_int(i64, session.conn_send_window)) + inc);
             if ((next > wire.MAX_WINDOW_SIZE)) {
                 session.fatal_error = error.HTTP2FlowControlError;
                 return;
@@ -170,8 +146,7 @@ if ((header.length != 4)) {
                     stream.fatal_error = error.HTTP2ProtocolError;
                     return;
                 }
-                const next = (cp_cast_int(i64, stream.send_window) + inc);
-                _ = &next;
+                const next = ((if (comptime @typeInfo(@TypeOf(stream.send_window)) == .@"enum") cp_cast_int(i64, @intFromEnum(stream.send_window)) else cp_cast_int(i64, stream.send_window)) + inc);
                 if ((next > wire.MAX_WINDOW_SIZE)) {
                     _ = stream.rst(.FLOW_CONTROL_ERROR);
                     stream.fatal_error = error.HTTP2FlowControlError;
@@ -181,7 +156,6 @@ if ((header.length != 4)) {
                 session.stream_progressed = true;
             } else {
                 const sid: u31 = @intCast(header.streamIdentifier);
-                _ = &sid;
                 if ((((sid & 1) == 0) or (sid >= session.next_stream_id))) {
                     session.fatal_error = error.HTTP2ProtocolError;
                     return;
@@ -220,7 +194,6 @@ if ((header.streamIdentifier == 0)) {
 var fragment = payload;
         _ = &fragment;
         const stream_id: u31 = @intCast(header.streamIdentifier);
-        _ = &stream_id;
         if (session.streams.get(stream_id)) |stream| {
             _ = &stream;
             session.stream_progressed = true;
@@ -323,7 +296,6 @@ if (((session.expecting_continuation == 0) or (header.streamIdentifier != sessio
 .HTTP_FRAME_DATA => {
 session.conn_unacked_bytes = (session.conn_unacked_bytes + header.length);
         const stream_id: u31 = @intCast(header.streamIdentifier);
-        _ = &stream_id;
         if (session.streams.get(stream_id)) |stream| {
             _ = &stream;
             session.stream_progressed = true;
@@ -368,7 +340,6 @@ if ((header.length != 4)) {
             return;
         }
         const stream_id: u31 = @intCast(header.streamIdentifier);
-        _ = &stream_id;
         if ((((stream_id == 0) or ((stream_id & 1) == 0)) or (stream_id >= session.next_stream_id))) {
             session.fatal_error = error.HTTP2ProtocolError;
             return;
@@ -376,11 +347,9 @@ if ((header.length != 4)) {
         if (session.streams.get(stream_id)) |stream| {
             _ = &stream;
             const had_response = stream.remoteClosed();
-            _ = &had_response;
             stream.rst_done = true;
             stream.state = .closed;
             const code: u32 = wire.u32FromBytes(payload[0..4]);
-            _ = &code;
             if ((code == @intFromEnum(wire.ErrorCode.NO_ERROR))) {
                 if (had_response) {
                     stream.fatal_error = null;
@@ -408,9 +377,7 @@ if ((header.streamIdentifier != 0)) {
         session.goaway_received = true;
         session.goaway_last_stream_id = wire.UInt31WithReserved.fromBytes(payload[0..4]).uint31;
         const code: u32 = wire.u32FromBytes(payload[4..8]);
-        _ = &code;
         const graceful = (code == @intFromEnum(wire.ErrorCode.NO_ERROR));
-        _ = &graceful;
         var it = session.streams.iterator();
         _ = &it;
         while (it.next()) |e| {
@@ -447,7 +414,6 @@ pub fn decodeDiscardOrphan(session: *ClientSession) void {
         while ((offset < session.orphan_header_block.items.len)) {
             const result = (blk_catch_0: { break :blk_catch_0 ((session.hpack.decode(session.orphan_header_block.items[offset..])) catch |__ce_0| { _ = &__ce_0; session.fatal_error = error.HTTP2CompressionError;
             return; }); });
-            _ = &result;
             offset = (offset + result.next);
         }
 }
@@ -464,7 +430,6 @@ pub fn decodeHeaderBlock(session: *ClientSession, stream: *Stream) void {
         _ = bounds.deinit(bun.default_allocator);
         }
         const start_len = stream.decoded_bytes.items.len;
-        _ = &start_len;
         var seen_regular = false;
         _ = &seen_regular;
         var seen_status = false;
@@ -476,16 +441,15 @@ pub fn decodeHeaderBlock(session: *ClientSession, stream: *Stream) void {
         while ((offset < stream.header_block.items.len)) {
             const result = (blk_catch_1: { break :blk_catch_1 ((session.hpack.decode(stream.header_block.items[offset..])) catch |__ce_1| { _ = &__ce_1; session.fatal_error = error.HTTP2CompressionError;
             return; }); });
-            _ = &result;
             offset = (offset + result.next);
-            if (((result.name.len > 0) and (result.name[0] == 58))) {
-                if (((((stream.status_code != 0) or seen_regular) or seen_status) or (!strings.eqlComptime(result.name, ":status")))) {
+            if ((((if (comptime @typeInfo(@TypeOf(result)) == .@"enum" or @typeInfo(@TypeOf(result)) == .@"union") @tagName(result) else result.name).len > 0) and ((if (comptime @typeInfo(@TypeOf(result)) == .@"enum" or @typeInfo(@TypeOf(result)) == .@"union") @tagName(result) else result.name)[0] == 58))) {
+                if (((((stream.status_code != 0) or seen_regular) or seen_status) or (!strings.eqlComptime((if (comptime @typeInfo(@TypeOf(result)) == .@"enum" or @typeInfo(@TypeOf(result)) == .@"union") @tagName(result) else result.name), ":status")))) {
                     malformed = true;
                     continue;
                 }
                 seen_status = true;
-                if ((result.value.len == 3)) {
-                    status = (blk_catch_2: { break :blk_catch_2 ((std.fmt.parseInt(u32, result.value, 10)) catch |__ce_2| { _ = &__ce_2; break :blk_catch_2 0; }); });
+                if (((if (comptime @typeInfo(@TypeOf(result)) == .@"enum") @intFromEnum(result) else result.value).len == 3)) {
+                    status = (blk_catch_2: { break :blk_catch_2 ((std.fmt.parseInt(u32, (if (comptime @typeInfo(@TypeOf(result)) == .@"enum") @intFromEnum(result) else result.value), 10)) catch |__ce_2| { _ = &__ce_2; break :blk_catch_2 0; }); });
                 } else {
                     status = 0;
                 }
@@ -498,20 +462,18 @@ pub fn decodeHeaderBlock(session: *ClientSession, stream: *Stream) void {
             if (((stream.status_code != 0) or malformed)) {
                 continue;
             }
-            if (isMalformedResponseField(result.name)) {
+            if (isMalformedResponseField((if (comptime @typeInfo(@TypeOf(result)) == .@"enum" or @typeInfo(@TypeOf(result)) == .@"union") @tagName(result) else result.name))) {
                 malformed = true;
                 continue;
             }
-            if ((((stream.decoded_bytes.items.len + result.name.len) + result.value.len) > local_max_header_list_size)) {
+            if ((((stream.decoded_bytes.items.len + (if (comptime @typeInfo(@TypeOf(result)) == .@"enum" or @typeInfo(@TypeOf(result)) == .@"union") @tagName(result) else result.name).len) + (if (comptime @typeInfo(@TypeOf(result)) == .@"enum") @intFromEnum(result) else result.value).len) > local_max_header_list_size)) {
                 session.fatal_error = error.HTTP2HeaderListTooLarge;
                 return;
             }
             const name_start: u32 = @intCast(stream.decoded_bytes.items.len);
-            _ = &name_start;
-            _ = bun.handleOom(stream.decoded_bytes.appendSlice(bun.default_allocator, result.name));
+            _ = bun.handleOom(stream.decoded_bytes.appendSlice(bun.default_allocator, (if (comptime @typeInfo(@TypeOf(result)) == .@"enum" or @typeInfo(@TypeOf(result)) == .@"union") @tagName(result) else result.name)));
             const value_start: u32 = @intCast(stream.decoded_bytes.items.len);
-            _ = &value_start;
-            _ = bun.handleOom(stream.decoded_bytes.appendSlice(bun.default_allocator, result.value));
+            _ = bun.handleOom(stream.decoded_bytes.appendSlice(bun.default_allocator, (if (comptime @typeInfo(@TypeOf(result)) == .@"enum") @intFromEnum(result) else result.value)));
             _ = bun.handleOom(bounds.append(bun.default_allocator, .{ name_start, value_start, @intCast(stream.decoded_bytes.items.len) }));
         }
         if (malformed) {
@@ -549,7 +511,6 @@ pub fn decodeHeaderBlock(session: *ClientSession, stream: *Stream) void {
             _ = stream.sentEndStream();
         }
         const bytes = stream.decoded_bytes.items;
-        _ = &bytes;
         _ = bun.handleOom(stream.decoded_headers.ensureTotalCapacityPrecise(bun.default_allocator, bounds.items.len));
         for (bounds.items) |b| {
             _ = &b;
@@ -562,7 +523,6 @@ pub fn stripPadding(payload: []const u8) ?[]const u8 {
             return null;
         }
         const pad: usize = payload[0];
-        _ = &pad;
         if ((pad >= payload.len)) {
             return null;
         }

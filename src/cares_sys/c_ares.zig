@@ -2,31 +2,13 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 pub const socklen_t = c.socklen_t;
 pub const ares_ssize_t = isize;
-pub const ares_socket_t = if (bun.Environment.isWindows) std.os.windows.ws2_32.SOCKET else c_int;
+pub const ares_socket_t = (if (bun.Environment.isWindows) std.os.windows.ws2_32.SOCKET else c_int);
 pub const ares_sock_state_cb = ?*const fn (?*anyopaque, ares_socket_t, c_int, c_int) callconv(.c) void;
 pub const struct_apattern = opaque {};
-
 pub const AF = std.posix.AF;
-
 pub const NSClass = enum(c_int) {
     /// Cookie.
     ns_c_invalid = 0,
@@ -45,7 +27,6 @@ pub const NSClass = enum(c_int) {
     ns_c_any = 255,
     ns_c_max = 65536,
 };
-
 pub const NSType = enum(c_int) {
     /// Cookie.
     ns_t_invalid = 0,
@@ -202,7 +183,6 @@ pub const Options = extern struct {
     evsys: ares_evsys_t = 0,
     server_failover_opts: struct_ares_server_failover_options = @import("std").mem.zeroes(struct_ares_server_failover_options),
 };
-
 pub const struct_hostent = extern struct {
     h_name: ?[*:0]u8,
     h_aliases: ?[*:null]?[*:0]u8,
@@ -284,7 +264,6 @@ pub const struct_hostent = extern struct {
         ares_free_hostent(this);
     }
 };
-
 pub const hostent_with_ttls = struct {
     hostent: *struct_hostent,
     ttls: [256]c_int = [_]c_int{-1} ** 256,
@@ -375,7 +354,6 @@ pub const hostent_with_ttls = struct {
         bun.default_allocator.destroy(this);
     }
 };
-
 pub const struct_nameinfo = extern struct {
     node: [*c]u8,
     service: [*c]u8,
@@ -403,7 +381,6 @@ pub const struct_nameinfo = extern struct {
         }.handle;
     }
 };
-
 pub const struct_timeval = std.posix.timeval;
 pub const struct_Channeldata = opaque {};
 pub const AddrInfo_cname = extern struct {
@@ -431,7 +408,6 @@ pub const AddrInfo_node = extern struct {
         return len;
     }
 };
-
 pub const AddrInfo = extern struct {
     cnames_: [*c]AddrInfo_cname = null,
     node: ?*AddrInfo_node = null,
@@ -480,12 +456,10 @@ pub const AddrInfo_hints = extern struct {
         return this.ai_flags == 0 and this.ai_family == 0 and this.ai_socktype == 0 and this.ai_protocol == 0;
     }
 };
-
 pub const ChannelOptions = struct {
     timeout: ?i32 = null,
     tries: ?i32 = null,
 };
-
 pub const Channel = opaque {
     pub fn init(comptime Container: type, this: *Container, options: ChannelOptions) ?Error {
         var channel: *Channel = undefined;
@@ -613,50 +587,13 @@ pub const Channel = opaque {
         );
     }
 };
-
 var ares_has_loaded = std.atomic.Value(bool).init(false);
-fn libraryInit() void {
-    if (ares_has_loaded.swap(true, .monotonic))
-        return;
-
-    const rc = ares_library_init_mem(
-        ARES_LIB_INIT_ALL,
-        bun.mimalloc.mi_malloc,
-        bun.mimalloc.mi_free,
-        bun.mimalloc.mi_realloc,
-    );
-    if (rc != ARES_SUCCESS) {
-        std.debug.panic("ares_library_init_mem failed: {d}", .{rc});
-        unreachable;
-    }
-}
-
 pub const ares_callback = ?*const fn (?*anyopaque, c_int, c_int, [*c]u8, c_int) callconv(.c) void;
 pub const ares_host_callback = ?*const fn (?*anyopaque, c_int, c_int, ?*struct_hostent) callconv(.c) void;
 pub const ares_nameinfo_callback = ?*const fn (?*anyopaque, c_int, c_int, [*c]u8, [*c]u8) callconv(.c) void;
 pub const ares_sock_create_callback = ?*const fn (ares_socket_t, c_int, ?*anyopaque) callconv(.c) c_int;
 pub const ares_sock_config_callback = ?*const fn (ares_socket_t, c_int, ?*anyopaque) callconv(.c) c_int;
 pub const ares_addrinfo_callback = *const fn (?*anyopaque, c_int, c_int, ?*AddrInfo) callconv(.c) void;
-pub extern fn ares_library_init(flags: c_int) c_int;
-pub extern fn ares_library_init_mem(flags: c_int, amalloc: ?*const fn (usize) callconv(.c) ?*anyopaque, afree: ?*const fn (?*anyopaque) callconv(.c) void, arealloc: ?*const fn (?*anyopaque, usize) callconv(.c) ?*anyopaque) c_int;
-pub extern fn ares_library_initialized() c_int;
-pub extern fn ares_library_cleanup() void;
-pub extern fn ares_version(version: [*c]c_int) [*c]const u8;
-pub extern fn ares_init(channelptr: **Channel) c_int;
-pub extern fn ares_init_options(channelptr: **Channel, options: ?*Options, optmask: c_int) c_int;
-pub extern fn ares_save_options(channel: *Channel, options: ?*Options, optmask: *c_int) c_int;
-pub extern fn ares_destroy_options(options: *Options) void;
-pub extern fn ares_dup(dest: ?*Channel, src: *Channel) c_int;
-pub extern fn ares_destroy(channel: *Channel) void;
-pub extern fn ares_cancel(channel: *Channel) void;
-pub extern fn ares_set_local_ip4(channel: *Channel, local_ip: c_uint) void;
-pub extern fn ares_set_local_ip6(channel: *Channel, local_ip6: [*c]const u8) void;
-pub extern fn ares_set_local_dev(channel: *Channel, local_dev_name: [*c]const u8) void;
-pub extern fn ares_set_socket_callback(channel: *Channel, callback: ares_sock_create_callback, user_data: ?*anyopaque) void;
-pub extern fn ares_set_socket_configure_callback(channel: *Channel, callback: ares_sock_config_callback, user_data: ?*anyopaque) void;
-pub extern fn ares_set_sortlist(channel: *Channel, sortstr: [*c]const u8) c_int;
-pub extern fn ares_getaddrinfo(channel: *Channel, node: ?[*:0]const u8, service: ?[*:0]const u8, hints: [*c]const AddrInfo_hints, callback: ares_addrinfo_callback, arg: ?*anyopaque) void;
-pub extern fn ares_freeaddrinfo(ai: *AddrInfo) void;
 pub const ares_socket_functions = extern struct {
     socket: ?*const fn (c_int, c_int, c_int, ?*anyopaque) callconv(.c) ares_socket_t = null,
     close: ?*const fn (ares_socket_t, ?*anyopaque) callconv(.c) c_int = null,
@@ -664,22 +601,6 @@ pub const ares_socket_functions = extern struct {
     recvfrom: ?*const fn (ares_socket_t, ?*anyopaque, usize, c_int, [*c]struct_sockaddr, [*c]ares_socklen_t, ?*anyopaque) callconv(.c) ares_ssize_t = null,
     sendv: ?*const fn (ares_socket_t, [*c]const iovec, c_int, ?*anyopaque) callconv(.c) ares_ssize_t = null,
 };
-pub extern fn ares_set_socket_functions(channel: *Channel, funcs: ?*const ares_socket_functions, user_data: ?*anyopaque) void;
-pub extern fn ares_send(channel: *Channel, qbuf: [*c]const u8, qlen: c_int, callback: ares_callback, arg: ?*anyopaque) void;
-pub extern fn ares_query(channel: *Channel, name: [*c]const u8, dnsclass: NSClass, @"type": NSType, callback: ares_callback, arg: ?*anyopaque) void;
-pub extern fn ares_search(channel: *Channel, name: [*c]const u8, dnsclass: c_int, @"type": c_int, callback: ares_callback, arg: ?*anyopaque) void;
-pub extern fn ares_gethostbyname(channel: *Channel, name: [*c]const u8, family: c_int, callback: ares_host_callback, arg: ?*anyopaque) void;
-pub extern fn ares_gethostbyname_file(channel: *Channel, name: [*c]const u8, family: c_int, host: [*:null]?*struct_hostent) c_int;
-pub extern fn ares_gethostbyaddr(channel: *Channel, addr: ?*const anyopaque, addrlen: c_int, family: c_int, callback: ares_host_callback, arg: ?*anyopaque) void;
-pub extern fn ares_getnameinfo(channel: *Channel, sa: [*c]const struct_sockaddr, salen: ares_socklen_t, flags: c_int, callback: ares_nameinfo_callback, arg: ?*anyopaque) void;
-pub extern fn ares_getsock(channel: *Channel, socks: [*c]ares_socket_t, numsocks: c_int) c_int;
-pub extern fn ares_timeout(channel: *Channel, maxtv: ?*struct_timeval, tv: ?*struct_timeval) ?*struct_timeval;
-pub extern fn ares_process_fd(channel: *Channel, read_fd: ares_socket_t, write_fd: ares_socket_t) void;
-pub extern fn ares_create_query(name: [*c]const u8, dnsclass: c_int, @"type": c_int, id: c_ushort, rd: c_int, buf: [*c][*c]u8, buflen: [*c]c_int, max_udp_size: c_int) c_int;
-pub extern fn ares_mkquery(name: [*c]const u8, dnsclass: c_int, @"type": c_int, id: c_ushort, rd: c_int, buf: [*c][*c]u8, buflen: [*c]c_int) c_int;
-pub extern fn ares_expand_name(encoded: [*c]const u8, abuf: [*c]const u8, alen: c_int, s: [*c][*c]u8, enclen: [*c]c_long) c_int;
-pub extern fn ares_expand_string(encoded: [*c]const u8, abuf: [*c]const u8, alen: c_int, s: [*c][*c]u8, enclen: [*c]c_long) c_int;
-pub extern fn ares_queue_active_queries(channel: *const Channel) usize;
 const union_unnamed_2 = extern union {
     _S6_u8: [16]u8,
 };
@@ -961,7 +882,6 @@ pub const struct_ares_soa_reply = extern struct {
         ares_free_data(this);
     }
 };
-
 pub const struct_ares_uri_reply = extern struct {
     next: [*c]struct_ares_uri_reply,
     priority: c_ushort,
@@ -969,7 +889,6 @@ pub const struct_ares_uri_reply = extern struct {
     uri: [*c]u8,
     ttl: c_int,
 };
-
 pub const struct_any_reply = struct {
     a_reply: ?*hostent_with_ttls = null,
     aaaa_reply: ?*hostent_with_ttls = null,
@@ -1103,22 +1022,6 @@ pub const struct_any_reply = struct {
         bun.default_allocator.destroy(this);
     }
 };
-pub extern fn ares_parse_a_reply(abuf: [*c]const u8, alen: c_int, host: [*c]?*struct_hostent, addrttls: [*c]struct_ares_addrttl, naddrttls: [*c]c_int) c_int;
-pub extern fn ares_parse_aaaa_reply(abuf: [*c]const u8, alen: c_int, host: [*c]?*struct_hostent, addrttls: [*c]struct_ares_addr6ttl, naddrttls: [*c]c_int) c_int;
-pub extern fn ares_parse_caa_reply(abuf: [*c]const u8, alen: c_int, caa_out: [*c][*c]struct_ares_caa_reply) c_int;
-pub extern fn ares_parse_ptr_reply(abuf: [*c]const u8, alen: c_int, addr: ?*const anyopaque, addrlen: c_int, family: c_int, host: [*c]?*struct_hostent) c_int;
-pub extern fn ares_parse_ns_reply(abuf: [*c]const u8, alen: c_int, host: [*c]?*struct_hostent) c_int;
-pub extern fn ares_parse_srv_reply(abuf: [*c]const u8, alen: c_int, srv_out: [*c][*c]struct_ares_srv_reply) c_int;
-pub extern fn ares_parse_mx_reply(abuf: [*c]const u8, alen: c_int, mx_out: [*c][*c]struct_ares_mx_reply) c_int;
-pub extern fn ares_parse_txt_reply(abuf: [*c]const u8, alen: c_int, txt_out: [*c][*c]struct_ares_txt_reply) c_int;
-pub extern fn ares_parse_txt_reply_ext(abuf: [*c]const u8, alen: c_int, txt_out: [*c][*c]struct_ares_txt_ext) c_int;
-pub extern fn ares_parse_naptr_reply(abuf: [*c]const u8, alen: c_int, naptr_out: [*c][*c]struct_ares_naptr_reply) c_int;
-pub extern fn ares_parse_soa_reply(abuf: [*c]const u8, alen: c_int, soa_out: [*c][*c]struct_ares_soa_reply) c_int;
-pub extern fn ares_parse_uri_reply(abuf: [*c]const u8, alen: c_int, uri_out: [*c][*c]struct_ares_uri_reply) c_int;
-pub extern fn ares_free_string(str: ?*anyopaque) void;
-pub extern fn ares_free_hostent(host: ?*struct_hostent) void;
-pub extern fn ares_free_data(dataptr: ?*anyopaque) void;
-pub extern fn ares_strerror(code: c_int) [*c]const u8;
 const union_unnamed_3 = extern union {
     addr4: struct_in_addr,
     addr6: struct_ares_in6_addr,
@@ -1139,14 +1042,6 @@ pub const struct_ares_addr_port_node = extern struct {
     udp_port: c_int,
     tcp_port: c_int,
 };
-pub extern fn ares_set_servers(channel: *Channel, servers: [*c]struct_ares_addr_node) c_int;
-pub extern fn ares_set_servers_ports(channel: *Channel, servers: [*c]struct_ares_addr_port_node) c_int;
-pub extern fn ares_set_servers_csv(channel: *Channel, servers: [*c]const u8) c_int;
-pub extern fn ares_set_servers_ports_csv(channel: *Channel, servers: [*c]const u8) c_int;
-pub extern fn ares_get_servers(channel: *Channel, servers: *?*struct_ares_addr_port_node) c_int;
-pub extern fn ares_get_servers_ports(channel: *Channel, servers: *?*struct_ares_addr_port_node) c_int;
-pub extern fn ares_inet_ntop(af: c_int, src: ?*const anyopaque, dst: [*]u8, size: ares_socklen_t) ?[*:0]const u8;
-pub extern fn ares_inet_pton(af: c_int, src: [*c]const u8, dst: ?*anyopaque) c_int;
 pub const ARES_SUCCESS = 0;
 pub const ARES_ENODATA = 1;
 pub const ARES_EFORMERR = 2;
@@ -1174,7 +1069,6 @@ pub const ARES_EADDRGETNETWORKPARAMS = 23;
 pub const ARES_ECANCELLED = 24;
 pub const ARES_ESERVICE = 25;
 pub const ARES_ENOSERVER = 26;
-
 pub const Error = enum(i32) {
     ENODATA = ARES_ENODATA,
     EFORMERR = ARES_EFORMERR,
@@ -1338,76 +1232,69 @@ pub const Error = enum(i32) {
         };
     }
 };
-
-pub const ARES_FLAG_USEVC = @as(c_int, 1) << @as(c_int, 0);
-pub const ARES_FLAG_PRIMARY = @as(c_int, 1) << @as(c_int, 1);
-pub const ARES_FLAG_IGNTC = @as(c_int, 1) << @as(c_int, 2);
-pub const ARES_FLAG_NORECURSE = @as(c_int, 1) << @as(c_int, 3);
-pub const ARES_FLAG_STAYOPEN = @as(c_int, 1) << @as(c_int, 4);
-pub const ARES_FLAG_NOSEARCH = @as(c_int, 1) << @as(c_int, 5);
-pub const ARES_FLAG_NOALIASES = @as(c_int, 1) << @as(c_int, 6);
-pub const ARES_FLAG_NOCHECKRESP = @as(c_int, 1) << @as(c_int, 7);
-pub const ARES_FLAG_NO_DFLT_SVR = @as(c_int, 1) << @as(c_int, 9);
-pub const ARES_FLAG_EDNS = @as(c_int, 1) << @as(c_int, 8);
-pub const ARES_OPT_FLAGS = @as(c_int, 1) << @as(c_int, 0);
-pub const ARES_OPT_TIMEOUT = @as(c_int, 1) << @as(c_int, 1);
-pub const ARES_OPT_TRIES = @as(c_int, 1) << @as(c_int, 2);
-pub const ARES_OPT_NDOTS = @as(c_int, 1) << @as(c_int, 3);
-pub const ARES_OPT_UDP_PORT = @as(c_int, 1) << @as(c_int, 4);
-pub const ARES_OPT_TCP_PORT = @as(c_int, 1) << @as(c_int, 5);
-pub const ARES_OPT_SERVERS = @as(c_int, 1) << @as(c_int, 6);
-pub const ARES_OPT_DOMAINS = @as(c_int, 1) << @as(c_int, 7);
-pub const ARES_OPT_LOOKUPS = @as(c_int, 1) << @as(c_int, 8);
-pub const ARES_OPT_SOCK_STATE_CB = @as(c_int, 1) << @as(c_int, 9);
-pub const ARES_OPT_SORTLIST = @as(c_int, 1) << @as(c_int, 10);
-pub const ARES_OPT_SOCK_SNDBUF = @as(c_int, 1) << @as(c_int, 11);
-pub const ARES_OPT_SOCK_RCVBUF = @as(c_int, 1) << @as(c_int, 12);
-pub const ARES_OPT_TIMEOUTMS = @as(c_int, 1) << @as(c_int, 13);
-pub const ARES_OPT_ROTATE = @as(c_int, 1) << @as(c_int, 14);
-pub const ARES_OPT_EDNSPSZ = @as(c_int, 1) << @as(c_int, 15);
-pub const ARES_OPT_NOROTATE = @as(c_int, 1) << @as(c_int, 16);
-pub const ARES_OPT_RESOLVCONF = @as(c_int, 1) << @as(c_int, 17);
-pub const ARES_OPT_HOSTS_FILE = @as(c_int, 1) << @as(c_int, 18);
-pub const ARES_NI_NOFQDN = @as(c_int, 1) << @as(c_int, 0);
-pub const ARES_NI_NUMERICHOST = @as(c_int, 1) << @as(c_int, 1);
-pub const ARES_NI_NAMEREQD = @as(c_int, 1) << @as(c_int, 2);
-pub const ARES_NI_NUMERICSERV = @as(c_int, 1) << @as(c_int, 3);
-pub const ARES_NI_DGRAM = @as(c_int, 1) << @as(c_int, 4);
-pub const ARES_NI_TCP = @as(c_int, 0);
+pub const ARES_FLAG_USEVC = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(0)) else @as(c_int, 0)));
+pub const ARES_FLAG_PRIMARY = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)));
+pub const ARES_FLAG_IGNTC = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(2)) else @as(c_int, 2)));
+pub const ARES_FLAG_NORECURSE = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(3)) else @as(c_int, 3)));
+pub const ARES_FLAG_STAYOPEN = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(4)) else @as(c_int, 4)));
+pub const ARES_FLAG_NOSEARCH = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(5)) else @as(c_int, 5)));
+pub const ARES_FLAG_NOALIASES = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(6)) else @as(c_int, 6)));
+pub const ARES_FLAG_NOCHECKRESP = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(7)) else @as(c_int, 7)));
+pub const ARES_FLAG_NO_DFLT_SVR = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(9)) else @as(c_int, 9)));
+pub const ARES_FLAG_EDNS = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(8)) else @as(c_int, 8)));
+pub const ARES_OPT_FLAGS = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(0)) else @as(c_int, 0)));
+pub const ARES_OPT_TIMEOUT = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)));
+pub const ARES_OPT_TRIES = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(2)) else @as(c_int, 2)));
+pub const ARES_OPT_NDOTS = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(3)) else @as(c_int, 3)));
+pub const ARES_OPT_UDP_PORT = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(4)) else @as(c_int, 4)));
+pub const ARES_OPT_TCP_PORT = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(5)) else @as(c_int, 5)));
+pub const ARES_OPT_SERVERS = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(6)) else @as(c_int, 6)));
+pub const ARES_OPT_DOMAINS = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(7)) else @as(c_int, 7)));
+pub const ARES_OPT_LOOKUPS = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(8)) else @as(c_int, 8)));
+pub const ARES_OPT_SOCK_STATE_CB = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(9)) else @as(c_int, 9)));
+pub const ARES_OPT_SORTLIST = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(10)) else @as(c_int, 10)));
+pub const ARES_OPT_SOCK_SNDBUF = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(11)) else @as(c_int, 11)));
+pub const ARES_OPT_SOCK_RCVBUF = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(12)) else @as(c_int, 12)));
+pub const ARES_OPT_TIMEOUTMS = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(13)) else @as(c_int, 13)));
+pub const ARES_OPT_ROTATE = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(14)) else @as(c_int, 14)));
+pub const ARES_OPT_EDNSPSZ = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(15)) else @as(c_int, 15)));
+pub const ARES_OPT_NOROTATE = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(16)) else @as(c_int, 16)));
+pub const ARES_OPT_RESOLVCONF = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(17)) else @as(c_int, 17)));
+pub const ARES_OPT_HOSTS_FILE = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(18)) else @as(c_int, 18)));
+pub const ARES_NI_NOFQDN = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(0)) else @as(c_int, 0)));
+pub const ARES_NI_NUMERICHOST = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)));
+pub const ARES_NI_NAMEREQD = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(2)) else @as(c_int, 2)));
+pub const ARES_NI_NUMERICSERV = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(3)) else @as(c_int, 3)));
+pub const ARES_NI_DGRAM = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(4)) else @as(c_int, 4)));
+pub const ARES_NI_TCP = (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(0)) else @as(c_int, 0));
 pub const ARES_NI_UDP = ARES_NI_DGRAM;
-pub const ARES_NI_SCTP = @as(c_int, 1) << @as(c_int, 5);
-pub const ARES_NI_DCCP = @as(c_int, 1) << @as(c_int, 6);
-pub const ARES_NI_NUMERICSCOPE = @as(c_int, 1) << @as(c_int, 7);
-pub const ARES_NI_LOOKUPHOST = @as(c_int, 1) << @as(c_int, 8);
-pub const ARES_NI_LOOKUPSERVICE = @as(c_int, 1) << @as(c_int, 9);
-pub const ARES_NI_IDN = @as(c_int, 1) << @as(c_int, 10);
-pub const ARES_NI_IDN_ALLOW_UNASSIGNED = @as(c_int, 1) << @as(c_int, 11);
-pub const ARES_NI_IDN_USE_STD3_ASCII_RULES = @as(c_int, 1) << @as(c_int, 12);
-pub const ARES_AI_CANONNAME = @as(c_int, 1) << @as(c_int, 0);
-pub const ARES_AI_NUMERICHOST = @as(c_int, 1) << @as(c_int, 1);
-pub const ARES_AI_PASSIVE = @as(c_int, 1) << @as(c_int, 2);
-pub const ARES_AI_NUMERICSERV = @as(c_int, 1) << @as(c_int, 3);
-pub const ARES_AI_V4MAPPED = @as(c_int, 1) << @as(c_int, 4);
-pub const ARES_AI_ALL = @as(c_int, 1) << @as(c_int, 5);
-pub const ARES_AI_ADDRCONFIG = @as(c_int, 1) << @as(c_int, 6);
-pub const ARES_AI_NOSORT = @as(c_int, 1) << @as(c_int, 7);
-pub const ARES_AI_ENVHOSTS = @as(c_int, 1) << @as(c_int, 8);
-pub const ARES_AI_IDN = @as(c_int, 1) << @as(c_int, 10);
-pub const ARES_AI_IDN_ALLOW_UNASSIGNED = @as(c_int, 1) << @as(c_int, 11);
-pub const ARES_AI_IDN_USE_STD3_ASCII_RULES = @as(c_int, 1) << @as(c_int, 12);
-pub const ARES_AI_CANONIDN = @as(c_int, 1) << @as(c_int, 13);
-pub const ARES_AI_MASK = (((((ARES_AI_CANONNAME | ARES_AI_NUMERICHOST) | ARES_AI_PASSIVE) | ARES_AI_NUMERICSERV) | ARES_AI_V4MAPPED) | ARES_AI_ALL) | ARES_AI_ADDRCONFIG;
-pub const ARES_GETSOCK_MAXNUM = @as(c_int, 16);
-pub inline fn ARES_GETSOCK_READABLE(bits: anytype, num: anytype) @TypeOf(bits & (@as(c_int, 1) << num)) {
-    return bits & (@as(c_int, 1) << num);
-}
-pub inline fn ARES_GETSOCK_WRITABLE(bits: anytype, num: anytype) @TypeOf(bits & (@as(c_int, 1) << (num + ARES_GETSOCK_MAXNUM))) {
-    return bits & (@as(c_int, 1) << (num + ARES_GETSOCK_MAXNUM));
-}
-pub const ARES_LIB_INIT_NONE = @as(c_int, 0);
-pub const ARES_LIB_INIT_WIN32 = @as(c_int, 1) << @as(c_int, 0);
+pub const ARES_NI_SCTP = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(5)) else @as(c_int, 5)));
+pub const ARES_NI_DCCP = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(6)) else @as(c_int, 6)));
+pub const ARES_NI_NUMERICSCOPE = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(7)) else @as(c_int, 7)));
+pub const ARES_NI_LOOKUPHOST = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(8)) else @as(c_int, 8)));
+pub const ARES_NI_LOOKUPSERVICE = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(9)) else @as(c_int, 9)));
+pub const ARES_NI_IDN = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(10)) else @as(c_int, 10)));
+pub const ARES_NI_IDN_ALLOW_UNASSIGNED = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(11)) else @as(c_int, 11)));
+pub const ARES_NI_IDN_USE_STD3_ASCII_RULES = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(12)) else @as(c_int, 12)));
+pub const ARES_AI_CANONNAME = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(0)) else @as(c_int, 0)));
+pub const ARES_AI_NUMERICHOST = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)));
+pub const ARES_AI_PASSIVE = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(2)) else @as(c_int, 2)));
+pub const ARES_AI_NUMERICSERV = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(3)) else @as(c_int, 3)));
+pub const ARES_AI_V4MAPPED = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(4)) else @as(c_int, 4)));
+pub const ARES_AI_ALL = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(5)) else @as(c_int, 5)));
+pub const ARES_AI_ADDRCONFIG = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(6)) else @as(c_int, 6)));
+pub const ARES_AI_NOSORT = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(7)) else @as(c_int, 7)));
+pub const ARES_AI_ENVHOSTS = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(8)) else @as(c_int, 8)));
+pub const ARES_AI_IDN = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(10)) else @as(c_int, 10)));
+pub const ARES_AI_IDN_ALLOW_UNASSIGNED = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(11)) else @as(c_int, 11)));
+pub const ARES_AI_IDN_USE_STD3_ASCII_RULES = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(12)) else @as(c_int, 12)));
+pub const ARES_AI_CANONIDN = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(13)) else @as(c_int, 13)));
+pub const ARES_AI_MASK = ((((((ARES_AI_CANONNAME | ARES_AI_NUMERICHOST) | ARES_AI_PASSIVE) | ARES_AI_NUMERICSERV) | ARES_AI_V4MAPPED) | ARES_AI_ALL) | ARES_AI_ADDRCONFIG);
+pub const ARES_GETSOCK_MAXNUM = (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(16)) else @as(c_int, 16));
+pub const ARES_LIB_INIT_NONE = (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(0)) else @as(c_int, 0));
+pub const ARES_LIB_INIT_WIN32 = cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(0)) else @as(c_int, 0)));
 pub const ARES_LIB_INIT_ALL = ARES_LIB_INIT_WIN32;
-pub const ARES_SOCKET_BAD = if (bun.Environment.isWindows) std.os.windows.ws2_32.INVALID_SOCKET else -@as(c_int, 1);
+pub const ARES_SOCKET_BAD = (if (bun.Environment.isWindows) std.os.windows.ws2_32.INVALID_SOCKET else (0 - (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1))));
 pub const ares_socket_typedef = "";
 pub const ares_addrinfo_cname = AddrInfo_cname;
 pub const ares_addrinfo_node = AddrInfo_node;
@@ -1426,54 +1313,206 @@ pub const ares_soa_reply = struct_ares_soa_reply;
 pub const ares_uri_reply = struct_ares_uri_reply;
 pub const ares_addr_node = struct_ares_addr_node;
 pub const ares_addr_port_node = struct_ares_addr_port_node;
-
-pub fn getSockaddr(addr: []const u8, port: u16, sa: *std.posix.sockaddr) c_int {
-    const buf_size = 128;
-
-    var buf: [buf_size]u8 = undefined;
-    const addr_ptr: [*:0]const u8 = brk: {
-        if (addr.len == 0 or addr.len >= buf_size) {
-            return -1;
-        }
-        const len = @min(addr.len, buf.len - 1);
-        @memcpy(buf[0..len], addr[0..len]);
-
-        buf[len] = 0;
-        break :brk buf[0..len :0];
-    };
-
-    {
-        const in: *std.posix.sockaddr.in = @ptrCast(@alignCast(sa));
-        if (ares_inet_pton(AF.INET, addr_ptr, &in.addr) == 1) {
-            in.*.family = AF.INET;
-            in.*.port = std.mem.nativeToBig(u16, port);
-            return 0;
-        }
-    }
-    {
-        const in6: *std.posix.sockaddr.in6 = @ptrCast(@alignCast(sa));
-        if (ares_inet_pton(AF.INET6, addr_ptr, &in6.addr) == 1) {
-            in6.*.family = AF.INET6;
-            in6.*.port = std.mem.nativeToBig(u16, port);
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
 const iovec = @import("std").os.iovec;
-
 const bun = @import("bun");
 const jsc = bun.jsc;
 const strings = bun.strings;
 const libuv = bun.windows.libuv;
-
 const c = @import("std").c;
 const ares_socklen_t = c.socklen_t;
 const fd_set = c.fd_set;
-
 const struct_sockaddr = std.posix.sockaddr;
 const struct_in_addr = std.posix.sockaddr.in;
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
+    const T = @TypeOf(val);
+    if (comptime @typeInfo(T) == .comptime_int) return val << shift;
+    if (comptime @typeInfo(T) == .int) {
+        const ShiftType = std.math.Log2Int(T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val << @as(ShiftType, @truncate(u_shift));
+    }
+    return val << shift;
+}
+fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
+    const T = @TypeOf(val);
+    if (comptime @typeInfo(T) == .comptime_int) return val >> shift;
+    if (comptime @typeInfo(T) == .int) {
+        const ShiftType = std.math.Log2Int(T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val >> @as(ShiftType, @truncate(u_shift));
+    }
+    return val >> shift;
+}
 
+pub fn libraryInit() void {
+        if (ares_has_loaded.swap(true, .monotonic)) {
+            return;
+        }
+        const rc = ares_library_init_mem(ARES_LIB_INIT_ALL, bun.mimalloc.mi_malloc, bun.mimalloc.mi_free, bun.mimalloc.mi_realloc);
+        if ((rc != ARES_SUCCESS)) {
+            _ = std.debug.panic("ares_library_init_mem failed: {d}", .{ rc });
+            _ = unreachable;
+        }
+}
+
+pub extern "c" fn ares_library_init(flags: c_int) callconv(.c) c_int;
+
+pub extern "c" fn ares_library_init_mem(flags: c_int, amalloc: ?*const fn (usize) ?callconv(.c), anyopaque: *anyopaque, afree: ?*const fn (?*anyopaque) callconv(.c), void: *anyopaque, arealloc: ?*const fn (?*anyopaque, usize) ?callconv(.c), anyopaque: *anyopaque) callconv(.c) c_int;
+
+pub extern "c" fn ares_library_initialized() callconv(.c) c_int;
+
+pub extern "c" fn ares_library_cleanup() callconv(.c) void;
+
+pub extern "c" fn ares_version(version: [*c]c_int) callconv(.c) [*c]const u8;
+
+pub extern "c" fn ares_init(channelptr: *Channel) callconv(.c) c_int;
+
+pub extern "c" fn ares_init_options(channelptr: *Channel, options: ?*Options, optmask: c_int) callconv(.c) c_int;
+
+pub extern "c" fn ares_save_options(channel: *Channel, options: ?*Options, optmask: *c_int) callconv(.c) c_int;
+
+pub extern "c" fn ares_destroy_options(options: *Options) callconv(.c) void;
+
+pub extern "c" fn ares_dup(dest: ?*Channel, src: *Channel) callconv(.c) c_int;
+
+pub extern "c" fn ares_destroy(channel: *Channel) callconv(.c) void;
+
+pub extern "c" fn ares_cancel(channel: *Channel) callconv(.c) void;
+
+pub extern "c" fn ares_set_local_ip4(channel: *Channel, local_ip: c_uint) callconv(.c) void;
+
+pub extern "c" fn ares_set_local_ip6(channel: *Channel, local_ip6: [*c]const u8) callconv(.c) void;
+
+pub extern "c" fn ares_set_local_dev(channel: *Channel, local_dev_name: [*c]const u8) callconv(.c) void;
+
+pub extern "c" fn ares_set_socket_callback(channel: *Channel, callback: ares_sock_create_callback, user_data: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn ares_set_socket_configure_callback(channel: *Channel, callback: ares_sock_config_callback, user_data: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn ares_set_sortlist(channel: *Channel, sortstr: [*c]const u8) callconv(.c) c_int;
+
+pub extern "c" fn ares_getaddrinfo(channel: *Channel, node: ?[*:0]u8, service: ?[*:0]u8, hints: [*c]const AddrInfo_hints, callback: ares_addrinfo_callback, arg: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn ares_freeaddrinfo(ai: *AddrInfo) callconv(.c) void;
+
+pub extern "c" fn ares_set_socket_functions(channel: *Channel, funcs: ?*const ares_socket_functions, user_data: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn ares_send(channel: *Channel, qbuf: [*c]const u8, qlen: c_int, callback: ares_callback, arg: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn ares_query(channel: *Channel, name: [*c]const u8, dnsclass: NSClass, @"type": NSType, callback: ares_callback, arg: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn ares_search(channel: *Channel, name: [*c]const u8, dnsclass: c_int, @"type": c_int, callback: ares_callback, arg: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn ares_gethostbyname(channel: *Channel, name: [*c]const u8, family: c_int, callback: ares_host_callback, arg: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn ares_gethostbyname_file(channel: *Channel, name: [*c]const u8, family: c_int, host: ?[*:null]struct_hostent) callconv(.c) c_int;
+
+pub extern "c" fn ares_gethostbyaddr(channel: *Channel, addr: ?*const anyopaque, addrlen: c_int, family: c_int, callback: ares_host_callback, arg: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn ares_getnameinfo(channel: *Channel, sa: [*c]const struct_sockaddr, salen: ares_socklen_t, flags: c_int, callback: ares_nameinfo_callback, arg: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn ares_getsock(channel: *Channel, socks: [*c]ares_socket_t, numsocks: c_int) callconv(.c) c_int;
+
+pub extern "c" fn ares_timeout(channel: *Channel, maxtv: ?*struct_timeval, tv: ?*struct_timeval) callconv(.c) ?*struct_timeval;
+
+pub extern "c" fn ares_process_fd(channel: *Channel, read_fd: ares_socket_t, write_fd: ares_socket_t) callconv(.c) void;
+
+pub extern "c" fn ares_create_query(name: [*c]const u8, dnsclass: c_int, @"type": c_int, id: c_ushort, rd: c_int, buf: [*c][*c]u8, buflen: [*c]c_int, max_udp_size: c_int) callconv(.c) c_int;
+
+pub extern "c" fn ares_mkquery(name: [*c]const u8, dnsclass: c_int, @"type": c_int, id: c_ushort, rd: c_int, buf: [*c][*c]u8, buflen: [*c]c_int) callconv(.c) c_int;
+
+pub extern "c" fn ares_expand_name(encoded: [*c]const u8, abuf: [*c]const u8, alen: c_int, s: [*c][*c]u8, enclen: [*c]c_long) callconv(.c) c_int;
+
+pub extern "c" fn ares_expand_string(encoded: [*c]const u8, abuf: [*c]const u8, alen: c_int, s: [*c][*c]u8, enclen: [*c]c_long) callconv(.c) c_int;
+
+pub extern "c" fn ares_queue_active_queries(channel: *const Channel) callconv(.c) usize;
+
+pub extern "c" fn ares_parse_a_reply(abuf: [*c]const u8, alen: c_int, host: ?[*c]struct_hostent, addrttls: [*c]struct_ares_addrttl, naddrttls: [*c]c_int) callconv(.c) c_int;
+
+pub extern "c" fn ares_parse_aaaa_reply(abuf: [*c]const u8, alen: c_int, host: ?[*c]struct_hostent, addrttls: [*c]struct_ares_addr6ttl, naddrttls: [*c]c_int) callconv(.c) c_int;
+
+pub extern "c" fn ares_parse_caa_reply(abuf: [*c]const u8, alen: c_int, caa_out: [*c][*c]struct_ares_caa_reply) callconv(.c) c_int;
+
+pub extern "c" fn ares_parse_ptr_reply(abuf: [*c]const u8, alen: c_int, addr: ?*const anyopaque, addrlen: c_int, family: c_int, host: ?[*c]struct_hostent) callconv(.c) c_int;
+
+pub extern "c" fn ares_parse_ns_reply(abuf: [*c]const u8, alen: c_int, host: ?[*c]struct_hostent) callconv(.c) c_int;
+
+pub extern "c" fn ares_parse_srv_reply(abuf: [*c]const u8, alen: c_int, srv_out: [*c][*c]struct_ares_srv_reply) callconv(.c) c_int;
+
+pub extern "c" fn ares_parse_mx_reply(abuf: [*c]const u8, alen: c_int, mx_out: [*c][*c]struct_ares_mx_reply) callconv(.c) c_int;
+
+pub extern "c" fn ares_parse_txt_reply(abuf: [*c]const u8, alen: c_int, txt_out: [*c][*c]struct_ares_txt_reply) callconv(.c) c_int;
+
+pub extern "c" fn ares_parse_txt_reply_ext(abuf: [*c]const u8, alen: c_int, txt_out: [*c][*c]struct_ares_txt_ext) callconv(.c) c_int;
+
+pub extern "c" fn ares_parse_naptr_reply(abuf: [*c]const u8, alen: c_int, naptr_out: [*c][*c]struct_ares_naptr_reply) callconv(.c) c_int;
+
+pub extern "c" fn ares_parse_soa_reply(abuf: [*c]const u8, alen: c_int, soa_out: [*c][*c]struct_ares_soa_reply) callconv(.c) c_int;
+
+pub extern "c" fn ares_parse_uri_reply(abuf: [*c]const u8, alen: c_int, uri_out: [*c][*c]struct_ares_uri_reply) callconv(.c) c_int;
+
+pub extern "c" fn ares_free_string(str: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn ares_free_hostent(host: ?*struct_hostent) callconv(.c) void;
+
+pub extern "c" fn ares_free_data(dataptr: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn ares_strerror(code: c_int) callconv(.c) [*c]const u8;
+
+pub extern "c" fn ares_set_servers(channel: *Channel, servers: [*c]struct_ares_addr_node) callconv(.c) c_int;
+
+pub extern "c" fn ares_set_servers_ports(channel: *Channel, servers: [*c]struct_ares_addr_port_node) callconv(.c) c_int;
+
+pub extern "c" fn ares_set_servers_csv(channel: *Channel, servers: [*c]const u8) callconv(.c) c_int;
+
+pub extern "c" fn ares_set_servers_ports_csv(channel: *Channel, servers: [*c]const u8) callconv(.c) c_int;
+
+pub extern "c" fn ares_get_servers(channel: *Channel, servers: *?*struct_ares_addr_port_node) callconv(.c) c_int;
+
+pub extern "c" fn ares_get_servers_ports(channel: *Channel, servers: *?*struct_ares_addr_port_node) callconv(.c) c_int;
+
+pub extern "c" fn ares_inet_ntop(af: c_int, src: ?*const anyopaque, dst: [*]u8, size: ares_socklen_t) callconv(.c) ?[*:0]u8;
+
+pub extern "c" fn ares_inet_pton(af: c_int, src: [*c]const u8, dst: ?*anyopaque) callconv(.c) c_int;
+
+pub inline fn ARES_GETSOCK_READABLE(bits: anytype, num: anytype) @TypeOf(bits&(@as(c_int,1)<<num)) {
+        return (bits & cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), num));
+}
+
+pub inline fn ARES_GETSOCK_WRITABLE(bits: anytype, num: anytype) @TypeOf(bits&(@as(c_int,1)<<(num+ARES_GETSOCK_MAXNUM))) {
+        return (bits & cp_shl((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(1)) else @as(c_int, 1)), (num + ARES_GETSOCK_MAXNUM)));
+}
+
+pub fn getSockaddr(addr: []const u8, port: u16, sa: *std.posix.sockaddr) c_int {
+        const buf_size: i32 = 128;
+        var buf: [buf_size]u8 = undefined;
+        _ = &buf;
+        const addr_ptr: [*:0]u8 = brk: {
+        if (((addr.len == 0) or (addr.len >= buf_size))) {
+            return 0xffffffffffffffff;
+        }
+        const len = @min(addr.len, (buf.len - 1));
+        _ = @memcpy(buf[0..len], addr[0..len]);
+        buf[cp_cast_int(usize, len)] = 0;
+        break :brk buf[0..len :0].ptr;
+};
+        {
+            var in_sa: *std.posix.sockaddr.in = @ptrCast(@alignCast(sa));
+            _ = &in_sa;
+            if ((ares_inet_pton(AF.INET, addr_ptr, (&in_sa.addr)) == 1)) {
+                in_sa.family = AF.INET;
+                in_sa.port = std.mem.nativeToBig(u16, port);
+                return 0;
+            }
+        }
+        {
+            var in6: *std.posix.sockaddr.in6 = @ptrCast(@alignCast(sa));
+            _ = &in6;
+            if ((ares_inet_pton(AF.INET6, addr_ptr, (&in6.addr)) == 1)) {
+                in6.family = AF.INET6;
+                in6.port = std.mem.nativeToBig(u16, port);
+                return 0;
+            }
+        }
+        return 0xffffffffffffffff;
+}

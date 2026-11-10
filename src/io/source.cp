@@ -179,7 +179,7 @@ export union(enum) Source {
     }
 
     pub fn openPipe(loop: *uv.Loop, fd: bun.FD): bun.sys.Maybe(*Source.Pipe) {
-        zig { log("openPipe (fd = {f})", .{fd}); }
+        log("openPipe (fd = {f})", .{fd});
         const pipe = bun.new(Source.Pipe, std.mem.zeroes(Source.Pipe));
         switch (pipe.init(loop, false)) {
             .err e => {
@@ -229,7 +229,7 @@ export union(enum) Source {
     };
 
     pub fn openTty(loop: *uv.Loop, fd: bun.FD): bun.sys.Maybe(*Source.Tty) {
-        zig { log("openTTY (fd = {f})", .{fd}); }
+        log("openTTY (fd = {f})", .{fd});
 
         const uv_fd = fd.uv();
 
@@ -251,7 +251,7 @@ export union(enum) Source {
 
     pub fn openFile(fd: bun.FD): *Source.File {
         bun.assert(fd.isValid() and fd.uv() != -1);
-        zig { log("openFile (fd = {f})", .{fd}); }
+        log("openFile (fd = {f})", .{fd});
         const file = bun.handleOom(bun.default_allocator.create(Source.File));
 
         file.* = std.mem.zeroes(Source.File);
@@ -261,7 +261,7 @@ export union(enum) Source {
 
     pub fn open(loop: *uv.Loop, fd: bun.FD): bun.sys.Maybe(Source) {
         const rc = bun.windows.libuv.uv_guess_handle(fd.uv());
-        zig { log("open(fd: {f}, type: {s})", .{ fd, @tagName(rc) }); }
+        log("open(fd: {f}, type: {s})", .{ fd, @tagName(rc) });
 
         switch (rc) {
             .named_pipe => {
@@ -323,14 +323,12 @@ export union(enum) Source {
 }
 
 export fn Source__setRawModeStdin(raw: bool): c_int {
-    zig {
-        const tty = switch (Source.openTty(bun.jsc.VirtualMachine.get().uvLoop(), .stdin())) {
-            .result => |tty| tty,
-            .err => |e| return e.errno,
-        };
-        if (tty.setMode(if (raw) .vt else .normal).toError(.uv_tty_set_mode)) |err| {
-            return err.errno;
-        }
-        return 0;
+    const tty = match (Source.openTty(bun.jsc.VirtualMachine.get().uvLoop(), .stdin())) {
+        .result(t) => t,
+        .err(e) => return e.errno,
+    };
+    if (err := tty.setMode(if (raw) .vt else .normal).toError(.uv_tty_set_mode)) {
+        return err.errno;
     }
+    return 0;
 }

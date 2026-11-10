@@ -1,41 +1,41 @@
 //! This is a dynamically-allocated one-off task
 //! Use it when you can't add to jsc.Task directly and managing the lifetime of the Task struct is overly complex
 
-import bun from "bun";
+const bun = @import("bun");
 const jsc = bun.jsc;
 const Task = jsc.Task;
 
-export class ManagedTask {
-    ctx: ?*! = null;
-    callback: fn (*!) bun.JSError!void;
+pub const ManagedTask = struct {
+    ctx: ?*anyopaque = null,
+    callback: *const (fn (*anyopaque) bun.JSError!void),
 
-    pub fn task(_: *ManagedTask): Task {
-        return Task.init(_);
+    pub fn task(this: *ManagedTask) Task {
+        return Task.init(this);
     }
 
-    pub fn release(_: *ManagedTask) {
-        bun.default_allocator.destroy(_);
+    pub fn release(this: *ManagedTask) void {
+        bun.default_allocator.destroy(this);
     }
 
-    pub fn deinit(_: *ManagedTask) {
-        _.release();
+    pub fn deinit(this: *ManagedTask) void {
+        this.release();
     }
 
-    pub fn run(_: *ManagedTask): bun.JSError!void {
+    pub fn run(this: *ManagedTask) bun.JSError!void {
         @setRuntimeSafety(false);
-        defer _.release();
-        const cb = _.callback;
-        const context = _.ctx;
-        cb(context.?)?;
+        defer this.release();
+        const cb = this.callback;
+        const context = this.ctx;
+        try cb(context.?);
     }
 
-    pub fn cancel(_: *ManagedTask) {
-        _.callback = struct {
+    pub fn cancel(this: *ManagedTask) void {
+        this.callback = &struct {
             fn f(_: *anyopaque) bun.JSError!void {}
         }.f;
     }
 
-    pub static fn New(comptime Type: type, comptime Callback: auto): type {
+    pub fn New(comptime Type: type, comptime Callback: anytype) type {
         return struct {
             pub fn init(ctx: *Type) Task {
                 var managed = bun.handleOom(bun.default_allocator.create(ManagedTask));
@@ -51,4 +51,4 @@ export class ManagedTask {
             }
         };
     }
-}
+};

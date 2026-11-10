@@ -5,6 +5,8 @@ const string = []const u8;
 pub const Mode = std.posix.mode_t;
 pub const E = std.posix.E;
 pub const S = std.posix.S;
+const MAX_ERRNO = 134;
+pub const bun = @import("bun");
 pub const SystemErrno = enum(u16) {
     SUCCESS = 0,
     EPERM = 1,
@@ -140,20 +142,35 @@ pub const SystemErrno = enum(u16) {
     ENOTRECOVERABLE = 131,
     ERFKILL = 132,
     EHWPOISON = 133,
-
-    pub const max = 134;
+    pub fn get(s: []const u8) ?@This() {
+        return std.meta.stringToEnum(@This(), s);
+    }
+    pub fn has(s: []const u8) bool {
+        return std.meta.stringToEnum(@This(), s) != null;
+    }
+    pub fn fromName(s: []const u8) ?@This() {
+        return get(s);
+    }
+    pub fn name(self: @This()) []const u8 {
+        return @tagName(self);
+    }
 
     pub fn init(code: anytype) ?SystemErrno {
-        if (code < 0) {
-            if (code <= -max) {
+        if ((code < 0)) {
+            if ((code <= (0 - MAX_ERRNO))) {
                 return null;
             }
-            return @enumFromInt(-code);
+            return @enumFromInt((0 - code));
         }
-        if (code >= max) return null;
+        if ((code >= MAX_ERRNO)) {
+            return null;
+        }
         return @enumFromInt(code);
     }
+
+    pub const max = MAX_ERRNO;
 };
+
 pub const UV_E = struct {
     pub const @"2BIG": i32 = @intFromEnum(SystemErrno.E2BIG);
     pub const ACCES: i32 = @intFromEnum(SystemErrno.EACCES);
@@ -225,22 +242,20 @@ pub const UV_E = struct {
     pub const UNATCH: i32 = @intFromEnum(SystemErrno.EUNATCH);
     pub const NOEXEC: i32 = @intFromEnum(SystemErrno.ENOEXEC);
 };
+
 pub fn getErrno(rc: anytype) E {
     const Type = @TypeOf(rc);
-
-    return switch (Type) {
-        usize => {
-            const signed: isize = @bitCast(rc);
-            const int = if (signed > -4096 and signed < 0) -signed else 0;
-            return @enumFromInt(int);
-        },
-        i32, c_int, u32, isize, i64 => if (rc == -1)
-            @enumFromInt(std.c._errno().*)
-        else
-            .SUCCESS,
-
-        else => @compileError("Not implemented yet for type " ++ @typeName(Type)),
-    };
+    if ((Type == usize)) {
+        var signed: isize = @bitCast(rc);
+        _ = &signed;
+        var int = (if (((signed > -4096) and (signed < 0))) (0 - signed) else 0);
+        _ = &int;
+        return @enumFromInt(int);
+    } else {
+        if ((rc == -1)) {
+            return @enumFromInt((std.c._errno()).*);
+        } else {
+            return .SUCCESS;
+        }
+    }
 }
-
-const bun = @import("bun");

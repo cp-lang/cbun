@@ -7,8 +7,8 @@ const jsc = bun.jsc;
 const uws = bun.uws;
 const us_socket_stream_buffer_t = uws.us_socket_stream_buffer_t;
 
-pub fn createBunSocketErrorToJS(_: uws.create_bun_socket_error_t, globalObject: *jsc.JSGlobalObject): jsc.JSValue {
-    return switch (_) {
+pub fn createBunSocketErrorToJS(err: uws.create_bun_socket_error_t, globalObject: *jsc.JSGlobalObject) jsc.JSValue {
+    return switch (err) {
         .none => bun.BoringSSL.ERR_toJS(globalObject, bun.BoringSSL.c.ERR_get_error()),
         .load_ca_file => globalObject.ERR(.BORINGSSL, "Failed to load CA file", .{}).toJS(),
         .invalid_ca_file => globalObject.ERR(.BORINGSSL, "Invalid CA file", .{}).toJS(),
@@ -17,9 +17,9 @@ pub fn createBunSocketErrorToJS(_: uws.create_bun_socket_error_t, globalObject: 
     };
 }
 
-pub fn verifyErrorToJS(_: *const uws.us_bun_verify_error_t, globalObject: *jsc.JSGlobalObject): bun.JSError!jsc.JSValue {
-    const code = if (_.code == null) "" else _.code[0..bun.len(_.code)];
-    const reason = if (_.reason == null) "" else _.reason[0..bun.len(_.reason)];
+pub fn verifyErrorToJS(err: *const uws.us_bun_verify_error_t, globalObject: *jsc.JSGlobalObject) bun.JSError!jsc.JSValue {
+    const code = if (err.code == null) "" else err.code[0..bun.len(err.code)];
+    const reason = if (err.reason == null) "" else err.reason[0..bun.len(err.reason)];
 
     const fallback = jsc.SystemError{
         .code = bun.String.cloneUTF8(code),
@@ -31,22 +31,22 @@ pub fn verifyErrorToJS(_: *const uws.us_bun_verify_error_t, globalObject: *jsc.J
 
 @extern fn uws_ws_get_topics_as_js_array(ssl: i32, ws: *uws.RawWebSocket, globalObject: *jsc.JSGlobalObject): jsc.JSValue;
 
-pub fn anyWebSocketGetTopicsAsJSArray(_: uws.AnyWebSocket, globalObject: *jsc.JSGlobalObject): jsc.JSValue {
-    return switch (_) {
-        .ssl => uws_ws_get_topics_as_js_array(1, _.raw(), globalObject),
-        .tcp => uws_ws_get_topics_as_js_array(0, _.raw(), globalObject),
+pub fn anyWebSocketGetTopicsAsJSArray(ws: uws.AnyWebSocket, globalObject: *jsc.JSGlobalObject) jsc.JSValue {
+    return switch (ws) {
+        .ssl => uws_ws_get_topics_as_js_array(1, ws.raw(), globalObject),
+        .tcp => uws_ws_get_topics_as_js_array(0, ws.raw(), globalObject),
     };
 }
 
 @export pub fn us_socket_buffered_js_write(
     socket: *uws.us_socket_t,
-    _: bool,
+    ssl: bool,
     ended: bool,
     buffer: *us_socket_stream_buffer_t,
     globalObject: *jsc.JSGlobalObject,
     data: jsc.JSValue,
     encoding: jsc.JSValue,
-): jsc.JSValue {
+) jsc.JSValue {
     let stream_buffer = buffer.toStreamBuffer();
     let total_written: usize = 0;
     defer {
@@ -55,17 +55,22 @@ pub fn anyWebSocketGetTopicsAsJSArray(_: uws.AnyWebSocket, globalObject: *jsc.JS
     }
 
     let stack_fallback = std.heap.stackFallback(16 * 1024, bun.default_allocator);
-    const node_buffer: jsc.Node.BlobOrStringOrBuffer = if (data.isUndefined())
-        jsc.Node.BlobOrStringOrBuffer{ .string_or_buffer = jsc.Node.StringOrBuffer.empty }
-    else
-        jsc.Node.BlobOrStringOrBuffer.fromJSWithEncodingValueAllowRequestResponse(globalObject, stack_fallback.get(), data, encoding, true) catch {
+    var node_buffer: jsc.Node.BlobOrStringOrBuffer = undefined;
+    if (data.isUndefined()) {
+        node_buffer = jsc.Node.BlobOrStringOrBuffer{ .string_or_buffer = jsc.Node.StringOrBuffer.empty };
+    } else {
+        const maybe_buf = jsc.Node.BlobOrStringOrBuffer.fromJSWithEncodingValueAllowRequestResponse(globalObject, stack_fallback.get(), data, encoding, true) catch {
             return .zero;
-        } orelse {
+        };
+        if (maybe_buf) |buf| {
+            node_buffer = buf;
+        } else {
             if (!globalObject.hasException()) {
                 return globalObject.throwInvalidArgumentTypeValue("data", "string, buffer, or blob", data) catch .zero;
             }
             return .zero;
-        };
+        }
+    }
 
     defer node_buffer.deinit();
     if (node_buffer == .blob and node_buffer.blob.needsToReadFile()) {

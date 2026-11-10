@@ -1,5 +1,22 @@
-zig {
-    pub const Parser = struct {
+import * as std from "std";
+import * as bun from "bun";
+import * as ini_jsc from "../install_jsc/ini_jsc.zig";
+
+const Allocator = std.mem.Allocator;
+const Global = bun.Global;
+const OOM = bun.OOM;
+const Output = bun.Output;
+const Loc = bun.logger.Loc;
+const Registry = bun.install.Npm.Registry;
+
+const js_ast = bun.ast;
+const E = bun.ast.E;
+const Expr = bun.ast.Expr;
+const Rope = js_ast.E.Object.Rope;
+
+pub const IniTestingAPIs = ini_jsc.IniTestingAPIs;
+
+pub const Parser = struct {
         opts: Options = .{},
         source: bun.logger.Source,
         src: []const u8,
@@ -574,9 +591,6 @@ zig {
         }
     };
 
-    /// Used in JS tests, see `internal-for-testing.ts` and shell tests.
-    pub const IniTestingAPIs = @import("../install_jsc/ini_jsc.zig").IniTestingAPIs;
-
     pub const ToStringFormatter = struct {
         d: js_ast.Expr.Data,
 
@@ -602,7 +616,7 @@ zig {
         }
     };
 
-    pub fn Option(comptime T: type) type {
+    pub fn Option(comptime T: type): type {
         return union(enum) {
             some: T,
             none,
@@ -820,6 +834,7 @@ zig {
         }
     };
 
+const _Internal = struct {
     pub fn loadNpmrcConfig(
         allocator: std.mem.Allocator,
         install: *bun.schema.api.BunInstall,
@@ -849,7 +864,7 @@ zig {
             });
             defer allocator.free(source.contents);
 
-            loadNpmrc(allocator, install, env, npmrc_path, &log, source, &configs) catch |err| {
+            _Internal.loadNpmrc(allocator, install, env, npmrc_path, &log, source, &configs) catch |err| {
                 switch (err) {
                     error.OutOfMemory => bun.outOfMemory(),
                 }
@@ -1227,7 +1242,7 @@ zig {
                             if (try conf_item.dupeValueDecoded(allocator, log, source)) |x| v.password = x;
                         },
                         ._auth => {
-                            try @"handle _auth"(allocator, v, &conf_item, log, source);
+                            try _Internal.@"handle _auth"(allocator, v, &conf_item, log, source);
                         },
                         .email => {
                             if (try conf_item.dupeValueDecoded(allocator, log, source)) |x| v.email = x;
@@ -1259,7 +1274,7 @@ zig {
                                 if (try conf_item.dupeValueDecoded(allocator, log, source)) |x| v.password = x;
                             },
                             ._auth => {
-                                try @"handle _auth"(allocator, v, &conf_item, log, source);
+                                try _Internal.@"handle _auth"(allocator, v, &conf_item, log, source);
                             },
                             .email => {
                                 if (try conf_item.dupeValueDecoded(allocator, log, source)) |x| v.email = x;
@@ -1338,19 +1353,8 @@ zig {
         v.password = password;
         return;
     }
+};
 
-    const std = @import("std");
-    const Allocator = std.mem.Allocator;
-
-    const bun = @import("bun");
-    const Global = bun.Global;
-    const OOM = bun.OOM;
-    const Output = bun.Output;
-    const Loc = bun.logger.Loc;
-    const Registry = bun.install.Npm.Registry;
-
-    const js_ast = bun.ast;
-    const E = bun.ast.E;
-    const Expr = bun.ast.Expr;
-    const Rope = js_ast.E.Object.Rope;
-}
+pub const loadNpmrcConfig = _Internal.loadNpmrcConfig;
+pub const loadNpmrc = _Internal.loadNpmrc;
+const @"handle _auth" = _Internal.@"handle _auth";

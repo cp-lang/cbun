@@ -2,32 +2,15 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
 pub const HTTPContext = @import("./HTTPContext.zig").HTTPContext;
 pub const Status = union(enum) {
     done,
     err: anyerror,
     again,
+    pub fn has(s: []const u8) bool { if (comptime @typeInfo(@This()).@"union".tag_type) |TagType| { return std.meta.stringToEnum(TagType, s) != null; } return false; }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 };
 
 pub const SendFile = @This();
@@ -45,20 +28,15 @@ pub fn isEligible(url: bun.URL) bool {
 }
 
 pub fn write(self: *SendFile, socket: anytype) Status {
-        const adjusted_count_temporary = @min(cp_cast_int(u64, self.remain), @as(u63, std.math.maxInt(u63)));
-        _ = &adjusted_count_temporary;
-        const adjusted_count = @as(u63, adjusted_count_temporary);
-        _ = &adjusted_count;
+        const adjusted_count_temporary = @min((if (comptime @typeInfo(@TypeOf(self.remain)) == .@"enum") cp_cast_int(u64, @intFromEnum(self.remain)) else cp_cast_int(u64, self.remain)), (if (comptime @typeInfo(u63) == .@"enum") @as(u63, @enumFromInt(std.math.maxInt(u63))) else @as(u63, std.math.maxInt(u63))));
+        const adjusted_count = (if (comptime @typeInfo(u63) == .@"enum") @as(u63, @enumFromInt(adjusted_count_temporary)) else @as(u63, adjusted_count_temporary));
         if (bun.Environment.isLinux) {
-            var signed_offset: i64 = cp_cast_int(i64, self.offset);
+            var signed_offset: i64 = (if (comptime @typeInfo(@TypeOf(self.offset)) == .@"enum") cp_cast_int(i64, @intFromEnum(self.offset)) else cp_cast_int(i64, self.offset));
             _ = &signed_offset;
             const begin = self.offset;
-            _ = &begin;
             const val = std.os.linux.sendfile(socket.fd().cast(), self.fd.cast(), (&signed_offset), self.remain);
-            _ = &val;
-            self.offset = cp_cast_int(u64, signed_offset);
+            self.offset = (if (comptime @typeInfo(@TypeOf(signed_offset)) == .@"enum") cp_cast_int(u64, @intFromEnum(signed_offset)) else cp_cast_int(u64, signed_offset));
             const errcode = bun.sys.getErrno(val);
-            _ = &errcode;
             var diff: usize = 0;
             _ = &diff;
             if ((self.offset > begin)) {
@@ -79,12 +57,9 @@ pub fn write(self: *SendFile, socket: anytype) Status {
             if (bun.Environment.isFreeBSD) {
                 var sbytes: *anyopaque = 0;
                 _ = &sbytes;
-                const signed_offset: i64 = @bitCast(cp_cast_int(u64, self.offset));
-                _ = &signed_offset;
+                const signed_offset: i64 = @bitCast((if (comptime @typeInfo(@TypeOf(self.offset)) == .@"enum") cp_cast_int(u64, @intFromEnum(self.offset)) else cp_cast_int(u64, self.offset)));
                 const errcode = bun.sys.getErrno(std.c.sendfile(self.fd.cast(), socket.fd().cast(), signed_offset, adjusted_count, null, (&sbytes), 0));
-                _ = &errcode;
-                const wrote = cp_cast_int(u64, sbytes);
-                _ = &wrote;
+                const wrote = (if (comptime @typeInfo(@TypeOf(sbytes)) == .@"enum") cp_cast_int(u64, @intFromEnum(sbytes)) else cp_cast_int(u64, sbytes));
                 self.offset = (self.offset + wrote);
                 if ((self.remain > wrote)) {
                     self.remain = (self.remain - wrote);
@@ -101,12 +76,9 @@ pub fn write(self: *SendFile, socket: anytype) Status {
                 if (bun.Environment.isPosix) {
                     var sbytes: *anyopaque = adjusted_count;
                     _ = &sbytes;
-                    const signed_offset: i64 = @bitCast(cp_cast_int(u64, self.offset));
-                    _ = &signed_offset;
+                    const signed_offset: i64 = @bitCast((if (comptime @typeInfo(@TypeOf(self.offset)) == .@"enum") cp_cast_int(u64, @intFromEnum(self.offset)) else cp_cast_int(u64, self.offset)));
                     const errcode = bun.sys.getErrno(std.c.sendfile(self.fd.cast(), socket.fd().cast(), signed_offset, (&sbytes), null, 0));
-                    _ = &errcode;
-                    const wrote = cp_cast_int(u64, sbytes);
-                    _ = &wrote;
+                    const wrote = (if (comptime @typeInfo(@TypeOf(sbytes)) == .@"enum") cp_cast_int(u64, @intFromEnum(sbytes)) else cp_cast_int(u64, sbytes));
                     self.offset = (self.offset + wrote);
                     if ((self.remain > wrote)) {
                         self.remain = (self.remain - wrote);

@@ -3,10 +3,9 @@ import std from "std";
 
 const SystemErrno = bun.sys.SystemErrno;
 
-zig {
 /// This map is derived off of uv.h's definitions, and is what Node.js uses in printing errors.
-pub const libuv_error_map = brk: {
-    const entries: []const struct { [:0]const u8, [:0]const u8 } = &.{
+export const libuv_error_map = brk: {
+    const entries = &.{
         .{ "E2BIG", "argument list too long" },
         .{ "EACCES", "permission denied" },
         .{ "EADDRINUSE", "address already in use" },
@@ -92,9 +91,10 @@ pub const libuv_error_map = brk: {
         .{ "ENODATA", "no data available" },
         .{ "EUNATCH", "protocol driver not attached" },
     };
-    var map = std.EnumMap(SystemErrno, [:0]const u8).initFull("unknown error");
-    for (entries) |entry| {
-        const key, const text = entry;
+    let map = std.EnumMap(SystemErrno, [:0]const u8).initFull("unknown error");
+    for (entry of entries) {
+        const key = entry[0];
+        const text = entry[1];
         if (@hasField(SystemErrno, key)) {
             map.put(@field(SystemErrno, key), text);
         }
@@ -105,4 +105,3 @@ pub const libuv_error_map = brk: {
 
     break :brk map;
 };
-}

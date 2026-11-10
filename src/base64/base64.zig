@@ -2,387 +2,26 @@
 const std = @import("std");
 const string = []const u8;
 
-fn cp_cast_int(comptime Dest: type, val: anytype) Dest {
-    const Src = @TypeOf(val);
-    if (comptime Src == Dest) return val;
-    if (comptime Src == comptime_int) {
-        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) {
-            return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val)))));
-        } else {
-            return @as(Dest, @truncate(val));
-        }
-    }
-    const src_bits = @typeInfo(Src).int.bits;
-    const dest_bits = @typeInfo(Dest).int.bits;
-    if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {
-        if (comptime dest_bits >= src_bits) {
-            return @as(Dest, val);
-        } else {
-            return @truncate(val);
-        }
-    }
-    if (comptime @typeInfo(Src).int.signedness == .signed) {
-        const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val);
-        const u: u128 = @bitCast(s);
-        if (comptime dest_bits >= 128) {
-            return @as(Dest, u);
-        } else {
-            return @truncate(u);
-        }
-    } else {
-        const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val);
-        const s: i128 = @bitCast(u);
-        if (comptime dest_bits >= 128) {
-            return @as(Dest, s);
-        } else {
-            return @truncate(s);
-        }
-    }
-}
-
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const assert = bun.assert;
 const testing = std.testing;
-
-extern fn WTF__base64URLEncode(input: [*]const u8, input_len: usize, output: [*]u8, output_len: usize) usize;
-
-const decoderWithIgnoreProto = *const fn (ignore: []const u8) Base64DecoderWithIgnore;
-
-pub const Codecs = struct {
-    alphabet_chars: [64]u8,
-    pad_char: ?u8,
-    decoderWithIgnore: decoderWithIgnoreProto,
-    Encoder: Base64Encoder,
-    Decoder: Base64Decoder,
-};
-
-pub const standard_alphabet_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".*;
-fn standardBase64DecoderWithIgnore(ignore: []const u8) Base64DecoderWithIgnore {
-    return Base64DecoderWithIgnore.init(standard_alphabet_chars, '=', ignore);
-}
-
-pub const standard = Codecs{
-    .alphabet_chars = standard_alphabet_chars,
-    .pad_char = '=',
-    .decoderWithIgnore = standardBase64DecoderWithIgnore,
-    .Encoder = Base64Encoder.init(standard_alphabet_chars, '='),
-    .Decoder = Base64Decoder.init(standard_alphabet_chars, '='),
-};
-
-pub const standard_no_pad = Codecs{
-    .alphabet_chars = standard_alphabet_chars,
-    .pad_char = null,
-    .decoderWithIgnore = standardBase64DecoderWithIgnore,
-    .Encoder = Base64Encoder.init(standard_alphabet_chars, null),
-    .Decoder = Base64Decoder.init(standard_alphabet_chars, null),
-};
-
-pub const url_safe_alphabet_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".*;
-fn urlSafeBase64DecoderWithIgnore(ignore: []const u8) Base64DecoderWithIgnore {
-    return Base64DecoderWithIgnore.init(url_safe_alphabet_chars, '=', ignore);
-}
-
-pub const url_safe = Codecs{
-    .alphabet_chars = url_safe_alphabet_chars,
-    .pad_char = '=',
-    .decoderWithIgnore = urlSafeBase64DecoderWithIgnore,
-    .Encoder = Base64Encoder.init(url_safe_alphabet_chars, '='),
-    .Decoder = Base64Decoder.init(url_safe_alphabet_chars, '='),
-};
-
-pub const url_safe_no_pad = Codecs{
-    .alphabet_chars = url_safe_alphabet_chars,
-    .pad_char = null,
-    .decoderWithIgnore = urlSafeBase64DecoderWithIgnore,
-    .Encoder = Base64Encoder.init(url_safe_alphabet_chars, null),
-    .Decoder = Base64Decoder.init(url_safe_alphabet_chars, null),
-};
-
-const mixed_decoder = brk: {
-    var decoder = standard.decoderWithIgnore("\xff \t\r\n" ++ [_]u8{
-        std.ascii.control_code.vt,
-        std.ascii.control_code.ff,
-    });
-
-    for (url_safe_alphabet_chars[62..], 62..) |c, i| {
-        decoder.decoder.char_to_index[c] = @as(u8, @intCast(i));
-    }
-
-    break :brk decoder;
-};
-
-pub fn decode(destination: []u8, source: []const u8) bun.simdutf.SIMDUTFResult {
-    const result = bun.simdutf.base64.decode(source, destination, false);
-
-    if (!result.isSuccessful()) {
-        var wrote: usize = 0;
-        mixed_decoder.decode(destination, source, &wrote) catch {
-            return .{
-                .count = wrote,
-                .status = .invalid_base64_character,
-            };
-        };
-        return .{ .count = wrote, .status = .success };
-    }
-
-    return result;
-}
-
-pub fn decodeAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var dest = try allocator.alloc(u8, decodeLen(input));
-    errdefer allocator.free(dest);
-    const result = decode(dest, input);
-    if (!result.isSuccessful()) {
-        return error.DecodingFailed;
-    }
-    return dest[0..result.count];
-}
-
-pub fn encode(destination: []u8, source: []const u8) usize {
-    return bun.simdutf.base64.encode(source, destination, false);
-}
-
-pub fn encodeAlloc(allocator: std.mem.Allocator, source: []const u8) !bun.ByteList {
-    const len = encodeLen(source);
-    const destination = try allocator.alloc(u8, len);
-    errdefer allocator.free(destination);
-    const encoded_len = encode(destination, source);
-    return .{
-        .ptr = destination.ptr,
-        .len = @truncate(encoded_len),
-        .cap = @truncate(len),
-    };
-}
-
-pub fn simdutfEncodeLenUrlSafe(source_len: usize) usize {
-    return bun.simdutf.base64.encode_len(source_len, true);
-}
-
-pub fn simdutfEncodeUrlSafe(destination: []u8, source: []const u8) usize {
-    return bun.simdutf.base64.encode(source, destination, true);
-}
-
-pub fn decodeLenUpperBound(len: usize) usize {
-    return standard.Decoder.calcSizeUpperBound(len) catch {
-        return len / 4 * 3;
-    };
-}
-
-pub fn decodeLen(source: anytype) usize {
-    return standard.Decoder.calcSizeForSlice(source) catch {
-        return source.len / 4 * 3 + 2;
-    };
-}
-
-pub fn encodeLen(source: anytype) usize {
-    return encodeLenFromSize(source.len);
-}
-
-pub fn encodeLenFromSize(source: usize) usize {
-    return standard.Encoder.calcSize(source);
-}
-
-pub fn urlSafeEncodeLen(source: anytype) usize {
-    return ((source.len * 4) + 2) / 3;
-}
-
-pub fn encodeURLSafe(dest: []u8, source: []const u8) usize {
-    bun.jsc.markBinding(@src());
-    return WTF__base64URLEncode(source.ptr, source.len, dest.ptr, dest.len);
-}
-fn is_string_like(comptime T: type) bool {
-    if (T == []const u8 or T == []u8) return true;
-    if (@typeInfo(T) == .pointer) {
-        const Child = @typeInfo(T).pointer.child;
-        if (Child == u8) return true;
-        if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true;
-    }
-    return false;
-}
-fn to_string_slice(v: anytype) []const u8 {
-    const T = @TypeOf(v);
-    if (comptime (T == []const u8 or T == []u8)) {
-        return v;
-    } else {
-        const cp_str_slice: []const u8 = v;
-        return cp_str_slice;
-    }
-}
-fn CpValType(comptime T: type) type {
-    if (is_string_like(T)) return []const u8;
-    if (T == comptime_int) return i32;
-    if (T == comptime_float) return f32;
-    return T;
-}
-fn cp_val(v: anytype) CpValType(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime is_string_like(T)) {
-        return to_string_slice(v);
-    } else if (comptime T == comptime_int) {
-        return @as(i32, v);
-    } else if (comptime T == comptime_float) {
-        return @as(f32, v);
-    } else {
-        return v;
-    }
-}
-fn CpNullCoalesceReturn(comptime TOpt: type, comptime TFb: type) type {
-    if (@typeInfo(TOpt) == .optional) {
-        const Child = @typeInfo(TOpt).optional.child;
-        if (is_string_like(Child)) return []const u8;
-        return Child;
-    }
-    return CpValType(TFb);
-}
-fn cp_null_coalesce(opt_val: anytype, fallback: anytype) CpNullCoalesceReturn(@TypeOf(opt_val), @TypeOf(fallback)) {
-    const TOpt = @TypeOf(opt_val);
-    const RType = CpNullCoalesceReturn(TOpt, @TypeOf(fallback));
-    if (comptime @typeInfo(TOpt) == .optional) {
-        if (opt_val) |v| {
-            if (comptime is_string_like(RType)) {
-                return to_string_slice(v);
-            } else {
-                return v;
-            }
-        } else {
-            if (comptime is_string_like(RType)) {
-                return to_string_slice(fallback);
-            } else {
-                return fallback;
-            }
-        }
-    }
-    return cp_val(fallback);
-}
-fn cp_eq(a: anytype, b: anytype) bool {
-    const Ta = @TypeOf(a);
-    const Tb = @TypeOf(b);
-    if (comptime @typeInfo(Ta) == .null and @typeInfo(Tb) == .null) return true;
-    if (comptime @typeInfo(Ta) == .null) {
-        if (comptime @typeInfo(Tb) == .optional) return b == null;
-        return false;
-    }
-    if (comptime @typeInfo(Tb) == .null) {
-        if (comptime @typeInfo(Ta) == .optional) return a == null;
-        return false;
-    }
-    if (comptime is_string_like(Ta) and is_string_like(Tb)) {
-        return std.mem.eql(u8, to_string_slice(a), to_string_slice(b));
-    }
-    if (comptime (@typeInfo(Ta) == .int or Ta == comptime_int) and (@typeInfo(Tb) == .int or Tb == comptime_int)) {
-        return a == b;
-    }
-    if (comptime (@typeInfo(Ta) == .float or Ta == comptime_float) and (@typeInfo(Tb) == .float or Tb == comptime_float)) {
-        return a == b;
-    }
-    if (comptime @typeInfo(Ta) == .optional and @typeInfo(Tb) == .optional) {
-        if (a) |va| {
-            if (b) |vb| return cp_eq(va, vb);
-            return false;
-        } else {
-            return b == null;
-        }
-    }
-    if (comptime @typeInfo(Ta) == .optional) {
-        if (a) |va| return cp_eq(va, b);
-        return false;
-    }
-    if (comptime @typeInfo(Tb) == .optional) {
-        if (b) |vb| return cp_eq(a, vb);
-        return false;
-    }
-    if (comptime Ta != Tb) return false;
-    return a == b;
-}
-fn cp_neq(a: anytype, b: anytype) bool {
-    return !cp_eq(a, b);
-}
-fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) {
-    .pointer => |p| switch (p.size) {
-        .slice => @TypeOf(val),
-        .one => switch (@typeInfo(p.child)) {
-            .array => []const @typeInfo(p.child).array.child,
-            .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val),
-            else => @TypeOf(val),
-        },
-        else => @TypeOf(val),
-    },
-    .array => []const @typeInfo(@TypeOf(val)).array.child,
-    else => @TypeOf(val),
-} {
-    const T = @TypeOf(val);
-    switch (@typeInfo(T)) {
-        .pointer => |p| switch (p.size) {
-            .slice => return val,
-            .one => switch (@typeInfo(p.child)) {
-                .array => return val[0..],
-                .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val,
-                else => return val,
-            },
-            else => return val,
-        },
-        .array => return val[0..],
-        else => return val,
-    }
-}
-fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) {
-    .array => []@typeInfo(@TypeOf(ptr.*)).array.child,
-    .pointer => |p| switch (p.size) {
-        .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child,
-        .one => switch (@typeInfo(p.child)) {
-            .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"),
-            else => @compileError("Cannot mutably iterate over non-collection"),
-        },
-        else => @compileError("Cannot mutably iterate over non-collection"),
-    },
-    else => @compileError("Cannot mutably iterate over non-collection"),
-} {
-    const ValT = @TypeOf(ptr.*);
-    switch (@typeInfo(ValT)) {
-        .array => return ptr[0..],
-        .pointer => |p| switch (p.size) {
-            .slice => return @constCast(ptr.*),
-            .one => return @constCast(ptr.*.*),
-            else => unreachable,
-        },
-        else => unreachable,
-    }
-}
-fn cp_index_of(container: anytype, needle: anytype) i32 {
-    const cp_slice = cp_iter_slice(container);
-    const SliceT = @TypeOf(cp_slice);
-    if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) {
-        if (std.mem.indexOf(u8, to_string_slice(cp_slice), to_string_slice(needle))) |i| return @intCast(i);
-        return -1;
-    }
-    for (cp_slice, 0..) |item, idx| {
-        if (cp_eq(item, needle)) return @intCast(idx);
-    }
-    return -1;
-}
-fn cp_last_index_of(container: anytype, needle: anytype) i32 {
-    const cp_slice = cp_iter_slice(container);
-    const SliceT = @TypeOf(cp_slice);
-    if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) {
-        if (std.mem.lastIndexOf(u8, to_string_slice(cp_slice), to_string_slice(needle))) |i| return @intCast(i);
-        return -1;
-    }
-    var i: usize = cp_slice.len;
-    while (i > 0) {
-        i -= 1;
-        if (cp_eq(cp_slice[i], needle)) return @intCast(i);
-    }
-    return -1;
-}
-fn cp_includes(container: anytype, needle: anytype) bool {
-    return cp_index_of(container, needle) != -1;
-}
+pub const standard_alphabet_chars = ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/").*;
+pub const standard = Codecs{ .alphabet_chars = standard_alphabet_chars, .pad_char = 61, .decoderWithIgnore = standardBase64DecoderWithIgnore, .Encoder = Base64Encoder.init(standard_alphabet_chars, 61), .Decoder = Base64Decoder.init(standard_alphabet_chars, 61) };
+pub const standard_no_pad = Codecs{ .alphabet_chars = standard_alphabet_chars, .pad_char = null, .decoderWithIgnore = standardBase64DecoderWithIgnore, .Encoder = Base64Encoder.init(standard_alphabet_chars, null), .Decoder = Base64Decoder.init(standard_alphabet_chars, null) };
+pub const url_safe_alphabet_chars = ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_").*;
+pub const url_safe = Codecs{ .alphabet_chars = url_safe_alphabet_chars, .pad_char = 61, .decoderWithIgnore = urlSafeBase64DecoderWithIgnore, .Encoder = Base64Encoder.init(url_safe_alphabet_chars, 61), .Decoder = Base64Decoder.init(url_safe_alphabet_chars, 61) };
+pub const url_safe_no_pad = Codecs{ .alphabet_chars = url_safe_alphabet_chars, .pad_char = null, .decoderWithIgnore = urlSafeBase64DecoderWithIgnore, .Encoder = Base64Encoder.init(url_safe_alphabet_chars, null), .Decoder = Base64Decoder.init(url_safe_alphabet_chars, null) };
+const mixed_decoder = createMixedDecoder();
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
 fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
     const T = @TypeOf(val);
     if (comptime @typeInfo(T) == .comptime_int) return val << shift;
     if (comptime @typeInfo(T) == .int) {
         const ShiftType = std.math.Log2Int(T);
-        return val << @as(ShiftType, @truncate(shift));
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val << @as(ShiftType, @truncate(u_shift));
     }
     return val << shift;
 }
@@ -391,78 +30,78 @@ fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
     if (comptime @typeInfo(T) == .comptime_int) return val >> shift;
     if (comptime @typeInfo(T) == .int) {
         const ShiftType = std.math.Log2Int(T);
-        return val >> @as(ShiftType, @truncate(shift));
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val >> @as(ShiftType, @truncate(u_shift));
     }
     return val >> shift;
 }
-
+pub const bun = @import("bun");
 pub const Base64Encoder = struct {
     alphabet_chars: [64]u8,
     pad_char: ?u8,
 
-    pub fn init(alphabet_chars: [64]u8, pad_char: ?u8) Base64Encoder {
-        return Base64Encoder{ .alphabet_chars = alphabet_chars, .pad_char = pad_char };
+pub fn init(alphabet_chars: [64]u8, pad_char: ?u8) Base64Encoder {
+            return Base64Encoder{ .alphabet_chars = alphabet_chars, .pad_char = pad_char };
     }
 
-    pub fn calcSize(self: *const Base64Encoder, source_len: usize) usize {
+pub fn calcSize(self: Base64Encoder, source_len: usize) usize {
         _ = &self;
-        if ((self.pad_char != null)) {
-            return (((source_len + 2) / 3) * 4);
-        } else {
-            var leftover = (source_len % 3);
-            _ = &leftover;
-            return (((source_len / 3) * 4) + (((leftover * 4) + 2) / 3));
-        }
+            if ((self.pad_char != null)) {
+                return (((source_len + 2) / 3) * 4);
+            } else {
+                var leftover = (source_len % 3);
+                _ = &leftover;
+                return (((source_len / 3) * 4) + (((leftover * 4) + 2) / 3));
+            }
     }
 
-    pub fn encodeWithoutSizeCheck(self: *const Base64Encoder, dest: []u8, source: []const u8) usize {
+pub fn encodeWithoutSizeCheck(self: Base64Encoder, dest: []u8, source: []const u8) usize {
         _ = &self;
-        var acc: u32 = 0;
-        _ = &acc;
-        var acc_len: u32 = 0;
-        _ = &acc_len;
-        var out_idx: i32 = 0;
-        _ = &out_idx;
-        for (cp_iter_slice(source)) |v| {
-            _ = &v;
-            acc = (cp_shl(acc, 8) + cp_cast_int(u32, v));
-            acc_len = (acc_len + 8);
-            while ((acc_len >= 6)) {
-                acc_len = (acc_len - 6);
-                var idx: usize = cp_cast_int(usize, (cp_shr(acc, acc_len) & 63));
+            var acc: u32 = 0;
+            _ = &acc;
+            var acc_len: u32 = 0;
+            _ = &acc_len;
+            var out_idx: i32 = 0;
+            _ = &out_idx;
+            for (cp_iter_slice(source)) |v| {
+                _ = &v;
+                acc = (cp_shl(acc, 8) + (if (comptime @typeInfo(@TypeOf(v)) == .@"enum") cp_cast_int(u32, @intFromEnum(v)) else cp_cast_int(u32, v)));
+                acc_len = (acc_len + 8);
+                while ((acc_len >= 6)) {
+                    acc_len = (acc_len - 6);
+                    var idx: usize = (if (comptime @typeInfo(@TypeOf((cp_shr(acc, acc_len) & 63))) == .@"enum") cp_cast_int(usize, @intFromEnum((cp_shr(acc, acc_len) & 63))) else cp_cast_int(usize, (cp_shr(acc, acc_len) & 63)));
+                    _ = &idx;
+                    dest[cp_cast_int(usize, out_idx)] = self.alphabet_chars[@as(usize, @intCast(idx))];
+                    out_idx = (out_idx + 1);
+                }
+            }
+            if ((acc_len > 0)) {
+                var shift: u32 = ((if (comptime @typeInfo(@TypeOf(6)) == .@"enum") cp_cast_int(u32, @intFromEnum(6)) else cp_cast_int(u32, 6)) - acc_len);
+                _ = &shift;
+                var idx: usize = (if (comptime @typeInfo(@TypeOf((cp_shl(acc, shift) & 63))) == .@"enum") cp_cast_int(usize, @intFromEnum((cp_shl(acc, shift) & 63))) else cp_cast_int(usize, (cp_shl(acc, shift) & 63)));
                 _ = &idx;
                 dest[cp_cast_int(usize, out_idx)] = self.alphabet_chars[@as(usize, @intCast(idx))];
                 out_idx = (out_idx + 1);
             }
-        }
-        if ((acc_len > 0)) {
-            var shift: u32 = (cp_cast_int(u32, 6) - acc_len);
-            _ = &shift;
-            var idx: usize = cp_cast_int(usize, (cp_shl(acc, shift) & 63));
-            _ = &idx;
-            dest[cp_cast_int(usize, out_idx)] = self.alphabet_chars[@as(usize, @intCast(idx))];
-            out_idx = (out_idx + 1);
-        }
-        return out_idx;
+            return out_idx;
     }
 
-    pub fn encode(self: *const Base64Encoder, dest: []u8, source: []const u8) []const u8 {
+pub fn encode(self: Base64Encoder, dest: []u8, source: []const u8) []const u8 {
         _ = &self;
-        var out_len = self.calcSize(source.len);
-        _ = &out_len;
-        var out_idx = self.encodeWithoutSizeCheck(dest, source);
-        _ = &out_idx;
-        if ((self.pad_char != null)) {
-            var pad = cp_null_coalesce(self.pad_char, 0);
-            _ = &pad;
-            var i = out_idx;
-            _ = &i;
-            while ((i < out_len)) {
-                dest[cp_cast_int(usize, i)] = pad;
-                i = (i + 1);
+            var out_len = self.calcSize(source.len);
+            _ = &out_len;
+            var out_idx = self.encodeWithoutSizeCheck(dest, source);
+            _ = &out_idx;
+            if (self.pad_char) |pad| {
+                _ = &pad;
+                var i = out_idx;
+                _ = &i;
+                while ((i < out_len)) {
+                    dest[cp_cast_int(usize, i)] = pad;
+                    i = (i + 1);
+                }
             }
-        }
-        return dest[0..out_len];
+            return dest[0..out_len];
     }
 };
 
@@ -470,231 +109,115 @@ pub const Base64Decoder = struct {
     char_to_index: [256]u8,
     pad_char: ?u8,
 
-    pub fn init(alphabet_chars: [64]u8, pad_char: ?u8) Base64Decoder {
-        var result = Base64Decoder{ .char_to_index = @as([256]u8, @splat(@as(u8, cp_cast_int(u8, 255)))), .pad_char = pad_char };
-        _ = &result;
-        var i: i32 = 0;
-        _ = &i;
-        for (cp_iter_slice(alphabet_chars)) |c| {
-            _ = &c;
-            result.char_to_index[cp_cast_int(usize, cp_cast_int(usize, c))] = cp_cast_int(u8, i);
-            i = (i + 1);
-        }
-        return result;
-    }
-
-    pub fn calcSizeUpperBound(self: *const Base64Decoder, source_len: usize) !usize {
-        _ = &self;
-        var result = ((source_len / 4) * 3);
-        _ = &result;
-        var leftover = (source_len % 4);
-        _ = &leftover;
-        if ((self.pad_char != null)) {
-            if (((leftover % 4) != 0)) {
-                return error.InvalidPadding;
-            }
-        } else {
-            if (((leftover % 4) == 1)) {
-                return error.InvalidPadding;
-            }
-            result = (result + ((leftover * 3) / 4));
-        }
-        return result;
-    }
-
-    pub fn calcSizeForSlice(self: *const Base64Decoder, source: []const u8) !usize {
-        _ = &self;
-        var source_len = source.len;
-        _ = &source_len;
-        var result = try self.calcSizeUpperBound(source_len);
-        _ = &result;
-        if ((self.pad_char != null)) {
-            var pad = cp_null_coalesce(self.pad_char, 0);
-            _ = &pad;
-            if (((source_len >= 1) and (source[@as(usize, @intCast((source_len - 1)))] == pad))) {
-                result = (result - 1);
-            }
-            if (((source_len >= 2) and (source[@as(usize, @intCast((source_len - 2)))] == pad))) {
-                result = (result - 1);
-            }
-        }
-        return result;
-    }
-
-    pub fn decode(self: *const Base64Decoder, dest: []u8, source: []const u8) !void {
-        _ = &self;
-        if (((self.pad_char != null) and ((source.len % 4) != 0))) {
-            return error.InvalidPadding;
-        }
-        var acc: u32 = 0;
-        _ = &acc;
-        var acc_len: u32 = 0;
-        _ = &acc_len;
-        var dest_idx: usize = 0;
-        _ = &dest_idx;
-        var leftover_idx: ?usize = null;
-        _ = &leftover_idx;
-        var src_idx: usize = 0;
-        _ = &src_idx;
-        for (cp_iter_slice(source)) |c| {
-            _ = &c;
-            var d = self.char_to_index[@as(usize, @intCast(cp_cast_int(usize, c)))];
-            _ = &d;
-            if ((d == 255)) {
-                if (((self.pad_char == null) or cp_neq(c, cp_null_coalesce(self.pad_char, 0)))) {
-                    return error.InvalidCharacter;
-                }
-                leftover_idx = src_idx;
-                break;
-            }
-            acc = (cp_shl(acc, 6) + cp_cast_int(u32, d));
-            acc_len = (acc_len + 6);
-            if ((acc_len >= 8)) {
-                acc_len = (acc_len - 8);
-                var val: u8 = cp_cast_int(u8, (cp_shr(acc, acc_len) & 255));
-                _ = &val;
-                dest[cp_cast_int(usize, dest_idx)] = val;
-                dest_idx = (dest_idx + 1);
-            }
-            src_idx = (src_idx + 1);
-        }
-        if (((acc_len > 4) or ((acc & (cp_shl(cp_cast_int(u32, 1), acc_len) - 1)) != 0))) {
-            return error.InvalidPadding;
-        }
-        if ((leftover_idx == null)) {
-            return;
-        }
-        var l_idx = cp_null_coalesce(leftover_idx, 0);
-        _ = &l_idx;
-        var leftover = source[l_idx..source.len];
-        _ = &leftover;
-        if ((self.pad_char != null)) {
-            var pad = cp_null_coalesce(self.pad_char, 0);
-            _ = &pad;
-            var padding_len: u32 = (acc_len / 2);
-            _ = &padding_len;
-            var padding_chars: u32 = 0;
-            _ = &padding_chars;
-            for (cp_iter_slice(leftover)) |c| {
+pub fn init(alphabet_chars: [64]u8, pad_char: ?u8) Base64Decoder {
+            var result = Base64Decoder{ .char_to_index = @as([256]u8, @splat(@as(u8, (if (comptime @typeInfo(@TypeOf(255)) == .@"enum") cp_cast_int(u8, @intFromEnum(255)) else cp_cast_int(u8, 255))))), .pad_char = pad_char };
+            _ = &result;
+            var i: i32 = 0;
+            _ = &i;
+            for (cp_iter_slice(alphabet_chars)) |c| {
                 _ = &c;
-                if (cp_neq(c, pad)) {
-                    if (cp_eq(c, 255)) {
-                        return error.InvalidCharacter;
-                    } else {
-                        return error.InvalidPadding;
-                    }
-                }
-                padding_chars = (padding_chars + 1);
+                result.char_to_index[cp_cast_int(usize, (if (comptime @typeInfo(@TypeOf(c)) == .@"enum") cp_cast_int(usize, @intFromEnum(c)) else cp_cast_int(usize, c)))] = (if (comptime @typeInfo(@TypeOf(i)) == .@"enum") cp_cast_int(u8, @intFromEnum(i)) else cp_cast_int(u8, i));
+                i = (i + 1);
             }
-            if ((padding_chars != padding_len)) {
-                return error.InvalidPadding;
-            }
-        }
-    }
-};
-
-pub const Base64DecoderWithIgnore = struct {
-    decoder: Base64Decoder,
-    char_is_ignored: [256]bool,
-
-    pub fn init(alphabet_chars: [64]u8, pad_char: ?u8, ignore_chars: []const u8) Base64DecoderWithIgnore {
-        var result = Base64DecoderWithIgnore{ .decoder = Base64Decoder.init(alphabet_chars, pad_char), .char_is_ignored = @as([256]bool, @splat(@as(bool, false))) };
-        _ = &result;
-        for (cp_iter_slice(ignore_chars)) |c| {
-            _ = &c;
-            result.char_is_ignored[cp_cast_int(usize, cp_cast_int(usize, c))] = true;
-        }
-        return result;
+            return result;
     }
 
-    pub fn calcSizeUpperBound(self: *const Base64DecoderWithIgnore, source_len: usize) usize {
+pub fn calcSizeUpperBound(self: Base64Decoder, source_len: usize) !usize {
         _ = &self;
-        var result = ((source_len / 4) * 3);
-        _ = &result;
-        if ((self.decoder.pad_char == null)) {
+            var result = ((source_len / 4) * 3);
+            _ = &result;
             var leftover = (source_len % 4);
             _ = &leftover;
-            result = (result + ((leftover * 3) / 4));
-        }
-        return result;
+            if ((self.pad_char != null)) {
+                if (((leftover % 4) != 0)) {
+                    return error.InvalidPadding;
+                }
+            } else {
+                if (((leftover % 4) == 1)) {
+                    return error.InvalidPadding;
+                }
+                result = (result + ((leftover * 3) / 4));
+            }
+            return result;
     }
 
-    pub fn decode(self: *const Base64DecoderWithIgnore, dest: []u8, source: []const u8, wrote: *usize) !void {
+pub fn calcSizeForSlice(self: Base64Decoder, source: []const u8) !usize {
         _ = &self;
-        var acc: u32 = 0;
-        _ = &acc;
-        var acc_len: u32 = 0;
-        _ = &acc_len;
-        var dest_idx: usize = 0;
-        _ = &dest_idx;
-        var leftover_idx: ?usize = null;
-        _ = &leftover_idx;
-        var src_idx: usize = 0;
-        _ = &src_idx;
-        defer {
-            {
-                wrote.* = dest_idx;
+            var source_len = source.len;
+            _ = &source_len;
+            var result = try self.calcSizeUpperBound(source_len);
+            _ = &result;
+            if ((self.pad_char != null)) {
+                var pad = self.pad_char.?;
+                _ = &pad;
+                if (((source_len >= 1) and (source[@as(usize, @intCast((source_len - 1)))] == pad))) {
+                    result = (result - 1);
+                }
+                if (((source_len >= 2) and (source[@as(usize, @intCast((source_len - 2)))] == pad))) {
+                    result = (result - 1);
+                }
             }
-        }
-        for (cp_iter_slice(source)) |c| {
-            _ = &c;
-            if (self.char_is_ignored[@as(usize, @intCast(cp_cast_int(usize, c)))]) {
-                src_idx = (src_idx + 1);
-                continue;
+            return result;
+    }
+
+pub fn decode(self: Base64Decoder, dest: []u8, source: []const u8) !void {
+        _ = &self;
+            if (((self.pad_char != null) and ((source.len % 4) != 0))) {
+                return error.InvalidPadding;
             }
-            var d = self.decoder.char_to_index[@as(usize, @intCast(cp_cast_int(usize, c)))];
-            _ = &d;
-            if ((d == 255)) {
-                if ((self.decoder.pad_char != null)) {
-                    var pad = cp_null_coalesce(self.decoder.pad_char, 0);
-                    _ = &pad;
-                    if (cp_eq(c, pad)) {
-                        leftover_idx = src_idx;
-                        break;
+            var acc: u32 = 0;
+            _ = &acc;
+            var acc_len: u32 = 0;
+            _ = &acc_len;
+            var dest_idx: usize = 0;
+            _ = &dest_idx;
+            var leftover_idx: ?usize = null;
+            _ = &leftover_idx;
+            var src_idx: usize = 0;
+            _ = &src_idx;
+            for (cp_iter_slice(source)) |c| {
+                _ = &c;
+                var d = self.char_to_index[@as(usize, @intCast((if (comptime @typeInfo(@TypeOf(c)) == .@"enum") cp_cast_int(usize, @intFromEnum(c)) else cp_cast_int(usize, c))))];
+                _ = &d;
+                if ((d == 255)) {
+                    if (((self.pad_char == null) or (c != ((self.pad_char) orelse (0))))) {
+                        return error.InvalidCharacter;
                     }
+                    leftover_idx = src_idx;
+                    break;
                 }
-                if (self.char_is_ignored[255]) {
-                    src_idx = (src_idx + 1);
-                    continue;
+                acc = (cp_shl(acc, 6) + (if (comptime @typeInfo(@TypeOf(d)) == .@"enum") cp_cast_int(u32, @intFromEnum(d)) else cp_cast_int(u32, d)));
+                acc_len = (acc_len + 6);
+                if ((acc_len >= 8)) {
+                    acc_len = (acc_len - 8);
+                    var val: u8 = (if (comptime @typeInfo(@TypeOf((cp_shr(acc, acc_len) & 255))) == .@"enum") cp_cast_int(u8, @intFromEnum((cp_shr(acc, acc_len) & 255))) else cp_cast_int(u8, (cp_shr(acc, acc_len) & 255)));
+                    _ = &val;
+                    dest[cp_cast_int(usize, dest_idx)] = val;
+                    dest_idx = (dest_idx + 1);
                 }
-                return error.InvalidCharacter;
+                src_idx = (src_idx + 1);
             }
-            acc = (cp_shl(acc, 6) + cp_cast_int(u32, d));
-            acc_len = (acc_len + 6);
-            if ((acc_len >= 8)) {
-                if ((dest_idx == dest.len)) {
-                    return error.NoSpaceLeft;
-                }
-                acc_len = (acc_len - 8);
-                var val: u8 = cp_cast_int(u8, (cp_shr(acc, acc_len) & 255));
-                _ = &val;
-                dest[cp_cast_int(usize, dest_idx)] = val;
-                dest_idx = (dest_idx + 1);
+            if (((acc_len > 4) or ((acc & (cp_shl((if (comptime @typeInfo(@TypeOf(1)) == .@"enum") cp_cast_int(u32, @intFromEnum(1)) else cp_cast_int(u32, 1)), acc_len) - 1)) != 0))) {
+                return error.InvalidPadding;
             }
-            src_idx = (src_idx + 1);
-        }
-        if (((acc_len > 4) or ((acc & (cp_shl(cp_cast_int(u32, 1), acc_len) - 1)) != 0))) {
-            return error.InvalidPadding;
-        }
-        if ((self.decoder.pad_char != null)) {
-            var pad = cp_null_coalesce(self.decoder.pad_char, 0);
-            _ = &pad;
-            var padding_len: u32 = (acc_len / 2);
-            _ = &padding_len;
-            if ((leftover_idx != null)) {
-                var l_idx = cp_null_coalesce(leftover_idx, 0);
-                _ = &l_idx;
-                var leftover = source[l_idx..source.len];
-                _ = &leftover;
+            if ((leftover_idx == null)) {
+                return;
+            }
+            var l_idx = leftover_idx.?;
+            _ = &l_idx;
+            var leftover = source[l_idx..source.len];
+            _ = &leftover;
+            if ((self.pad_char != null)) {
+                var pad = self.pad_char.?;
+                _ = &pad;
+                var padding_len: u32 = (acc_len / 2);
+                _ = &padding_len;
                 var padding_chars: u32 = 0;
                 _ = &padding_chars;
                 for (cp_iter_slice(leftover)) |c| {
                     _ = &c;
-                    if (self.char_is_ignored[@as(usize, @intCast(cp_cast_int(usize, c)))]) {
-                        continue;
-                    }
-                    if (cp_neq(c, pad)) {
-                        if (cp_eq(c, 255)) {
+                    if ((c != pad)) {
+                        if ((c == 255)) {
                             return error.InvalidCharacter;
                         } else {
                             return error.InvalidPadding;
@@ -705,11 +228,231 @@ pub const Base64DecoderWithIgnore = struct {
                 if ((padding_chars != padding_len)) {
                     return error.InvalidPadding;
                 }
-            } else {
-                if ((padding_len > 0)) {
-                    return error.InvalidPadding;
-                }
             }
-        }
     }
 };
+
+pub const Base64DecoderWithIgnore = struct {
+    decoder: Base64Decoder,
+    char_is_ignored: [256]bool,
+
+pub fn init(alphabet_chars: [64]u8, pad_char: ?u8, ignore_chars: []const u8) Base64DecoderWithIgnore {
+            var result = Base64DecoderWithIgnore{ .decoder = Base64Decoder.init(alphabet_chars, pad_char), .char_is_ignored = @as([256]bool, @splat(@as(bool, false))) };
+            _ = &result;
+            for (cp_iter_slice(ignore_chars)) |c| {
+                _ = &c;
+                result.char_is_ignored[cp_cast_int(usize, (if (comptime @typeInfo(@TypeOf(c)) == .@"enum") cp_cast_int(usize, @intFromEnum(c)) else cp_cast_int(usize, c)))] = true;
+            }
+            return result;
+    }
+
+pub fn calcSizeUpperBound(self: Base64DecoderWithIgnore, source_len: usize) usize {
+        _ = &self;
+            var result = ((source_len / 4) * 3);
+            _ = &result;
+            if ((self.decoder.pad_char == null)) {
+                var leftover = (source_len % 4);
+                _ = &leftover;
+                result = (result + ((leftover * 3) / 4));
+            }
+            return result;
+    }
+
+pub fn decode(self: Base64DecoderWithIgnore, dest: []u8, source: []const u8, wrote: *usize) !void {
+        _ = &self;
+            var acc: u32 = 0;
+            _ = &acc;
+            var acc_len: u32 = 0;
+            _ = &acc_len;
+            var dest_idx: usize = 0;
+            _ = &dest_idx;
+            var leftover_idx: ?usize = null;
+            _ = &leftover_idx;
+            var src_idx: usize = 0;
+            _ = &src_idx;
+            defer {
+            {
+                wrote.* = dest_idx;
+            }
+            }
+            for (cp_iter_slice(source)) |c| {
+                _ = &c;
+                if (self.char_is_ignored[@as(usize, @intCast((if (comptime @typeInfo(@TypeOf(c)) == .@"enum") cp_cast_int(usize, @intFromEnum(c)) else cp_cast_int(usize, c))))]) {
+                    src_idx = (src_idx + 1);
+                    continue;
+                }
+                var d = self.decoder.char_to_index[@as(usize, @intCast((if (comptime @typeInfo(@TypeOf(c)) == .@"enum") cp_cast_int(usize, @intFromEnum(c)) else cp_cast_int(usize, c))))];
+                _ = &d;
+                if ((d == 255)) {
+                    if ((self.decoder.pad_char != null)) {
+                        var pad = ((self.decoder.pad_char) orelse (0));
+                        _ = &pad;
+                        if ((c == pad)) {
+                            leftover_idx = src_idx;
+                            break;
+                        }
+                    }
+                    if (self.char_is_ignored[255]) {
+                        src_idx = (src_idx + 1);
+                        continue;
+                    }
+                    return error.InvalidCharacter;
+                }
+                acc = (cp_shl(acc, 6) + (if (comptime @typeInfo(@TypeOf(d)) == .@"enum") cp_cast_int(u32, @intFromEnum(d)) else cp_cast_int(u32, d)));
+                acc_len = (acc_len + 6);
+                if ((acc_len >= 8)) {
+                    if ((dest_idx == dest.len)) {
+                        return error.NoSpaceLeft;
+                    }
+                    acc_len = (acc_len - 8);
+                    var val: u8 = (if (comptime @typeInfo(@TypeOf((cp_shr(acc, acc_len) & 255))) == .@"enum") cp_cast_int(u8, @intFromEnum((cp_shr(acc, acc_len) & 255))) else cp_cast_int(u8, (cp_shr(acc, acc_len) & 255)));
+                    _ = &val;
+                    dest[cp_cast_int(usize, dest_idx)] = val;
+                    dest_idx = (dest_idx + 1);
+                }
+                src_idx = (src_idx + 1);
+            }
+            if (((acc_len > 4) or ((acc & (cp_shl((if (comptime @typeInfo(@TypeOf(1)) == .@"enum") cp_cast_int(u32, @intFromEnum(1)) else cp_cast_int(u32, 1)), acc_len) - 1)) != 0))) {
+                return error.InvalidPadding;
+            }
+            if ((self.decoder.pad_char != null)) {
+                var pad = self.decoder.pad_char.?;
+                _ = &pad;
+                var padding_len: u32 = (acc_len / 2);
+                _ = &padding_len;
+                if ((leftover_idx != null)) {
+                    var l_idx = leftover_idx.?;
+                    _ = &l_idx;
+                    var leftover = source[l_idx..source.len];
+                    _ = &leftover;
+                    var padding_chars: u32 = 0;
+                    _ = &padding_chars;
+                    for (cp_iter_slice(leftover)) |c| {
+                        _ = &c;
+                        if (self.char_is_ignored[@as(usize, @intCast((if (comptime @typeInfo(@TypeOf(c)) == .@"enum") cp_cast_int(usize, @intFromEnum(c)) else cp_cast_int(usize, c))))]) {
+                            continue;
+                        }
+                        if ((c != pad)) {
+                            if ((c == 255)) {
+                                return error.InvalidCharacter;
+                            } else {
+                                return error.InvalidPadding;
+                            }
+                        }
+                        padding_chars = (padding_chars + 1);
+                    }
+                    if ((padding_chars != padding_len)) {
+                        return error.InvalidPadding;
+                    }
+                } else {
+                    if ((padding_len > 0)) {
+                        return error.InvalidPadding;
+                    }
+                }
+            }
+    }
+};
+
+pub const Codecs = struct {
+    alphabet_chars: [64]u8,
+    pad_char: ?u8,
+    decoderWithIgnore: decoderWithIgnoreProto,
+    Encoder: Base64Encoder,
+    Decoder: Base64Decoder,
+};
+
+const decoderWithIgnoreProto = *const fn ([]const u8) Base64DecoderWithIgnore;
+
+pub extern "c" fn WTF__base64URLEncode(input: [*]const u8, input_len: usize, output: [*]u8, output_len: usize) callconv(.c) usize;
+
+pub fn standardBase64DecoderWithIgnore(ignore: []const u8) Base64DecoderWithIgnore {
+        return Base64DecoderWithIgnore.init(standard_alphabet_chars, 61, ignore);
+}
+
+pub fn urlSafeBase64DecoderWithIgnore(ignore: []const u8) Base64DecoderWithIgnore {
+        return Base64DecoderWithIgnore.init(url_safe_alphabet_chars, 61, ignore);
+}
+
+pub fn createMixedDecoder() Base64DecoderWithIgnore {
+        var decoder = standard.decoderWithIgnore("\xff \t\r\n\x0b\x0c");
+        _ = &decoder;
+        var i: u8 = 62;
+        _ = &i;
+        for (cp_iter_slice(url_safe_alphabet_chars[62..])) |c| {
+            _ = &c;
+            decoder.decoder.char_to_index[cp_cast_int(usize, c)] = i;
+            i = (i + 1);
+        }
+        return decoder;
+}
+
+pub fn decode(destination: []u8, source: []const u8) bun.simdutf.SIMDUTFResult {
+        const result = bun.simdutf.base64.decode(source, destination, false);
+        if ((!result.isSuccessful())) {
+            var wrote: usize = 0;
+            _ = &wrote;
+            _ = (blk_catch_0: { break :blk_catch_0 ((mixed_decoder.decode(destination, source, (&wrote))) catch |__ce_0| { _ = &__ce_0; return .{ .count = wrote, .status = .invalid_base64_character }; }); });
+            return .{ .count = wrote, .status = .success };
+        }
+        return result;
+}
+
+pub fn decodeAlloc(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+        var dest = try allocator.alloc(u8, decodeLen(input));
+        _ = &dest;
+        errdefer {
+        _ = allocator.free(dest);
+        }
+        const result = decode(dest, input);
+        if ((!result.isSuccessful())) {
+            return error.DecodingFailed;
+        }
+        return dest[0..result.count];
+}
+
+pub fn encode(destination: []u8, source: []const u8) usize {
+        return bun.simdutf.base64.encode(source, destination, false);
+}
+
+pub fn encodeAlloc(allocator: std.mem.Allocator, source: []const u8) !bun.ByteList {
+        const len = encodeLen(source);
+        const destination = try allocator.alloc(u8, len);
+        errdefer {
+        _ = allocator.free(destination);
+        }
+        const encoded_len = encode(destination, source);
+        return .{ .ptr = destination.ptr, .len = @truncate(encoded_len), .cap = @truncate(len) };
+}
+
+pub fn simdutfEncodeLenUrlSafe(source_len: usize) usize {
+        return bun.simdutf.base64.encode_len(source_len, true);
+}
+
+pub fn simdutfEncodeUrlSafe(destination: []u8, source: []const u8) usize {
+        return bun.simdutf.base64.encode(source, destination, true);
+}
+
+pub fn decodeLenUpperBound(len: usize) usize {
+        return (blk_catch_1: { break :blk_catch_1 ((standard.Decoder.calcSizeUpperBound(len)) catch |__ce_1| { _ = &__ce_1; return ((len / 4) * 3); }); });
+}
+
+pub fn decodeLen(source: anytype) usize {
+        return (blk_catch_2: { break :blk_catch_2 ((standard.Decoder.calcSizeForSlice(source)) catch |__ce_2| { _ = &__ce_2; return (((source.len / 4) * 3) + 2); }); });
+}
+
+pub fn encodeLen(source: anytype) usize {
+        return encodeLenFromSize(source.len);
+}
+
+pub fn encodeLenFromSize(source: usize) usize {
+        return standard.Encoder.calcSize(source);
+}
+
+pub fn urlSafeEncodeLen(source: anytype) usize {
+        return (((source.len * 4) + 2) / 3);
+}
+
+pub fn encodeURLSafe(dest: []u8, source: []const u8) usize {
+        _ = bun.jsc.markBinding(@src());
+        return WTF__base64URLEncode(source.ptr, source.len, dest.ptr, dest.len);
+}

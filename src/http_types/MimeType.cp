@@ -1,69 +1,44 @@
-zig {
-    const bun = @import("bun");
-    const strings = bun.strings;
-    const Loader = @import("../bundler/options.zig").Loader;
-    const ComptimeStringMap = bun.ComptimeStringMap;
+import bun from "bun";
+import std from "std";
 
-    pub const Map = bun.StringHashMap(Table);
-    pub const Table = @import("./mime_type_list_enum.zig").MimeTypeList;
-    pub const all = @import("./mime_type_list_enum.zig").MimeTypeList.all;
-}
+const strings = bun.strings;
+import { Loader } from "../bundler/options.zig";
+const ComptimeStringMap = bun.ComptimeStringMap;
 
-export @root struct MimeType {
-    value: string,
-    category: Category,
+pub const Table = @import("./mime_type_list_enum.zig").MimeTypeList;
+pub const Map = bun.StringHashMap(Table);
+pub const all = Table.all;
 
-    pub fn canOpenInEditor(this): bool {
-        if (this.category == .text || this.category.isCode()) {
-            return true;
-        }
+pub fn categoryFromTable(entry: Table): Category {
+    return match (entry) {
+        .@"text/javascript",
+        .@"application/javascript",
+        .@"application/javascript; charset=utf-8"
+        => .javascript,
 
-        if (this.category == .image) {
-            return strings.eqlComptime(this.value, "image/svg+xml");
-        }
+        .@"text/css",
+        .@"text/css;charset=utf-8",
+        .@"text/css; charset=utf-8",
+        .@"text/css; charset=utf8",
+        .@"text/css;charset=utf8"
+        => .css,
 
-        return false;
-    }
-}
+        .@"text/html",
+        .@"text/html;charset=utf-8",
+        .@"text/html; charset=utf-8",
+        .@"text/html; charset=utf8",
+        .@"text/html;charset=utf8"
+        => .html,
 
-export @value struct Compact {
-    value: Table,
+        .@"application/json",
+        .@"application/json;charset=utf-8",
+        .@"application/json; charset=utf-8",
+        .@"application/json; charset=utf8",
+        .@"application/json;charset=utf8"
+        => .json,
 
-    static fn from(value: Table): Compact {
-        return Compact {
-            value: value,
-        };
-    }
-
-    pub fn toMimeType(this): MimeType {
-        zig {
-            if (comptime bun.Environment.ci_assert) {
-                if (!bun.strings.eql(self.value.slice(), @tagName(self.value))) {
-                    bun.Output.panic("{s} != {s}. Code generation is broken.", .{ self.value.slice(), @tagName(self.value) });
-                }
-            }
-
-            switch (self.value) {
-                .@"application/webassembly" => return wasm,
-                .@"application/javascript" => return javascript,
-                .@"application/json" => return json,
-                .@"application/x-www-form-urlencoded" => return toMimeType(.from(.@"application/x-www-form-urlencoded;charset=UTF-8")),
-                .@"image/vnd.microsoft.icon" => return ico,
-                .@"text/css" => return css,
-                .@"text/html" => return html,
-                .@"text/javascript" => return javascript,
-                .@"text/jsx" => return javascript,
-                .@"text/plain" => return text,
-                else => {
-                    const slice = Table.slice(self.value);
-                    return MimeType{
-                        .value = slice,
-                        .category = .fromTable(self.value),
-                    };
-                },
-            }
-        }
-    }
+        else => categoryInit(entry.slice()),
+    };
 }
 
 export enum Category {
@@ -108,308 +83,344 @@ export enum Category {
         };
     }
 
-    zig {
-        pub fn fromTable(entry: Table) Category {
-            return switch (entry) {
-                .@"text/javascript",
-                .@"application/javascript",
-                .@"application/javascript; charset=utf-8",
-                => .javascript,
-                .@"text/css",
-                .@"text/css;charset=utf-8",
-                .@"text/css; charset=utf-8",
-                .@"text/css; charset=utf8",
-                .@"text/css;charset=utf8",
-                => .css,
-                .@"text/html",
-                .@"text/html;charset=utf-8",
-                .@"text/html; charset=utf-8",
-                .@"text/html; charset=utf8",
-                .@"text/html;charset=utf8",
-                => .html,
-                .@"application/json",
-                .@"application/json;charset=utf-8",
-                .@"application/json; charset=utf-8",
-                .@"application/json; charset=utf8",
-                .@"application/json;charset=utf8",
-                => .json,
-                else => Category.init(entry.slice()),
-            };
+    pub static fn fromTable(entry: Table): Category {
+        return categoryFromTable(entry);
+    }
+
+    pub static fn init(str: string): Category {
+        return categoryInit(str);
+    }
+}
+
+pub fn categoryInit(str: string): Category {
+    if (slash := strings.indexOfChar(str, '/')) {
+        let category = str[0..slash];
+        let after_slash_full = if (str.len > slash + 1) str[slash + 1..] else "";
+        let after_slash = after_slash_full;
+        if (semicolon := strings.indexOfChar(after_slash_full, ';')) {
+            after_slash = after_slash_full[0..semicolon];
         }
 
-        pub fn init(str: string) Category {
-            if (strings.indexOfChar(str, '/')) |slash| {
-                const category = str[0..slash];
-                var after_slash = if (str.len > slash + 1) str[slash + 1 ..] else "";
-
-                if (strings.indexOfChar(after_slash, ';')) |semicolon| {
-                    after_slash = after_slash[0..semicolon];
-                }
-
-                if (strings.eqlComptime(category, "text")) {
-                    if (strings.eqlComptime(after_slash, "javascript")) {
-                        return .javascript;
-                    }
-
-                    if (strings.eqlComptime(after_slash, "css")) {
-                        return .css;
-                    }
-
-                    if (strings.eqlComptime(after_slash, "html")) {
-                        return .html;
-                    }
-
-                    if (strings.eqlComptime(after_slash, "json")) {
-                        return .json;
-                    }
-
-                    return .text;
-                }
-
-                if (strings.eqlComptime(category, "application")) {
-                    if (strings.eqlComptime(after_slash, "wasm")) {
-                        return .wasm;
-                    }
-
-                    if (strings.eqlComptime(after_slash, "javascript")) {
-                        return .javascript;
-                    }
-
-                    if (strings.eqlComptime(after_slash, "json")) {
-                        return .json;
-                    }
-
-                    if (strings.eqlComptime(after_slash, "octet-stream")) {
-                        return .other;
-                    }
-
-                    return .application;
-                }
-
-                if (strings.eqlComptime(category, "image")) {
-                    return .image;
-                }
-
-                if (strings.eqlComptime(category, "video")) {
-                    return .video;
-                }
-
-                if (strings.eqlComptime(category, "audio")) {
-                    return .audio;
-                }
-
-                if (strings.eqlComptime(category, "font")) {
-                    return .font;
-                }
-
-                if (strings.eqlComptime(category, "multipart")) {
-                    return .multipart;
-                }
-
-                if (strings.eqlComptime(category, "model")) {
-                    return .model;
-                }
-
-                if (strings.eqlComptime(category, "message")) {
-                    return .message;
-                }
-
-                if (strings.eqlComptime(category, "x-conference")) {
-                    return .@"x-conference";
-                }
-
-                if (strings.eqlComptime(category, "x-shader")) {
-                    return .@"x-shader";
-                }
-
-                if (strings.eqlComptime(category, "chemical")) {
-                    return .chemical;
-                }
+        if (strings.eqlComptime(category, "text")) {
+            if (strings.eqlComptime(after_slash, "javascript")) {
+                return .javascript;
             }
 
-            return .other;
+            if (strings.eqlComptime(after_slash, "css")) {
+                return .css;
+            }
+
+            if (strings.eqlComptime(after_slash, "html")) {
+                return .html;
+            }
+
+            if (strings.eqlComptime(after_slash, "json")) {
+                return .json;
+            }
+
+            return .text;
+        }
+
+        if (strings.eqlComptime(category, "application")) {
+            if (strings.eqlComptime(after_slash, "wasm")) {
+                return .wasm;
+            }
+
+            if (strings.eqlComptime(after_slash, "javascript")) {
+                return .javascript;
+            }
+
+            if (strings.eqlComptime(after_slash, "json")) {
+                return .json;
+            }
+
+            if (strings.eqlComptime(after_slash, "octet-stream")) {
+                return .other;
+            }
+
+            return .application;
+        }
+
+        if (strings.eqlComptime(category, "image")) {
+            return .image;
+        }
+
+        if (strings.eqlComptime(category, "video")) {
+            return .video;
+        }
+
+        if (strings.eqlComptime(category, "audio")) {
+            return .audio;
+        }
+
+        if (strings.eqlComptime(category, "font")) {
+            return .font;
+        }
+
+        if (strings.eqlComptime(category, "multipart")) {
+            return .multipart;
+        }
+
+        if (strings.eqlComptime(category, "model")) {
+            return .model;
+        }
+
+        if (strings.eqlComptime(category, "message")) {
+            return .message;
+        }
+
+        if (strings.eqlComptime(category, "x-conference")) {
+            return .@"x-conference";
+        }
+
+        if (strings.eqlComptime(category, "x-shader")) {
+            return .@"x-shader";
+        }
+
+        if (strings.eqlComptime(category, "chemical")) {
+            return .chemical;
+        }
+    }
+
+    return .other;
+}
+
+export @root struct MimeType {
+    value: string,
+    category: Category,
+
+    pub fn canOpenInEditor(this): bool {
+        if (this.category == .text || this.category.isCode()) {
+            return true;
+        }
+
+        if (this.category == .image) {
+            return strings.eqlComptime(this.value, "image/svg+xml");
+        }
+
+        return false;
+    }
+}
+
+fn initComptime(comptime str: string, t: Category): MimeType {
+    return MimeType {
+        value: str,
+        category: t,
+    };
+}
+
+pub const none = initComptime("", .none);
+pub const other = initComptime("application/octet-stream", .other);
+pub const css = initComptime("text/css;charset=utf-8", .css);
+pub const javascript = initComptime("text/javascript;charset=utf-8", .javascript);
+pub const ico = initComptime("image/vnd.microsoft.icon", .image);
+pub const html = initComptime("text/html;charset=utf-8", .html);
+pub const json = initComptime("application/json;charset=utf-8", .json);
+pub const transpiled_json = javascript;
+pub const text = initComptime("text/plain;charset=utf-8", .html);
+pub const wasm = initComptime("application/wasm", .wasm);
+
+export @value struct Compact {
+    value: Table,
+
+    static fn from(value: Table): Compact {
+        return Compact {
+            value: value,
+        };
+    }
+
+    pub fn toMimeType(this): MimeType {
+        if (comptime bun.Environment.ci_assert) {
+            if (!bun.strings.eql(this.value.slice(), @tagName(this.value))) {
+                bun.Output.panic("{s} != {s}. Code generation is broken.", .{ this.value.slice(), @tagName(this.value) });
+            }
+        }
+
+        match (this.value) {
+            .@"application/webassembly" => return wasm,
+            .@"application/javascript" => return javascript,
+            .@"application/json" => return json,
+            .@"application/x-www-form-urlencoded" => return Compact.from(.@"application/x-www-form-urlencoded;charset=UTF-8").toMimeType(),
+            .@"image/vnd.microsoft.icon" => return ico,
+            .@"text/css" => return css,
+            .@"text/html" => return html,
+            .@"text/javascript" => return javascript,
+            .@"text/jsx" => return javascript,
+            .@"text/plain" => return text,
+            else => {
+                let slice = this.value.slice();
+                return MimeType {
+                    value: slice,
+                    category: categoryFromTable(this.value),
+                };
+            },
         }
     }
 }
 
-zig {
-    pub fn createHashTable(allocator: std.mem.Allocator) !Map {
-        @branchHint(.cold);
+pub fn createHashTable(allocator: std.mem.Allocator): !Map {
+    @branchHint(.cold);
 
-        var map = Map.init(allocator);
-        try map.ensureTotalCapacity(@as(u32, @truncate(Table.all.len)));
-        @setEvalBranchQuota(4000);
-        for (Table.all) |entry| {
-            if (comptime bun.Environment.ci_assert) {
-                if (!bun.strings.eql(entry.slice(), @tagName(entry))) {
-                    bun.Output.panic("{s} != {s}. Code generation is broken.", .{ entry.slice(), @tagName(entry) });
+    let map = Map.init(allocator);
+    map.ensureTotalCapacity(@as(u32, @truncate(Table.all.len)))?;
+    @setEvalBranchQuota(4000);
+    for (entry of Table.all) {
+        if (comptime bun.Environment.ci_assert) {
+            if (!bun.strings.eql(entry.slice(), @tagName(entry))) {
+                bun.Output.panic("{s} != {s}. Code generation is broken.", .{ entry.slice(), @tagName(entry) });
+            }
+        }
+        map.putAssumeCapacityNoClobber(entry.slice(), entry);
+    }
+
+    return map;
+}
+
+pub fn init(str_: string, allocator: ?std.mem.Allocator, mut allocated: ?*bool): MimeType {
+    if (slash := std.mem.indexOfScalar(u8, str_, '/')) {
+        let category_ = str_[0..slash];
+
+        if (category_.len == 0 || category_[0] == '*' || str_.len <= slash + 1) {
+            return other;
+        }
+
+        let sub_str = str_[slash + 1..];
+        let str = sub_str;
+        if (semicolon := std.mem.indexOfScalar(u8, sub_str, ';')) {
+            str = sub_str[0..semicolon];
+        }
+
+        match (category_.len) {
+            11 => { // "application".len
+                if (strings.eqlComptimeIgnoreLen(category_, "application")) {
+                    if (strings.eqlComptime(str, "json") || strings.eqlComptime(str, "geo+json")) {
+                        return json;
+                    }
                 }
-            }
-            map.putAssumeCapacityNoClobber(entry.slice(), entry);
-        }
 
-        return map;
-    }
+                if (strings.eqlComptime(str, "octet-stream")) {
+                    return other;
+                }
 
-    pub const none = MimeType.initComptime("", .none);
-    pub const other = MimeType.initComptime("application/octet-stream", .other);
-    pub const css = MimeType.initComptime("text/css;charset=utf-8", .css);
-    pub const javascript = MimeType.initComptime("text/javascript;charset=utf-8", .javascript);
-    pub const ico = MimeType.initComptime("image/vnd.microsoft.icon", .image);
-    pub const html = MimeType.initComptime("text/html;charset=utf-8", .html);
-    pub const json = MimeType.initComptime("application/json;charset=utf-8", .json);
-    pub const transpiled_json = javascript;
-    pub const text = MimeType.initComptime("text/plain;charset=utf-8", .html);
-    pub const wasm = MimeType.initComptime(
-        "application/wasm",
-        .wasm,
-    );
-    fn initComptime(comptime str: string, t: Category) MimeType {
-        return MimeType{
-            .value = str,
-            .category = t,
-        };
-    }
+                if (strings.eqlComptime(str, "wasm")) {
+                    return wasm;
+                }
 
-    pub fn init(str_: string, allocator: ?std.mem.Allocator, allocated: ?*bool) MimeType {
-        var str = str_;
-        if (std.mem.indexOfScalar(u8, str, '/')) |slash| {
-            const category_ = str[0..slash];
-
-            if (category_.len == 0 or category_[0] == '*' or str.len <= slash + 1) {
-                return other;
-            }
-
-            str = str[slash + 1 ..];
-
-            if (std.mem.indexOfScalar(u8, str, ';')) |semicolon| {
-                str = str[0..semicolon];
-            }
-
-            switch (category_.len) {
-                "application".len => {
-                    if (strings.eqlComptimeIgnoreLen(category_, "application")) {
-                        if (strings.eqlComptime(str, "json") or strings.eqlComptime(str, "geo+json")) {
-                            return json;
-                        }
-                    }
-
-                    if (strings.eqlComptime(str, "octet-stream")) {
-                        return other;
-                    }
-
-                    if (strings.eqlComptime(str, "wasm")) {
-                        return wasm;
-                    }
-
-                    if (allocated != null and allocator != null) allocated.?.* = true;
-                    return MimeType{
-                        .value = if (allocator) |a| bun.handleOom(a.dupe(u8, str_)) else str_,
-                        .category = .application,
+                if (allocated != null && allocator != null) allocated.?.* = true;
+                let val_str = if (allocator != null) bun.handleOom(allocator.?.dupe(u8, str_)) else str_;
+                return MimeType {
+                    value: val_str,
+                    category: .application,
+                };
+            },
+            4 => { // "font".len / "text".len
+                if (strings.eqlComptimeIgnoreLen(category_, "font")) {
+                    if (allocated != null && allocator != null) allocated.?.* = true;
+                    let val_str = if (allocator != null) bun.handleOom(allocator.?.dupe(u8, str_)) else str_;
+                    return MimeType {
+                        value: val_str,
+                        category: .font,
                     };
-                },
-                "font".len => {
-                    if (strings.eqlComptimeIgnoreLen(category_, "font")) {
-                        if (allocated != null and allocator != null) allocated.?.* = true;
-                        return MimeType{
-                            .value = if (allocator) |a| bun.handleOom(a.dupe(u8, str_)) else str_,
-                            .category = .font,
-                        };
+                }
+
+                if (strings.eqlComptimeIgnoreLen(category_, "text")) {
+                    if (strings.eqlComptime(str, "css")) {
+                        return css;
                     }
 
-                    if (strings.eqlComptimeIgnoreLen(category_, "text")) {
-                        if (strings.eqlComptime(str, "css")) {
-                            return css;
-                        }
-
-                        if (strings.eqlComptime(str, "html")) {
-                            return html;
-                        }
-
-                        if (strings.eqlComptime(str, "javascript")) {
-                            return javascript;
-                        }
-
-                        if (strings.eqlComptime(str, "plain")) {
-                            return text;
-                        }
-
-                        if (allocated != null and allocator != null) allocated.?.* = true;
-                        return MimeType{
-                            .value = if (allocator) |a| bun.handleOom(a.dupe(u8, str_)) else str_,
-                            .category = .text,
-                        };
-                    }
-                },
-                "image".len => {
-                    if (strings.eqlComptimeIgnoreLen(category_, "image")) {
-                        if (allocated != null and allocator != null) allocated.?.* = true;
-                        return MimeType{
-                            .value = if (allocator) |a| bun.handleOom(a.dupe(u8, str_)) else str_,
-                            .category = .image,
-                        };
+                    if (strings.eqlComptime(str, "html")) {
+                        return html;
                     }
 
-                    if (strings.eqlComptimeIgnoreLen(category_, "audio")) {
-                        if (allocated != null and allocator != null) allocated.?.* = true;
-                        return MimeType{
-                            .value = if (allocator) |a| bun.handleOom(a.dupe(u8, str_)) else str_,
-                            .category = .audio,
-                        };
+                    if (strings.eqlComptime(str, "javascript")) {
+                        return javascript;
                     }
 
-                    if (strings.eqlComptimeIgnoreLen(category_, "video")) {
-                        if (allocated != null and allocator != null) allocated.?.* = true;
-                        return MimeType{
-                            .value = if (allocator) |a| bun.handleOom(a.dupe(u8, str_)) else str_,
-                            .category = .video,
-                        };
+                    if (strings.eqlComptime(str, "plain")) {
+                        return text;
                     }
-                },
-                else => {},
-            }
-        }
 
-        if (allocated != null and allocator != null) allocated.?.* = true;
-        return MimeType{
-            .value = if (allocator) |a| bun.handleOom(a.dupe(u8, str_)) else str_,
-            .category = .other,
-        };
-    }
-
-    pub fn byLoader(loader: Loader, ext: string) MimeType {
-        switch (loader) {
-            .tsx, .ts, .js, .jsx, .json => {
-                return javascript;
+                    if (allocated != null && allocator != null) allocated.?.* = true;
+                    let val_str = if (allocator != null) bun.handleOom(allocator.?.dupe(u8, str_)) else str_;
+                    return MimeType {
+                        value: val_str,
+                        category: .text,
+                    };
+                }
             },
-            .css => {
-                return css;
+            5 => { // "image".len / "audio".len / "video".len
+                if (strings.eqlComptimeIgnoreLen(category_, "image")) {
+                    if (allocated != null && allocator != null) allocated.?.* = true;
+                    let val_str = if (allocator != null) bun.handleOom(allocator.?.dupe(u8, str_)) else str_;
+                    return MimeType {
+                        value: val_str,
+                        category: .image,
+                    };
+                }
+
+                if (strings.eqlComptimeIgnoreLen(category_, "audio")) {
+                    if (allocated != null && allocator != null) allocated.?.* = true;
+                    let val_str = if (allocator != null) bun.handleOom(allocator.?.dupe(u8, str_)) else str_;
+                    return MimeType {
+                        value: val_str,
+                        category: .audio,
+                    };
+                }
+
+                if (strings.eqlComptimeIgnoreLen(category_, "video")) {
+                    if (allocated != null && allocator != null) allocated.?.* = true;
+                    let val_str = if (allocator != null) bun.handleOom(allocator.?.dupe(u8, str_)) else str_;
+                    return MimeType {
+                        value: val_str,
+                        category: .video,
+                    };
+                }
             },
-            else => {
-                return byExtension(ext);
-            },
+            else => {},
         }
     }
 
-    pub fn byExtension(ext_without_leading_dot: string) MimeType {
-        return byExtensionNoDefault(ext_without_leading_dot) orelse MimeType.other;
+    if (allocated != null && allocator != null) allocated.?.* = true;
+    let fallback_val = if (allocator != null) bun.handleOom(allocator.?.dupe(u8, str_)) else str_;
+    return MimeType {
+        value: fallback_val,
+        category: .other,
+    };
+}
+
+pub fn byLoader(loader: Loader, ext: string): MimeType {
+    match (loader) {
+        .tsx, .ts, .js, .jsx, .json => {
+            return javascript;
+        },
+        .css => {
+            return css;
+        },
+        else => {
+            return byExtension(ext);
+        },
+    }
+}
+
+pub fn byExtension(ext_without_leading_dot: string): MimeType {
+    return byExtensionNoDefault(ext_without_leading_dot) orelse MimeType.other;
+}
+
+pub fn byExtensionNoDefault(ext_without_leading_dot: string): ?MimeType {
+    if (entry := extensions.get(ext_without_leading_dot)) {
+        return Compact.from(entry).toMimeType();
     }
 
-    pub fn byExtensionNoDefault(ext_without_leading_dot: string) ?MimeType {
-        if (extensions.get(ext_without_leading_dot)) |entry| {
-            return Compact.from(entry).toMimeType();
-        }
+    return null;
+}
 
-        return null;
-    }
+pub fn byName(name: []const u8): MimeType {
+    return MimeType.init(name, null, null);
+}
 
-    pub fn byName(name: []const u8) MimeType {
-        return MimeType.init(name, null, null);
-    }
-
-    pub fn deinit(mimeType: MimeType, allocator: std.mem.Allocator) void {
-        allocator.free(mimeType.value);
-    }
+pub fn deinit(mimeType: MimeType, allocator: std.mem.Allocator): void {
+    allocator.free(mimeType.value);
+}
 
     pub const extensions = ComptimeStringMap(Table, .{
         .{ "123", .@"application/vnd.lotus-1-2-3" },
@@ -1613,18 +1624,19 @@ zig {
         .{ "zmm", .@"application/vnd.handheld-entertainment+xml" },
     });
 
-    const IMAGES_HEADERS = .{
-        .{ [_]u8{ 0x42, 0x4d }, Table.@"image/bmp" },
-        .{ [_]u8{ 0xff, 0xd8, 0xff }, Table.@"image/jpeg" },
-        .{ [_]u8{ 0x49, 0x49, 0x2a, 0x00 }, Table.@"image/tiff" },
-        .{ [_]u8{ 0x4d, 0x4d, 0x00, 0x2a }, Table.@"image/tiff" },
-        .{ [_]u8{ 0x47, 0x49, 0x46, 0x38, 0x39, 0x61 }, Table.@"image/gif" },
-        .{ [_]u8{ 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a }, Table.@"image/png" },
-    };
-    pub fn sniff(bytes: []const u8) ?MimeType {
+    pub const IMAGES_HEADERS = [
+        .{ "\x42\x4D", Table.@"image/bmp" },
+        .{ "\xFF\xD8\xFF", Table.@"image/jpeg" },
+        .{ "\x49\x49\x2A\x00", Table.@"image/tiff" },
+        .{ "\x4D\x4D\x00\x2A", Table.@"image/tiff" },
+        .{ "\x47\x49\x46\x38\x39\x61", Table.@"image/gif" },
+        .{ "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A", Table.@"image/png" },
+    ];
+
+    pub fn sniff(bytes: []const u8): ?MimeType {
         if (bytes.len < 2) return null;
 
-        inline for (IMAGES_HEADERS) |header| {
+        @for (header of IMAGES_HEADERS) {
             if (bytes.len >= header[0].len) {
                 if (strings.eqlComptime(bytes[0..header[0].len], header[0])) {
                     return Compact.from(header[1]).toMimeType();
@@ -1634,4 +1646,3 @@ zig {
 
         return null;
     }
-}

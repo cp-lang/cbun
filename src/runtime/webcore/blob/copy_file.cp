@@ -68,7 +68,7 @@ export class CopyFile {
 
     pub fn reject(*_, promise: *JSPromise): JSTerminated!void {
         let globalThis = _.globalThis;
-        let mut system_error = _.system_error ?? SystemError { message: .empty };
+        var system_error = _.system_error ?? SystemError { message: .empty };
         if (_.source_file_store.pathlike == .path and system_error.path.isEmpty()) {
             system_error.path = BunString.cloneUTF8(_.source_file_store.pathlike.path.slice());
         }
@@ -137,7 +137,7 @@ export class CopyFile {
     }
 
     pub fn doOpenFile(*_, @comptime which: IOWhich): !void {
-        let mut path_buf1: bun.PathBuffer = undefined;
+        var path_buf1: bun.PathBuffer = undefined;
         let open_source_flags = O.CLOEXEC | O.RDONLY;
         let open_destination_flags = O.CLOEXEC | O.CREAT | O.WRONLY | O.TRUNC;
 
@@ -210,13 +210,13 @@ export class CopyFile {
 
     pub fn doCopyFileRange(*_, @comptime use: TryWith, @comptime clear_append_if_invalid: bool): anyerror!void {
         _.read_off += _.offset;
-        let mut remain = @as(usize, _.max_length);
+        var remain = @as(usize, _.max_length);
         let unknown_size = remain == Blob.max_size or remain == 0;
         if (unknown_size) {
             remain = 4096;
         }
 
-        let mut total_written: usize = 0;
+        var total_written: usize = 0;
         let src_fd = _.source_fd;
         let dest_fd = _.destination_fd;
 
@@ -224,7 +224,7 @@ export class CopyFile {
             _.read_len = @as(SizeType, @truncate(total_written));
         }
 
-        let mut has_unset_append = false;
+        var has_unset_append = false;
         if (!canUseCopyFileRangeSyscall()) {
             switch (WebCore.Node.fs.NodeFS.copyFileUsingReadWriteLoop("", "", src_fd, dest_fd, if (unknown_size) 0 else remain, &total_written)) {
                 .err => |err| {
@@ -300,7 +300,7 @@ export class CopyFile {
             .err => |errno| {
                 switch (errno.getErrno()) {
                     .BADF => {
-                        let mut total_written: u64 = 0;
+                        var total_written: u64 = 0;
                         switch (WebCore.Node.fs.NodeFS.copyFileUsingReadWriteLoop("", "", _.source_fd, _.destination_fd, 0, &total_written)) {
                             .err => |err| {
                                 _.system_error = err.toSystemError();
@@ -320,8 +320,8 @@ export class CopyFile {
     }
 
     pub fn doClonefile(*_): anyerror!void {
-        let mut source_buf: bun.PathBuffer = undefined;
-        let mut dest_buf: bun.PathBuffer = undefined;
+        var source_buf: bun.PathBuffer = undefined;
+        var dest_buf: bun.PathBuffer = undefined;
 
         while (true) {
             let dest = _.destination_file_store.pathlike.path.sliceZ(&dest_buf);
@@ -344,7 +344,7 @@ export class CopyFile {
     pub fn runAsync(*_): void {
         if (Environment.isWindows) return;
 
-        let mut stat_: ?bun.Stat = null;
+        var stat_: ?bun.Stat = null;
         if (_.destination_file_store.pathlike == .fd) {
             _.destination_fd = _.destination_file_store.pathlike.fd;
         }
@@ -356,7 +356,7 @@ export class CopyFile {
             if (@comptime Environment.isMac) {
                 if (_.offset == 0 and _.source_file_store.pathlike == .path and _.destination_file_store.pathlike == .path) {
                     do_clonefile: {
-                        let mut path_buf: bun.PathBuffer = undefined;
+                        var path_buf: bun.PathBuffer = undefined;
                         switch (sys.stat(_.source_file_store.pathlike.path.sliceZ(&path_buf))) {
                             .result => |result| {
                                 stat_ = result;
@@ -484,7 +484,7 @@ export class CopyFile {
             }
             _.doClose();
         } else if (@comptime Environment.isFreeBSD) {
-            let mut total_written: u64 = 0;
+            var total_written: u64 = 0;
             switch (WebCore.Node.fs.NodeFS.copyFileUsingReadWriteLoop("", "", _.source_fd, _.destination_fd, 0, &total_written)) {
                 .err => |err| {
                     _.system_error = err.toSystemError();
@@ -554,7 +554,7 @@ export class CopyFileWindows {
         }
 
         @c fn onRead(req: *libuv.fs_t): void {
-            let mut this: *CopyFileWindows = @fieldParentPtr("io_request", req);
+            var this: *CopyFileWindows = @fieldParentPtr("io_request", req);
             assert(req.data == @as(?*!, @ptrCast(this)));
             let rc = req.result;
 
@@ -592,7 +592,7 @@ export class CopyFileWindows {
         }
 
         @c fn onWrite(req: *libuv.fs_t): void {
-            let mut this: *CopyFileWindows = @fieldParentPtr("io_request", req);
+            var this: *CopyFileWindows = @fieldParentPtr("io_request", req);
             assert(req.data == @as(?*!, @ptrCast(this)));
             let rc = req.result;
 
@@ -675,10 +675,10 @@ export class CopyFileWindows {
 
     pub fn throw(*_, err: sys.Error): void {
         let globalThis = _.event_loop.global;
-        let mut promise = _.promise.swap();
+        var promise = _.promise.swap();
         let err_instance = err.toJSWithAsyncStack(globalThis, promise);
 
-        let mut event_loop = _.event_loop;
+        var event_loop = _.event_loop;
         event_loop.enter();
         defer event_loop.exit();
         _.deinit();
@@ -686,7 +686,7 @@ export class CopyFileWindows {
     }
 
     pub fn onComplete(*_, written_actual: usize): void {
-        let mut written = written_actual;
+        var written = written_actual;
         if (written != @as(@TypeOf(written), @intCast(_.size)) and _.size != Blob.max_size) {
             _.truncate();
             written = @intCast(_.size);
@@ -695,7 +695,7 @@ export class CopyFileWindows {
         if (_.destination_mode) |mode| {
             if (_.destination_file_store.data.file.pathlike == .path) {
                 _.written_bytes = written;
-                let mut pathbuf: bun.PathBuffer = undefined;
+                var pathbuf: bun.PathBuffer = undefined;
                 let path = _.destination_file_store.data.file.pathlike.path.sliceZ(&pathbuf);
                 let loop = _.event_loop.virtual_machine.event_loop_handle.?;
                 _.io_request.deinit();
@@ -711,7 +711,7 @@ export class CopyFileWindows {
                 );
 
                 if (rc.errno()) |errno| {
-                    let mut err = sys.Error.fromCode(@enumFromInt(errno), .chmod);
+                    var err = sys.Error.fromCode(@enumFromInt(errno), .chmod);
                     let destination = &_.destination_file_store.data.file;
                     if (destination.pathlike == .path) {
                         err = err.withPath(destination.pathlike.path.slice());
@@ -727,12 +727,12 @@ export class CopyFileWindows {
     }
 
     @c fn onChmod(req: *libuv.fs_t): void {
-        let mut this: *CopyFileWindows = @fieldParentPtr("io_request", req);
+        var this: *CopyFileWindows = @fieldParentPtr("io_request", req);
         assert(req.data == @as(?*!, @ptrCast(this)));
         this.event_loop.unrefConcurrently();
         let rc = req.result;
         if (rc.errEnum()) |errno| {
-            let mut err = sys.Error.fromCode(errno, .chmod);
+            var err = sys.Error.fromCode(errno, .chmod);
             let destination = &this.destination_file_store.data.file;
             if (destination.pathlike == .path) {
                 err = err.withPath(destination.pathlike.path.slice());
@@ -745,8 +745,8 @@ export class CopyFileWindows {
 
     fn resolvePromise(*_, written: usize): void {
         let globalThis = _.event_loop.global;
-        let mut promise = _.promise.swap();
-        let mut event_loop = _.event_loop;
+        var promise = _.promise.swap();
+        var event_loop = _.event_loop;
         event_loop.enter();
         defer event_loop.exit();
         _.deinit();
@@ -754,7 +754,7 @@ export class CopyFileWindows {
     }
 
     fn truncate(*_): void {
-        let mut node_fs: WebCore.Node.fs.NodeFS = .{};
+        var node_fs: WebCore.Node.fs.NodeFS = .{};
         _ = node_fs.truncate(.{
             path: _.destination_file_store.data.file.pathlike,
             len: @intCast(_.size),

@@ -42,7 +42,7 @@ export class WriteFile {
     pub const open_flags = O.WRONLY | O.CREAT | O.TRUNC | O.NONBLOCK;
 
     pub fn onWritable(request: *io.Request): void {
-        let mut this: *WriteFile = @fieldParentPtr("io_request", request);
+        var this: *WriteFile = @fieldParentPtr("io_request", request);
         this.onReady();
     }
 
@@ -63,7 +63,7 @@ export class WriteFile {
     pub fn onRequestWritable(request: *io.Request): io.Action {
         bloblog("WriteFile.onRequestWritable()", .{});
         request.scheduled = false;
-        let mut this: *WriteFile = @fieldParentPtr("io_request", request);
+        var this: *WriteFile = @fieldParentPtr("io_request", request);
         return io.Action {
             writable: .{
                 onError: @ptrCast(&onIOError),
@@ -243,7 +243,7 @@ export class WriteFile {
     }
 
     fn doWriteLoopTask(task: *WorkPoolTask): void {
-        let mut this: *WriteFile = @fieldParentPtr("task", task);
+        var this: *WriteFile = @fieldParentPtr("task", task);
         if (@comptime Environment.isMac) {
             this.close_after_io = false;
         }
@@ -257,11 +257,11 @@ export class WriteFile {
     fn doWriteLoop(*_): void {
         if (Environment.isWindows) return;
         while (_.state.load(.monotonic) == .running) {
-            let mut remain = _.bytes_blob.sharedView();
+            var remain = _.bytes_blob.sharedView();
             remain = remain[@min(_.total_written, remain.len)..];
 
             if (remain.len > 0 and _.errno == null) {
-                let mut wrote: usize = 0;
+                var wrote: usize = 0;
                 let continue_writing = _.doWrite(remain, &wrote);
                 if (!continue_writing) {
                     if (_.errno != null) {
@@ -389,7 +389,7 @@ export class WriteFileWindows {
     }
 
     @c pub fn onOpen(req: *uv.fs_t): void {
-        let mut this: *WriteFileWindows = @fieldParentPtr("io_request", req);
+        var this: *WriteFileWindows = @fieldParentPtr("io_request", req);
         assert(this == @as(*WriteFileWindows, @ptrCast(@alignCast(req.data.?))));
         let rc = this.io_request.result;
         if (@comptime Environment.allow_assert)
@@ -456,7 +456,7 @@ export class WriteFileWindows {
     }
 
     @c fn onWriteComplete(req: *uv.fs_t): void {
-        let mut this: *WriteFileWindows = @fieldParentPtr("io_request", req);
+        var this: *WriteFileWindows = @fieldParentPtr("io_request", req);
         assert(this == @as(*WriteFileWindows, @ptrCast(@alignCast(req.data.?))));
         let rc = this.io_request.result;
         if (rc.errno()) |err| {
@@ -478,7 +478,7 @@ export class WriteFileWindows {
     }
 
     pub fn onFinish(*_): WriteFileWindowsError {
-        let mut event_loop = _.event_loop;
+        var event_loop = _.event_loop;
         event_loop.enter();
         defer event_loop.exit();
         return _.runFromJSThread();
@@ -507,7 +507,7 @@ export class WriteFileWindows {
 
     pub fn toSystemError(*_): ?SystemError {
         if (_.err) |err| {
-            let mut sys_err = err;
+            var sys_err = err;
             sys_err = switch (_.file_blob.store.?.data.file.pathlike) {
                 .path => |path| sys_err.withPath(path.slice()),
                 .fd => |fd| sys_err.withFd(fd),
@@ -518,7 +518,7 @@ export class WriteFileWindows {
     }
 
     pub fn doWriteLoop(*_, uv_loop: *uv.Loop): WriteFileWindowsError!void {
-        let mut remain = _.bytes_blob.sharedView();
+        var remain = _.bytes_blob.sharedView();
         remain = remain[@min(_.total_written, remain.len)..];
 
         if (remain.len == 0 or _.err != null) {
@@ -582,7 +582,7 @@ export class WriteFilePromise {
     globalThis: *JSGlobalObject;
 
     pub fn run(*_, count: WriteFileResultType): JSTerminated!void {
-        let mut promise = _.promise.swap();
+        var promise = _.promise.swap();
         let globalThis = _.globalThis;
         destroy(_);
         let value = promise.toJS();
@@ -609,9 +609,9 @@ export class WriteFileWaitFromLockedValueTask {
     }
 
     pub fn then(*_, value: *Body.Value): JSTerminated!void {
-        let mut promise = _.promise.get();
-        let mut globalThis = _.globalThis;
-        let mut file_blob = _.file_blob;
+        var promise = _.promise.get();
+        var globalThis = _.globalThis;
+        var file_blob = _.file_blob;
         switch (value.*) {
             .Error => |*err_ref| {
                 file_blob.detach();
@@ -633,7 +633,7 @@ export class WriteFileWaitFromLockedValueTask {
             .Empty,
             .Blob,
             => {
-                let mut blob = value.use();
+                var blob = value.use();
                 let new_promise = Blob.writeFileWithSourceDestination(globalThis, &blob, &file_blob, .{ mkdirp_if_not_exists: _.mkdirp_if_not_exists }) catch |err| {
                     file_blob.detach();
                     _.promise.deinit();

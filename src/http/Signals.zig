@@ -2,25 +2,6 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
 pub const Store = struct {
     header_progress: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     response_body_streaming: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -41,12 +22,12 @@ aborted: ?*std.atomic.Value(bool) = null,
 cert_errors: ?*std.atomic.Value(bool) = null,
 upgraded: ?*std.atomic.Value(bool) = null,
 
-pub fn isEmpty(self: *const Signals) bool {
+pub fn isEmpty(self: Signals) bool {
         return (((((self.aborted == null) and (self.response_body_streaming == null)) and (self.header_progress == null)) and (self.cert_errors == null)) and (self.upgraded == null));
 }
 
-pub fn get(self: *const Signals, comptime field: std.meta.FieldEnum(Signals)) bool {
-        var ptr = ((@field(self, @tagName(field))) orelse { return false; });
+pub fn get(self: Signals, comptime field: std.meta.FieldEnum(Signals)) bool {
+        var ptr: *std.atomic.Value(bool) = ((@field(self, @tagName(field))) orelse { return false; });
         _ = &ptr;
         return ptr.load(.monotonic);
 }

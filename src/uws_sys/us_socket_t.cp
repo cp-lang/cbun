@@ -42,19 +42,14 @@ import { SocketKind } from "./SocketKind.zig";
 }
 
 export @opaque class us_socket_t {
-    zig {
-        pub const CloseCode = enum(i32) {
-            normal = 0,
-            failure = 1,
-            fast_shutdown = 2,
-        };
+    pub enum CloseCode: i32 {
+        normal = 0,
+        failure = 1,
+        fast_shutdown = 2,
     }
 
     pub fn open(*this, is_client: bool, ip_addr: string?): void {
-        let mut client_int: i32 = 0;
-        if (is_client) {
-            client_int = 1;
-        }
+        let client_int: i32 = if (is_client) 1 else 0;
         if (ip_addr != null) {
             let ip = ip_addr.?;
             us_socket_open(this, client_int, ip.ptr, ip.len as i32);
@@ -205,14 +200,12 @@ export @opaque class us_socket_t {
     }
 
     pub fn setNodelay(*this, enabled: bool): void {
-        let mut en: i32 = 0;
-        if (enabled) { en = 1; }
+        let en: i32 = if (enabled) 1 else 0;
         us_socket_nodelay(this, en);
     }
 
     pub fn setKeepalive(*this, enabled: bool, delay: u32): i32 {
-        let mut en: i32 = 0;
-        if (enabled) { en = 1; }
+        let en: i32 = if (enabled) 1 else 0;
         return us_socket_keepalive(this, en, delay);
     }
 
@@ -221,8 +214,7 @@ export @opaque class us_socket_t {
     }
 
     pub fn setSslRawTap(*this, enabled: bool): void {
-        let mut en: i32 = 0;
-        if (enabled) { en = 1; }
+        let en: i32 = if (enabled) 1 else 0;
         us_socket_set_ssl_raw_tap(this, en);
     }
 
@@ -266,20 +258,16 @@ export @extern @value class us_socket_stream_buffer_t {
     }
 
     pub fn toStreamBuffer(this): bun.io.StreamBuffer {
-        zig {
-            return .{
-                .list = if (self.list_ptr) |buffer_ptr| .{
-                    .allocator = bun.default_allocator,
-                    .items = buffer_ptr[0..self.list_len],
-                    .capacity = self.list_cap,
-                } else .{
-                    .allocator = bun.default_allocator,
-                    .items = &.{},
-                    .capacity = 0,
-                },
-                .cursor = self.cursor,
-            };
-        }
+        let items: u8[] = if (this.list_ptr != null) this.list_ptr.?[0..this.list_len] else &[];
+        let cap: usize = if (this.list_ptr != null) this.list_cap else 0;
+        return bun.io.StreamBuffer {
+            list = .{
+                allocator = bun.default_allocator,
+                items = items,
+                capacity = cap,
+            },
+            cursor = this.cursor,
+        };
     }
 
     pub fn release(*this): void {
@@ -293,8 +281,6 @@ export @extern @value class us_socket_stream_buffer_t {
     }
 }
 
-zig {
-    export fn us_socket_free_stream_buffer(buffer: *us_socket_stream_buffer_t) void {
-        buffer.deinit();
-    }
+export fn us_socket_free_stream_buffer(buffer: *us_socket_stream_buffer_t): void {
+    buffer.deinit();
 }

@@ -95,7 +95,7 @@ export class PendingValue {
             }
         }
 
-        let mut promise = JSPromise.create(globalThis);
+        var promise = JSPromise.create(globalThis);
         let promise_value = promise.toJS();
         value.promise = promise_value;
         promise_value.protect();
@@ -177,7 +177,7 @@ export union Value {
     pub fn toBlobIfPossible(this: *Value): void {
         if (this.* == .WTFStringImpl) {
             if (this.WTFStringImpl.toUTF8IfNeeded(default_allocator)) |bytes| {
-                let mut str = this.WTFStringImpl;
+                var str = this.WTFStringImpl;
                 defer str.deref();
                 this.* = .{
                     .InternalBlob = Blob.Internal {
@@ -263,7 +263,7 @@ export union Value {
                 return new_blob;
             },
             .WTFStringImpl => {
-                let mut wtf = this.WTFStringImpl;
+                var wtf = this.WTFStringImpl;
                 defer wtf.deref();
                 let new_blob = if (wtf.toUTF8IfNeeded(default_allocator)) |allocated_slice| {
                     Blob.init(@constCast(allocated_slice.slice()), default_allocator, VirtualMachine.get().global);
@@ -403,7 +403,7 @@ export class Body {
     }
 
     pub static fn extract(globalThis: *JSGlobalObject, value: JSValue): JSError!Body {
-        let mut body = Body { .value = Value { .Null = {} } };
+        var body = Body { .value = Value { .Null = {} } };
         // Value extraction from JSValue
         return body;
     }

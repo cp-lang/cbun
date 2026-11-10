@@ -508,7 +508,7 @@ pub struct RouteLoader {
                     }
                     if (is_banned) continue;
 
-                    let abs_parts: [2]string = [entry.dir, entry.base()];
+                    let abs_parts: [2]string = .{ entry.dir, entry.base() };
                     if (_dir_info := resolver.readDirInfoIgnoreError(fs.abs(&abs_parts))) {
                         const dir_info: *const DirInfo = _dir_info;
                         _.load(
@@ -688,7 +688,7 @@ pub struct Route {
         let route_file_buf = *route_bufs.get().route_file_buf;
         let public_path = brk: {
             if (base.len == 0) break :brk public_dir;
-            let buf: *[]u8 = route_file_buf;
+            var buf: []u8 = route_file_buf;
 
             if (public_dir.len > 0) {
                 route_file_buf[0] = '/';
@@ -721,7 +721,7 @@ pub struct Route {
         }
 
         name = std.mem.trimRight(u8, name, "/");
-        let match_name: string = name[0..];
+        var match_name: []const u8 = name;
 
         let validation_result = PatternValidationResult{};
         const is_index = name.len == 0;
@@ -770,7 +770,7 @@ pub struct Route {
                 file = valid.stdFile();
                 needs_close = false;
             } else {
-                let parts: [2]string = [entry.dir, entry.base()];
+                let parts: [2]string = .{ entry.dir, entry.base() };
                 abs_path_str = FileSystem.instance.absBuf(&parts, route_file_buf);
                 route_file_buf[abs_path_str.len] = 0;
                 const buf = route_file_buf[0..abs_path_str.len :0];

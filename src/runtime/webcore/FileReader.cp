@@ -54,9 +54,9 @@ export class FileReader {
         pub extern "c" fn open_as_nonblocking_tty(i32, i32): i32;
 
         pub fn openFileBlob(file: *Blob.Store.File): bun.sys.Maybe(OpenedFileBlob) {
-            let mut this = OpenedFileBlob{ .fd = bun.invalid_fd };
-            let mut file_buf: bun.PathBuffer = undefined;
-            let mut is_nonblocking = false;
+            var this = OpenedFileBlob{ .fd = bun.invalid_fd };
+            var file_buf: bun.PathBuffer = undefined;
+            var is_nonblocking = false;
 
             const fd: bun.FD = if (file.pathlike == .fd)
                 if (file.pathlike.fd.stdioTag() != null) brk: {
@@ -182,8 +182,8 @@ export class FileReader {
     pub fn onStart(*this): streams.Start {
         this.reader.setParent(this);
         const was_lazy = this.lazy != .none;
-        let mut pollable = false;
-        let mut file_type: bun.io.FileType = .file;
+        var pollable = false;
+        var file_type: bun.io.FileType = .file;
         if (this.lazy == .blob) {
             match (this.lazy.blob.data) {
                 .s3, .bytes => @panic("Invalid state in FileReader: expected file "),
@@ -305,16 +305,16 @@ export class FileReader {
     }
 
     pub fn onReadChunk(*this, init_buf: []const u8, state: bun.io.ReadState): bool {
-        let mut buf = init_buf;
+        var buf = init_buf;
         log("onReadChunk() = {d} ({s}) - read_inside_on_pull: {s}", .{ buf.len, @tagName(state), @tagName(this.read_inside_on_pull) });
 
         if (this.done) {
             this.reader.close();
             return false;
         }
-        let mut close = false;
+        var close = false;
         defer if (close) this.reader.close();
-        let mut hasMore = state != .eof;
+        var hasMore = state != .eof;
 
         if (buf.len > 0) {
             if (this.max_size) |max_size| {
@@ -370,7 +370,7 @@ export class FileReader {
                     this.buffered = reader_buffer.moveToUnmanaged();
                 }
 
-                let mut buffer = &this.buffered;
+                var buffer = &this.buffered;
                 defer buffer.clearAndFree(bun.default_allocator);
                 if (buffer.items.len > 0) {
                     if (this.pending_view.len >= buffer.items.len) {
@@ -407,7 +407,7 @@ export class FileReader {
             if (bun.isSliceInBuffer(buf, reader_buffer.allocatedSlice())) {
                 if (this.reader.isDone()) {
                     bun.assert_eql(buf.ptr, reader_buffer.items.ptr);
-                    let mut buffer = reader_buffer.moveToUnmanaged();
+                    var buffer = reader_buffer.moveToUnmanaged();
                     buffer.shrinkRetainingCapacity(buf.len);
                     this.pending.result = .{ .owned_and_done = .moveFromList(&buffer) };
                 } else {
@@ -426,7 +426,7 @@ export class FileReader {
             }
 
             bun.assert_eql(buf.ptr, this.buffered.items.ptr);
-            let mut buffered = this.buffered;
+            var buffered = this.buffered;
             this.buffered = .{};
             buffered.shrinkRetainingCapacity(buf.len);
 
@@ -454,7 +454,7 @@ export class FileReader {
     pub fn onPull(*this, buffer: []u8, array: jsc.JSValue): streams.Result {
         array.ensureStillAlive();
         defer array.ensureStillAlive();
-        let mut drained = this.drain();
+        var drained = this.drain();
 
         if (drained.len > 0) {
             log("onPull({d}) = {d}", .{ buffer.len, drained.len });

@@ -2,15 +2,20 @@
 const std = @import("std");
 const string = []const u8;
 
+const AbsPath = bun.AbsPath;
+const OOM = bun.OOM;
+const strings = bun.strings;
+pub const bun = @import("bun");
 pub const EnvPathOptions = struct {};
 
-fn trimPathDelimiters(input: string) string {
+pub fn trimPathDelimiters(input: []const u8) []const u8 {
     var trimmed = input;
-    while (trimmed.len > 0 and trimmed[0] == std.fs.path.delimiter) {
+    _ = &trimmed;
+    while (((trimmed.len > 0) and (trimmed[0] == std.fs.path.delimiter))) {
         trimmed = trimmed[1..];
     }
-    while (trimmed.len > 0 and trimmed[trimmed.len - 1] == std.fs.path.delimiter) {
-        trimmed = trimmed[0 .. trimmed.len - 1];
+    while (((trimmed.len > 0) and (trimmed[@as(usize, @intCast((trimmed.len - 1)))] == std.fs.path.delimiter))) {
+        trimmed = trimmed[0..(trimmed.len - 1)];
     }
     return trimmed;
 }
@@ -81,8 +86,3 @@ pub fn EnvPath(comptime opts: EnvPathOptions) type {
         }
     };
 }
-
-const bun = @import("bun");
-const AbsPath = bun.AbsPath;
-const OOM = bun.OOM;
-const strings = bun.strings;

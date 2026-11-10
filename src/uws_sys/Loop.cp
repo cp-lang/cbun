@@ -39,11 +39,15 @@ export class LoopHandler {
     cb: @c fn (*!, *Loop): void,
 
     pub fn removePost(this): void {
-        uws_loop_removePostHandler(this.loop, this as *!, this.cb);
+        unsafe {
+            uws_loop_removePostHandler(this.loop, this as *!, this.cb);
+        }
     }
 
     pub fn removePre(this): void {
-        uws_loop_removePreHandler(this.loop, this as *!, this.cb);
+        unsafe {
+            uws_loop_removePreHandler(this.loop, this as *!, this.cb);
+        }
     }
 }
 
@@ -123,19 +127,13 @@ export @extern class PosixLoop {
     }
 
     pub static fn create(@comptime Handler: type): *Loop {
-        let mut pre_cb = null;
-        if (reflect.hasMethod(Handler, "pre")) {
-            pre_cb = Handler.pre;
-        }
-        let mut post_cb = null;
-        if (reflect.hasMethod(Handler, "post")) {
-            post_cb = Handler.post;
-        }
+        let mut_pre_cb = if (@hasDecl(Handler, "pre")) Handler.pre else null;
+        let mut_post_cb = if (@hasDecl(Handler, "post")) Handler.post else null;
         return us_create_loop(
             null,
             Handler.wakeup,
-            pre_cb,
-            post_cb,
+            mut_pre_cb,
+            mut_post_cb,
             0,
         ).?;
     }
@@ -149,10 +147,8 @@ export @extern class PosixLoop {
     }
 
     pub fn tickWithoutIdle(*this): void {
-        zig {
-            const ts = bun.timespec{ .sec = 0, .nsec = 0 };
-            c.us_loop_run_bun_tick(self, &ts);
-        }
+        const ts: bun.timespec = .{ .sec = 0, .nsec = 0 };
+        us_loop_run_bun_tick(this as *Loop, &ts);
     }
 
     pub fn tickWithTimeout(*this, timespec: *const bun.timespec?): void {
@@ -168,13 +164,13 @@ export @extern class PosixLoop {
     }
 
     pub fn nextTick(*this, @comptime UserType: type, user_data: UserType, @comptime deferCallback: anytype): void {
-        zig {
-            const Handler = struct {
-                pub fn callback(data: *anyopaque) callconv(.c) void {
-                    deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
-                }
-            };
-            c.uws_loop_defer(self, user_data, Handler.callback);
+        const Handler = struct {
+            pub fn callback(data: *anyopaque) callconv(.c) void {
+                deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
+            }
+        };
+        unsafe {
+            uws_loop_defer(this as *Loop, user_data as *!, Handler.callback);
         }
     }
 
@@ -211,7 +207,9 @@ export @extern class WindowsLoop {
     }
 
     pub static fn get(): *WindowsLoop {
-        return uws_get_loop_with_native(bun.windows.libuv.Loop.get() as *any!);
+        unsafe {
+            return uws_get_loop_with_native(bun.windows.libuv.Loop.get() as *any!);
+        }
     }
 
     pub fn iterationNumber(this): u64 {
@@ -248,19 +246,13 @@ export @extern class WindowsLoop {
     }
 
     pub static fn create(@comptime Handler: type): *WindowsLoop {
-        let mut pre_cb = null;
-        if (reflect.hasMethod(Handler, "pre")) {
-            pre_cb = Handler.pre;
-        }
-        let mut post_cb = null;
-        if (reflect.hasMethod(Handler, "post")) {
-            post_cb = Handler.post;
-        }
+        let mut_pre_cb = if (@hasDecl(Handler, "pre")) Handler.pre else null;
+        let mut_post_cb = if (@hasDecl(Handler, "post")) Handler.post else null;
         return us_create_loop(
             null,
             Handler.wakeup,
-            pre_cb,
-            post_cb,
+            mut_pre_cb,
+            mut_post_cb,
             0,
         ).? as *WindowsLoop;
     }
@@ -286,13 +278,13 @@ export @extern class WindowsLoop {
     }
 
     pub fn nextTick(*this, @comptime UserType: type, user_data: UserType, @comptime deferCallback: anytype): void {
-        zig {
-            const Handler = struct {
-                pub fn callback(data: *anyopaque) callconv(.c) void {
-                    deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
-                }
-            };
-            c.uws_loop_defer(self, user_data, Handler.callback);
+        const Handler = struct {
+            pub fn callback(data: *anyopaque) callconv(.c) void {
+                deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
+            }
+        };
+        unsafe {
+            uws_loop_defer(this as *Loop, user_data as *!, Handler.callback);
         }
     }
 

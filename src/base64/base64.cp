@@ -47,8 +47,7 @@ export struct Base64Encoder {
     fn encode(*dest: u8[], source: string): string {
         let out_len = calcSize(source.len);
         let out_idx = encodeWithoutSizeCheck(dest, source);
-        if (pad_char != null) {
-            let pad = pad_char ?? 0;
+        if (pad := pad_char) {
             let i = out_idx;
             while (i < out_len) {
                 dest[i] = pad;
@@ -96,7 +95,7 @@ export struct Base64Decoder {
         let source_len = source.len;
         let result = calcSizeUpperBound(source_len)?;
         if (pad_char != null) {
-            let pad = pad_char ?? 0;
+            let pad = pad_char.?;
             if (source_len >= 1 && source[source_len - 1] == pad) {
                 result -= 1;
             }
@@ -141,10 +140,10 @@ export struct Base64Decoder {
         if (leftover_idx == null) {
             return;
         }
-        let l_idx = leftover_idx ?? 0;
+        let l_idx = leftover_idx.?;
         let leftover = source[l_idx..source.len];
         if (pad_char != null) {
-            let pad = pad_char ?? 0;
+            let pad = pad_char.?;
             let padding_len: u32 = acc_len / 2;
             let padding_chars: u32 = 0;
             for (c in leftover) {
@@ -238,11 +237,11 @@ export struct Base64DecoderWithIgnore {
         }
 
         if (decoder.pad_char != null) {
-            let pad = decoder.pad_char ?? 0;
+            let pad = decoder.pad_char.?;
             let padding_len: u32 = acc_len / 2;
 
             if (leftover_idx != null) {
-                let l_idx = leftover_idx ?? 0;
+                let l_idx = leftover_idx.?;
                 let leftover = source[l_idx..source.len];
                 let padding_chars: u32 = 0;
                 for (c in leftover) {
@@ -268,155 +267,158 @@ export struct Base64DecoderWithIgnore {
     }
 }
 
-zig {
-    const bun = @import("bun");
-    const assert = bun.assert;
-    const testing = std.testing;
+import * as bun from "bun";
+import * as std from "std";
 
-    extern fn WTF__base64URLEncode(input: [*]const u8, input_len: usize, output: [*]u8, output_len: usize) usize;
+const assert = bun.assert;
+const testing = std.testing;
 
-    const decoderWithIgnoreProto = *const fn (ignore: []const u8) Base64DecoderWithIgnore;
+extern fn WTF__base64URLEncode(input: [*]const u8, input_len: usize, output: [*]u8, output_len: usize): usize;
 
-    pub const Codecs = struct {
-        alphabet_chars: [64]u8,
-        pad_char: ?u8,
-        decoderWithIgnore: decoderWithIgnoreProto,
-        Encoder: Base64Encoder,
-        Decoder: Base64Decoder,
-    };
+type decoderWithIgnoreProto = *const fn (ignore: string) Base64DecoderWithIgnore;
 
-    pub const standard_alphabet_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".*;
-    fn standardBase64DecoderWithIgnore(ignore: []const u8) Base64DecoderWithIgnore {
-        return Base64DecoderWithIgnore.init(standard_alphabet_chars, '=', ignore);
+pub struct Codecs {
+    alphabet_chars: [64]u8,
+    pad_char: u8?,
+    decoderWithIgnore: decoderWithIgnoreProto,
+    Encoder: Base64Encoder,
+    Decoder: Base64Decoder,
+}
+
+pub const standard_alphabet_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".*;
+
+fn standardBase64DecoderWithIgnore(ignore: string): Base64DecoderWithIgnore {
+    return Base64DecoderWithIgnore.init(standard_alphabet_chars, '=', ignore);
+}
+
+pub const standard = Codecs{
+    .alphabet_chars = standard_alphabet_chars,
+    .pad_char = '=',
+    .decoderWithIgnore = standardBase64DecoderWithIgnore,
+    .Encoder = Base64Encoder.init(standard_alphabet_chars, '='),
+    .Decoder = Base64Decoder.init(standard_alphabet_chars, '='),
+};
+
+pub const standard_no_pad = Codecs{
+    .alphabet_chars = standard_alphabet_chars,
+    .pad_char = null,
+    .decoderWithIgnore = standardBase64DecoderWithIgnore,
+    .Encoder = Base64Encoder.init(standard_alphabet_chars, null),
+    .Decoder = Base64Decoder.init(standard_alphabet_chars, null),
+};
+
+pub const url_safe_alphabet_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".*;
+
+fn urlSafeBase64DecoderWithIgnore(ignore: string): Base64DecoderWithIgnore {
+    return Base64DecoderWithIgnore.init(url_safe_alphabet_chars, '=', ignore);
+}
+
+pub const url_safe = Codecs{
+    .alphabet_chars = url_safe_alphabet_chars,
+    .pad_char = '=',
+    .decoderWithIgnore = urlSafeBase64DecoderWithIgnore,
+    .Encoder = Base64Encoder.init(url_safe_alphabet_chars, '='),
+    .Decoder = Base64Decoder.init(url_safe_alphabet_chars, '='),
+};
+
+pub const url_safe_no_pad = Codecs{
+    .alphabet_chars = url_safe_alphabet_chars,
+    .pad_char = null,
+    .decoderWithIgnore = urlSafeBase64DecoderWithIgnore,
+    .Encoder = Base64Encoder.init(url_safe_alphabet_chars, null),
+    .Decoder = Base64Decoder.init(url_safe_alphabet_chars, null),
+};
+
+fn createMixedDecoder(): Base64DecoderWithIgnore {
+    let decoder = standard.decoderWithIgnore("\xff \t\r\n\x0b\x0c");
+
+    let i: u8 = 62;
+    for (c in url_safe_alphabet_chars[62..]) {
+        decoder.decoder.char_to_index[c] = i;
+        i += 1;
     }
 
-    pub const standard = Codecs{
-        .alphabet_chars = standard_alphabet_chars,
-        .pad_char = '=',
-        .decoderWithIgnore = standardBase64DecoderWithIgnore,
-        .Encoder = Base64Encoder.init(standard_alphabet_chars, '='),
-        .Decoder = Base64Decoder.init(standard_alphabet_chars, '='),
-    };
+    return decoder;
+}
 
-    pub const standard_no_pad = Codecs{
-        .alphabet_chars = standard_alphabet_chars,
-        .pad_char = null,
-        .decoderWithIgnore = standardBase64DecoderWithIgnore,
-        .Encoder = Base64Encoder.init(standard_alphabet_chars, null),
-        .Decoder = Base64Decoder.init(standard_alphabet_chars, null),
-    };
+const mixed_decoder = createMixedDecoder();
 
-    pub const url_safe_alphabet_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".*;
-    fn urlSafeBase64DecoderWithIgnore(ignore: []const u8) Base64DecoderWithIgnore {
-        return Base64DecoderWithIgnore.init(url_safe_alphabet_chars, '=', ignore);
-    }
+pub fn decode(*destination: []u8, source: string): bun.simdutf.SIMDUTFResult {
+    const result = bun.simdutf.base64.decode(source, destination, false);
 
-    pub const url_safe = Codecs{
-        .alphabet_chars = url_safe_alphabet_chars,
-        .pad_char = '=',
-        .decoderWithIgnore = urlSafeBase64DecoderWithIgnore,
-        .Encoder = Base64Encoder.init(url_safe_alphabet_chars, '='),
-        .Decoder = Base64Decoder.init(url_safe_alphabet_chars, '='),
-    };
-
-    pub const url_safe_no_pad = Codecs{
-        .alphabet_chars = url_safe_alphabet_chars,
-        .pad_char = null,
-        .decoderWithIgnore = urlSafeBase64DecoderWithIgnore,
-        .Encoder = Base64Encoder.init(url_safe_alphabet_chars, null),
-        .Decoder = Base64Decoder.init(url_safe_alphabet_chars, null),
-    };
-
-    const mixed_decoder = brk: {
-        var decoder = standard.decoderWithIgnore("\xff \t\r\n" ++ [_]u8{
-            std.ascii.control_code.vt,
-            std.ascii.control_code.ff,
-        });
-
-        for (url_safe_alphabet_chars[62..], 62..) |c, i| {
-            decoder.decoder.char_to_index[c] = @as(u8, @intCast(i));
-        }
-
-        break :brk decoder;
-    };
-
-    pub fn decode(destination: []u8, source: []const u8) bun.simdutf.SIMDUTFResult {
-        const result = bun.simdutf.base64.decode(source, destination, false);
-
-        if (!result.isSuccessful()) {
-            var wrote: usize = 0;
-            mixed_decoder.decode(destination, source, &wrote) catch {
-                return .{
-                    .count = wrote,
-                    .status = .invalid_base64_character,
-                };
+    if (!result.isSuccessful()) {
+        let wrote: usize = 0;
+        mixed_decoder.decode(destination, source, &wrote) catch {
+            return .{
+                .count = wrote,
+                .status = .invalid_base64_character,
             };
-            return .{ .count = wrote, .status = .success };
-        }
-
-        return result;
-    }
-
-    pub fn decodeAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-        var dest = try allocator.alloc(u8, decodeLen(input));
-        errdefer allocator.free(dest);
-        const result = decode(dest, input);
-        if (!result.isSuccessful()) {
-            return error.DecodingFailed;
-        }
-        return dest[0..result.count];
-    }
-
-    pub fn encode(destination: []u8, source: []const u8) usize {
-        return bun.simdutf.base64.encode(source, destination, false);
-    }
-
-    pub fn encodeAlloc(allocator: std.mem.Allocator, source: []const u8) !bun.ByteList {
-        const len = encodeLen(source);
-        const destination = try allocator.alloc(u8, len);
-        errdefer allocator.free(destination);
-        const encoded_len = encode(destination, source);
-        return .{
-            .ptr = destination.ptr,
-            .len = @truncate(encoded_len),
-            .cap = @truncate(len),
         };
+        return .{ .count = wrote, .status = .success };
     }
 
-    pub fn simdutfEncodeLenUrlSafe(source_len: usize) usize {
-        return bun.simdutf.base64.encode_len(source_len, true);
-    }
+    return result;
+}
 
-    pub fn simdutfEncodeUrlSafe(destination: []u8, source: []const u8) usize {
-        return bun.simdutf.base64.encode(source, destination, true);
+pub fn decodeAlloc(allocator: std.mem.Allocator, input: string): ![]u8 {
+    let dest = allocator.alloc(u8, decodeLen(input))?;
+    errdefer allocator.free(dest);
+    const result = decode(dest, input);
+    if (!result.isSuccessful()) {
+        return error.DecodingFailed;
     }
+    return dest[0..result.count];
+}
 
-    pub fn decodeLenUpperBound(len: usize) usize {
-        return standard.Decoder.calcSizeUpperBound(len) catch {
-            return len / 4 * 3;
-        };
-    }
+pub fn encode(*destination: []u8, source: string): usize {
+    return bun.simdutf.base64.encode(source, destination, false);
+}
 
-    pub fn decodeLen(source: anytype) usize {
-        return standard.Decoder.calcSizeForSlice(source) catch {
-            return source.len / 4 * 3 + 2;
-        };
-    }
+pub fn encodeAlloc(allocator: std.mem.Allocator, source: string): !bun.ByteList {
+    const len = encodeLen(source);
+    const destination = allocator.alloc(u8, len)?;
+    errdefer allocator.free(destination);
+    const encoded_len = encode(destination, source);
+    return .{
+        .ptr = destination.ptr,
+        .len = @truncate(encoded_len),
+        .cap = @truncate(len),
+    };
+}
 
-    pub fn encodeLen(source: anytype) usize {
-        return encodeLenFromSize(source.len);
-    }
+pub fn simdutfEncodeLenUrlSafe(source_len: usize): usize {
+    return bun.simdutf.base64.encode_len(source_len, true);
+}
 
-    pub fn encodeLenFromSize(source: usize) usize {
-        return standard.Encoder.calcSize(source);
-    }
+pub fn simdutfEncodeUrlSafe(*destination: []u8, source: string): usize {
+    return bun.simdutf.base64.encode(source, destination, true);
+}
 
-    pub fn urlSafeEncodeLen(source: anytype) usize {
-        return ((source.len * 4) + 2) / 3;
-    }
+pub fn decodeLenUpperBound(len: usize): usize {
+    return standard.Decoder.calcSizeUpperBound(len) catch {
+        return len / 4 * 3;
+    };
+}
 
-    pub fn encodeURLSafe(dest: []u8, source: []const u8) usize {
-        bun.jsc.markBinding(@src());
-        return WTF__base64URLEncode(source.ptr, source.len, dest.ptr, dest.len);
-    }
+pub fn decodeLen(source: anytype): usize {
+    return standard.Decoder.calcSizeForSlice(source) catch {
+        return source.len / 4 * 3 + 2;
+    };
+}
+
+pub fn encodeLen(source: anytype): usize {
+    return encodeLenFromSize(source.len);
+}
+
+pub fn encodeLenFromSize(source: usize): usize {
+    return standard.Encoder.calcSize(source);
+}
+
+pub fn urlSafeEncodeLen(source: anytype): usize {
+    return ((source.len * 4) + 2) / 3;
+}
+
+pub fn encodeURLSafe(*dest: []u8, source: string): usize {
+    bun.jsc.markBinding(@src());
+    return WTF__base64URLEncode(source.ptr, source.len, dest.ptr, dest.len);
 }

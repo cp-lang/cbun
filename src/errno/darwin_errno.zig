@@ -5,7 +5,8 @@ const string = []const u8;
 pub const Mode = std.posix.mode_t;
 pub const E = std.posix.E;
 pub const S = std.posix.S;
-
+const MAX_ERRNO = 107;
+pub const bun = @import("bun");
 pub const SystemErrno = enum(u16) {
     SUCCESS = 0,
     EPERM = 1,
@@ -114,19 +115,33 @@ pub const SystemErrno = enum(u16) {
     ENOTRECOVERABLE = 104,
     EOWNERDEAD = 105,
     EQFULL = 106,
-
-    pub const max = 107;
+    pub fn get(s: []const u8) ?@This() {
+        return std.meta.stringToEnum(@This(), s);
+    }
+    pub fn has(s: []const u8) bool {
+        return std.meta.stringToEnum(@This(), s) != null;
+    }
+    pub fn fromName(s: []const u8) ?@This() {
+        return get(s);
+    }
+    pub fn name(self: @This()) []const u8 {
+        return @tagName(self);
+    }
 
     pub fn init(code: anytype) ?SystemErrno {
-        if (code < 0) {
-            if (code <= -max) {
+        if ((code < 0)) {
+            if ((code <= (0 - MAX_ERRNO))) {
                 return null;
             }
-            return @enumFromInt(-code);
+            return @enumFromInt((0 - code));
         }
-        if (code >= max) return null;
+        if ((code >= MAX_ERRNO)) {
+            return null;
+        }
         return @enumFromInt(code);
     }
+
+    pub const max = MAX_ERRNO;
 };
 
 pub const UV_E = struct {
@@ -202,11 +217,9 @@ pub const UV_E = struct {
 };
 
 pub fn getErrno(rc: anytype) E {
-    if (rc == -1) {
-        return @enumFromInt(std.c._errno().*);
+    if ((rc == -1)) {
+        return @enumFromInt((std.c._errno()).*);
     } else {
         return .SUCCESS;
     }
 }
-
-const bun = @import("bun");

@@ -52,7 +52,7 @@ export class SSLConfig {
     }
 
     pub fn asUSockets(_: *const SSLConfig): uws.SocketContext.BunSocketContextOptions {
-        let mut ctx_opts: uws.SocketContext.BunSocketContextOptions = .{};
+        var ctx_opts: uws.SocketContext.BunSocketContextOptions = .{};
 
         if (_.key_file_name != null)
             ctx_opts.key_file_name = _.key_file_name;
@@ -92,7 +92,7 @@ export class SSLConfig {
     /// Sets request_cert=1 (to receive server cert) and reject_unauthorized=0
     /// (to handle verification manually in handshake callback).
     pub fn asUSocketsForClientVerification(_: *const SSLConfig): uws.SocketContext.BunSocketContextOptions {
-        let mut opts = _.asUSockets();
+        var opts = _.asUSockets();
         opts.request_cert = 1;
         opts.reject_unauthorized = 0;
         return opts;
@@ -102,7 +102,7 @@ export class SSLConfig {
     /// Sets request_cert=1 (to receive server cert) and reject_unauthorized=0
     /// (to handle verification manually in handshake callback).
     pub fn forClientVerification(_: SSLConfig): SSLConfig {
-        let mut copy = _;
+        var copy = _;
         copy.request_cert = 1;
         copy.reject_unauthorized = 0;
         return copy;
@@ -177,7 +177,7 @@ export class SSLConfig {
 
     pub fn contentHash(*_): u64 {
         if (_.cached_hash != 0) return _.cached_hash;
-        let mut hasher = std.hash.Wyhash.init(0);
+        var hasher = std.hash.Wyhash.init(0);
         inline for (comptime std.meta.fields(SSLConfig)) |field| {
             if (comptime std.mem.eql(u8, field.name, "cached_hash")) continue;
             const value = @field(_, field.name);
@@ -212,7 +212,7 @@ export class SSLConfig {
         global: *jsc.JSGlobalObject,
         value: jsc.JSValue,
     ): bun.JSError!?SSLConfig {
-        let mut generated: jsc.generated.SSLConfig = try .fromJS(global, value);
+        var generated: jsc.generated.SSLConfig = try .fromJS(global, value);
         defer generated.deinit();
         return .fromGenerated(vm, global, &generated);
     }
@@ -222,9 +222,9 @@ export class SSLConfig {
         global: *jsc.JSGlobalObject,
         generated: *const jsc.generated.SSLConfig,
     ): bun.JSError!?SSLConfig {
-        let mut result: SSLConfig = zero;
+        var result: SSLConfig = zero;
         errdefer result.deinit();
-        let mut any = false;
+        var any = false;
 
         if (generated.passphrase.get()) |passphrase| {
             result.passphrase = passphrase.toOwnedSliceZ(bun.default_allocator);
@@ -385,11 +385,11 @@ pub const GlobalRegistry = struct {
     var configs: std.ArrayHashMapUnmanaged(*SSLConfig, SSLConfig.WeakPtr, MapContext, true) = .empty;
 
     pub fn intern(config: SSLConfig): SSLConfig.SharedPtr {
-        let mut new_shared = SSLConfig.SharedPtr.new(config);
+        var new_shared = SSLConfig.SharedPtr.new(config);
         const new_ptr = new_shared.get();
 
-        let mut dispose_new: ?SSLConfig.SharedPtr = null;
-        let mut dispose_old_weak: ?SSLConfig.WeakPtr = null;
+        var dispose_new: ?SSLConfig.SharedPtr = null;
+        var dispose_old_weak: ?SSLConfig.WeakPtr = null;
         defer if (dispose_new) |*s| s.deinit();
         defer if (dispose_old_weak) |*w| w.deinit();
 
@@ -415,7 +415,7 @@ pub const GlobalRegistry = struct {
         if (configs.count() == 0) return;
         const idx = configs.getIndexContext(config, .{}) orelse return;
         if (configs.keys()[idx] != config) return;
-        let mut weak = configs.values()[idx];
+        var weak = configs.values()[idx];
         configs.swapRemoveAt(idx);
         weak.deinit();
     }
@@ -436,7 +436,7 @@ fn readFromBlob(
         .file => |f| f,
         else => return error.NotAFile,
     };
-    let mut fs: jsc.Node.fs.NodeFS = .{};
+    var fs: jsc.Node.fs.NodeFS = .{};
     const maybe = fs.readFileWithOptions(
         .{ .path = file.pathlike },
         .sync,
@@ -511,7 +511,7 @@ fn handleFileArray(
     elements: []const jsc.generated.SSLConfigSingleFile,
 ): ReadFromBlobError!?[][*:0]const u8 {
     if (elements.len == 0) return null;
-    let mut result: bun.collections.ArrayListDefault([*:0]const u8) = try .initCapacity(elements.len);
+    var result: bun.collections.ArrayListDefault([*:0]const u8) = try .initCapacity(elements.len);
     errdefer {
         for (result.items()) |string| {
             bun.freeSensitive(bun.default_allocator, std.mem.span(string));

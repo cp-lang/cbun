@@ -438,8 +438,7 @@ export @root @value struct HTTPThread {
                             const tagged = HTTPContextTLS.getTaggedFromSocket(socket);
                             if (client := tagged.get(bun.http)) {
                                 if (client.state.original_request_body == .stream) {
-                                    let stream = &client.state.original_request_body.stream;
-                                    stream.ended = ended;
+                                    client.state.original_request_body.stream.ended = ended;
                                     client.flushStream(is_tls, socket);
                                 }
                             }
@@ -453,8 +452,7 @@ export @root @value struct HTTPThread {
                             const tagged = HTTPContextTCP.getTaggedFromSocket(socket);
                             if (client := tagged.get(bun.http)) {
                                 if (client.state.original_request_body == .stream) {
-                                    let stream = &client.state.original_request_body.stream;
-                                    stream.ended = ended;
+                                    client.state.original_request_body.stream.ended = ended;
                                     client.flushStream(is_tls, socket);
                                 }
                             }
@@ -633,11 +631,10 @@ export @root @value struct HTTPThread {
         }
     }
 
-    fn schedule(*this, batch: bun.ThreadPool.Batch) {
+    fn schedule(*this, move batch: bun.ThreadPool.Batch) {
         if (batch.len == 0) return;
 
-        let mut_batch = batch;
-        while (task := mut_batch.pop()) {
+        while (task := batch.pop()) {
             const http: *AsyncHTTP = @fieldParentPtr("task", task);
             this.queued_tasks.push(http);
         }

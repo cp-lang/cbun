@@ -2,49 +2,25 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
+fn CpOptType(comptime T: type) type { if (@typeInfo(T) == .optional) return T; return ?T; }
+fn CpUnwrapOpt(comptime T: type) type { if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }
+fn cp_opt_is_null(v: anytype) bool { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) return v == null; return false; }
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
 const SSLWrapper = @import("../runtime/socket/ssl_wrapper.zig").SSLWrapper;
 pub const HTTPClient = bun.http.HTTPClient;
 pub const HTTPSocketTCP = bun.http.NewHTTPContext(false).HTTPSocket;
 pub const HTTPSocketSSL = bun.http.NewHTTPContext(true).HTTPSocket;
-fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
-fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
-fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
-fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
-const Message = anyopaque;
-fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
-pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx})); }
-pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
-pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@"struct".fields.len; return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
-pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
-pub fn CpUnpackSliceType(comptime T: type, comptime start_idx: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }
-pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 pub const HTTPCertError = @import("./HTTPCertError.zig").HTTPCertError;
 pub const HTTPContext = @import("./HTTPContext.zig").HTTPContext;
 pub const ProxyTunnelSocket = union(enum) {
     tcp: HTTPSocketTCP,
     ssl: HTTPSocketSSL,
     none: void,
+    pub fn has(s: []const u8) bool { if (comptime @typeInfo(@This()).@"union".tag_type) |TagType| { return std.meta.stringToEnum(TagType, s) != null; } return false; }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 };
 
 pub const ProxyTunnel = @This();
@@ -62,7 +38,6 @@ pub fn onOpen(client: *HTTPClient) void {
         client.state.response_stage = .proxy_handshake;
         client.state.request_stage = .proxy_handshake;
         const proxy_opt = client.proxy_tunnel;
-        _ = &proxy_opt;
         if (proxy_opt) |proxy| {
             _ = &proxy;
             _ = proxy.ref();
@@ -71,10 +46,8 @@ pub fn onOpen(client: *HTTPClient) void {
             }
             if (proxy.wrapper) |*wrapper| {
                 _ = &wrapper;
-                const ssl_ptr = ((wrapper.ssl) orelse { return; });
-                _ = &ssl_ptr;
+                const ssl_ptr = (((wrapper.*).ssl) orelse { return; });
                 const _hostname = ((client.hostname) orelse (client.url.hostname));
-                _ = &_hostname;
                 var hostname: [:0]const u8 = "";
                 _ = &hostname;
                 var hostname_needs_free = false;
@@ -120,7 +93,6 @@ pub fn onData(client: *HTTPClient, decoded_data: []const u8) void {
             return;
         }
         const proxy_opt = client.proxy_tunnel;
-        _ = &proxy_opt;
         if (proxy_opt) |proxy| {
             _ = &proxy;
             _ = proxy.ref();
@@ -134,7 +106,6 @@ if ((decoded_data.len == 0)) {
             }
             const report_progress = (blk_catch_0: { break :blk_catch_0 ((client.handleResponseBody(decoded_data, false)) catch |err| { _ = &err; _ = proxy.close(err);
             return; }); });
-            _ = &report_progress;
             if (report_progress) {
                 _ = ProxyTunnel.progressUpdateForProxySocket(client, proxy);
                 return;
@@ -146,7 +117,6 @@ if ((decoded_data.len == 0)) {
             }
             const report_progress = (blk_catch_1: { break :blk_catch_1 ((client.handleResponseBodyChunkedEncoding(decoded_data)) catch |err| { _ = &err; _ = proxy.close(err);
             return; }); });
-            _ = &report_progress;
             if (report_progress) {
                 _ = ProxyTunnel.progressUpdateForProxySocket(client, proxy);
                 return;
@@ -175,7 +145,6 @@ client.state.pending_response = null;
 
 pub fn onHandshake(client: *HTTPClient, handshake_success: bool, ssl_error: bun.uws.us_bun_verify_error_t) void {
         const proxy_opt = client.proxy_tunnel;
-        _ = &proxy_opt;
         if (proxy_opt) |proxy| {
             _ = &proxy;
             _ = proxy.ref();
@@ -198,7 +167,6 @@ pub fn onHandshake(client: *HTTPClient, handshake_success: bool, ssl_error: bun.
                 cert_reason = reason[0..bun.len(reason) :0];
             }
             const handshake_error = HTTPCertError{ .error_no = ssl_error.error_no, .code = cert_code, .reason = cert_reason };
-            _ = &handshake_error;
             if (handshake_success) {
                 client.flags.did_have_handshaking_error = (handshake_error.error_no != 0);
                 if (client.flags.reject_unauthorized) {
@@ -208,7 +176,6 @@ pub fn onHandshake(client: *HTTPClient, handshake_success: bool, ssl_error: bun.
                     }
                     _ = bun.assert((proxy.wrapper != null));
                     const ssl_ptr = (((blk_om_2: { const __o_2 = proxy.wrapper; const __R_2 = CpOptType(@TypeOf(cp_opt_unwrap(__o_2).ssl)); if (cp_opt_is_null(__o_2)) break :blk_om_2 @as(__R_2, null); break :blk_om_2 @as(__R_2, cp_opt_unwrap(__o_2).ssl); })) orelse { return; });
-                    _ = &ssl_ptr;
                     switch (proxy.socket) {
 .ssl => |socket| {
 if ((!client.checkServerIdentity(true, socket, handshake_error, ssl_ptr, false))) {
@@ -249,7 +216,6 @@ _ = client.onWritable(true, false, socket);
 
 pub fn writeEncrypted(client: *HTTPClient, encoded_data: []const u8) void {
         const proxy_opt = client.proxy_tunnel;
-        _ = &proxy_opt;
         if (proxy_opt) |proxy| {
             _ = &proxy;
             if (proxy.write_buffer.isNotEmpty()) {
@@ -261,9 +227,7 @@ pub fn writeEncrypted(client: *HTTPClient, encoded_data: []const u8) void {
 .tcp => |socket| socket.write(encoded_data),
 .none => 0,
 });
-            _ = &written;
-            const pending = encoded_data[cp_cast_int(usize, written)..];
-            _ = &pending;
+            const pending = encoded_data[(if (comptime @typeInfo(@TypeOf(written)) == .@"enum") cp_cast_int(usize, @intFromEnum(written)) else cp_cast_int(usize, written))..];
             if ((pending.len > 0)) {
                 _ = bun.handleOom(proxy.write_buffer.write(pending));
             }
@@ -272,12 +236,10 @@ pub fn writeEncrypted(client: *HTTPClient, encoded_data: []const u8) void {
 
 pub fn onClose(client: *HTTPClient) void {
         const proxy_opt = client.proxy_tunnel;
-        _ = &proxy_opt;
         if (proxy_opt) |proxy| {
             _ = &proxy;
             _ = proxy.ref();
             const in_progress = (((client.state.stage != .done) and (client.state.stage != .fail)) and (!client.state.flags.is_redirect_pending));
-            _ = &in_progress;
             if (in_progress) {
                 if (client.state.isChunkedEncoding()) {
                     switch (client.state.chunked_decoder._state) {
@@ -301,7 +263,6 @@ else => {
                 }
             }
             const err = proxy.shutdown_err;
-            _ = &err;
             switch (proxy.socket) {
 .ssl => |socket| {
 _ = client.closeAndFail(err, true, socket);
@@ -322,7 +283,6 @@ pub fn start(client: *HTTPClient, comptime is_ssl: bool, socket: anytype, ssl_op
         var proxy_tunnel = bun.new(ProxyTunnel, .{ .ref_count = RefCount.init() });
         _ = &proxy_tunnel;
         const custom_options = ssl_options.forClientVerification();
-        _ = &custom_options;
         proxy_tunnel.wrapper = (blk_catch_3: { break :blk_catch_3 ((ProxyTunnelWrapper.init(custom_options, true, .{ .onOpen = ProxyTunnel.onOpen, .onData = ProxyTunnel.onData, .onHandshake = ProxyTunnel.onHandshake, .onClose = ProxyTunnel.onClose, .write = ProxyTunnel.writeEncrypted, .ctx = client })) catch |err| { _ = &err; if ((err == error.OutOfMemory)) {
             _ = bun.outOfMemory();
         }
@@ -338,9 +298,9 @@ pub fn start(client: *HTTPClient, comptime is_ssl: bool, socket: anytype, ssl_op
         if (proxy_tunnel.wrapper) |*wrapper| {
             _ = &wrapper;
             if ((start_payload.len > 0)) {
-                _ = wrapper.startWithPayload(start_payload);
+                _ = (wrapper.*).startWithPayload(start_payload);
             } else {
-                _ = wrapper.start();
+                _ = (wrapper.*).start();
             }
         }
 }
@@ -353,7 +313,7 @@ pub fn close(self: *ProxyTunnel, err: anyerror) void {
 pub fn shutdown(self: *ProxyTunnel) void {
         if (self.wrapper) |*wrapper| {
             _ = &wrapper;
-            _ = wrapper.shutdown(true);
+            _ = (wrapper.*).shutdown(true);
         }
 }
 
@@ -367,21 +327,19 @@ pub fn onWritable(self: *ProxyTunnel, comptime is_ssl: bool, socket: anytype) vo
         {
             if (self.wrapper) |*wrapper| {
                 _ = &wrapper;
-                _ = wrapper.flush();
+                _ = (wrapper.*).flush();
             }
         }
         }
         const encoded_data = self.write_buffer.slice();
-        _ = &encoded_data;
         if ((encoded_data.len == 0)) {
             return;
         }
         const written: i32 = socket.write(encoded_data);
-        _ = &written;
         if ((written == encoded_data.len)) {
             _ = self.write_buffer.reset();
         } else {
-            self.write_buffer.cursor = (self.write_buffer.cursor + cp_cast_int(usize, written));
+            self.write_buffer.cursor = (self.write_buffer.cursor + (if (comptime @typeInfo(@TypeOf(written)) == .@"enum") cp_cast_int(usize, @intFromEnum(written)) else cp_cast_int(usize, written)));
         }
 }
 
@@ -392,14 +350,14 @@ pub fn receive(self: *ProxyTunnel, buf: []const u8) void {
         }
         if (self.wrapper) |*wrapper| {
             _ = &wrapper;
-            _ = wrapper.receiveData(buf);
+            _ = (wrapper.*).receiveData(buf);
         }
 }
 
 pub fn write(self: *ProxyTunnel, buf: []const u8) !usize {
         if (self.wrapper) |*wrapper| {
             _ = &wrapper;
-            return wrapper.writeData(buf);
+            return (wrapper.*).writeData(buf);
         }
         return error.ConnectionClosed;
 }
@@ -423,7 +381,7 @@ pub fn adopt(self: *ProxyTunnel, client: *HTTPClient, comptime is_ssl: bool, soc
         _ = self.write_buffer.reset();
         if (self.wrapper) |*wrapper| {
             _ = &wrapper;
-            wrapper.handlers.ctx = client;
+            (wrapper.*).handlers.ctx = client;
         }
         if (is_ssl) {
             self.socket = .{ .ssl = socket };
@@ -442,7 +400,7 @@ pub fn deinit(self: *ProxyTunnel) void {
         self.socket = .{ .none = {} };
         if (self.wrapper) |*wrapper| {
             _ = &wrapper;
-            _ = wrapper.deinit();
+            _ = (wrapper.*).deinit();
             self.wrapper = null;
         }
         _ = self.write_buffer.deinit();

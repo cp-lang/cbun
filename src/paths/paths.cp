@@ -1,29 +1,28 @@
-zig {
-    pub const Path = paths.Path;
-    pub const AbsPath = paths.AbsPath;
-    pub const AutoAbsPath = paths.AutoAbsPath;
-    pub const RelPath = paths.RelPath;
-    pub const AutoRelPath = paths.AutoRelPath;
+import * as std from "std";
+import * as bun from "bun";
+import * as paths from "./Path.zig";
+import * as pools from "./path_buffer_pool.zig";
+import * as env_path from "./EnvPath.zig";
 
-    pub const EnvPath = @import("./EnvPath.zig").EnvPath;
+const Environment = bun.Environment;
 
-    pub const path_buffer_pool = pools.path_buffer_pool;
-    pub const w_path_buffer_pool = pools.w_path_buffer_pool;
-    pub const os_path_buffer_pool = pools.os_path_buffer_pool;
+export const Path = paths.Path;
+export const AbsPath = paths.AbsPath;
+export const AutoAbsPath = paths.AutoAbsPath;
+export const RelPath = paths.RelPath;
+export const AutoRelPath = paths.AutoRelPath;
 
-    pub const MAX_PATH_BYTES: usize = if (Environment.isWasm) 1024 else std.fs.max_path_bytes;
-    pub const PathBuffer = [MAX_PATH_BYTES]u8;
-    pub const PATH_MAX_WIDE = std.os.windows.PATH_MAX_WIDE;
-    pub const WPathBuffer = [PATH_MAX_WIDE]u16;
-    pub const OSPathChar = if (Environment.isWindows) u16 else u8;
-    pub const OSPathSliceZ = [:0]const OSPathChar;
-    pub const OSPathSlice = []const OSPathChar;
-    pub const OSPathBuffer = if (Environment.isWindows) WPathBuffer else PathBuffer;
+export const EnvPath = env_path.EnvPath;
 
-    const paths = @import("./Path.zig");
-    const pools = @import("./path_buffer_pool.zig");
-    const std = @import("std");
+export const path_buffer_pool = pools.path_buffer_pool;
+export const w_path_buffer_pool = pools.w_path_buffer_pool;
+export const os_path_buffer_pool = pools.os_path_buffer_pool;
 
-    const bun = @import("bun");
-    const Environment = bun.Environment;
-}
+export const MAX_PATH_BYTES: usize = if (Environment.isWasm) 1024 else std.fs.max_path_bytes;
+export type PathBuffer = [MAX_PATH_BYTES]u8;
+export const PATH_MAX_WIDE = std.os.windows.PATH_MAX_WIDE;
+export type WPathBuffer = [PATH_MAX_WIDE]u16;
+export type OSPathChar = if (Environment.isWindows) u16 else u8;
+export type OSPathSliceZ = [:0]const OSPathChar;
+export type OSPathSlice = []const OSPathChar;
+export type OSPathBuffer = if (Environment.isWindows) WPathBuffer else PathBuffer;

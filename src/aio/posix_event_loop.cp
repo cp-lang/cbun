@@ -121,9 +121,7 @@ pub const KeepAlive = struct {
     }
 };
 
-zig {
-    const KQueueGenerationNumber = if (Environment.isMac and Environment.allow_assert) usize else u0;
-}
+const KQueueGenerationNumber = if (Environment.isMac and Environment.allow_assert) usize else u0;
 pub const FilePoll = struct {
     var max_generation_number: KQueueGenerationNumber = 0;
 
@@ -1142,35 +1140,27 @@ pub const FilePoll = struct {
     }
 };
 
-zig {
-    pub const Waker = switch (Environment.os) {
-        .mac => KEventWaker,
-        .linux, .freebsd => LinuxWaker,
-        .windows, .wasm => @compileError("unreachable"),
-    };
-}
-
 pub const LinuxWaker = struct {
     fd: bun.FD,
 
-    pub fn init() !Waker {
+    pub fn init() !LinuxWaker {
         return initWithFileDescriptor(.fromNative(try std.posix.eventfd(0, 0)));
     }
 
-    pub fn getFd(this: *const Waker) bun.FD {
+    pub fn getFd(this: *const LinuxWaker) bun.FD {
         return this.fd;
     }
 
-    pub fn initWithFileDescriptor(fd: bun.FD) Waker {
-        return Waker{ .fd = fd };
+    pub fn initWithFileDescriptor(fd: bun.FD) LinuxWaker {
+        return LinuxWaker{ .fd = fd };
     }
 
-    pub fn wait(this: Waker) void {
+    pub fn wait(this: LinuxWaker) void {
         var bytes: usize = 0;
         _ = std.posix.read(this.fd.cast(), @as(*[8]u8, @ptrCast(&bytes))) catch 0;
     }
 
-    pub fn wake(this: *const Waker) void {
+    pub fn wake(this: *const LinuxWaker) void {
         var bytes: usize = 1;
         _ = std.posix.write(
             this.fd.cast(),
@@ -1189,7 +1179,7 @@ pub const KEventWaker = struct {
 
     const Kevent64 = std.posix.system.kevent64_s;
 
-    pub fn wake(this: *Waker) void {
+    pub fn wake(this: *KEventWaker) void {
         bun.jsc.markBinding(@src());
 
         if (io_darwin_schedule_wakeup(this.machport)) {
@@ -1199,11 +1189,11 @@ pub const KEventWaker = struct {
         this.has_pending_wake = true;
     }
 
-    pub fn getFd(this: *const Waker) bun.FD {
+    pub fn getFd(this: *const KEventWaker) bun.FD {
         return .fromNative(this.kq);
     }
 
-    pub fn wait(this: Waker) void {
+    pub fn wait(this: KEventWaker) void {
         if (!bun.FD.fromNative(this.kq).isValid()) {
             return;
         }
@@ -1232,11 +1222,11 @@ pub const KEventWaker = struct {
 
     extern fn io_darwin_schedule_wakeup(bun.mach_port) bool;
 
-    pub fn init() !Waker {
+    pub fn init() !KEventWaker {
         return initWithFileDescriptor(bun.default_allocator, try std.posix.kqueue());
     }
 
-    pub fn initWithFileDescriptor(allocator: std.mem.Allocator, kq: i32) !Waker {
+    pub fn initWithFileDescriptor(allocator: std.mem.Allocator, kq: i32) !KEventWaker {
         bun.jsc.markBinding(@src());
         bun.assert(kq > -1);
         const machport_buf = try allocator.alloc(u8, 1024);
@@ -1249,12 +1239,18 @@ pub const KEventWaker = struct {
             return error.MachportCreationFailed;
         }
 
-        return Waker{
+        return KEventWaker{
             .kq = kq,
             .machport = machport,
             .machport_buf = machport_buf,
         };
     }
+};
+
+pub const Waker = switch (Environment.os) {
+    .mac => KEventWaker,
+    .linux, .freebsd => LinuxWaker,
+    .windows, .wasm => @compileError("unreachable"),
 };
 
 pub const Closer = struct {

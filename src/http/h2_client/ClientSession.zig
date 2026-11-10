@@ -2,31 +2,13 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
 pub const HTTPContextTLS = @import("../HTTPContext.zig").NewHTTPContext(true);
 pub const Socket = HTTPContextTLS.HTTPSocket;
 pub const HTTPClient = bun.http.HTTPClient;
 pub const SSLConfig = bun.api.server.ServerConfig.SSLConfig;
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 pub const Stream = @import("./Stream.zig").Stream;
 pub const dispatch = @import("./dispatch.zig");
 pub const encode = @import("./encode.zig");
@@ -37,6 +19,10 @@ pub const NewHTTPContext = @import("../HTTPContext.zig").NewHTTPContext;
 pub const HeaderResult = enum {
     has_body,
     finished,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 };
 
 pub const ClientSession = @This();
@@ -119,11 +105,11 @@ pub fn create(ctx: *HTTPContextTLS, socket: Socket, client: *HTTPClient) *Client
         return session;
 }
 
-pub fn hasHeadroom(self: *const ClientSession) bool {
+pub fn hasHeadroom(self: ClientSession) bool {
         return (((((!self.goaway_received) and (!self.encoder_poisoned)) and (self.fatal_error == null)) and (self.streams.count() < self.remote_max_concurrent_streams)) and (self.next_stream_id < H2FrameParser.MAX_STREAM_ID));
 }
 
-pub fn matches(self: *const ClientSession, hostname: []const u8, port: u16, ssl_config: ?*SSLConfig) bool {
+pub fn matches(self: ClientSession, hostname: []const u8, port: u16, ssl_config: ?*SSLConfig) bool {
         return (((self.port == port) and (bun.api.server.ServerConfig.SSLConfig.rawPtr(self.ssl_config) == ssl_config)) and bun.strings.eqlLong(self.hostname, hostname, true));
 }
 
@@ -180,7 +166,7 @@ pub fn drainPending(self: *ClientSession) void {
         }
 }
 
-pub fn canPool(self: *const ClientSession) bool {
+pub fn canPool(self: ClientSession) bool {
         return (((((((((self.streams.count() == 0) and (!self.goaway_received)) and (!self.encoder_poisoned)) and (self.fatal_error == null)) and (self.expecting_continuation == 0)) and (self.read_buffer.items.len == 0)) and self.write_buffer.isEmpty()) and (self.remote_max_concurrent_streams > 0)) and (self.next_stream_id < H2FrameParser.MAX_STREAM_ID));
 }
 
@@ -198,9 +184,8 @@ pub fn writeFrame(self: *ClientSession, frame_type: H2FrameParser.FrameType, fla
 
 pub fn attach(self: *ClientSession, client: *HTTPClient) void {
         _ = bun.debugAssert(self.hasHeadroom());
-        var stream = Stream.new(.{ .id = self.next_stream_id, .session = self, .client = client, .send_window = @intCast(@min(self.remote_initial_window_size, cp_cast_int(u32, H2FrameParser.MAX_WINDOW_SIZE))) });
-        var __stream_moved = false; _ = &__stream_moved;
-        defer if (!__stream_moved) { const T = @TypeOf(stream); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = stream.release() catch {}; } else { stream.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = stream; _drop_val.release(); } };
+        var stream = Stream.new(.{ .id = self.next_stream_id, .session = self, .client = client, .send_window = @intCast(@min(self.remote_initial_window_size, (if (comptime @typeInfo(@TypeOf(H2FrameParser.MAX_WINDOW_SIZE)) == .@"enum") cp_cast_int(u32, @intFromEnum(H2FrameParser.MAX_WINDOW_SIZE)) else cp_cast_int(u32, H2FrameParser.MAX_WINDOW_SIZE)))) });
+        _ = &stream;
         _ = bun.http.H2.live_streams.fetchAdd(1, .monotonic);
         self.next_stream_id = (self.next_stream_id + 2);
         _ = bun.handleOom(self.streams.put(bun.default_allocator, stream.id, stream));
@@ -344,14 +329,12 @@ pub fn streamBodyByHttpId(self: *ClientSession, async_http_id: u32, ended: bool)
 }
 
 pub fn writeWindowUpdate(self: *ClientSession, stream_id: u32, increment: u31) void {
-        const value: u32 = @byteSwap(cp_cast_int(u32, increment));
-        _ = &value;
+        const value: u32 = @byteSwap((if (comptime @typeInfo(@TypeOf(increment)) == .@"enum") cp_cast_int(u32, @intFromEnum(increment)) else cp_cast_int(u32, increment)));
         _ = self.writeFrame(.HTTP_FRAME_WINDOW_UPDATE, 0, stream_id, std.mem.asBytes((&value)));
 }
 
 pub fn replenishWindow(self: *ClientSession) void {
         const threshold = (bun.http.H2.local_initial_window_size / 2);
-        _ = &threshold;
         if ((self.conn_unacked_bytes >= threshold)) {
             _ = self.writeWindowUpdate(0, @intCast(self.conn_unacked_bytes));
             self.conn_unacked_bytes = 0;
@@ -389,7 +372,6 @@ pub fn flush(self: *ClientSession) !bool {
                 return error.WriteFailed;
             }
             const n: usize = @intCast(wrote);
-            _ = &n;
             total = (total + n);
             remaining = remaining[n..];
             if ((n == 0)) {
@@ -423,7 +405,6 @@ pub fn onData(self: *ClientSession, incoming: []const u8) void {
             var __consumed_moved = false; _ = &__consumed_moved;
             defer if (!__consumed_moved) { const T = @TypeOf(consumed); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = consumed.release() catch {}; } else { consumed.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = consumed; _drop_val.release(); } };
             const tail = (self.read_buffer.items.len - consumed);
-            _ = &tail;
             if (((tail > 0) and (consumed > 0))) {
                 _ = bun.copy(u8, self.read_buffer.items[0..tail], self.read_buffer.items[consumed..]);
             }
@@ -501,7 +482,6 @@ pub fn onIdleData(self: *ClientSession, incoming: []const u8) void {
         var __consumed_moved = false; _ = &__consumed_moved;
         defer if (!__consumed_moved) { const T = @TypeOf(consumed); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = consumed.release() catch {}; } else { consumed.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = consumed; _drop_val.release(); } };
         const tail = (self.read_buffer.items.len - consumed);
-        _ = &tail;
         if (((tail > 0) and (consumed > 0))) {
             _ = bun.copy(u8, self.read_buffer.items[0..tail], self.read_buffer.items[consumed..]);
         }
@@ -549,7 +529,6 @@ pub fn onClose(self: *ClientSession, err: anyerror) void {
 pub fn failAll(self: *ClientSession, err: anyerror) void {
         self.fatal_error = ((self.fatal_error) orelse (err));
         const sock = self.socket;
-        _ = &sock;
         if ((!sock.isClosedOrHasError())) {
             var goaway: [8]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
             _ = &goaway;
@@ -666,7 +645,6 @@ pub fn deliverStream(self: *ClientSession, stream: *Stream) bool {
             client.h2 = null;
             _ = client.failFromH2(err);
             return true; }); });
-            _ = &result;
             if (client.state.flags.is_redirect_pending) {
                 _ = stream.rst(.CANCEL);
                 _ = (blk_catch_16: { break :blk_catch_16 ((self.flush()) catch |__ce_16| { _ = &__ce_16;  }); });

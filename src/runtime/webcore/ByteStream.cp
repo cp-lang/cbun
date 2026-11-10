@@ -400,7 +400,7 @@ export class ByteStream {
 
     pub fn toAnyBlob(*_): ?Blob.Any {
         if (_.has_received_last_chunk) {
-            const buffer = _.buffer;
+            const saved_buf = _.buffer;
             _.buffer = .{
                 .allocator = default_allocator,
                 .items = &.{},
@@ -411,7 +411,7 @@ export class ByteStream {
             _.pending.result = .{ .done = {} };
             _.parent().is_closed = true;
             return .{ .InternalBlob = .{
-                .bytes = buffer,
+                .bytes = saved_buf,
                 .was_string = false,
             } };
         }

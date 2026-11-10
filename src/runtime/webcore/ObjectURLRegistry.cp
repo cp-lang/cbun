@@ -4,46 +4,46 @@ const bun = @import("bun");
 const UUID = bun.UUID;
 const jsc = bun.jsc;
 
-export class ObjectURLRegistry {
-    lock: bun.Mutex = .{};
-    map: std.AutoHashMap(UUID, *Entry) = std.AutoHashMap(UUID, *Entry).init(bun.default_allocator);
+pub const ObjectURLRegistry = struct {
+    lock: bun.Mutex = .{},
+    map: std.AutoHashMap(UUID, *Entry) = std.AutoHashMap(UUID, *Entry).init(bun.default_allocator),
 
     pub const Entry = struct {
-        blob: jsc.WebCore.Blob;
+        blob: jsc.WebCore.Blob,
 
         pub const new = bun.TrivialNew(Entry);
-        pub fn init(blob: *const jsc.WebCore.Blob): *Entry {
+        pub fn init(blob: *const jsc.WebCore.Blob) *Entry {
             return Entry.new(.{
                 .blob = blob.dupeWithContentType(true),
             });
         }
 
-        pub fn release(*_): void {
-            _.blob.deinit();
+        pub fn release(this: *Entry) void {
+            this.blob.deinit();
         }
 
-        pub fn deinit(_: *Entry): void {
-            _.release();
-            bun.destroy(_);
+        pub fn deinit(this: *Entry) void {
+            this.release();
+            bun.destroy(this);
         }
     };
 
-    pub fn register(_: *ObjectURLRegistry, vm: *jsc.VirtualMachine, blob: *const jsc.WebCore.Blob): UUID {
+    pub fn register(this: *ObjectURLRegistry, vm: *jsc.VirtualMachine, blob: *const jsc.WebCore.Blob) UUID {
         const uuid = vm.rareData().nextUUID();
         const entry = Entry.init(blob);
 
-        _.lock.lock();
-        defer _.lock.unlock();
-        bun.handleOom(_.map.put(uuid, entry));
+        this.lock.lock();
+        defer this.lock.unlock();
+        bun.handleOom(this.map.put(uuid, entry));
         return uuid;
     }
 
-    pub fn singleton(): *ObjectURLRegistry {
+    pub fn singleton() *ObjectURLRegistry {
         const Singleton = struct {
             pub var registry: ObjectURLRegistry = undefined;
             pub var once = std.once(get);
 
-            fn get(): void {
+            fn get() void {
                 registry = .{};
             }
         };
@@ -52,49 +52,49 @@ export class ObjectURLRegistry {
         return &Singleton.registry;
     }
 
-    fn getDupedBlob(_: *ObjectURLRegistry, uuid: *const UUID): ?jsc.WebCore.Blob {
-        _.lock.lock();
-        defer _.lock.unlock();
-        const entry = _.map.get(uuid.*) orelse return null;
+    fn getDupedBlob(this: *ObjectURLRegistry, uuid: *const UUID) ?jsc.WebCore.Blob {
+        this.lock.lock();
+        defer this.lock.unlock();
+        const entry = this.map.get(uuid.*) orelse return null;
         return entry.blob.dupeWithContentType(true);
     }
 
-    fn uuidFromPathname(pathname: []const u8): ?UUID {
+    fn uuidFromPathname(pathname: []const u8) ?UUID {
         return UUID.parse(pathname) catch return null;
     }
 
-    pub fn resolveAndDupe(_: *ObjectURLRegistry, pathname: []const u8): ?jsc.WebCore.Blob {
+    pub fn resolveAndDupe(this: *ObjectURLRegistry, pathname: []const u8) ?jsc.WebCore.Blob {
         const uuid = uuidFromPathname(pathname) orelse return null;
-        _.lock.lock();
-        defer _.lock.unlock();
-        const entry = _.map.get(uuid) orelse return null;
+        this.lock.lock();
+        defer this.lock.unlock();
+        const entry = this.map.get(uuid) orelse return null;
         return entry.blob.dupeWithContentType(true);
     }
 
-    pub fn resolveAndDupeToJS(_: *ObjectURLRegistry, pathname: []const u8, globalObject: *jsc.JSGlobalObject): ?jsc.JSValue {
-        var blob = jsc.WebCore.Blob.new(_.resolveAndDupe(pathname) orelse return null);
+    pub fn resolveAndDupeToJS(this: *ObjectURLRegistry, pathname: []const u8, globalObject: *jsc.JSGlobalObject) ?jsc.JSValue {
+        var blob = jsc.WebCore.Blob.new(this.resolveAndDupe(pathname) orelse return null);
         return blob.toJS(globalObject);
     }
 
-    pub fn revoke(_: *ObjectURLRegistry, pathname: []const u8): void {
+    pub fn revoke(this: *ObjectURLRegistry, pathname: []const u8) void {
         const uuid = uuidFromPathname(pathname) orelse return;
-        _.lock.lock();
-        defer _.lock.unlock();
-        const entry = _.map.fetchRemove(uuid) orelse return;
+        this.lock.lock();
+        defer this.lock.unlock();
+        const entry = this.map.fetchRemove(uuid) orelse return;
         entry.value.deinit();
     }
 
-    pub fn has(_: *ObjectURLRegistry, pathname: []const u8): bool {
+    pub fn has(this: *ObjectURLRegistry, pathname: []const u8) bool {
         const uuid = uuidFromPathname(pathname) orelse return false;
-        _.lock.lock();
-        defer _.lock.unlock();
-        return _.map.contains(uuid);
+        this.lock.lock();
+        defer this.lock.unlock();
+        return this.map.contains(uuid);
     }
-}
+};
 
 pub const specifier_len = "blob:".len + UUID.stringLength;
 
-pub fn isBlobURL(url: []const u8): bool {
+pub fn isBlobURL(url: []const u8) bool {
     return url.len >= specifier_len and bun.strings.hasPrefixComptime(url, "blob:");
 }
 
@@ -103,7 +103,7 @@ comptime {
     @export(&Bun__createObjectURL, .{ .name = "Bun__createObjectURL" });
 }
 
-fn Bun__createObjectURL_(globalObject: *jsc.JSGlobalObject, callframe: *jsc.CallFrame): bun.JSError!jsc.JSValue {
+fn Bun__createObjectURL_(globalObject: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
     const arguments = callframe.arguments_old(1);
     if (arguments.len < 1) {
         return globalObject.throwNotEnoughArguments("createObjectURL", 1, arguments.len);
@@ -122,7 +122,7 @@ comptime {
     @export(&Bun__revokeObjectURL, .{ .name = "Bun__revokeObjectURL" });
 }
 
-fn Bun__revokeObjectURL_(globalObject: *jsc.JSGlobalObject, callframe: *jsc.CallFrame): bun.JSError!jsc.JSValue {
+fn Bun__revokeObjectURL_(globalObject: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
     const arguments = callframe.arguments_old(1);
     if (arguments.len < 1) {
         return globalObject.throwNotEnoughArguments("revokeObjectURL", 1, arguments.len);
@@ -152,7 +152,7 @@ comptime {
     @export(&jsFunctionResolveObjectURL, .{ .name = "jsFunctionResolveObjectURL" });
 }
 
-fn jsFunctionResolveObjectURL_(globalObject: *jsc.JSGlobalObject, callframe: *jsc.CallFrame): bun.JSError!jsc.JSValue {
+fn jsFunctionResolveObjectURL_(globalObject: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
     const arguments = callframe.arguments_old(1);
     if (arguments.len < 1) {
         return .js_undefined;

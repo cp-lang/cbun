@@ -26,7 +26,7 @@ export enum Opcode(u4) {
     }
 }
 
-export @packed(u16) struct WebsocketHeader {
+pub const WebsocketHeader = packed struct(u16) {
     len: u7,
     mask: bool,
     opcode: Opcode,
@@ -34,40 +34,40 @@ export @packed(u16) struct WebsocketHeader {
     compressed: bool = false,
     final: bool = true,
 
-    pub static fn writeHeader(header: WebsocketHeader, writer: auto, n: usize): ! {
-        writer.writeInt(u16, @as(u16, @bitCast(header)), .big)?;
+    pub fn writeHeader(header: WebsocketHeader, writer: anytype, n: usize) anyerror!void {
+        try writer.writeInt(u16, @as(u16, @bitCast(header)), .big);
         bun.assert(header.len == packLength(n));
     }
 
-    pub static fn packLength(length: usize): u7 {
+    pub fn packLength(length: usize) u7 {
         return switch (length) {
-            0..=125 => @as(u7, @truncate(length)),
-            126..=0xFFFF => 126,
-            * => 127,
+            0...125 => @as(u7, @truncate(length)),
+            126...0xFFFF => 126,
+            else => 127,
         };
     }
 
-    pub static fn lengthByteCount(byte_length: usize): usize {
+    pub fn lengthByteCount(byte_length: usize) usize {
         return switch (byte_length) {
-            0..=125 => 0,
-            126..=0xFFFF => @sizeOf(u16),
-            * => @sizeOf(u64),
+            0...125 => 0,
+            126...0xFFFF => @sizeOf(u16),
+            else => @sizeOf(u64),
         };
     }
 
-    pub static fn frameSize(byte_length: usize): usize {
+    pub fn frameSize(byte_length: usize) usize {
         return 2 + byte_length + lengthByteCount(byte_length);
     }
 
-    pub static fn frameSizeIncludingMask(byte_length: usize): usize {
+    pub fn frameSizeIncludingMask(byte_length: usize) usize {
         return frameSize(byte_length) + 4;
     }
 
-    pub static fn slice(header: WebsocketHeader): [u8; 2] {
-        return @bitCast(@byteSwap(@as(u16, @bitCast(header))));
+    pub fn slice(self: WebsocketHeader) [2]u8 {
+        return @as([2]u8, @bitCast(@byteSwap(@as(u16, @bitCast(self)))));
     }
 
-    pub static fn fromSlice(bytes: [u8; 2]): WebsocketHeader {
-        return @bitCast(@byteSwap(@as(u16, @bitCast(bytes))));
+    pub fn fromSlice(bytes: [2]u8) WebsocketHeader {
+        return @as(WebsocketHeader, @bitCast(@byteSwap(@as(u16, @bitCast(bytes)))));
     }
-}
+};

@@ -91,56 +91,62 @@ export enum InternalSocket {
         };
     }
 
-    zig {
-        pub fn get(this: @This()) ?*us_socket_t {
-            return switch (this) {
-                .connected => this.connected,
-                .connecting, .detached, .upgradedDuplex, .pipe => null,
-            };
-        }
+    pub fn get(this): ?*us_socket_t {
+        return switch (this) {
+            .connected(socket) => socket,
+            else => null,
+        };
+    }
 
-        pub fn eq(this: @This(), other: @This()) bool {
-            return switch (this) {
-                .connected => switch (other) {
-                    .connected => this.connected == other.connected,
-                    .upgradedDuplex, .connecting, .detached, .pipe => false,
-                },
-                .connecting => switch (other) {
-                    .upgradedDuplex, .connected, .detached, .pipe => false,
-                    .connecting => this.connecting == other.connecting,
-                },
-                .detached => switch (other) {
-                    .detached => true,
-                    .upgradedDuplex, .connected, .connecting, .pipe => false,
-                },
-                .upgradedDuplex => switch (other) {
-                    .upgradedDuplex => this.upgradedDuplex == other.upgradedDuplex,
-                    .connected, .connecting, .detached, .pipe => false,
-                },
-                .pipe => switch (other) {
-                    .pipe => if (bun.Environment.isWindows) this.pipe == other.pipe else false,
-                    .connected, .connecting, .detached, .upgradedDuplex => false,
-                },
-            };
-        }
+    pub fn eq(this, other: InternalSocket): bool {
+        return switch (this) {
+            .connected(a) => switch (other) {
+                .connected(b) => a == b,
+                else => false,
+            },
+            .connecting(a) => switch (other) {
+                .connecting(b) => a == b,
+                else => false,
+            },
+            .detached => switch (other) {
+                .detached => true,
+                else => false,
+            },
+            .upgradedDuplex(a) => switch (other) {
+                .upgradedDuplex(b) => a == b,
+                else => false,
+            },
+            .pipe(a) => switch (other) {
+                .pipe(b) => if (bun.Environment.isWindows) a == b else false,
+                else => false,
+            },
+        };
+    }
+}
+
+fn NativeSocketHandleType(@comptime ssl: bool): type {
+    if (ssl) {
+        return bun.BoringSSL.c.SSL;
+    } else {
+        return anyopaque;
     }
 }
 
 export class SocketHandler<const is_ssl: bool> {
+    pub const Self = @This();
     socket: InternalSocket,
 
-    zig {
-        pub const Self = @This();
-        pub const detached: Self = .{ .socket = .detached };
+    pub const detached: SocketHandler(is_ssl) = .{ .socket = .detached };
 
-        pub fn getNativeHandle(this: Self) ?*NativeSocketHandleType(is_ssl) {
-            return @ptrCast(switch (this.socket) {
-                .connected => |socket| socket.getNativeHandle(),
-                .connecting => |socket| socket.getNativeHandle(),
+    pub fn getNativeHandle(this): ?*NativeSocketHandleType(is_ssl) {
+        unsafe {
+            return switch (this.socket) {
+                .connected(socket) => socket.getNativeHandle() as ?*NativeSocketHandleType(is_ssl),
+                .connecting(socket) => socket.getNativeHandle() as ?*NativeSocketHandleType(is_ssl),
                 .detached => null,
-                .upgradedDuplex => |socket| if (is_ssl) @as(*anyopaque, @ptrCast(socket.ssl() orelse return null)) else null,
-                .pipe => |socket| if (is_ssl and bun.Environment.isWindows) @as(*anyopaque, @ptrCast(socket.ssl() orelse return null)) else null,
-            } orelse return null);
+                .upgradedDuplex(socket) => if (is_ssl) socket.ssl() as ?*NativeSocketHandleType(is_ssl) else null,
+                .pipe(socket) => if (is_ssl && bun.Environment.isWindows) socket.ssl() as ?*NativeSocketHandleType(is_ssl) else null,
+            };
         }
     }
 
@@ -437,100 +443,98 @@ export class SocketHandler<const is_ssl: bool> {
         return Self { socket = InternalSocket.pipe(pipe) };
     }
 
-    zig {
-        pub const fromFd = struct {
-            pub fn call(
-                g: *SocketGroup,
-                k: SocketKind,
-                handle: bun.FD,
-                comptime This: type,
-                this: *This,
-                comptime socket_field_name: ?[]const u8,
-                is_ipc: bool,
-            ) ?SocketHandler(is_ssl) {
-                const raw = g.fromFd(k, null, @sizeOf(?*This), handle.native(), is_ipc) orelse return null;
-                const socket_ = SocketHandler(is_ssl){ .socket = .{ .connected = raw } };
+    pub const fromFd = struct {
+        pub fn call(
+            g: *SocketGroup,
+            k: SocketKind,
+            handle: bun.FD,
+            comptime This: type,
+            this: *This,
+            comptime socket_field_name: ?[]const u8,
+            is_ipc: bool,
+        ) ?SocketHandler(is_ssl) {
+            const raw = g.fromFd(k, null, @sizeOf(?*This), handle.native(), is_ipc) orelse return null;
+            const socket_ = SocketHandler(is_ssl){ .socket = .{ .connected = raw } };
 
-                raw.ext(?*This).* = this;
-                if (comptime socket_field_name) |field| {
-                    @field(this, field) = socket_;
-                }
-                return socket_;
+            raw.ext(?*This).* = this;
+            if (comptime socket_field_name) |field| {
+                @field(this, field) = socket_;
             }
-        }.call;
+            return socket_;
+        }
+    }.call;
 
-        pub const connectGroup = struct {
-            pub fn call(
-                g: *SocketGroup,
-                kind: SocketKind,
-                ssl_ctx: ?*bun.uws.SslCtx,
-                raw_host: []const u8,
-                port: anytype,
-                owner: anytype,
-                allow_half_open: bool,
-            ) !SocketHandler(is_ssl) {
-                const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
-                const opts: c_int = if (allow_half_open) bun.uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0;
-                const host = if (raw_host.len > 1 and raw_host[0] == '[' and raw_host[raw_host.len - 1] == ']')
-                    raw_host[1 .. raw_host.len - 1]
-                else
-                    raw_host;
-                var stack: [256]u8 = undefined;
-                const hostZ: [:0]const u8 = if (host.len < stack.len) blk: {
-                    @memcpy(stack[0..host.len], host);
-                    stack[host.len] = 0;
-                    break :blk stack[0..host.len :0];
-                } else bun.handleOom(bun.default_allocator.dupeZ(u8, host));
-                defer if (hostZ.ptr != &stack) bun.default_allocator.free(hostZ);
+    pub const connectGroup = struct {
+        pub fn call(
+            g: *SocketGroup,
+            kind: SocketKind,
+            ssl_ctx: ?*bun.uws.SslCtx,
+            raw_host: []const u8,
+            port: anytype,
+            owner: anytype,
+            allow_half_open: bool,
+        ) !SocketHandler(is_ssl) {
+            const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
+            const opts: c_int = if (allow_half_open) bun.uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0;
+            const host = if (raw_host.len > 1 and raw_host[0] == '[' and raw_host[raw_host.len - 1] == ']')
+                raw_host[1 .. raw_host.len - 1]
+            else
+                raw_host;
+            var stack: [256]u8 = undefined;
+            const hostZ: [:0]const u8 = if (host.len < stack.len) blk: {
+                @memcpy(stack[0..host.len], host);
+                stack[host.len] = 0;
+                break :blk stack[0..host.len :0];
+            } else bun.handleOom(bun.default_allocator.dupeZ(u8, host));
+            defer if (hostZ.ptr != &stack) bun.default_allocator.free(hostZ);
 
-                return switch (g.connect(kind, ssl_ctx, hostZ, @intCast(port), opts, @sizeOf(?*Owner))) {
-                    .failed => error.FailedToOpenSocket,
-                    .socket => |s| blk: {
-                        s.ext(?*Owner).* = owner;
-                        break :blk .{ .socket = .{ .connected = s } };
-                    },
-                    .connecting => |cs| blk: {
-                        cs.ext(?*Owner).* = owner;
-                        break :blk .{ .socket = .{ .connecting = cs } };
-                    },
-                };
-            }
-        }.call;
+            return switch (g.connect(kind, ssl_ctx, hostZ, @intCast(port), opts, @sizeOf(?*Owner))) {
+                .failed => error.FailedToOpenSocket,
+                .socket => |s| blk: {
+                    s.ext(?*Owner).* = owner;
+                    break :blk .{ .socket = .{ .connected = s } };
+                },
+                .connecting => |cs| blk: {
+                    cs.ext(?*Owner).* = owner;
+                    break :blk .{ .socket = .{ .connecting = cs } };
+                },
+            };
+        }
+    }.call;
 
-        pub const connectUnixGroup = struct {
-            pub fn call(
-                g: *SocketGroup,
-                kind: SocketKind,
-                ssl_ctx: ?*bun.uws.SslCtx,
-                path: []const u8,
-                owner: anytype,
-                allow_half_open: bool,
-            ) !SocketHandler(is_ssl) {
-                const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
-                const opts: c_int = if (allow_half_open) bun.uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0;
-                const s = g.connectUnix(kind, ssl_ctx, path.ptr, path.len, opts, @sizeOf(?*Owner)) orelse
-                    return error.FailedToOpenSocket;
-                s.ext(?*Owner).* = owner;
-                return .{ .socket = .{ .connected = s } };
-            }
-        }.call;
+    pub const connectUnixGroup = struct {
+        pub fn call(
+            g: *SocketGroup,
+            kind: SocketKind,
+            ssl_ctx: ?*bun.uws.SslCtx,
+            path: []const u8,
+            owner: anytype,
+            allow_half_open: bool,
+        ) !SocketHandler(is_ssl) {
+            const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
+            const opts: c_int = if (allow_half_open) bun.uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0;
+            const s = g.connectUnix(kind, ssl_ctx, path.ptr, path.len, opts, @sizeOf(?*Owner)) orelse
+                return error.FailedToOpenSocket;
+            s.ext(?*Owner).* = owner;
+            return .{ .socket = .{ .connected = s } };
+        }
+    }.call;
 
-        pub const adoptGroup = struct {
-            pub fn call(
-                tcp: *us_socket_t,
-                g: *SocketGroup,
-                kind: SocketKind,
-                comptime Owner: type,
-                comptime field: []const u8,
-                owner: *Owner,
-            ) bool {
-                const new_s = tcp.adopt(g, kind, @sizeOf(*anyopaque), @sizeOf(*anyopaque)) orelse return false;
-                new_s.ext(*anyopaque).* = owner;
-                @field(owner, field) = .{ .socket = .{ .connected = new_s } };
-                return true;
-            }
-        }.call;
-    }
+    pub const adoptGroup = struct {
+        pub fn call(
+            tcp: *us_socket_t,
+            g: *SocketGroup,
+            kind: SocketKind,
+            comptime Owner: type,
+            comptime field: []const u8,
+            owner: *Owner,
+        ) bool {
+            const new_s = tcp.adopt(g, kind, @sizeOf(*anyopaque), @sizeOf(*anyopaque)) orelse return false;
+            new_s.ext(*anyopaque).* = owner;
+            @field(owner, field) = .{ .socket = .{ .connected = new_s } };
+            return true;
+        }
+    }.call;
 
     pub static fn from(socket: *us_socket_t): Self {
         return Self { socket = InternalSocket.connected(socket) };
@@ -653,12 +657,4 @@ export enum AnySocket {
 
 export const NewSocketHandler = SocketHandler;
 
-zig {
-    fn NativeSocketHandleType(comptime ssl: bool) type {
-        if (ssl) {
-            return bun.BoringSSL.c.SSL;
-        } else {
-            return anyopaque;
-        }
-    }
-}
+

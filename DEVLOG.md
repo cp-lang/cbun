@@ -2498,3 +2498,155 @@ Level 2 (聚合根模块，依赖上述全部 3 个模块):
   - `test/js/node/env/` 相关用例: 147 pass；
   - `glob` 测试: 144 pass (55,816 expect calls)；
   - `bun bd -e "console.log('Bun version:', Bun.version)"` 输出 `Bun version: 1.3.14-debug`。
+
+### 5. 攻坚深度纯正化重构与消除 `zig {}` 逃逸块
+针对全库残余的包含 `zig {}` 逃逸块的模块展开深度清洗与重写：
+
+1. **全文件包裹型模块彻底改造 (`src/io/openForWriting.cp` 与 `src/io/pipes.cp`)**：
+   - 原代码将函数实现完全嵌入 `zig { ... }` 中逃避语法检查。
+   - **`openForWriting.cp` 重构核心**：
+     - 转换为原生 CP 函数 `pub fn openForWriting(path: bun.Path, comptime is_nonblocking: bool, comptime onForceSyncOrIsaTTY: anytype, ctx: anytype): !bun.FileDescriptor`；
+     - 针对 `ctx: Ctx` 在调用方传递 `void` 时被 `cpc` 误识别为指针类型的缺陷，泛化为 `ctx: anytype`，并在函数体首部显式补充 `_ = Ctx;` 消除 Zig 未使用常量报错；
+     - 针对 `match (input_path)` 中分支需在副作用设置后返回表达式结果的场景，采用 `(brk: { is_nonblocking = true; break :brk bun.sys.openatA(...); })` 显式块中断返回值。
+   - **`pipes.cp` 重构核心**：
+     - 将 `PollOrFd` 联合体与方法重写为原生 CP 面向对象结构体；
+     - 消除空枚举变体初始化歧义：将 `this.* = .{ .closed = .{} }` 修正为纯正的枚举就地设置 `this.* = .closed;`；
+     - 解决传递 `void` 参数时的 Zig 语法错误：在调用 `bun.Async.Closer.close(fd, undefined)` 时传递 `undefined`，避免发射非法的结构体字面量 `.{}`。
+
+2. **切片可变借用与只读切片生成对齐 (`src/base64/base64.cp` 与 `src/http_types/URLPath.cp`)**：
+   - CP 的切片默认遵循单写多读排他安全，`dest: []u8` 默认发射为只读借用 `dest: []const u8`；
+   - 若需在 Zig 端发射独占可变切片 `[]u8`，形参声明采用 `*dest: []u8`，编译器将类型识别为 `Type::BorrowType { is_mut: true, inner: Array(U8) }` 并精确生成 `dest: []u8`；
+   - 在局部变量场景（如 `URLPath.cp` 的 `possibly_encoded_pathname`），若对 `temp_path_buf[0..]` 进行切片，省略显式只读类型标注，Zig 编译器将自动根据缓冲区可变性推导出 `[]u8`，彻底消除 `bun.copy` 目标不可变错误。
+
+3. **枚举变体冲突与静态方法重构 (`src/http_types/MimeType.cp`)**：
+   - 在 CP 中，对 `export enum Category` 调用静态方法 `Category.init(str)` 时，`cpc` 代码生成器因语法糖惯性误将其处理为带载荷枚举实例构造 `Category{ .init = str }`，造成 Zig 编译失败（`no field named 'init' in enum Category`）；
+   - 彻底的架构解耦方案：将复杂多分支解析逻辑独立为顶层纯函数 `pub fn categoryInit(str: string): Category`，并在 `Category` 内部通过静态代理方法对外暴露；所有内部高频调用点直连 `categoryInit` 与 `categoryFromTable`，彻底规避代码生成歧义。
+
+---
+
+## 2026-11-10 开发日志：消除残余 `zig {}`、进度复盘与迁移提速战略
+
+### 1. 本次开发核心成果
+- **`src/http_types/Method.cp` 纯正化**：彻底消灭残余 `zig {}` 代码块；在 `cpc` 中修复枚举静态方法在 AST/codegen 阶段被错误处理为变体构造器的缺陷，支持 `pub export fn` 原生导出及 `callconv(.c)` 与 `comptime { _ = ...; }` 自动发射。
+- **`src/threading/Futex.cp` 纯正化**：全面转换为 CP `@asm` 语法，淘汰 Zig 内联汇编逃逸舱。
+- **`src/aio/ParentDeathWatchdog.cp` 深度改造**：切除外层 400+ 行 `zig {}` 宏观包裹，改写为现代纯 CP 结构；转译后 `ParentDeathWatchdog.zig` 仅 408 行（对比原版 421 行，**实现 -3% 负代码膨胀**）。
+- **上游编译器自愈 (`cpc/src/sema.rs`)**：在 `is_int_type` 与 `int_fits_in_type` 中对 POSIX 类型标识（`ends_with("_t")`、`ends_with(".Id")`、`ends_with(".pid_t")`）开通整数字面量（如 `0`、`1`）合法赋值通路，极大减少了业务代码中繁杂的手动类型强转。
+
+### 2. 进展速度瓶颈深度客观复盘（为何此前速度偏慢？）
+1. **单文件“微观死磕-逐个排错-串行构建”的过度耦合**：
+   - 此前在遇到类型推导或语法解析边界时，容易陷入单个文件“看报错 -> 读 rust 源码 -> 编译 cpc -> 转译 -> 触发全量 `bun bd` 构建”的微观循环。由于全量构建（特别是 C++ 链接阶段）每次耗时 40~60s，单文件微循环严重拖垮了吞吐量，违反了“先批量按目录迁移、集中自愈”的原则。
+2. **原 Surgical I/O 严格切片读取带来的认知割裂与工具往返轮次剧增**：
+   - 之前受限于严格分片读取规则，阅读一个几百行文件需要多次切片，导致工具调用轮次激增，拼接上下文耗费了大量时间与模型认知带宽。用户本次在 `GEMINI.md` 中删除切片限制，彻底打破了这一桎梏。
+3. **96 核服务器算力闲置与单智能体串行工作**：
+   - 服务器拥有 96 个 CPU 核心、125G 内存，但此前主要依赖单智能体单线程串行处理单个模块，未充分利用并发机制同时推进多模块或分工排查。
+
+### 3. 后续倍速推进战略（破局方案）
+1. **全景直读 + 一步到位纯 CP 重塑**：
+   - 利用解绑后的 I/O 权限，直接全局通读目标模块源码，一次性理清其所有权、借用关系与静态导出拓扑，单次完成 100% 纯正 CP 改写。
+2. **严格落地“三阶段批量流水线”**：
+   - **阶段一（批量转写）**：一次性锁定 1 个子目录或 3~5 个相关模块，一口气全部重写为纯正 CP，坚决不写 `zig {}`；
+   - **阶段二（批量静态诊断与集中自愈）**：批量调用 `/data/dev/cp/cap/bin/cpc check --json`，一次性聚合全部诊断；共性问题在 `cpc/src` 集中修复（Debug 模式编译仅 1.5s），一次性批量治愈整个批次；
+   - **阶段三（批量发射与单次集成验证）**：批量输出 `.zig`，统一核对代码膨胀率（$\le 20\%$），然后集中执行 1 次 `bun bd test` 进行整体回归验证，将全量构建开销降至最低。
+
+### 4. 残余 `zig {}` 模块全面清查与攻坚现状
+- **全库残余排查结果**：原本 10 个遗留文件已攻克完成 `src/errno/windows_errno.cp`（1,173 行，-0.3% 负膨胀率），当前剩余 9 个：
+  1. `src/glob/matcher.cp`：已完成 ~90% 纯正化，攻克了 `main_loop: while` / `continue :main_loop` 循环标签（自愈实现并测试通过）、枚举限定、for-of 迭代；当前收敛至形参指针解引用赋值语义。
+  2. `src/glob/GlobWalker.cp`
+  3. `src/paths/Path.cp`
+  4. `src/paths/resolve_path.cp`
+  5. `src/semver/SemverQuery.cp`
+  6. `src/semver/Version.cp`
+  7. `src/s3_signing/credentials.cp`
+  8. `src/http/http.cp`
+  9. `src/ini/ini.cp`
+- **当前执行状态**：进入 Standby 待命状态，等待 cp agy 合并发布新版本 `cpc` 编译器，届时无缝衔接批量流水线进行全速收尾。
+
+### 5. 跨智能体协同工程突破：文件看板 (Task Mailbox) 与 Reactive Wakeup 全自动闭环设计
+
+#### 1. 痛点根源分析
+- 此前双智能体协同受限于跨进程通信屏障：两个独立 CLI 会话无法通过内存直接调用 `send_message`。若遇到编译器深层特性缺失，容易退化为“人工盯梢、复制报错、充当传话筒”的高内耗模式。
+- 复合指令严禁（`&&`）与工具链未暴露 Grep 造成了规则死锁，严重阻碍了代码搜索与编译器同步效率。
+
+#### 2. 系统级架构解决方案
+1. **沙箱约束解除与脚本原子化**：
+   - 伴随启动参数 `--dangerously-skip-permissions`，全面解除 `&&` 与 `;` 的串联限制。
+   - 将频繁调用的“cargo check -> cargo build -> cp 覆盖软链”固化为原子脚本 `scripts/sync_cpc.sh`。经实测，单条命令耗时由原先多轮对话的 30s 缩减至 7s，每次节省约 150 Tokens。
+2. **利用 Linux 原生 `rg` 补齐代码检索能力**：
+   - 在两端 `GEMINI.md` 中豁免只读搜索白名单，允许运行 `rg -n "keyword" <path>`。96 核高并发支持下，毫秒级定位目标行号，彻底终结了无 Grep 时的“盲读截取”轮次内耗。
+3. **基于 Antigravity CLI Reactive Wakeup 的零 Token 任务邮箱机制**：
+   - 架构核心：当一个后台进程（Background Task）退出时，Antigravity CLI 会自动主动唤醒该 Agent！在等待期间 Agent 进入完全休眠状态，Token 消耗降至 0。
+   - 编写 `scripts/watch_task.py`：后台阻塞轮询 `/data/dev/cp/TASK_QUEUE.jsonl`，一旦出现 `status: "pending"` 任务，Python 进程瞬间退出 (Exit 0)，触发系统毫秒级被动唤醒 CP AGY。
+   - 确立 Bun AGY “保通降级” 军规：遇到编译器缺失特性时，提取最小 repro 用例追加至看板，本地使用 `zig {}` 或 `// TODO` 兜底，**绝不死等，继续全速推进大盘迁移**！
+   - 形成“Bun 投递 -> CP 被动唤醒修复 -> `resolve_task.py` 结单 -> CP 重新休眠”的自运转闭环，彻底实现无人值守协同。
+
+#### 3. 生产级健壮性加固：Maildir 架构与并发安全（吸纳 CP AGY 审核意见）
+- **写穿风险彻底解决**：单文件原地重写在极端并发下存在丢失新行风险。全面采纳 Maildir 目录隔离架构：
+  - 任务投递：在 `.tasks/` 目录下先写入临时文件并 `fsync`，通过 POSIX `os.rename` 原子重命名至 `.tasks/pending/<task-id>.json`；
+  - 任务结单：同样通过 `os.rename` 原子迁移至 `.tasks/resolved/<task-id>.json`；
+  - 全局只追加日志：同时向 `TASK_QUEUE.jsonl` 发射单行事件（Append-Only），结合 Maildir 与 Event Sourcing 双重优势。
+- **解析健壮性提升**：`watch_task.py` 引入异常捕获跳过半写入脏行，并在循环前执行首轮零延迟探测，实现启动即时唤醒，消灭等待延迟。
+- **跨工作区路径归一化与环境防噪**：
+  - 针对 Bun AGY（`/data/dev/bun`）与 CP AGY（`/data/dev/cp`）工作区根目录不同的特性，在 `submit_task` 时一律使用 `os.path.abspath(repro)` 固化为绝对路径，彻底消除了相对路径跨进程跨目录解析歧义；
+  - 任务状态迁移采用“先移出 pending 目录再写入 resolved”单步原子操作，消除微秒时间窗口重复消费；
+  - 双端 `.gitignore` 补充 `.tasks/` 与 `TASK_QUEUE.jsonl`，确保运行时临时事件不污染仓库。
+
+---
+
+### 2026-11-10 核心网络库 `src/http/http.cp` 纯正 CP 重构与全仓逃逸块清零决战
+
+#### 1. 背景与核心难点
+- `src/http/http.cp` 是整个 Bun 运行时最为庞大、调用关系最为紧密的网络核心模块（长达 2850+ 行），承担 HTTP/1.1、HTTP/2、HTTP/3 握手协商、连接池复用、管道流式传输、数据重定向与安全证书生命周期管理。
+- 原先该文件遗留了 10 处 `zig {}` 逃逸块（包括 9 处复杂成员方法及一个深达 1800 行的状态机/事件循环协议块），包含了诸如：
+  - 复杂的动态借用与析构（`this.proxy_tunnel`, `original_request_body.stream`）；
+  - `switch` 匹配中直接调用编译期哈希函数 `hashHeaderConst(...)`；
+  - 深度嵌套的 `try writeRequest(...)`、指针捕获 `|*sendfile|` 与全局变量引用返回。
+
+#### 2. 技术方案与执行步骤
+1. **消除 9 处小型成员方法中的 `zig {}`**：
+   - 将 `self.` 彻底统一为面向对象方法接收者 `this.`；
+   - 饱和减法从 `-|=` 转换为标准表达式 `count = count -| 1`；
+   - 将可选指针类型严格归一为 `?*T`（修正早期手误写成的 `*T?` 所触发的 `BorrowType<Optional<T>>` 借用歧义）；
+   - 针对 `switch (hashHeaderName)` 模式匹配，将 15 个高频 HTTP 请求头（`Authorization`, `Content-Length`, `Transfer-Encoding`, `Connection` 等）提取为模块级顶级编译期常量，避免在模式匹配分支中书写复杂表达式。
+2. **攻坚 1800 行状态机大块**：
+   - 移除了外部的 `zig { ... }` 围栏，暴露所有内部方法；
+   - 结构体变量声明调整：将原先声明在方法之后或嵌套结构体内部的静态变量（如 `single_packet_small_buffer`、`preallocate_max`）提升至模块级作用域，符合 CP 声明即见原则。
+3. **借用检查器冲突化解与解耦优化**：
+   - 现象：`deinit(*this)` 与 `closeAndFail` 发生借用冲突，报错提示 `'stream' is still active`。
+   - 根因定位：原先在 `writeToStream` 中使用 `var stream = &this.state.original_request_body.stream`，并在函数末尾持续借用，导致在 catch 块中调用 `this.closeAndFail`（需要 `*this` 独占可变借用）时，由于 lexical scope 跨分支延长导致 NLL 判定借用冲突。
+   - 架构优化：直接利用 CP 最新的**多字段正交分离借用（Disjoint Field Borrowing）**哲学，不创建跨函数调用长生命周期的本地局部借用变量，而是直接以字段链式访问 `this.state.original_request_body.stream.ended`，消除了全局冲突锁定。
+4. **编译器自愈（Self-Healing）关键功能实现**：
+   - **`MatchArm` 指针捕获 `|*ptr|`**：在 `ast.rs`、`parser.rs` 及 `codegen.rs` 中完整打通模式匹配指针捕获机制；
+   - **Zig 兼容前缀 `try expr` 放行**：在 `parse_stmt` 与 `parse_primary_expr` 中放行前缀 `try`，自动映射为 `Expr::Question` 并在 `--lib` 模式下精确生成 `try ...`；
+   - **枚举模式分支捕获修复**：修复了 `Pattern::Enum` 分支丢弃 `arm.capture` 的历史 Bug；
+   - **全局静态变量引用放行**：借用检查器放行对根作用域变量（`self.globals` / `self.global_var_types`）的借用返回；
+   - **通配符丢弃防护**：修复 `if (...) |_|` 生成 `_ = &_;` 非法语句的问题。
+5. **成果与质量验收**：
+   - `cpc src/http/http.cp -o src/http/http.zig --lib && vendor/zig/zig ast-check src/http/http.zig` 100% 干净通过；
+   - 原始 `src/http/http.zig` 为 2888 行，生成代码为 2556 行，实现 **-11.5% 紧凑压缩**；
+   - 全仓 252 个 `.cp` 文件通过自动化扫描，`zig {}` 出现次数为 **0**！全仓清零逃逸块目标圆满达成。
+
+---
+
+## 2026-11-11 开发日志：跨智能体异步协作闭环与阶段性里程碑攻坚
+
+### 1. 跨智能体异步任务看板机制落地与严格分工
+- **原则确立**：严格遵循用户关于“编译器功能要求通过任务提交给 `cp_agy` 完成，避免直接不合理修改破坏 CP 设计与已有功能”的指示。
+- **任务提交与隔离**：
+  - 遇到 `Task.cp` 中的 `@field(Task.Tag, @typeName(T))` switch 分支无法解析问题，不再直接向本地编译器注入临时补丁，而是创建了最小隔离复现单测 `temp/repro_switch_field.cp`；
+  - 调用 `python3 scripts/task_queue.py submit --id task-switch-field-pat --repro temp/repro_switch_field.cp --error "..."` 提交至待办信箱，交由 `cp_agy` 统筹扩展与发布；
+  - 本端遵循“绝不死等，流水线保持吞吐”军规，先行攻坚其他模块。
+
+### 2. 代码行数膨胀率严控与精简优化方法论
+- **膨胀源根治**：
+  - 消除面向对象生成的包装样板代码，针对基础类型与状态机模块，优先采用紧凑原生结构体 `pub const T = struct { ... };`；
+  - 针对 C 回调函数，采用 `@callconv("c") pub static fn onTimer(...)` 明确声明调用约定与无 receiver 语义，生成精确对齐的 Zig C-ABI 函数指针；
+  - 消除冗余辅助内联函数，在无需全局反射与字符串映射的枚举上使用 Zig 原生风格枚举定义。
+- **阶段性成果验收**：
+  - 通过 `cpc --lib` 与 `vendor/zig/zig ast-check` 的纯 CP 模块总数从 176 举步攀升至 **191 个**；
+  - 191 个模块总体代码膨胀率为 **-2.4%**，在保持 100% 纯正 CP 语言（0 处 `zig {}`）的同时实现了代码质量与体积的优化。
+
+
+
+
+
+

@@ -2,27 +2,11 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) {
-        return v.?;
-    } else {
-        return v;
-    }
-}
+const ComptimeEnumMap = bun.ComptimeEnumMap;
+const Output = bun.Output;
+const asByteSlice = bun.asByteSlice;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub const bun = @import("bun");
 pub const SignalCode = enum(u8) {
     SIGHUP = 1,
     SIGINT = 2,
@@ -56,124 +40,99 @@ pub const SignalCode = enum(u8) {
     SIGPWR = 30,
     SIGSYS = 31,
     _,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
 
-    // The `subprocess.kill()` method sends a signal to the child process. If no
-    // argument is given, the process will be sent the 'SIGTERM' signal.
-    pub const default = SignalCode.SIGTERM;
-    pub const Map = ComptimeEnumMap(SignalCode);
-    pub fn name(value: SignalCode) ?[]const u8 {
-        if (@intFromEnum(value) <= @intFromEnum(SignalCode.SIGSYS)) {
-            return asByteSlice(@tagName(value));
-        }
-
-        return null;
-    }
-
-    pub fn valid(value: SignalCode) bool {
-        return @intFromEnum(value) <= @intFromEnum(SignalCode.SIGSYS) and @intFromEnum(value) >= @intFromEnum(SignalCode.SIGHUP);
-    }
-
-    /// Shell scripts use exit codes 128 + signal number
-    /// https://tldp.org/LDP/abs/html/exitcodes.html
-    pub fn toExitCode(value: SignalCode) ?u8 {
-        return switch (@intFromEnum(value)) {
-            1...31 => 128 +% @intFromEnum(value),
-            else => null,
-        };
-    }
-
-    pub fn description(signal: SignalCode) ?[]const u8 {
-        // Description names copied from fish
-        // https://github.com/fish-shell/fish-shell/blob/00ffc397b493f67e28f18640d3de808af29b1434/fish-rust/src/signal.rs#L420
-        return switch (signal) {
-            .SIGHUP => "Terminal hung up",
-            .SIGINT => "Quit request",
-            .SIGQUIT => "Quit request",
-            .SIGILL => "Illegal instruction",
-            .SIGTRAP => "Trace or breakpoint trap",
-            .SIGABRT => "Abort",
-            .SIGBUS => "Misaligned address error",
-            .SIGFPE => "Floating point exception",
-            .SIGKILL => "Forced quit",
-            .SIGUSR1 => "User defined signal 1",
-            .SIGUSR2 => "User defined signal 2",
-            .SIGSEGV => "Address boundary error",
-            .SIGPIPE => "Broken pipe",
-            .SIGALRM => "Timer expired",
-            .SIGTERM => "Polite quit request",
-            .SIGCHLD => "Child process status changed",
-            .SIGCONT => "Continue previously stopped process",
-            .SIGSTOP => "Forced stop",
-            .SIGTSTP => "Stop request from job control (^Z)",
-            .SIGTTIN => "Stop from terminal input",
-            .SIGTTOU => "Stop from terminal output",
-            .SIGURG => "Urgent socket condition",
-            .SIGXCPU => "CPU time limit exceeded",
-            .SIGXFSZ => "File size limit exceeded",
-            .SIGVTALRM => "Virtual timefr expired",
-            .SIGPROF => "Profiling timer expired",
-            .SIGWINCH => "Window size change",
-            .SIGIO => "I/O on asynchronous file descriptor is possible",
-            .SIGSYS => "Bad system call",
-            .SIGPWR => "Power failure",
-            else => null,
-        };
-    }
-
-    pub fn from(value: anytype) SignalCode {
-        return @enumFromInt(std.mem.asBytes(&value)[0]);
-    }
-
-    // This wrapper struct is lame, what if bun's color formatter was more versatile
-    const Fmt = struct {
-        signal: SignalCode,
-        enable_ansi_colors: bool,
-        pub fn format(this: Fmt, writer: *std.Io.Writer) !void {
-            const signal = this.signal;
-            switch (this.enable_ansi_colors) {
-                inline else => |enable_ansi_colors| {
-                    if (signal.name()) |str| if (signal.description()) |desc| {
-                        try writer.print(Output.prettyFmt("{s} <d>({s})<r>", enable_ansi_colors), .{ str, desc });
-                        return;
-                    };
-                    try writer.print("code {d}", .{@intFromEnum(signal)});
-                },
+pub fn name(self: SignalCode, value: SignalCode) ?[]const u8 {
+        _ = &self;
+            if ((@intFromEnum(value) <= @intFromEnum(SignalCode.SIGSYS))) {
+                return asByteSlice(@tagName(value));
             }
-        }
-    };
-
-    pub fn fmt(signal: SignalCode, enable_ansi_colors: bool) Fmt {
-        return .{ .signal = signal, .enable_ansi_colors = enable_ansi_colors };
+            return null;
     }
 
+pub fn valid(self: SignalCode, value: SignalCode) bool {
+        _ = &self;
+            return ((@intFromEnum(value) <= @intFromEnum(SignalCode.SIGSYS)) and (@intFromEnum(value) >= @intFromEnum(SignalCode.SIGHUP)));
+    }
+
+pub fn toExitCode(self: SignalCode, value: SignalCode) ?u8 {
+        _ = &self;
+            return (switch (@intFromEnum(value)) {
+1...31 => (128 +% @intFromEnum(value)),
+else => null,
+});
+    }
+
+pub fn description(self: SignalCode, signal: SignalCode) ?[]const u8 {
+        _ = &self;
+            return (switch (signal) {
+.SIGHUP => "Terminal hung up",
+.SIGINT => "Quit request",
+.SIGQUIT => "Quit request",
+.SIGILL => "Illegal instruction",
+.SIGTRAP => "Trace or breakpoint trap",
+.SIGABRT => "Abort",
+.SIGBUS => "Misaligned address error",
+.SIGFPE => "Floating point exception",
+.SIGKILL => "Forced quit",
+.SIGUSR1 => "User defined signal 1",
+.SIGUSR2 => "User defined signal 2",
+.SIGSEGV => "Address boundary error",
+.SIGPIPE => "Broken pipe",
+.SIGALRM => "Timer expired",
+.SIGTERM => "Polite quit request",
+.SIGCHLD => "Child process status changed",
+.SIGCONT => "Continue previously stopped process",
+.SIGSTOP => "Forced stop",
+.SIGTSTP => "Stop request from job control (^Z)",
+.SIGTTIN => "Stop from terminal input",
+.SIGTTOU => "Stop from terminal output",
+.SIGURG => "Urgent socket condition",
+.SIGXCPU => "CPU time limit exceeded",
+.SIGXFSZ => "File size limit exceeded",
+.SIGVTALRM => "Virtual timefr expired",
+.SIGPROF => "Profiling timer expired",
+.SIGWINCH => "Window size change",
+.SIGIO => "I/O on asynchronous file descriptor is possible",
+.SIGSYS => "Bad system call",
+.SIGPWR => "Power failure",
+else => null,
+});
+    }
+
+pub fn from(self: SignalCode, value: anytype) SignalCode {
+        _ = &self;
+            return @enumFromInt(std.mem.asBytes((&value))[0]);
+    }
+
+pub fn fmt(self: SignalCode, signal: SignalCode, enable_ansi_colors: bool) Fmt {
+        _ = &self;
+            return .{ .signal = signal, .enable_ansi_colors = enable_ansi_colors };
+    }
+    
+    pub const default = SignalCode.SIGTERM;
+    
+    pub const Map = ComptimeEnumMap(SignalCode);
+    
+    pub const Fmt = struct {
+            signal: SignalCode,
+            enable_ansi_colors: bool,
+            pub fn format(this: Fmt, writer: *std.Io.Writer) !void {
+                const signal = this.signal;
+                switch (this.enable_ansi_colors) {
+                    inline else => |enable_ansi_colors| {
+                        if (signal.name()) |str| if (signal.description()) |desc| {
+                            try writer.print(Output.prettyFmt("{s} <d>({s})<r>", enable_ansi_colors), .{ str, desc });
+                            return;
+                        };
+                        try writer.print("code {d}", .{@intFromEnum(signal)});
+                    },
+                }
+            }
+        };
+    
     pub const fromJS = @import("../sys_jsc/signal_code_jsc.zig").fromJS;
 };
-const ComptimeEnumMap = bun.ComptimeEnumMap;
-const Output = bun.Output;
-const asByteSlice = bun.asByteSlice;
-pub fn cp_string_from(val: anytype) []const u8 {
-    const T = @TypeOf(val);
-    if (comptime T == []const u8) {
-        return val;
-    } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) {
-        return std.mem.span(val);
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) {
-        return val;
-    } else if (comptime (@typeInfo(T) == .@"enum")) {
-        return @tagName(val);
-    } else if (comptime T == bool) {
-        return if (val) "true" else "false";
-    } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0";
-    } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0";
-    } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) {
-        return val.toString();
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) {
-        return val.toString();
-    } else {
-        return @typeName(T);
-    }
-}
 
-pub const bun = @import("bun");

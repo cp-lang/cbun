@@ -2,32 +2,43 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) {
-        return v.?;
-    } else {
-        return v;
-    }
-}
+const Environment = bun.Environment;
+const Maybe = bun.sys.Maybe;
+const Platform = bun.analytics.GenerateHeader.GeneratePlatform;
+const math = std.math;
+const posix = std.posix;
+const fd_t = std.posix.fd_t;
+const debug = bun.Output.scoped(.copy_file, .hidden);
+pub const InputType = (if (Environment.isWindows) bun.OSPathSliceZ else bun.FD);
+pub const LinuxCopyFileState = packed struct(u8) {
+    has_seen_exdev: bool = false,
+    has_ioctl_ficlone_failed: bool = false,
+    has_copy_file_range_failed: bool = false,
+    has_sendfile_failed: bool = false,
+    _: u4 = 0,
+};
+pub const EmptyCopyFileState = struct {};
+pub const CopyFileState = (if (Environment.isLinux) LinuxCopyFileState else EmptyCopyFileState);
+pub const CopyFileReturnType = bun.sys.Maybe(void);
+pub var can_use_copy_file_range = std.atomic.Value(i32).init(0);
+pub var can_use_ioctl_ficlone_ = std.atomic.Value(i32).init(0);
+fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@"struct".fields.len; return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
+pub fn CpUnpackSliceType(comptime T: type, comptime start_idx: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
+pub const bun = @import("bun");
 pub const CopyFileRangeError = error{
     FileTooBig,
     InputOutput,
-    /// `in` is not open for reading; or `out` is not open  for  writing;
-    /// or the  `O.APPEND`  flag  is  set  for `out`.
     FilesOpenedWithWrongFlags,
     IsDir,
     OutOfMemory,
@@ -37,295 +48,262 @@ pub const CopyFileRangeError = error{
     FileBusy,
 } || posix.PReadError || posix.PWriteError || posix.UnexpectedError;
 
-pub const InputType = if (Environment.isWindows) bun.OSPathSliceZ else bun.FD;
 
-pub const LinuxCopyFileState = packed struct(u8) {
-    has_seen_exdev: bool = false,
-    has_ioctl_ficlone_failed: bool = false,
-    has_copy_file_range_failed: bool = false,
-    has_sendfile_failed: bool = false,
-    _: u4 = 0,
-};
-pub const EmptyCopyFileState = struct {};
-pub const CopyFileState = if (Environment.isLinux) LinuxCopyFileState else EmptyCopyFileState;
-pub const CopyFileReturnType = bun.sys.Maybe(void);
+pub fn copyFileWithState(in_fd: InputType, out_fd: InputType, copy_file_state: *CopyFileState) CopyFileReturnType {
+        if (comptime Environment.isMac) {
+            const rc = posix.system.fcopyfile(in_fd.native(), out_fd.native(), null, posix.system.COPYFILE{ .DATA = true });
+            switch (posix.errno(rc)) {
+.SUCCESS => {
+return CopyFileReturnType.success;
+},
+.OPNOTSUPP => {
 
-pub fn copyFileWithState(in: InputType, out: InputType, copy_file_state: *CopyFileState) CopyFileReturnType {
-    if (comptime Environment.isMac) {
-        const rc = posix.system.fcopyfile(in.native(), out.native(), null, posix.system.COPYFILE{ .DATA = true });
-
-        switch (posix.errno(rc)) {
-            .SUCCESS => return CopyFileReturnType.success,
-            // The source file is not a directory, symbolic link, or regular file.
-            // Try with the fallback path before giving up.
-            .OPNOTSUPP => {},
-            else => return CopyFileReturnType.errnoSys(rc, .copyfile).?,
+},
+else => {
+return (CopyFileReturnType.errnoSys(rc, .copyfile)).?;
+},
+}
         }
-    }
+        if (comptime Environment.isLinux) {
+            if (((can_use_ioctl_ficlone() and (!copy_file_state.has_seen_exdev)) and (!copy_file_state.has_ioctl_ficlone_failed))) {
+                const rc = bun.linux.ioctl_ficlone(out_fd, in_fd);
+                _ = bun.sys.syslog("ioctl_ficlone({f}, {f}) = {d}", .{ in_fd, out_fd, rc });
+                switch (bun.sys.getErrno(rc)) {
+.SUCCESS => {
+return CopyFileReturnType.success;
+},
+.XDEV => {
+copy_file_state.has_seen_exdev = true;
+},
+.INTR => {
 
-    if (comptime Environment.isLinux) {
-        if (can_use_ioctl_ficlone() and !copy_file_state.has_seen_exdev and !copy_file_state.has_ioctl_ficlone_failed) {
-            // We only check once if the ioctl is supported, and cache the result.
-            // EXT4 does not support FICLONE.
-            const rc = bun.linux.ioctl_ficlone(out, in);
-            // the ordering is flipped but it is consistent with other system calls.
-            bun.sys.syslog("ioctl_ficlone({f}, {f}) = {d}", .{ in, out, rc });
-            switch (bun.sys.getErrno(rc)) {
-                .SUCCESS => return CopyFileReturnType.success,
-                .XDEV => {
-                    copy_file_state.has_seen_exdev = true;
-                },
-
-                // Don't worry about EINTR here.
-                .INTR => {},
-
-                .ACCES, .BADF, .INVAL, .OPNOTSUPP, .NOSYS, .PERM => {
-                    debug("ioctl_ficlonerange is NOT supported", .{});
-                    can_use_ioctl_ficlone_.store(-1, .monotonic);
-                    copy_file_state.has_ioctl_ficlone_failed = true;
-                },
-                else => {
-                    // Failed for some other reason
-                    copy_file_state.has_ioctl_ficlone_failed = true;
-                },
+},
+.ACCES, .BADF, .INVAL, .OPNOTSUPP, .NOSYS, .PERM => {
+_ = debug("ioctl_ficlonerange is NOT supported", .{});
+                _ = can_use_ioctl_ficlone_.store(0xffffffffffffffff, .monotonic);
+                copy_file_state.has_ioctl_ficlone_failed = true;
+},
+else => {
+copy_file_state.has_ioctl_ficlone_failed = true;
+},
+}
+            }
+            var offset: u64 = 0;
+            _ = &offset;
+            while (true) {
+                const amt = (switch (copyFileRange(in_fd.native(), out_fd.native(), (math.maxInt(i32) - 1), 0, copy_file_state)) {
+.result => |a| a,
+.err => |e| {
+return .{ .initErr = e };
+},
+});
+                if ((amt == 0)) {
+                    break;
+                }
+                offset = (offset + amt);
+            }
+            return CopyFileReturnType.success;
+        }
+        if (comptime Environment.isFreeBSD) {
+            while (true) {
+                const rc = std.c.copy_file_range(in_fd.native(), null, out_fd.native(), null, (math.maxInt(i32) - 1), 0);
+                _ = bun.sys.syslog("copy_file_range({d}, {d}) = {d}", .{ in_fd.native(), out_fd.native(), rc });
+                const errno_code = bun.sys.getErrno(rc);
+                switch (errno_code) {
+.SUCCESS => {
+if ((rc == 0)) {
+                    return CopyFileReturnType.success;
+                }
+},
+.XDEV, .INVAL, .OPNOTSUPP, .BADF => {
+break;
+},
+.INTR => {
+_ = continue;
+},
+else => {
+return .{ .initErr = bun.sys.Error.fromCode(errno_code, .copy_file_range) };
+},
+}
             }
         }
-
-        // Try copy_file_range first as that works at the FS level and is the
-        // most efficient method (if available).
-        var offset: u64 = 0;
-        cfr_loop: while (true) {
-            // The kernel checks the u64 value `offset+count` for overflow, use
-            // a 32 bit value so that the syscall won't return EINVAL except for
-            // impossibly large files (> 2^64-1 - 2^32-1).
-            const amt = switch (copyFileRange(in.native(), out.native(), math.maxInt(i32) - 1, 0, copy_file_state)) {
-                .result => |a| a,
-                .err => |err| return .{ .err = err },
-            };
-            // Terminate when no data was copied
-            if (amt == 0) break :cfr_loop;
-            offset += amt;
+        if (comptime Environment.isWindows) {
+            if (CopyFileReturnType.errnoSys(bun.windows.CopyFileW(in_fd.ptr, out_fd.ptr, 0), .copyfile)) |err| {
+                _ = &err;
+                return err;
+            }
+            return CopyFileReturnType.success;
         }
-        return CopyFileReturnType.success;
-    }
-
-    if (comptime Environment.isFreeBSD) {
-        // FreeBSD 13+ has copy_file_range(2). Unlike Linux, we don't need
-        // kernel-version probing — our minimum is 14.0.
         while (true) {
-            const rc = std.c.copy_file_range(in.native(), null, out.native(), null, math.maxInt(i32) - 1, 0);
-            bun.sys.syslog("copy_file_range({d}, {d}) = {d}", .{ in.native(), out.native(), rc });
-            switch (bun.sys.getErrno(rc)) {
-                .SUCCESS => if (rc == 0) return CopyFileReturnType.success,
-                // Cross-filesystem or unsupported fd type — fall back to r/w loop.
-                .XDEV, .INVAL, .OPNOTSUPP, .BADF => break,
-                .INTR => continue,
-                else => |e| return .{ .err = bun.sys.Error.fromCode(e, .copy_file_range) },
+            switch (copyFileReadWriteLoop(in_fd.native(), out_fd.native(), (math.maxInt(i32) - 1))) {
+.err => |e| {
+return .{ .initErr = e };
+},
+.result => |amt| {
+if ((amt == 0)) {
+                break;
             }
+},
+}
         }
-    }
-
-    if (comptime Environment.isWindows) {
-        if (CopyFileReturnType.errnoSys(bun.windows.CopyFileW(in.ptr, out.ptr, 0), .copyfile)) |err| {
-            return err;
-        }
-
         return CopyFileReturnType.success;
-    }
-
-    while (true) {
-        switch (copyFileReadWriteLoop(in.native(), out.native(), math.maxInt(i32) - 1)) {
-            .err => |err| return .{ .err = err },
-            .result => |amt| {
-                if (amt == 0) break;
-            },
-        }
-    }
-
-    return CopyFileReturnType.success;
 }
 
-pub fn copyFile(in: InputType, out: InputType) CopyFileReturnType {
-    var state: CopyFileState = .{};
-    return copyFileWithState(in, out, &state);
+pub fn copyFile(in_fd: InputType, out_fd: InputType) CopyFileReturnType {
+        var state = CopyFileState{  };
+        _ = &state;
+        return copyFileWithState(in_fd, out_fd, (&state));
 }
 
-pub var can_use_copy_file_range = std.atomic.Value(i32).init(0);
 pub inline fn disableCopyFileRangeSyscall() void {
-    if (comptime !Environment.isLinux) {
-        return;
-    }
-    can_use_copy_file_range.store(-1, .monotonic);
+        if (comptime (!Environment.isLinux)) {
+            return;
+        }
+        _ = can_use_copy_file_range.store(0xffffffffffffffff, .monotonic);
 }
+
 pub fn canUseCopyFileRangeSyscall() bool {
-    const result = can_use_copy_file_range.load(.monotonic);
-    if (result == 0) {
-        if (bun.env_var.BUN_CONFIG_DISABLE_COPY_FILE_RANGE.get()) {
-            debug("copy_file_range is disabled by BUN_CONFIG_DISABLE_COPY_FILE_RANGE", .{});
-            can_use_copy_file_range.store(-1, .monotonic);
-            return false;
-        }
-
-        const kernel = Platform.kernelVersion();
-        if (kernel.orderWithoutTag(.{ .major = 4, .minor = 5 }).compare(.gte)) {
-            debug("copy_file_range is supported", .{});
-            can_use_copy_file_range.store(1, .monotonic);
-            return true;
-        } else {
-            debug("copy_file_range is NOT supported", .{});
-            can_use_copy_file_range.store(-1, .monotonic);
-            return false;
-        }
-    }
-
-    return result == 1;
-}
-
-pub var can_use_ioctl_ficlone_ = std.atomic.Value(i32).init(0);
-pub inline fn disable_ioctl_ficlone() void {
-    if (comptime !Environment.isLinux) {
-        return;
-    }
-    can_use_ioctl_ficlone_.store(-1, .monotonic);
-}
-pub fn can_use_ioctl_ficlone() bool {
-    const result = can_use_ioctl_ficlone_.load(.monotonic);
-    if (result == 0) {
-        if (bun.env_var.BUN_CONFIG_DISABLE_ioctl_ficlonerange.get()) {
-            debug("ioctl_ficlonerange is disabled by BUN_CONFIG_DISABLE_ioctl_ficlonerange", .{});
-            can_use_ioctl_ficlone_.store(-1, .monotonic);
-            return false;
-        }
-
-        const kernel = Platform.kernelVersion();
-        if (kernel.orderWithoutTag(.{ .major = 4, .minor = 5 }).compare(.gte)) {
-            debug("ioctl_ficlonerange is supported", .{});
-            can_use_ioctl_ficlone_.store(1, .monotonic);
-            return true;
-        } else {
-            debug("ioctl_ficlonerange is NOT supported", .{});
-            can_use_ioctl_ficlone_.store(-1, .monotonic);
-            return false;
-        }
-    }
-
-    return result == 1;
-}
-
-pub fn copyFileRange(in: fd_t, out: fd_t, len: usize, flags: u32, copy_file_state: *CopyFileState) Maybe(usize) {
-    if (canUseCopyFileRangeSyscall() and !copy_file_state.has_seen_exdev and !copy_file_state.has_copy_file_range_failed) {
-        while (true) {
-            const rc = std.os.linux.copy_file_range(in, null, out, null, len, flags);
-            bun.sys.syslog("copy_file_range({d}, {d}, {d}) = {d}", .{ in, out, len, rc });
-            switch (bun.sys.getErrno(rc)) {
-                .SUCCESS => return .{ .result = @intCast(rc) },
-                .INVAL => {
-                    copy_file_state.has_copy_file_range_failed = true;
-                },
-                .XDEV => {
-                    copy_file_state.has_seen_exdev = true;
-                    copy_file_state.has_copy_file_range_failed = true;
-                },
-                .OPNOTSUPP, .NOSYS => {
-                    copy_file_state.has_copy_file_range_failed = true;
-                    debug("copy_file_range is NOT supported", .{});
-                    can_use_copy_file_range.store(-1, .monotonic);
-                },
-                .INTR => continue,
-                else => {
-                    copy_file_state.has_copy_file_range_failed = true;
-                },
+        const result = can_use_copy_file_range.load(.monotonic);
+        if ((result == 0)) {
+            if (bun.env_var.BUN_CONFIG_DISABLE_COPY_FILE_RANGE.get()) {
+                _ = debug("copy_file_range is disabled by BUN_CONFIG_DISABLE_COPY_FILE_RANGE", .{});
+                _ = can_use_copy_file_range.store(0xffffffffffffffff, .monotonic);
+                return false;
             }
+            const kernel = Platform.kernelVersion();
+            if (kernel.orderWithoutTag(.{ .major = 4, .minor = 5 }).compare(.gte)) {
+                _ = debug("copy_file_range is supported", .{});
+                _ = can_use_copy_file_range.store(1, .monotonic);
+                return true;
+            } else {
+                _ = debug("copy_file_range is NOT supported", .{});
+                _ = can_use_copy_file_range.store(0xffffffffffffffff, .monotonic);
+                return false;
+            }
+        }
+        return (result == 1);
+}
+
+pub inline fn disable_ioctl_ficlone() void {
+        if (comptime (!Environment.isLinux)) {
+            return;
+        }
+        _ = can_use_ioctl_ficlone_.store(0xffffffffffffffff, .monotonic);
+}
+
+pub fn can_use_ioctl_ficlone() bool {
+        const result = can_use_ioctl_ficlone_.load(.monotonic);
+        if ((result == 0)) {
+            if (bun.env_var.BUN_CONFIG_DISABLE_ioctl_ficlonerange.get()) {
+                _ = debug("ioctl_ficlonerange is disabled by BUN_CONFIG_DISABLE_ioctl_ficlonerange", .{});
+                _ = can_use_ioctl_ficlone_.store(0xffffffffffffffff, .monotonic);
+                return false;
+            }
+            const kernel = Platform.kernelVersion();
+            if (kernel.orderWithoutTag(.{ .major = 4, .minor = 5 }).compare(.gte)) {
+                _ = debug("ioctl_ficlonerange is supported", .{});
+                _ = can_use_ioctl_ficlone_.store(1, .monotonic);
+                return true;
+            } else {
+                _ = debug("ioctl_ficlonerange is NOT supported", .{});
+                _ = can_use_ioctl_ficlone_.store(0xffffffffffffffff, .monotonic);
+                return false;
+            }
+        }
+        return (result == 1);
+}
+
+pub fn copyFileRange(in_fd: fd_t, out_fd: fd_t, len: usize, flags: u32, copy_file_state: *CopyFileState) Maybe(usize) {
+        if (((canUseCopyFileRangeSyscall() and (!copy_file_state.has_seen_exdev)) and (!copy_file_state.has_copy_file_range_failed))) {
+            while (true) {
+                const rc = std.os.linux.copy_file_range(in_fd, null, out_fd, null, len, flags);
+                _ = bun.sys.syslog("copy_file_range({d}, {d}, {d}) = {d}", .{ in_fd, out_fd, len, rc });
+                switch (bun.sys.getErrno(rc)) {
+.SUCCESS => {
+return .{ .initResult = @intCast(rc) };
+},
+.INVAL => {
+copy_file_state.has_copy_file_range_failed = true;
+},
+.XDEV => {
+copy_file_state.has_seen_exdev = true;
+                copy_file_state.has_copy_file_range_failed = true;
+},
+.OPNOTSUPP, .NOSYS => {
+copy_file_state.has_copy_file_range_failed = true;
+                _ = debug("copy_file_range is NOT supported", .{});
+                _ = can_use_copy_file_range.store(0xffffffffffffffff, .monotonic);
+},
+.INTR => {
+_ = continue;
+},
+else => {
+copy_file_state.has_copy_file_range_failed = true;
+},
+}
+                break;
+            }
+        }
+        while ((!copy_file_state.has_sendfile_failed)) {
+            const rc = std.os.linux.sendfile(@intCast(out_fd), @intCast(in_fd), null, len);
+            _ = bun.sys.syslog("sendfile({d}, {d}, {d}) = {d}", .{ in_fd, out_fd, len, rc });
+            switch (bun.sys.getErrno(rc)) {
+.SUCCESS => {
+return .{ .initResult = @intCast(rc) };
+},
+.INTR => {
+_ = continue;
+},
+.INVAL => {
+copy_file_state.has_sendfile_failed = true;
+},
+.XDEV => {
+copy_file_state.has_seen_exdev = true;
+            copy_file_state.has_sendfile_failed = true;
+},
+.OPNOTSUPP, .NOSYS => {
+copy_file_state.has_sendfile_failed = true;
+},
+else => {
+copy_file_state.has_sendfile_failed = true;
+},
+}
             break;
         }
-    }
+        return copyFileReadWriteLoop(in_fd, out_fd, len);
+}
 
-    while (!copy_file_state.has_sendfile_failed) {
-        const rc = std.os.linux.sendfile(@intCast(out), @intCast(in), null, len);
-        bun.sys.syslog("sendfile({d}, {d}, {d}) = {d}", .{ in, out, len, rc });
-        switch (bun.sys.getErrno(rc)) {
-            .SUCCESS => return .{ .result = @intCast(rc) },
-            .INTR => continue,
-            .INVAL => {
-                copy_file_state.has_sendfile_failed = true;
-            },
-            .XDEV => {
-                copy_file_state.has_seen_exdev = true;
-                copy_file_state.has_sendfile_failed = true;
-            },
-            .OPNOTSUPP, .NOSYS => {
-                copy_file_state.has_sendfile_failed = true;
-            },
-            else => {
-                copy_file_state.has_sendfile_failed = true;
-            },
+pub fn copyFileReadWriteLoop(in_fd: fd_t, out_fd: fd_t, len: usize) Maybe(usize) {
+        var buf: [32768]u8 = undefined;
+        _ = &buf;
+        const adjusted_count = @min(buf.len, len);
+        switch (bun.sys.read(.{ .fromNative = in_fd }, buf[0..adjusted_count])) {
+.result => |amt_read| {
+var amt_written: usize = 0;
+        _ = &amt_written;
+        if ((amt_read == 0)) {
+            return .{ .initResult = 0 };
         }
-        break;
-    }
-
-    return copyFileReadWriteLoop(in, out, len);
-}
-
-pub fn copyFileReadWriteLoop(
-    in: fd_t,
-    out: fd_t,
-    len: usize,
-) Maybe(usize) {
-    var buf: [8 * 4096]u8 = undefined;
-    const adjusted_count = @min(buf.len, len);
-    switch (bun.sys.read(.fromNative(in), buf[0..adjusted_count])) {
-        .result => |amt_read| {
-            var amt_written: usize = 0;
-            if (amt_read == 0) return .{ .result = 0 };
-
-            while (amt_written < amt_read) {
-                switch (bun.sys.write(.fromNative(out), buf[amt_written..amt_read])) {
-                    .result => |wrote| {
-                        if (wrote == 0) {
-                            return .{ .result = amt_written };
-                        }
-
-                        amt_written += wrote;
-                    },
-                    .err => |err| return .{ .err = err },
-                }
+        while ((amt_written < amt_read)) {
+            switch (bun.sys.write(.{ .fromNative = out_fd }, buf[amt_written..amt_read])) {
+.result => |wrote| {
+if ((wrote == 0)) {
+                return .{ .initResult = amt_written };
             }
-            if (amt_read == 0) return .{ .result = 0 };
-            return .{ .result = amt_read };
-        },
-        .err => |err| return .{ .err = err },
-    }
+            amt_written = (amt_written + wrote);
+},
+.err => |e| {
+return .{ .initErr = e };
+},
 }
-const Environment = bun.Environment;
-const Maybe = bun.sys.Maybe;
-const Platform = bun.analytics.GenerateHeader.GeneratePlatform;
-const math = std.math;
-const posix = std.posix;
-const fd_t = std.posix.fd_t;
-const debug = bun.Output.scoped(.copy_file, .hidden);
-pub fn cp_string_from(val: anytype) []const u8 {
-    const T = @TypeOf(val);
-    if (comptime T == []const u8) {
-        return val;
-    } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) {
-        return std.mem.span(val);
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) {
-        return val;
-    } else if (comptime (@typeInfo(T) == .@"enum")) {
-        return @tagName(val);
-    } else if (comptime T == bool) {
-        return if (val) "true" else "false";
-    } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0";
-    } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0";
-    } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) {
-        return val.toString();
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) {
-        return val.toString();
-    } else {
-        return @typeName(T);
-    }
+        }
+        if ((amt_read == 0)) {
+            return .{ .initResult = 0 };
+        }
+        return .{ .initResult = amt_read };
+},
+.err => |e| {
+return .{ .initErr = e };
+},
 }
-
-pub const bun = @import("bun");
+}

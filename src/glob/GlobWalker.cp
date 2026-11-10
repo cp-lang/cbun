@@ -1,4 +1,3 @@
-zig {
 // Portions of this file are derived from works under the MIT License:
 //
 // Copyright (c) 2023 Devon Govett
@@ -22,11 +21,34 @@ zig {
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-const isWindows = @import("builtin").os.tag == .windows;
+import * as std from "std";
+import * as builtin from "builtin";
+import * as bun from "bun";
+import * as DirIterator from "../runtime/node/dir_iterator.zig";
+import * as ResolvePath from "../paths/resolve_path.zig";
 
+const isWindows = builtin.os.tag == .windows;
 const log = bun.Output.scoped(.Glob, .visible);
 
-const CursorState = struct {
+const BunString = bun.String;
+const CodepointIterator = bun.strings.UnsignedCodepointIterator;
+const isAllAscii = bun.strings.isAllASCII;
+
+const jsc = bun.jsc;
+const ZigString = bun.jsc.ZigString;
+
+const Cursor = CodepointIterator.Cursor;
+const Codepoint = CodepointIterator.Cursor.CodePointType;
+
+const Syscall = bun.sys;
+const Maybe = bun.sys.Maybe;
+
+const ArrayList = std.ArrayListUnmanaged;
+const mem = std.mem;
+const Arena = std.heap.ArenaAllocator;
+
+const _Internal = struct {
+    const CursorState = struct {
     cursor: CodepointIterator.Cursor = .{},
 
     fn init(iterator: *const CodepointIterator) CursorState {
@@ -138,7 +160,7 @@ pub const SyscallAccessor = struct {
     }
 
     pub fn statat(handle: Handle, path: [:0]const u8) Maybe(bun.Stat) {
-        if (comptime bun.Environment.isWindows) return statatWindows(handle.value, path);
+        if (comptime bun.Environment.isWindows) return _Internal.statatWindows(handle.value, path);
         return switch (Syscall.fstatat(handle.value, path)) {
             .err => |err| .{ .err = err },
             .result => |s| .{ .result = s },
@@ -146,7 +168,7 @@ pub const SyscallAccessor = struct {
     }
 
     pub fn lstatat(handle: Handle, path: [:0]const u8) Maybe(bun.Stat) {
-        if (comptime bun.Environment.isWindows) return statatWindows(handle.value, path);
+        if (comptime bun.Environment.isWindows) return _Internal.statatWindows(handle.value, path);
         return Syscall.lstatat(handle.value, path);
     }
 
@@ -1233,8 +1255,8 @@ pub fn GlobWalker_(
 
             return switch (pattern_component.syntax_hint) {
                 .Double, .Single => true,
-                .WildcardFilepath => matchWildcardFilepath(pattern_component.patternSlice(this.pattern), filepath),
-                .Literal => matchWildcardLiteral(pattern_component.patternSlice(this.pattern), filepath),
+                .WildcardFilepath => _Internal.matchWildcardFilepath(pattern_component.patternSlice(this.pattern), filepath),
+                .Literal => _Internal.matchWildcardLiteral(pattern_component.patternSlice(this.pattern), filepath),
                 else => this.matchPatternSlow(pattern_component, filepath),
             };
         }
@@ -1639,26 +1661,11 @@ pub fn matchWildcardFilepath(glob: []const u8, path: []const u8) bool {
 pub fn matchWildcardLiteral(literal: []const u8, path: []const u8) bool {
     return std.mem.eql(u8, literal, path);
 }
+};
 
-const DirIterator = @import("../runtime/node/dir_iterator.zig");
-const ResolvePath = @import("../paths/resolve_path.zig");
-
-const bun = @import("bun");
-const BunString = bun.String;
-const CodepointIterator = bun.strings.UnsignedCodepointIterator;
-const isAllAscii = bun.strings.isAllASCII;
-
-const jsc = bun.jsc;
-const ZigString = bun.jsc.ZigString;
-
-const Cursor = CodepointIterator.Cursor;
-const Codepoint = CodepointIterator.Cursor.CodePointType;
-
-const Syscall = bun.sys;
-const Maybe = bun.sys.Maybe;
-
-const std = @import("std");
-const ArrayList = std.ArrayListUnmanaged;
-const mem = std.mem;
-const Arena = std.heap.ArenaAllocator;
-}
+pub const SyscallAccessor = _Internal.SyscallAccessor;
+pub const DirEntryAccessor = _Internal.DirEntryAccessor;
+pub const GlobWalker_ = _Internal.GlobWalker_;
+pub const matchWildcardFilepath = _Internal.matchWildcardFilepath;
+pub const matchWildcardLiteral = _Internal.matchWildcardLiteral;
+pub const statatWindows = _Internal.statatWindows;

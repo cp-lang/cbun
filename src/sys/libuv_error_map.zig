@@ -2,151 +2,22 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) {
-        return v.?;
-    } else {
-        return v;
-    }
-}
+const SystemErrno = bun.sys.SystemErrno;
 pub const libuv_error_map = brk: {
-    const entries: []const struct { [:0]const u8, [:0]const u8 } = &.{
-        .{ "E2BIG", "argument list too long" },
-        .{ "EACCES", "permission denied" },
-        .{ "EADDRINUSE", "address already in use" },
-        .{ "EADDRNOTAVAIL", "address not available" },
-        .{ "EAFNOSUPPORT", "address family not supported" },
-        .{ "EAGAIN", "resource temporarily unavailable" },
-        .{ "EAI_ADDRFAMILY", "address family not supported" },
-        .{ "EAI_AGAIN", "temporary failure" },
-        .{ "EAI_BADFLAGS", "bad ai_flags value" },
-        .{ "EAI_BADHINTS", "invalid value for hints" },
-        .{ "EAI_CANCELED", "request canceled" },
-        .{ "EAI_FAIL", "permanent failure" },
-        .{ "EAI_FAMILY", "ai_family not supported" },
-        .{ "EAI_MEMORY", "out of memory" },
-        .{ "EAI_NODATA", "no address" },
-        .{ "EAI_NONAME", "unknown node or service" },
-        .{ "EAI_OVERFLOW", "argument buffer overflow" },
-        .{ "EAI_PROTOCOL", "resolved protocol is unknown" },
-        .{ "EAI_SERVICE", "service not available for socket type" },
-        .{ "EAI_SOCKTYPE", "socket type not supported" },
-        .{ "EALREADY", "connection already in progress" },
-        .{ "EBADF", "bad file descriptor" },
-        .{ "EBUSY", "resource busy or locked" },
-        .{ "ECANCELED", "operation canceled" },
-        .{ "ECHARSET", "invalid Unicode character" },
-        .{ "ECONNABORTED", "software caused connection abort" },
-        .{ "ECONNREFUSED", "connection refused" },
-        .{ "ECONNRESET", "connection reset by peer" },
-        .{ "EDESTADDRREQ", "destination address required" },
-        .{ "EEXIST", "file already exists" },
-        .{ "EFAULT", "bad address in system call argument" },
-        .{ "EFBIG", "file too large" },
-        .{ "EHOSTUNREACH", "host is unreachable" },
-        .{ "EINTR", "interrupted system call" },
-        .{ "EINVAL", "invalid argument" },
-        .{ "EIO", "i/o error" },
-        .{ "EISCONN", "socket is already connected" },
-        .{ "EISDIR", "illegal operation on a directory" },
-        .{ "ELOOP", "too many symbolic links encountered" },
-        .{ "EMFILE", "too many open files" },
-        .{ "EMSGSIZE", "message too long" },
-        .{ "ENAMETOOLONG", "name too long" },
-        .{ "ENETDOWN", "network is down" },
-        .{ "ENETUNREACH", "network is unreachable" },
-        .{ "ENFILE", "file table overflow" },
-        .{ "ENOBUFS", "no buffer space available" },
-        .{ "ENODEV", "no such device" },
-        .{ "ENOENT", "no such file or directory" },
-        .{ "ENOMEM", "not enough memory" },
-        .{ "ENONET", "machine is not on the network" },
-        .{ "ENOPROTOOPT", "protocol not available" },
-        .{ "ENOSPC", "no space left on device" },
-        .{ "ENOSYS", "function not implemented" },
-        .{ "ENOTCONN", "socket is not connected" },
-        .{ "ENOTDIR", "not a directory" },
-        .{ "ENOTEMPTY", "directory not empty" },
-        .{ "ENOTSOCK", "socket operation on non-socket" },
-        .{ "ENOTSUP", "operation not supported on socket" },
-        .{ "EOVERFLOW", "value too large for defined data type" },
-        .{ "EPERM", "operation not permitted" },
-        .{ "EPIPE", "broken pipe" },
-        .{ "EPROTO", "protocol error" },
-        .{ "EPROTONOSUPPORT", "protocol not supported" },
-        .{ "EPROTOTYPE", "protocol wrong type for socket" },
-        .{ "ERANGE", "result too large" },
-        .{ "EROFS", "read-only file system" },
-        .{ "ESHUTDOWN", "cannot send after transport endpoint shutdown" },
-        .{ "ESPIPE", "invalid seek" },
-        .{ "ESRCH", "no such process" },
-        .{ "ETIMEDOUT", "connection timed out" },
-        .{ "ETXTBSY", "text file is busy" },
-        .{ "EXDEV", "cross-device link not permitted" },
-        .{ "UNKNOWN", "unknown error" },
-        .{ "EOF", "end of file" },
-        .{ "ENXIO", "no such device or address" },
-        .{ "EMLINK", "too many links" },
-        .{ "EHOSTDOWN", "host is down" },
-        .{ "EREMOTEIO", "remote I/O error" },
-        .{ "ENOTTY", "inappropriate ioctl for device" },
-        .{ "EFTYPE", "inappropriate file type or format" },
-        .{ "EILSEQ", "illegal byte sequence" },
-        .{ "ESOCKTNOSUPPORT", "socket type not supported" },
-        .{ "ENODATA", "no data available" },
-        .{ "EUNATCH", "protocol driver not attached" },
-    };
+    const entries = (&.{ .{ "E2BIG", "argument list too long" }, .{ "EACCES", "permission denied" }, .{ "EADDRINUSE", "address already in use" }, .{ "EADDRNOTAVAIL", "address not available" }, .{ "EAFNOSUPPORT", "address family not supported" }, .{ "EAGAIN", "resource temporarily unavailable" }, .{ "EAI_ADDRFAMILY", "address family not supported" }, .{ "EAI_AGAIN", "temporary failure" }, .{ "EAI_BADFLAGS", "bad ai_flags value" }, .{ "EAI_BADHINTS", "invalid value for hints" }, .{ "EAI_CANCELED", "request canceled" }, .{ "EAI_FAIL", "permanent failure" }, .{ "EAI_FAMILY", "ai_family not supported" }, .{ "EAI_MEMORY", "out of memory" }, .{ "EAI_NODATA", "no address" }, .{ "EAI_NONAME", "unknown node or service" }, .{ "EAI_OVERFLOW", "argument buffer overflow" }, .{ "EAI_PROTOCOL", "resolved protocol is unknown" }, .{ "EAI_SERVICE", "service not available for socket type" }, .{ "EAI_SOCKTYPE", "socket type not supported" }, .{ "EALREADY", "connection already in progress" }, .{ "EBADF", "bad file descriptor" }, .{ "EBUSY", "resource busy or locked" }, .{ "ECANCELED", "operation canceled" }, .{ "ECHARSET", "invalid Unicode character" }, .{ "ECONNABORTED", "software caused connection abort" }, .{ "ECONNREFUSED", "connection refused" }, .{ "ECONNRESET", "connection reset by peer" }, .{ "EDESTADDRREQ", "destination address required" }, .{ "EEXIST", "file already exists" }, .{ "EFAULT", "bad address in system call argument" }, .{ "EFBIG", "file too large" }, .{ "EHOSTUNREACH", "host is unreachable" }, .{ "EINTR", "interrupted system call" }, .{ "EINVAL", "invalid argument" }, .{ "EIO", "i/o error" }, .{ "EISCONN", "socket is already connected" }, .{ "EISDIR", "illegal operation on a directory" }, .{ "ELOOP", "too many symbolic links encountered" }, .{ "EMFILE", "too many open files" }, .{ "EMSGSIZE", "message too long" }, .{ "ENAMETOOLONG", "name too long" }, .{ "ENETDOWN", "network is down" }, .{ "ENETUNREACH", "network is unreachable" }, .{ "ENFILE", "file table overflow" }, .{ "ENOBUFS", "no buffer space available" }, .{ "ENODEV", "no such device" }, .{ "ENOENT", "no such file or directory" }, .{ "ENOMEM", "not enough memory" }, .{ "ENONET", "machine is not on the network" }, .{ "ENOPROTOOPT", "protocol not available" }, .{ "ENOSPC", "no space left on device" }, .{ "ENOSYS", "function not implemented" }, .{ "ENOTCONN", "socket is not connected" }, .{ "ENOTDIR", "not a directory" }, .{ "ENOTEMPTY", "directory not empty" }, .{ "ENOTSOCK", "socket operation on non-socket" }, .{ "ENOTSUP", "operation not supported on socket" }, .{ "EOVERFLOW", "value too large for defined data type" }, .{ "EPERM", "operation not permitted" }, .{ "EPIPE", "broken pipe" }, .{ "EPROTO", "protocol error" }, .{ "EPROTONOSUPPORT", "protocol not supported" }, .{ "EPROTOTYPE", "protocol wrong type for socket" }, .{ "ERANGE", "result too large" }, .{ "EROFS", "read-only file system" }, .{ "ESHUTDOWN", "cannot send after transport endpoint shutdown" }, .{ "ESPIPE", "invalid seek" }, .{ "ESRCH", "no such process" }, .{ "ETIMEDOUT", "connection timed out" }, .{ "ETXTBSY", "text file is busy" }, .{ "EXDEV", "cross-device link not permitted" }, .{ "UNKNOWN", "unknown error" }, .{ "EOF", "end of file" }, .{ "ENXIO", "no such device or address" }, .{ "EMLINK", "too many links" }, .{ "EHOSTDOWN", "host is down" }, .{ "EREMOTEIO", "remote I/O error" }, .{ "ENOTTY", "inappropriate ioctl for device" }, .{ "EFTYPE", "inappropriate file type or format" }, .{ "EILSEQ", "illegal byte sequence" }, .{ "ESOCKTNOSUPPORT", "socket type not supported" }, .{ "ENODATA", "no data available" }, .{ "EUNATCH", "protocol driver not attached" } });
     var map = std.EnumMap(SystemErrno, [:0]const u8).initFull("unknown error");
-    for (entries) |entry| {
-        const key, const text = entry;
+    _ = &map;
+    for (cp_iter_slice(entries)) |entry| {
+        _ = &entry;
+        const key = entry[0];
+        const text = entry[1];
         if (@hasField(SystemErrno, key)) {
-            map.put(@field(SystemErrno, key), text);
+            _ = map.put(@field(SystemErrno, key), text);
         }
     }
-
-    // sanity check
-    bun.assert(std.mem.eql(u8, map.get(SystemErrno.ENOENT).?, "no such file or directory"));
-
+    _ = bun.assert(std.mem.eql(u8, (map.get(SystemErrno.ENOENT)).?, "no such file or directory"));
     break :brk map;
 };
-const SystemErrno = bun.sys.SystemErrno;
-pub fn cp_string_from(val: anytype) []const u8 {
-    const T = @TypeOf(val);
-    if (comptime T == []const u8) {
-        return val;
-    } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) {
-        return std.mem.span(val);
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) {
-        return val;
-    } else if (comptime (@typeInfo(T) == .@"enum")) {
-        return @tagName(val);
-    } else if (comptime T == bool) {
-        return if (val) "true" else "false";
-    } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0";
-    } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0";
-    } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) {
-        return val.toString();
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) {
-        return val.toString();
-    } else {
-        return @typeName(T);
-    }
-}
-
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
 pub const bun = @import("bun");

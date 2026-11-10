@@ -2,337 +2,7 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) {
-        return v.?;
-    } else {
-        return v;
-    }
-}
-const Error = @This();
-
-const retry_errno = if (Environment.isWindows)
-    @as(Int, @intCast(@intFromEnum(E.INTR)))
-else
-    @as(Int, @intCast(@intFromEnum(E.AGAIN)));
-
-const todo_errno = std.math.maxInt(Int) - 1;
-
-pub const Int = u16;
-
-/// TODO: convert to function
-pub const oom = fromCode(E.NOMEM, .read);
-
-errno: Int = todo_errno,
-fd: bun.FD = bun.invalid_fd,
-from_libuv: if (Environment.isWindows) bool else void = if (Environment.isWindows) false else undefined,
-path: []const u8 = "",
-syscall: sys.Tag = sys.Tag.TODO,
-dest: []const u8 = "",
-
-pub fn clone(this: *const Error, allocator: std.mem.Allocator) Error {
-    var copy = this.*;
-    copy.path = bun.handleOom(allocator.dupe(u8, copy.path));
-    copy.dest = bun.handleOom(allocator.dupe(u8, copy.dest));
-    return copy;
-}
-
-pub fn fromCode(errno: E, syscall_tag: sys.Tag) Error {
-    return .{
-        .errno = @as(Int, @intCast(@intFromEnum(errno))),
-        .syscall = syscall_tag,
-    };
-}
-
-pub fn fromCodeInt(errno: anytype, syscall_tag: sys.Tag) Error {
-    return .{
-        .errno = @as(Int, @intCast(if (Environment.isWindows) @abs(errno) else errno)),
-        .syscall = syscall_tag,
-    };
-}
-
-pub fn format(self: Error, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    var that = self.withoutPath().toShellSystemError();
-    bun.debugAssert(that.path.tag != .WTFStringImpl);
-    bun.debugAssert(that.dest.tag != .WTFStringImpl);
-    that.path = bun.String.borrowUTF8(self.path);
-    that.dest = bun.String.borrowUTF8(self.dest);
-    bun.debugAssert(that.path.tag != .WTFStringImpl);
-    bun.debugAssert(that.dest.tag != .WTFStringImpl);
-
-    return that.format(writer);
-}
-
-pub inline fn getErrno(this: Error) E {
-    return @as(E, @enumFromInt(this.errno));
-}
-
-pub inline fn isRetry(this: *const Error) bool {
-    return this.getErrno() == .AGAIN;
-}
-
-pub const retry = Error{
-    .errno = retry_errno,
-    .syscall = .read,
-};
-
-pub inline fn withFd(this: Error, fd: anytype) Error {
-    if (Environment.allow_assert) bun.assert(fd != bun.invalid_fd);
-    return Error{
-        .errno = this.errno,
-        .syscall = this.syscall,
-        .fd = fd,
-    };
-}
-
-pub inline fn withPath(this: Error, path: anytype) Error {
-    if (std.meta.Child(@TypeOf(path)) == u16) {
-        @compileError("Do not pass WString path to withPath, it needs the path encoded as utf8");
-    }
-    return Error{
-        .errno = this.errno,
-        .syscall = this.syscall,
-        .path = bun.span(path),
-    };
-}
-
-pub inline fn withPathAndSyscall(this: Error, path: anytype, syscall_: sys.Tag) Error {
-    if (std.meta.Child(@TypeOf(path)) == u16) {
-        @compileError("Do not pass WString path to withPath, it needs the path encoded as utf8");
-    }
-    return Error{
-        .errno = this.errno,
-        .syscall = syscall_,
-        .path = bun.span(path),
-    };
-}
-
-pub fn deinit(this: *Error) void {
-    this.deinitWithAllocator(bun.default_allocator);
-}
-
-/// Only call this after it's been .clone()'d
-pub fn deinitWithAllocator(this: *Error, allocator: std.mem.Allocator) void {
-    if (this.path.len > 0) {
-        allocator.free(this.path);
-        this.path = "";
-    }
-    if (this.dest.len > 0) {
-        allocator.free(this.dest);
-        this.dest = "";
-    }
-}
-
-pub inline fn withPathDest(this: Error, path: anytype, dest: anytype) Error {
-    if (std.meta.Child(@TypeOf(path)) == u16) {
-        @compileError("Do not pass WString path to withPathDest, it needs the path encoded as utf8 (path)");
-    }
-    if (std.meta.Child(@TypeOf(dest)) == u16) {
-        @compileError("Do not pass WString path to withPathDest, it needs the path encoded as utf8 (dest)");
-    }
-    return Error{
-        .errno = this.errno,
-        .syscall = this.syscall,
-        .path = bun.span(path),
-        .dest = bun.span(dest),
-    };
-}
-
-pub inline fn withPathLike(this: Error, pathlike: anytype) Error {
-    return switch (pathlike) {
-        .fd => |fd| this.withFd(fd),
-        .path => |path| this.withPath(path.slice()),
-    };
-}
-
-/// When the memory of the path/dest buffer is unsafe to use, call this function to clone the error without the path/dest.
-pub fn withoutPath(this: *const Error) Error {
-    var copy = this.*;
-    copy.path = "";
-    copy.dest = "";
-    return copy;
-}
-
-pub fn name(this: *const Error) []const u8 {
-    if (comptime Environment.isWindows) {
-        const system_errno = brk: {
-            @setRuntimeSafety(false);
-            if (this.from_libuv) {
-                break :brk @as(SystemErrno, @enumFromInt(@intFromEnum(bun.windows.libuv.translateUVErrorToE(-@as(c_int, this.errno)))));
-            }
-
-            break :brk @as(SystemErrno, @enumFromInt(this.errno));
-        };
-        if (bun.tagName(SystemErrno, system_errno)) |errname| {
-            return errname;
-        }
-    } else if (this.errno > 0 and this.errno < SystemErrno.max) {
-        const system_errno = @as(SystemErrno, @enumFromInt(this.errno));
-        if (bun.tagName(SystemErrno, system_errno)) |errname| {
-            return errname;
-        }
-    }
-
-    return "UNKNOWN";
-}
-
-pub fn toZigErr(this: Error) anyerror {
-    return bun.errnoToZigErr(this.errno);
-}
-
-/// 1. Convert libuv errno values into libc ones.
-/// 2. Get the tag name as a string for printing.
-pub fn getErrorCodeTagName(err: *const Error) ?struct { [:0]const u8, SystemErrno } {
-    if (!Environment.isWindows) {
-        if (err.errno > 0 and err.errno < SystemErrno.max) {
-            const system_errno = @as(SystemErrno, @enumFromInt(err.errno));
-            return .{ @tagName(system_errno), system_errno };
-        }
-    } else {
-        const system_errno: SystemErrno = brk: {
-            @setRuntimeSafety(false);
-            if (err.from_libuv) {
-                break :brk @enumFromInt(@intFromEnum(bun.windows.libuv.translateUVErrorToE(@as(c_int, err.errno) * -1)));
-            }
-
-            break :brk @enumFromInt(err.errno);
-        };
-        if (bun.tagName(SystemErrno, system_errno)) |errname| {
-            return .{ errname, system_errno };
-        }
-    }
-    return null;
-}
-
-pub fn msg(this: Error) ?[]const u8 {
-    if (this.getErrorCodeTagName()) |resolved_errno| {
-        const code, const system_errno = resolved_errno;
-        if (coreutils_error_map.get(system_errno)) |label| {
-            return label;
-        }
-        return code;
-    }
-    return null;
-}
-
-/// Simpler formatting which does not allocate a message
-pub fn toShellSystemError(this: Error) SystemError {
-    @setEvalBranchQuota(1_000_000);
-    var err = SystemError{
-        .errno = @as(c_int, this.errno) * -1,
-        .syscall = bun.String.static(@tagName(this.syscall)),
-        .message = .empty,
-    };
-
-    if (this.getErrorCodeTagName()) |resolved_errno| {
-        const code, const system_errno = resolved_errno;
-        err.code = bun.String.static(code);
-        if (coreutils_error_map.get(system_errno)) |label| {
-            err.message = bun.String.static(label);
-        }
-    }
-
-    if (this.path.len > 0) {
-        err.path = bun.String.cloneUTF8(this.path);
-    }
-
-    if (this.dest.len > 0) {
-        err.dest = bun.String.cloneUTF8(this.dest);
-    }
-
-    if (this.fd.unwrapValid()) |valid| {
-        if (!Environment.isWindows or valid.kind == .uv) {
-            err.fd = valid.uv();
-        }
-    }
-
-    return err;
-}
-
-pub fn toSystemError(this: Error) SystemError {
-    var err = SystemError{
-        .errno = -%@as(c_int, this.errno),
-        .syscall = bun.String.static(@tagName(this.syscall)),
-        .message = .empty,
-    };
-
-    var maybe_code: ?[:0]const u8 = null;
-    var label: ?[]const u8 = null;
-    if (this.getErrorCodeTagName()) |resolved_errno| {
-        maybe_code, const system_errno = resolved_errno;
-        err.code = bun.String.static(maybe_code.?);
-        label = libuv_error_map.get(system_errno);
-    }
-
-    var message_buf: [4096]u8 = @splat(0);
-    const message = message: {
-        var stream = std.io.fixedBufferStream(&message_buf);
-        const writer = stream.writer();
-        brk: {
-            if (maybe_code) |code| {
-                writer.writeAll(code) catch break :brk;
-                writer.writeAll(": ") catch break :brk;
-            }
-            writer.writeAll(label orelse "Unknown Error") catch break :brk;
-            writer.writeAll(", ") catch break :brk;
-            writer.writeAll(@tagName(this.syscall)) catch break :brk;
-            if (this.path.len > 0) {
-                writer.writeAll(" '") catch break :brk;
-                writer.writeAll(this.path) catch break :brk;
-                writer.writeAll("'") catch break :brk;
-
-                if (this.dest.len > 0) {
-                    writer.writeAll(" -> '") catch break :brk;
-                    writer.writeAll(this.dest) catch break :brk;
-                    writer.writeAll("'") catch break :brk;
-                }
-            }
-        }
-        break :message stream.getWritten();
-    };
-    err.message = bun.String.cloneUTF8(message);
-
-    if (this.path.len > 0) {
-        err.path = bun.String.cloneUTF8(this.path);
-    }
-
-    if (this.dest.len > 0) {
-        err.dest = bun.String.cloneUTF8(this.dest);
-    }
-
-    if (this.fd.unwrapValid()) |valid| {
-        if (!Environment.isWindows or valid.kind == .uv) {
-            err.fd = valid.uv();
-        }
-    }
-
-    return err;
-}
-
-pub inline fn todo() Error {
-    if (Environment.isDebug) {
-        @panic("Error.todo() was called");
-    }
-    return Error{ .errno = todo_errno, .syscall = .TODO };
-}
-
-pub const toJS = @import("../sys_jsc/error_jsc.zig").toJS;
-pub const toJSWithAsyncStack = @import("../sys_jsc/error_jsc.zig").toJSWithAsyncStack;
-pub const TestingAPIs = @import("../sys_jsc/error_jsc.zig").TestingAPIs;
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const Environment = bun.Environment;
 const SystemError = bun.jsc.SystemError;
 const sys = bun.sys;
@@ -340,29 +10,296 @@ const E = sys.E;
 const SystemErrno = sys.SystemErrno;
 const coreutils_error_map = sys.coreutils_error_map;
 const libuv_error_map = sys.libuv_error_map;
-pub fn cp_string_from(val: anytype) []const u8 {
-    const T = @TypeOf(val);
-    if (comptime T == []const u8) {
-        return val;
-    } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) {
-        return std.mem.span(val);
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) {
-        return val;
-    } else if (comptime (@typeInfo(T) == .@"enum")) {
-        return @tagName(val);
-    } else if (comptime T == bool) {
-        return if (val) "true" else "false";
-    } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0";
-    } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0";
-    } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) {
-        return val.toString();
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) {
-        return val.toString();
-    } else {
-        return @typeName(T);
-    }
+fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@"struct".fields.len; return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
+pub fn CpUnpackSliceType(comptime T: type, comptime start_idx: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
+pub const bun = @import("bun");
+pub const Error = @This();
+
+errno: Int = todo_errno,
+fd: bun.FD = bun.invalid_fd,
+from_libuv: if (Environment.isWindows) bool else void = (if (Environment.isWindows) false else undefined),
+path: []const u8 = "",
+syscall: sys.Tag = sys.Tag.TODO,
+dest: []const u8 = "",
+
+pub fn clone(self: *const Error, allocator: std.mem.Allocator) Error {
+        var copy = self.*;
+        _ = &copy;
+        copy.path = bun.handleOom(allocator.dupe(u8, copy.path));
+        copy.dest = bun.handleOom(allocator.dupe(u8, copy.dest));
+        return copy;
 }
 
-pub const bun = @import("bun");
+pub fn fromCode(errno: E, syscall_tag: sys.Tag) Error {
+        return .{ .errno = (if (comptime @typeInfo(Int) == .@"enum") @as(Int, @enumFromInt(@intCast(@intFromEnum(errno)))) else @as(Int, @intCast(@intFromEnum(errno)))), .syscall = syscall_tag };
+}
+
+pub fn fromCodeInt(errno: anytype, syscall_tag: sys.Tag) Error {
+        return .{ .errno = (if (comptime @typeInfo(Int) == .@"enum") @as(Int, @enumFromInt(@intCast((if (Environment.isWindows) @abs(errno) else errno)))) else @as(Int, @intCast((if (Environment.isWindows) @abs(errno) else errno)))), .syscall = syscall_tag };
+}
+
+pub fn format(self: Error, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        var that = self.withoutPath().toShellSystemError();
+        _ = &that;
+        _ = bun.debugAssert((that.path.tag != .WTFStringImpl));
+        _ = bun.debugAssert((that.dest.tag != .WTFStringImpl));
+        that.path = bun.String.borrowUTF8(self.path);
+        that.dest = bun.String.borrowUTF8(self.dest);
+        _ = bun.debugAssert((that.path.tag != .WTFStringImpl));
+        _ = bun.debugAssert((that.dest.tag != .WTFStringImpl));
+        return that.format(writer);
+}
+
+pub inline fn getErrno(self: Error) E {
+        return (if (comptime @typeInfo(E) == .@"enum") @as(E, @enumFromInt(@enumFromInt(self.errno))) else @as(E, @enumFromInt(self.errno)));
+}
+
+pub inline fn isRetry(self: *const Error) bool {
+        return (self.getErrno() == .AGAIN);
+}
+
+pub inline fn withFd(self: Error, fd: anytype) Error {
+        if (Environment.allow_assert) {
+            _ = bun.assert((fd != bun.invalid_fd));
+        }
+        return Error{ .errno = self.errno, .syscall = self.syscall, .fd = fd };
+}
+
+pub inline fn withPath(self: Error, path_val: anytype) Error {
+        if ((std.meta.Child(@TypeOf(path_val)) == u16)) {
+            _ = @compileError("Do not pass WString path to withPath, it needs the path encoded as utf8");
+        }
+        return Error{ .errno = self.errno, .syscall = self.syscall, .path = bun.span(path_val) };
+}
+
+pub inline fn withPathAndSyscall(self: Error, path_val: anytype, syscall_: sys.Tag) Error {
+        if ((std.meta.Child(@TypeOf(path_val)) == u16)) {
+            _ = @compileError("Do not pass WString path to withPath, it needs the path encoded as utf8");
+        }
+        return Error{ .errno = self.errno, .syscall = syscall_, .path = bun.span(path_val) };
+}
+
+pub fn deinit(self: *Error) void {
+        _ = self.deinitWithAllocator(bun.default_allocator);
+}
+
+pub fn deinitWithAllocator(self: *Error, allocator: std.mem.Allocator) void {
+        if ((self.path.len > 0)) {
+            _ = allocator.free(self.path);
+            self.path = "";
+        }
+        if ((self.dest.len > 0)) {
+            _ = allocator.free(self.dest);
+            self.dest = "";
+        }
+}
+
+pub inline fn withPathDest(self: Error, path_val: anytype, dest_val: anytype) Error {
+        if ((std.meta.Child(@TypeOf(path_val)) == u16)) {
+            _ = @compileError("Do not pass WString path to withPathDest, it needs the path encoded as utf8 (path)");
+        }
+        if ((std.meta.Child(@TypeOf(dest_val)) == u16)) {
+            _ = @compileError("Do not pass WString path to withPathDest, it needs the path encoded as utf8 (dest)");
+        }
+        return Error{ .errno = self.errno, .syscall = self.syscall, .path = bun.span(path_val), .dest = bun.span(dest_val) };
+}
+
+pub inline fn withPathLike(self: Error, pathlike: anytype) Error {
+        return (switch (pathlike) {
+.fd => |fd_val| self.withFd(fd_val),
+.path => |p_val| self.withPath(p_val.slice()),
+});
+}
+
+pub fn withoutPath(self: *const Error) Error {
+        var copy = self.*;
+        _ = &copy;
+        copy.path = "";
+        copy.dest = "";
+        return copy;
+}
+
+pub fn name(self: *const Error) []const u8 {
+        if (comptime Environment.isWindows) {
+            const system_errno = brk: {
+            _ = @setRuntimeSafety(false);
+            if (self.from_libuv) {
+                break :brk (if (comptime @typeInfo(SystemErrno) == .@"enum") @as(SystemErrno, @enumFromInt(@enumFromInt(@intFromEnum(bun.windows.libuv.translateUVErrorToE((0 - (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(self.errno)) else @as(c_int, self.errno)))))))) else @as(SystemErrno, @enumFromInt(@intFromEnum(bun.windows.libuv.translateUVErrorToE((0 - (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(self.errno)) else @as(c_int, self.errno))))))));
+            }
+            break :brk (if (comptime @typeInfo(SystemErrno) == .@"enum") @as(SystemErrno, @enumFromInt(@enumFromInt(self.errno))) else @as(SystemErrno, @enumFromInt(self.errno)));
+};
+            if (bun.tagName(SystemErrno, system_errno)) |errname| {
+                _ = &errname;
+                return errname;
+            }
+        } else {
+            if (((self.errno > 0) and (self.errno < SystemErrno.max))) {
+                const system_errno = (if (comptime @typeInfo(SystemErrno) == .@"enum") @as(SystemErrno, @enumFromInt(@enumFromInt(self.errno))) else @as(SystemErrno, @enumFromInt(self.errno)));
+                if (bun.tagName(SystemErrno, system_errno)) |errname| {
+                    _ = &errname;
+                    return errname;
+                }
+            }
+        }
+        return "UNKNOWN";
+}
+
+pub fn toZigErr(self: Error) anyerror {
+        return bun.errnoToZigErr(self.errno);
+}
+
+pub fn getErrorCodeTagName(self: Error, err: *const Error) ?TagNameTuple {
+    _ = &self;
+        if ((!Environment.isWindows)) {
+            if (((err.errno > 0) and (err.errno < SystemErrno.max))) {
+                const system_errno = (if (comptime @typeInfo(SystemErrno) == .@"enum") @as(SystemErrno, @enumFromInt(@enumFromInt(err.errno))) else @as(SystemErrno, @enumFromInt(err.errno)));
+                return .{ @tagName(system_errno), system_errno };
+            }
+        } else {
+            const system_errno: SystemErrno = brk: {
+            _ = @setRuntimeSafety(false);
+            if (err.from_libuv) {
+                break :brk @enumFromInt(@intFromEnum(bun.windows.libuv.translateUVErrorToE(((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(err.errno)) else @as(c_int, err.errno)) * 0xffffffffffffffff))));
+            }
+            break :brk @enumFromInt(err.errno);
+};
+            if (bun.tagName(SystemErrno, system_errno)) |errname| {
+                _ = &errname;
+                return .{ errname, system_errno };
+            }
+        }
+        return null;
+}
+
+pub fn msg(self: Error) ?[]const u8 {
+        if (self.getErrorCodeTagName()) |resolved_errno| {
+            _ = &resolved_errno;
+            const code = resolved_errno[0];
+            const system_errno = resolved_errno[1];
+            if (coreutils_error_map.get(system_errno)) |label| {
+                _ = &label;
+                return label;
+            }
+            return code;
+        }
+        return null;
+}
+
+pub fn toShellSystemError(self: Error) SystemError {
+        _ = @setEvalBranchQuota(1, _000_000);
+        var err = SystemError{ .errno = ((if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(self.errno)) else @as(c_int, self.errno)) * 0xffffffffffffffff), .syscall = bun.String.static(@tagName(self.syscall)), .message = .empty };
+        _ = &err;
+        if (self.getErrorCodeTagName()) |resolved_errno| {
+            _ = &resolved_errno;
+            const code = resolved_errno[0];
+            const system_errno = resolved_errno[1];
+            err.code = bun.String.static(code);
+            if (coreutils_error_map.get(system_errno)) |label| {
+                _ = &label;
+                err.message = bun.String.static(label);
+            }
+        }
+        if ((self.path.len > 0)) {
+            err.path = bun.String.cloneUTF8(self.path);
+        }
+        if ((self.dest.len > 0)) {
+            err.dest = bun.String.cloneUTF8(self.dest);
+        }
+        if (self.fd.unwrapValid()) |valid| {
+            _ = &valid;
+            if (((!Environment.isWindows) or (valid.kind == .uv))) {
+                err.fd = valid.uv();
+            }
+        }
+        return err;
+}
+
+pub fn toSystemError(self: Error) SystemError {
+        var err = SystemError{ .errno = (0 - (if (comptime @typeInfo(c_int) == .@"enum") @as(c_int, @enumFromInt(self.errno)) else @as(c_int, self.errno))), .syscall = bun.String.static(@tagName(self.syscall)), .message = .empty };
+        _ = &err;
+        var maybe_code: ?[:0]const u8 = null;
+        _ = &maybe_code;
+        var label: ?[]const u8 = null;
+        _ = &label;
+        if (self.getErrorCodeTagName()) |resolved_errno| {
+            _ = &resolved_errno;
+            maybe_code = resolved_errno[0];
+            const system_errno = resolved_errno[1];
+            err.code = bun.String.static(maybe_code.?);
+            label = libuv_error_map.get(system_errno);
+        }
+        var message_buf: [4096]u8 = @splat(0);
+        _ = &message_buf;
+        const message = message: {
+        var stream = std.io.fixedBufferStream((&message_buf));
+        _ = &stream;
+        const writer = stream.writer();
+        _ = brk: {
+        if ((maybe_code != null)) {
+            _ = (blk_catch_0: { break :blk_catch_0 ((writer.writeAll(maybe_code.?)) catch |__ce_0| { _ = &__ce_0; break :brk; }); });
+            _ = (blk_catch_1: { break :blk_catch_1 ((writer.writeAll(": ")) catch |__ce_1| { _ = &__ce_1; break :brk; }); });
+        }
+        _ = (blk_catch_2: { break :blk_catch_2 ((writer.writeAll(((label) orelse ("Unknown Error")))) catch |__ce_2| { _ = &__ce_2; break :brk; }); });
+        _ = (blk_catch_3: { break :blk_catch_3 ((writer.writeAll(", ")) catch |__ce_3| { _ = &__ce_3; break :brk; }); });
+        _ = (blk_catch_4: { break :blk_catch_4 ((writer.writeAll(@tagName(self.syscall))) catch |__ce_4| { _ = &__ce_4; break :brk; }); });
+        if ((self.path.len > 0)) {
+            _ = (blk_catch_5: { break :blk_catch_5 ((writer.writeAll(" '")) catch |__ce_5| { _ = &__ce_5; break :brk; }); });
+            _ = (blk_catch_6: { break :blk_catch_6 ((writer.writeAll(self.path)) catch |__ce_6| { _ = &__ce_6; break :brk; }); });
+            _ = (blk_catch_7: { break :blk_catch_7 ((writer.writeAll("'")) catch |__ce_7| { _ = &__ce_7; break :brk; }); });
+            if ((self.dest.len > 0)) {
+                _ = (blk_catch_8: { break :blk_catch_8 ((writer.writeAll(" -> '")) catch |__ce_8| { _ = &__ce_8; break :brk; }); });
+                _ = (blk_catch_9: { break :blk_catch_9 ((writer.writeAll(self.dest)) catch |__ce_9| { _ = &__ce_9; break :brk; }); });
+                _ = (blk_catch_10: { break :blk_catch_10 ((writer.writeAll("'")) catch |__ce_10| { _ = &__ce_10; break :brk; }); });
+            }
+        }
+};
+        break :message stream.getWritten();
+};
+        err.message = bun.String.cloneUTF8(message);
+        if ((self.path.len > 0)) {
+            err.path = bun.String.cloneUTF8(self.path);
+        }
+        if ((self.dest.len > 0)) {
+            err.dest = bun.String.cloneUTF8(self.dest);
+        }
+        if (self.fd.unwrapValid()) |valid| {
+            _ = &valid;
+            if (((!Environment.isWindows) or (valid.kind == .uv))) {
+                err.fd = valid.uv();
+            }
+        }
+        return err;
+}
+
+pub inline fn todo() Error {
+        if (Environment.isDebug) {
+            _ = @panic("Error.todo() was called");
+        }
+        return Error{ .errno = todo_errno, .syscall = .TODO };
+}
+pub const Int = u16;
+const retry_errno = if (Environment.isWindows)
+        @as(Int, @intCast(@intFromEnum(E.INTR)))
+    else
+        @as(Int, @intCast(@intFromEnum(E.AGAIN)));
+const todo_errno = std.math.maxInt(Int) - 1;
+pub const oom = fromCode(E.NOMEM, .read);
+pub const retry = Error{
+        .errno = retry_errno,
+        .syscall = .read,
+    };
+pub const TagNameTuple = struct { [:0]const u8, SystemErrno };
+pub const toJS = @import("../sys_jsc/error_jsc.zig").toJS;
+pub const toJSWithAsyncStack = @import("../sys_jsc/error_jsc.zig").toJSWithAsyncStack;
+pub const TestingAPIs = @import("../sys_jsc/error_jsc.zig").TestingAPIs;

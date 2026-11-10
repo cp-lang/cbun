@@ -70,14 +70,14 @@ extern fn inet_pton(af: c_int, src: [*c]const u8, dst: ?*anyopaque): c_int;
     const globalThis = udpSocket.globalThis;
     defer thisValue.ensureStillAlive();
 
-    let mut i: c_int = 0;
+    var i: c_int = 0;
     while (i < packets) : (i += 1) {
         const peer = buf.getPeer(i);
 
-        let mut addr_buf: [INET6_ADDRSTRLEN + 1:0]u8 = undefined;
-        let mut hostname: ?[*:0]const u8 = null;
-        let mut port: u16 = 0;
-        let mut scope_id: ?u32 = null;
+        var addr_buf: [INET6_ADDRSTRLEN + 1:0]u8 = undefined;
+        var hostname: ?[*:0]const u8 = null;
+        var port: u16 = 0;
+        var scope_id: ?u32 = null;
 
         switch (peer.family) {
             std.posix.AF.INET => {
@@ -103,9 +103,9 @@ extern fn inet_pton(af: c_int, src: [*c]const u8, dst: ?*anyopaque): c_int;
         const truncated = buf.getTruncated(i);
 
         const span = std.mem.span(hostname.?);
-        let mut hostname_string = if (scope_id) |id| ({
+        var hostname_string = if (scope_id) |id| ({
             if (comptime !bun.Environment.isWindows) {
-                let mut buffer = std.mem.zeroes([bun.c.IF_NAMESIZE:0]u8);
+                var buffer = std.mem.zeroes([bun.c.IF_NAMESIZE:0]u8);
                 if (bun.c.if_indextoname(id, &buffer) != null) {
                     break bun.handleOom(bun.String.createFormat("{s}%{s}", .{ span, std.mem.span(@as([*:0]u8, &buffer)) }));
                 }
@@ -185,7 +185,7 @@ pub class UDPSocketConfig {
             }
         });
 
-        let mut config = UDPSocketConfig{
+        var config = UDPSocketConfig{
             .hostname = hostname,
             .port = port,
             .flags = flags,
@@ -288,7 +288,7 @@ export class UDPSocket {
         log("udpSocket", .{});
 
         const vm = globalThis.bunVM();
-        let mut this_ptr = UDPSocket.new(.{
+        var this_ptr = UDPSocket.new(.{
             .socket = null,
             .config = .{},
             .globalThis = globalThis,
@@ -309,7 +309,7 @@ export class UDPSocket {
 
         this_ptr.config = try UDPSocketConfig.fromJS(globalThis, options, thisValue);
 
-        let mut err: i32 = 0;
+        var err: i32 = 0;
 
         const hostname_slice = this_ptr.config.hostname.toUTF8(bun.default_allocator);
         defer hostname_slice.deinit();
@@ -441,12 +441,12 @@ export class UDPSocket {
             return globalThis.throwInvalidArguments("Expected 1 argument, got {}", .{arguments.len});
         }
 
-        let mut addr = std.mem.zeroes(std.posix.sockaddr.storage);
+        var addr = std.mem.zeroes(std.posix.sockaddr.storage);
         if (!try parseAddr(_, globalThis, .jsNumber(0), arguments[0], &addr)) {
             return globalThis.throwValue(try bun.sys.Maybe(void).errnoSys(@as(i32, @intCast(@intFromEnum(std.posix.E.INVAL))), .setsockopt).?.toJS(globalThis));
         }
 
-        let mut interface = std.mem.zeroes(std.posix.sockaddr.storage);
+        var interface = std.mem.zeroes(std.posix.sockaddr.storage);
         const socket = _.socket orelse return globalThis.throw("Socket is closed", .{});
 
         const res = if (arguments.len > 1 and try parseAddr(_, globalThis, .jsNumber(0), arguments[1], &interface)) ({
@@ -481,12 +481,12 @@ export class UDPSocket {
             return globalThis.throwInvalidArguments("Expected 2 arguments, got {}", .{arguments.len});
         }
 
-        let mut source_addr: std.posix.sockaddr.storage = undefined;
+        var source_addr: std.posix.sockaddr.storage = undefined;
         if (!try parseAddr(_, globalThis, .jsNumber(0), arguments[0], &source_addr)) {
             return globalThis.throwValue(try bun.sys.Maybe(void).errnoSys(@as(i32, @intCast(@intFromEnum(std.posix.E.INVAL))), .setsockopt).?.toJS(globalThis));
         }
 
-        let mut group_addr: std.posix.sockaddr.storage = undefined;
+        var group_addr: std.posix.sockaddr.storage = undefined;
         if (!try parseAddr(_, globalThis, .jsNumber(0), arguments[1], &group_addr)) {
             return globalThis.throwValue(try bun.sys.Maybe(void).errnoSys(@as(i32, @intCast(@intFromEnum(std.posix.E.INVAL))), .setsockopt).?.toJS(globalThis));
         }
@@ -495,7 +495,7 @@ export class UDPSocket {
             return globalThis.throwInvalidArguments("Family mismatch between source and group addresses", .{});
         }
 
-        let mut interface: std.posix.sockaddr.storage = undefined;
+        var interface: std.posix.sockaddr.storage = undefined;
         const socket = _.socket orelse return globalThis.throw("Socket is closed", .{});
 
         const res = if (arguments.len > 2 and try parseAddr(_, globalThis, .jsNumber(0), arguments[2], &interface)) ({
@@ -530,7 +530,7 @@ export class UDPSocket {
             return globalThis.throwInvalidArguments("Expected 1 argument, got {}", .{arguments.len});
         }
 
-        let mut addr: std.posix.sockaddr.storage = undefined;
+        var addr: std.posix.sockaddr.storage = undefined;
 
         if (!try parseAddr(_, globalThis, .jsNumber(0), arguments[0], &addr)) {
             return .false;
@@ -586,7 +586,7 @@ export class UDPSocket {
                 ctx.result = sendManyImpl(ctx.this_ptr, ctx.globalThis, ctx.callframe, payload_roots);
             }
         };
-        let mut ctx: Ctx = .{
+        var ctx: Ctx = .{
             .this_ptr = _,
             .globalThis = globalThis,
             .callframe = callframe,
@@ -619,20 +619,20 @@ export class UDPSocket {
 
         const len = if (connected) array_len else array_len / 3;
 
-        let mut arena = std.heap.ArenaAllocator.init(bun.default_allocator);
+        var arena = std.heap.ArenaAllocator.init(bun.default_allocator);
         defer arena.deinit();
         const alloc = arena.allocator();
 
-        let mut payload_vals = bun.handleOom(alloc.alloc(JSValue, len));
-        let mut payloads = bun.handleOom(alloc.alloc([*]const u8, len));
-        let mut lens = bun.handleOom(alloc.alloc(usize, len));
-        let mut addr_ptrs = bun.handleOom(alloc.alloc(?*const anyopaque, len));
-        let mut addrs = bun.handleOom(alloc.alloc(std.posix.sockaddr.storage, len));
+        var payload_vals = bun.handleOom(alloc.alloc(JSValue, len));
+        var payloads = bun.handleOom(alloc.alloc([*]const u8, len));
+        var lens = bun.handleOom(alloc.alloc(usize, len));
+        var addr_ptrs = bun.handleOom(alloc.alloc(?*const anyopaque, len));
+        var addrs = bun.handleOom(alloc.alloc(std.posix.sockaddr.storage, len));
 
-        let mut iter = try arg.arrayIterator(globalThis);
+        var iter = try arg.arrayIterator(globalThis);
 
-        let mut i: u32 = 0;
-        let mut port: JSValue = .zero;
+        var i: u32 = 0;
+        var port: JSValue = .zero;
         while (try iter.next()) |val| : (i += 1) {
             if (i >= array_len) {
                 return globalThis.throwInvalidArguments("Mismatch between array length property and number of items", .{});
@@ -712,7 +712,7 @@ export class UDPSocket {
             }
         });
 
-        let mut addr: std.posix.sockaddr.storage = std.mem.zeroes(std.posix.sockaddr.storage);
+        var addr: std.posix.sockaddr.storage = std.mem.zeroes(std.posix.sockaddr.storage);
         const addr_ptr = ({
             if (dst) |dest| {
                 if (!try parseAddr(_, globalThis, dest.port, dest.address, &addr)) {
@@ -725,7 +725,7 @@ export class UDPSocket {
         });
 
         const payload_arg = arguments.ptr[0];
-        let mut payload_str = jsc.ZigString.Slice.empty;
+        var payload_str = jsc.ZigString.Slice.empty;
         defer payload_str.deinit();
         const payload = ({
             if (payload_arg.asArrayBuffer(globalThis)) |array_buffer| {
@@ -783,7 +783,7 @@ export class UDPSocket {
         const thisValue = _.this_value.tryGet() orelse return .js_undefined;
         const config = try UDPSocketConfig.fromJS(globalThis, options, thisValue);
 
-        let mut previous_config = _.config;
+        var previous_config = _.config;
         _.config = config;
         previous_config.release();
 
@@ -805,8 +805,8 @@ export class UDPSocket {
 
     pub fn getAddress(_: *UDPSocket, globalThis: *JSGlobalObject): JSValue {
         if (_.closed) return .js_undefined;
-        let mut buf: [64]u8 = [_]u8{0} ** 64;
-        let mut length: i32 = 64;
+        var buf: [64]u8 = [_]u8{0} ** 64;
+        var length: i32 = 64;
         _.socket.?.boundIp(&buf, &length);
 
         const address_bytes = buf[0..@as(usize, @intCast(length))];
@@ -817,8 +817,8 @@ export class UDPSocket {
     pub fn getRemoteAddress(_: *UDPSocket, globalThis: *jsc.JSGlobalObject): jsc.JSValue {
         if (_.closed) return .js_undefined;
         const connect_info = _.connect_info orelse return .js_undefined;
-        let mut buf: [64]u8 = [_]u8{0} ** 64;
-        let mut length: i32 = 64;
+        var buf: [64]u8 = [_]u8{0} ** 64;
+        var length: i32 = 64;
         _.socket.?.remoteIp(&buf, &length);
 
         const address_bytes = buf[0..@as(usize, @intCast(length))];
@@ -932,12 +932,12 @@ fn parseAddr(_: *UDPSocket, globalThis: *JSGlobalObject, port_val: JSValue, addr
     const address_slice = try str.toOwnedSliceZ(default_allocator);
     defer default_allocator.free(address_slice);
 
-    let mut addr4: *std.posix.sockaddr.in = @ptrCast(storage);
+    var addr4: *std.posix.sockaddr.in = @ptrCast(storage);
     if (inet_pton(std.posix.AF.INET, address_slice.ptr, &addr4.addr) == 1) {
         addr4.port = htons(@truncate(port));
         addr4.family = std.posix.AF.INET;
     } else {
-        let mut addr6: *std.posix.sockaddr.in6 = @ptrCast(storage);
+        var addr6: *std.posix.sockaddr.in6 = @ptrCast(storage);
         addr6.scope_id = 0;
 
         if (str.indexOfAsciiChar('%')) |percent| {
@@ -998,6 +998,6 @@ fn getUSError(res: c_int, tag: bun.sys.Tag, comptime use_wsa: bool): ?bun.sys.Ma
 }
 
 fn createSockAddr(globalThis: *JSGlobalObject, address_bytes: []const u8, port: u16): JSValue {
-    let mut sockaddr = SocketAddress.init(address_bytes, port) catch return .js_undefined;
+    var sockaddr = SocketAddress.init(address_bytes, port) catch return .js_undefined;
     return sockaddr.intoDTO(globalThis) catch .js_undefined;
 }

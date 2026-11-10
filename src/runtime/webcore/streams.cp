@@ -337,7 +337,7 @@ export union Result {
 
     pub fn toJS(this: &Result, globalThis: *JSGlobalObject): JSError!JSValue {
         if (VirtualMachine.get().isShuttingDown()) {
-            let mut that = this.*;
+            var that = this.*;
             that.deinit();
             return JSValue.zero;
         }

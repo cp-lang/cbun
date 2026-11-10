@@ -2,49 +2,13 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
-const HPACK = @import("../lshpack.zig").HPACK;
-const RequestHeader = enum {
-    drop,
-    host,
-    te,
-    content_length,
-    expect,
-    sensitive,
-
-    const map = bun.ComptimeStringMap(RequestHeader, .{
-        .{ "connection", .drop },
-        .{ "keep-alive", .drop },
-        .{ "proxy-connection", .drop },
-        .{ "transfer-encoding", .drop },
-        .{ "upgrade", .drop },
-        .{ "host", .host },
-        .{ "te", .te },
-        .{ "content-length", .content_length },
-        .{ "expect", .expect },
-        .{ "authorization", .sensitive },
-        .{ "cookie", .sensitive },
-        .{ "set-cookie", .sensitive },
-    });
-};
-fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime (@typeInfo(T) == .@"struct" and @hasField(T, "msg"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
 fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
 fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
@@ -52,7 +16,8 @@ fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
     if (comptime @typeInfo(T) == .comptime_int) return val << shift;
     if (comptime @typeInfo(T) == .int) {
         const ShiftType = std.math.Log2Int(T);
-        return val << @as(ShiftType, @truncate(shift));
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val << @as(ShiftType, @truncate(u_shift));
     }
     return val << shift;
 }
@@ -61,15 +26,58 @@ fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
     if (comptime @typeInfo(T) == .comptime_int) return val >> shift;
     if (comptime @typeInfo(T) == .int) {
         const ShiftType = std.math.Log2Int(T);
-        return val >> @as(ShiftType, @truncate(shift));
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val >> @as(ShiftType, @truncate(u_shift));
     }
     return val >> shift;
 }
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@"struct".fields.len; return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
+pub fn CpUnpackSliceType(comptime T: type, comptime start_idx: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
 pub const ClientSession = @import("./ClientSession.zig").ClientSession;
 pub const Stream = @import("./Stream.zig").Stream;
 pub const H2FrameParser = @import("../H2FrameParser.zig");
+pub const HPACK = @import("../lshpack.zig").HPACK;
+pub const RequestHeader = enum {
+    drop,
+    host,
+    te,
+    content_length,
+    expect,
+    sensitive,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
+
+
+pub fn classifyHeader(name: []const u8) ?RequestHeader {
+        if (bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "host")) {
+            return .host;
+        }
+        if (bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "expect")) {
+            return .expect;
+        }
+        if (((((bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "connection") or bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "keep-alive")) or bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "proxy-connection")) or bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "transfer-encoding")) or bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "upgrade"))) {
+            return .drop;
+        }
+        if (bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "te")) {
+            return .te;
+        }
+        if (bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "content-length")) {
+            return .content_length;
+        }
+        if (((bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "authorization") or bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "cookie")) or bun.strings.eqlCaseInsensitiveASCIIICheckLength(name, "set-cookie"))) {
+            return .sensitive;
+        }
+        return null;
+}
 
 pub fn writePreface(session: *ClientSession) void {
         _ = session.queue(H2FrameParser.client_preface);
@@ -98,14 +106,14 @@ pub fn writeRequest(session: *ClientSession, client: *bun.http.HTTPClient, strea
         _ = &has_expect_continue;
         for (cp_iter_slice(request.headers)) |h| {
             _ = &h;
-            if (RequestHeader.map.getAnyCase(h.name)) |kind| {
+            if (classifyHeader((if (comptime @typeInfo(@TypeOf(h)) == .@"enum" or @typeInfo(@TypeOf(h)) == .@"union") @tagName(h) else h.name))) |kind| {
                 _ = &kind;
                 switch (kind) {
 .host => {
-authority = h.value;
+authority = (if (comptime @typeInfo(@TypeOf(h)) == .@"enum") @intFromEnum(h) else h.value);
 },
 .expect => {
-has_expect_continue = bun.strings.eqlCaseInsensitiveASCIIICheckLength(h.value, "100-continue");
+has_expect_continue = bun.strings.eqlCaseInsensitiveASCIIICheckLength((if (comptime @typeInfo(@TypeOf(h)) == .@"enum") @intFromEnum(h) else h.value), "100-continue");
 },
 else => {
 
@@ -136,49 +144,52 @@ else => {
             }
             var name: []const u8 = "";
             _ = &name;
-            if ((h.name.len <= lower_buf.len)) {
-                name = bun.strings.copyLowercaseIfNeeded(h.name, (&lower_buf));
+            if (((if (comptime @typeInfo(@TypeOf(h)) == .@"enum" or @typeInfo(@TypeOf(h)) == .@"union") @tagName(h) else h.name).len <= lower_buf.len)) {
+                name = bun.strings.copyLowercaseIfNeeded((if (comptime @typeInfo(@TypeOf(h)) == .@"enum" or @typeInfo(@TypeOf(h)) == .@"union") @tagName(h) else h.name), (&lower_buf));
             } else {
-                const hbuf = bun.handleOom(bun.default_allocator.alloc(u8, h.name.len));
-                _ = &hbuf;
-                name = bun.strings.copyLowercaseIfNeeded(h.name, hbuf);
+                const hbuf = bun.handleOom(bun.default_allocator.alloc(u8, (if (comptime @typeInfo(@TypeOf(h)) == .@"enum" or @typeInfo(@TypeOf(h)) == .@"union") @tagName(h) else h.name).len));
+                name = bun.strings.copyLowercaseIfNeeded((if (comptime @typeInfo(@TypeOf(h)) == .@"enum" or @typeInfo(@TypeOf(h)) == .@"union") @tagName(h) else h.name), hbuf);
                 heap = hbuf;
             }
             var never_index = false;
             _ = &never_index;
-            if (RequestHeader.map.get(name)) |kind| {
+            if (classifyHeader(name)) |kind| {
                 _ = &kind;
                 var should_skip = false;
                 _ = &should_skip;
                 switch (kind) {
-                    .drop => should_skip = true,
-                    .host => should_skip = true,
-                    .te => {
-                        if (!bun.strings.eqlCaseInsensitiveASCIIICheckLength(bun.strings.trim(h.value, " \t"), "trailers")) {
-                            should_skip = true;
-                        }
-                    },
-                    .content_length => {
-                        if (has_expect_continue) {
-                            should_skip = true;
-                        }
-                    },
-                    .sensitive => never_index = true,
-                    .expect => {},
+.drop => {
+should_skip = true;
+},
+.host => {
+should_skip = true;
+},
+.te => {
+if ((!bun.strings.eqlCaseInsensitiveASCIIICheckLength(bun.strings.trim((if (comptime @typeInfo(@TypeOf(h)) == .@"enum") @intFromEnum(h) else h.value), " \t"), "trailers"))) {
+                    should_skip = true;
                 }
+},
+.content_length => {
+if (has_expect_continue) {
+                    should_skip = true;
+                }
+},
+.sensitive => {
+never_index = true;
+},
+.expect => {
 
+},
+}
                 if (should_skip) {
                     continue;
                 }
             }
-            _ = try encodeHeader(session.hpack, (&session.encode_scratch), name, h.value, never_index);
+            _ = try encodeHeader(session.hpack, (&session.encode_scratch), name, (if (comptime @typeInfo(@TypeOf(h)) == .@"enum") @intFromEnum(h) else h.value), never_index);
         }
         const body = client.state.request_body;
-        _ = &body;
         const has_inline_body = ((client.state.original_request_body == .bytes) and (body.len > 0));
-        _ = &has_inline_body;
         const is_streaming = (client.state.original_request_body == .stream);
-        _ = &is_streaming;
         if ((has_expect_continue and (has_inline_body or is_streaming))) {
             stream.awaiting_continue = true;
         }
@@ -198,17 +209,14 @@ else => {
 
 pub fn writeHeaderBlock(session: *ClientSession, stream_id: u31, block: []const u8, end_stream: bool) void {
         const max: usize = session.remote_max_frame_size;
-        _ = &max;
         var remaining = block;
         _ = &remaining;
         var first = true;
         _ = &first;
         while (true) {
             const chunk = remaining[0..@min(remaining.len, max)];
-            _ = &chunk;
             remaining = remaining[chunk.len..];
             const last = (remaining.len == 0);
-            _ = &last;
             var flags: u8 = 0;
             _ = &flags;
             if (last) {
@@ -237,7 +245,6 @@ pub fn writeDataWindowed(session: *ClientSession, stream: *Stream, data: []const
         _ = &consumed;
         while (true) {
             const window: usize = @intCast(@max(0, @min(stream.send_window, session.conn_send_window)));
-            _ = &window;
             if (((remaining.len > 0) and (window == 0))) {
                 break;
             }
@@ -247,18 +254,16 @@ pub fn writeDataWindowed(session: *ClientSession, stream: *Stream, data: []const
             if (((consumed >= cap) and (remaining.len > 0))) {
                 break;
             }
-            const chunk_len = @min(remaining.len, @as(usize, session.remote_max_frame_size), window);
-            _ = &chunk_len;
+            const chunk_len = @min(remaining.len, (if (comptime @typeInfo(@TypeOf(session.remote_max_frame_size)) == .@"enum") cp_cast_int(usize, @intFromEnum(session.remote_max_frame_size)) else cp_cast_int(usize, session.remote_max_frame_size)), window);
             const last = (chunk_len == remaining.len);
-            _ = &last;
             var flags: u8 = 0;
             _ = &flags;
             if ((last and end_stream)) {
                 flags = @intFromEnum(H2FrameParser.DataFrameFlags.END_STREAM);
             }
             _ = session.writeFrame(.HTTP_FRAME_DATA, flags, stream.id, remaining[0..chunk_len]);
-            stream.send_window = (stream.send_window - @as(i32, @intCast(chunk_len)));
-            session.conn_send_window = (session.conn_send_window - @as(i32, @intCast(chunk_len)));
+            stream.send_window = (stream.send_window - (if (comptime @typeInfo(@TypeOf(chunk_len)) == .@"enum") cp_cast_int(i32, @intFromEnum(chunk_len)) else cp_cast_int(i32, chunk_len)));
+            session.conn_send_window = (session.conn_send_window - (if (comptime @typeInfo(@TypeOf(chunk_len)) == .@"enum") cp_cast_int(i32, @intFromEnum(chunk_len)) else cp_cast_int(i32, chunk_len)));
             consumed = (consumed + chunk_len);
             remaining = remaining[chunk_len..];
             if (last) {
@@ -275,49 +280,55 @@ pub fn drainSendBody(session: *ClientSession, stream: *Stream, cap: usize) void 
         if (stream.client) |client| {
             _ = &client;
             switch (client.state.original_request_body) {
-                .bytes => {
-                    const sent = writeDataWindowed(session, stream, stream.pending_body, true, cap);
-                    stream.pending_body = stream.pending_body[sent..];
-                    if (stream.pending_body.len == 0) {
-                        stream.sentEndStream();
-                        client.state.request_stage = .done;
-                    }
-                },
-                .stream => |*body| {
-                    if (body.buffer) |sb| {
-                        const buffer = sb.acquire();
-                        const data = buffer.slice();
-                        if (data.len == 0 and !body.ended) {
-                            sb.release();
-                            return;
-                        }
-                        const sent = writeDataWindowed(session, stream, data, body.ended, cap);
-                        buffer.cursor += sent;
-                        const drained = buffer.isEmpty();
-                        if (drained) buffer.reset();
-                        if (drained and body.ended) {
-                            stream.sentEndStream();
-                            client.state.request_stage = .done;
-                        } else if (drained and data.len > 0) {
-                            sb.reportDrain();
-                        }
-                        sb.release();
-                        if (stream.localClosed()) body.detach();
-                    } else {
-                        return;
-                    }
-                },
-                .sendfile => {
-                    @panic("unreachable");
-                },
+.bytes => {
+const sent = writeDataWindowed(session, stream, stream.pending_body, true, cap);
+            stream.pending_body = stream.pending_body[sent..];
+            if ((stream.pending_body.len == 0)) {
+                _ = stream.sentEndStream();
+                client.state.request_stage = .done;
             }
-
+},
+.stream => |body| {
+if (body.buffer) |sb| {
+                _ = &sb;
+                var buffer = sb.acquire();
+                _ = &buffer;
+                const data = buffer.slice();
+                if (((data.len == 0) and (!body.ended))) {
+                    _ = (if (comptime @typeInfo(@TypeOf(sb)) == .pointer) (sb) else &(sb)).release();
+                    return;
+                }
+                const sent = writeDataWindowed(session, stream, data, body.ended, cap);
+                buffer.cursor = (buffer.cursor + sent);
+                const drained = buffer.isEmpty();
+                if (drained) {
+                    _ = buffer.reset();
+                }
+                if ((drained and body.ended)) {
+                    _ = stream.sentEndStream();
+                    client.state.request_stage = .done;
+                } else {
+                    if ((drained and (data.len > 0))) {
+                        _ = sb.reportDrain();
+                    }
+                }
+                _ = (if (comptime @typeInfo(@TypeOf(sb)) == .pointer) (sb) else &(sb)).release();
+                if (stream.localClosed()) {
+                    _ = body.detach();
+                }
+            } else {
+                return;
+            }
+},
+.sendfile => {
+_ = @panic("unreachable");
+},
+}
         }
 }
 
 pub fn drainSendBodies(session: *ClientSession) void {
         const slice: usize = session.remote_max_frame_size;
-        _ = &slice;
         while (((session.conn_send_window > 0) and (session.write_buffer.size() < bun.http.H2.write_buffer_high_water))) {
             var progressed = false;
             _ = &progressed;
@@ -327,7 +338,6 @@ pub fn drainSendBodies(session: *ClientSession) void {
                     continue;
                 }
                 const before = session.conn_send_window;
-                _ = &before;
                 _ = drainSendBody(session, stream, slice);
                 if (((session.conn_send_window != before) or stream.localClosed())) {
                     progressed = true;
@@ -341,24 +351,22 @@ pub fn drainSendBodies(session: *ClientSession) void {
 
 pub fn encodeHeader(hpack: *HPACK, encoded: *std.ArrayListUnmanaged(u8), name: []const u8, value: []const u8, never_index: bool) !void {
         const required = (((encoded.items.len + name.len) + value.len) + 32);
-        _ = &required;
         _ = try encoded.ensureTotalCapacity(bun.default_allocator, required);
         const written = try hpack.encode(name, value, never_index, encoded.allocatedSlice(), encoded.items.len);
-        _ = &written;
         encoded.items.len = (encoded.items.len + written);
 }
 
 pub fn encodeHpackTableSizeUpdate(encoded: *std.ArrayListUnmanaged(u8), value: u32) void {
         if ((value < 31)) {
-            _ = encoded.appendAssumeCapacity((32 | @as(u8, @intCast(value))));
+            _ = encoded.appendAssumeCapacity((32 | (if (comptime @typeInfo(@TypeOf(value)) == .@"enum") cp_cast_int(u8, @intFromEnum(value)) else cp_cast_int(u8, value))));
             return;
         }
         _ = encoded.appendAssumeCapacity((32 | 31));
         var rest = (value - 31);
         _ = &rest;
         while ((rest >= 128)) {
-            _ = encoded.appendAssumeCapacity((@as(u8, @truncate(rest)) | 128));
+            _ = encoded.appendAssumeCapacity(((if (comptime @typeInfo(@TypeOf(rest)) == .@"enum") cp_cast_int(u8, @intFromEnum(rest)) else cp_cast_int(u8, rest)) | 128));
             rest = cp_shr(rest, 7);
         }
-        _ = encoded.appendAssumeCapacity(@as(u8, @truncate(rest)));
+        _ = encoded.appendAssumeCapacity((if (comptime @typeInfo(@TypeOf(rest)) == .@"enum") cp_cast_int(u8, @intFromEnum(rest)) else cp_cast_int(u8, rest)));
 }

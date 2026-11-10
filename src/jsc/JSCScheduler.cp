@@ -3,9 +3,9 @@ import { jsc, ConcurrentTask, Task, VirtualMachine } from "bun";
 const bun = @import("bun");
 
 pub const JSCDeferredWorkTask = opaque {
-    extern fn Bun__runDeferredWork(task: *JSCDeferredWorkTask): void;
+    extern fn Bun__runDeferredWork(task: *JSCDeferredWorkTask) void;
 
-    pub fn run(task: *JSCDeferredWorkTask): bun.JSTerminated!void {
+    pub fn run(task: *JSCDeferredWorkTask) bun.JSTerminated!void {
         const globalThis = bun.jsc.VirtualMachine.get().global;
         var scope: bun.jsc.ExceptionValidationScope = undefined;
         scope.init(globalThis, @src());

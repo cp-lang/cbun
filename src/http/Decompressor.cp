@@ -39,7 +39,7 @@ export enum Decompressor {
         if (this.* == .none) {
             switch (encoding) {
                 .gzip, .deflate => {
-                    let mut windowBits: i32 = 0 - bun.zlib.MAX_WBITS;
+                    var windowBits: i32 = 0 - bun.zlib.MAX_WBITS;
                     if (encoding == Encoding.gzip) {
                         windowBits = bun.zlib.MAX_WBITS | 16;
                     } else if (buffer.len > 1 && buffer[0] == 120) {

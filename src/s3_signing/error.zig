@@ -2,50 +2,10 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
-pub fn getSignErrorMessage(comptime err: anyerror) [:0]const u8 {
-        return switch (err) {
-            error.MissingCredentials => return "Missing S3 credentials. 'accessKeyId', 'secretAccessKey', 'bucket', and 'endpoint' are required",
-            error.InvalidMethod => return "Method must be GET, PUT, DELETE or HEAD when using s3:// protocol",
-            error.InvalidPath => return "Invalid S3 bucket, key combination",
-            error.InvalidEndpoint => return "Invalid S3 endpoint",
-            error.InvalidSessionToken => return "Invalid session token",
-            else => return "Failed to retrieve S3 content. Are the credentials correct?",
-        };
-    }
-
-    pub fn getSignErrorCodeAndMessage(err: anyerror) ErrorCodeAndMessage {
-        // keep error codes consistent for internal errors
-        return switch (err) {
-            error.MissingCredentials => .{ .code = "ERR_S3_MISSING_CREDENTIALS", .message = getSignErrorMessage(error.MissingCredentials) },
-            error.InvalidMethod => .{ .code = "ERR_S3_INVALID_METHOD", .message = getSignErrorMessage(error.InvalidMethod) },
-            error.InvalidPath => .{ .code = "ERR_S3_INVALID_PATH", .message = getSignErrorMessage(error.InvalidPath) },
-            error.InvalidEndpoint => .{ .code = "ERR_S3_INVALID_ENDPOINT", .message = getSignErrorMessage(error.InvalidEndpoint) },
-            error.InvalidSessionToken => .{ .code = "ERR_S3_INVALID_SESSION_TOKEN", .message = getSignErrorMessage(error.InvalidSessionToken) },
-            else => .{ .code = "ERR_S3_INVALID_SIGNATURE", .message = getSignErrorMessage(error.SignError) },
-        };
-    }
-
-    pub const getJSSignError = @import("../runtime/webcore/s3/error_jsc.zig").getJSSignError;
-    pub const throwSignError = @import("../runtime/webcore/s3/error_jsc.zig").throwSignError;
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
+pub const getJSSignError = error_jsc.getJSSignError;
+pub const throwSignError = error_jsc.throwSignError;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub const error_jsc = @import("../runtime/webcore/s3/error_jsc.zig");
 pub const ErrorCodeAndMessage = struct {
     code: []const u8,
     message: []const u8,
@@ -54,7 +14,29 @@ pub const ErrorCodeAndMessage = struct {
 pub const S3Error = struct {
     code: []const u8,
     message: []const u8,
-    pub const toJS = @import("../runtime/webcore/s3/error_jsc.zig").s3ErrorToJS;
-            pub const toJSWithAsyncStack = @import("../runtime/webcore/s3/error_jsc.zig").s3ErrorToJSWithAsyncStack;
+    pub const toJS = error_jsc.s3ErrorToJS;
+    pub const toJSWithAsyncStack = error_jsc.s3ErrorToJSWithAsyncStack;
 };
 
+
+pub fn getSignErrorMessage(comptime err: anyerror) [:0]const u8 {
+        return (switch (err) {
+error.MissingCredentials => "Missing S3 credentials. 'accessKeyId', 'secretAccessKey', 'bucket', and 'endpoint' are required",
+error.InvalidMethod => "Method must be GET, PUT, DELETE or HEAD when using s3:// protocol",
+error.InvalidPath => "Invalid S3 bucket, key combination",
+error.InvalidEndpoint => "Invalid S3 endpoint",
+error.InvalidSessionToken => "Invalid session token",
+else => "Failed to retrieve S3 content. Are the credentials correct?",
+});
+}
+
+pub fn getSignErrorCodeAndMessage(err: anyerror) ErrorCodeAndMessage {
+        return (switch (err) {
+error.MissingCredentials => .{ .code = "ERR_S3_MISSING_CREDENTIALS", .message = getSignErrorMessage(error.MissingCredentials) },
+error.InvalidMethod => .{ .code = "ERR_S3_INVALID_METHOD", .message = getSignErrorMessage(error.InvalidMethod) },
+error.InvalidPath => .{ .code = "ERR_S3_INVALID_PATH", .message = getSignErrorMessage(error.InvalidPath) },
+error.InvalidEndpoint => .{ .code = "ERR_S3_INVALID_ENDPOINT", .message = getSignErrorMessage(error.InvalidEndpoint) },
+error.InvalidSessionToken => .{ .code = "ERR_S3_INVALID_SESSION_TOKEN", .message = getSignErrorMessage(error.InvalidSessionToken) },
+else => .{ .code = "ERR_S3_INVALID_SIGNATURE", .message = getSignErrorMessage(error.SignError) },
+});
+}

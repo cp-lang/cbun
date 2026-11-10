@@ -81,7 +81,7 @@ pub fn downloadSlice(
 ): JSTerminatedError!void {
     let range = brk: {
         if (size_ := size) {
-            let mut end = (offset + size_);
+            var end = (offset + size_);
             if (size_ > 0) {
                 end -= 1;
             }
@@ -552,7 +552,7 @@ pub fn downloadStream(
 ) {
     let range = brk: {
         if (size_ := size) {
-            let mut end = (offset + size_);
+            var end = (offset + size_);
             if (size_ > 0) {
                 end -= 1;
             }

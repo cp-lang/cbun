@@ -295,13 +295,13 @@ export @root @value struct AsyncHTTP {
                     const size = std.base64.standard.Encoder.calcSize(auth.len);
                     let buf = async_http.allocator.alloc(u8, size + "Basic ".len) catch @panic("unreachable");
                     const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], auth);
-                    buf[0.."Basic ".len].* = "Basic ".*;
+                    @memcpy(buf[0.."Basic ".len], "Basic ");
                     async_http.client.proxy_authorization = buf[0 .. "Basic ".len + encoded.len];
                 } else {
                     const size = std.base64.standard.Encoder.calcSize(username.len);
                     let buf = allocator.alloc(u8, size + "Basic ".len) catch @panic("unreachable");
                     const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], username);
-                    buf[0.."Basic ".len].* = "Basic ".*;
+                    @memcpy(buf[0.."Basic ".len], "Basic ");
                     async_http.client.proxy_authorization = buf[0 .. "Basic ".len + encoded.len];
                 }
             }
@@ -368,13 +368,13 @@ export @root @value struct AsyncHTTP {
                     const size = std.base64.standard.Encoder.calcSize(auth.len);
                     let buf = this.allocator.alloc(u8, size + "Basic ".len) catch @panic("unreachable");
                     const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], auth);
-                    buf[0.."Basic ".len].* = "Basic ".*;
+                    @memcpy(buf[0.."Basic ".len], "Basic ");
                     this.client.proxy_authorization = buf[0 .. "Basic ".len + encoded.len];
                 } else {
                     const size = std.base64.standard.Encoder.calcSize(username.len);
                     let buf = this.allocator.alloc(u8, size + "Basic ".len) catch @panic("unreachable");
                     const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], username);
-                    buf[0.."Basic ".len].* = "Basic ".*;
+                    @memcpy(buf[0.."Basic ".len], "Basic ");
                     this.client.proxy_authorization = buf[0 .. "Basic ".len + encoded.len];
                 }
             }

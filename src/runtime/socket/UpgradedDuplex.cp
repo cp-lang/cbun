@@ -1,19 +1,17 @@
 // UpgradedDuplex provides TLS/SSL encryption for duplex streams in CP language
 // Converted from src/runtime/socket/UpgradedDuplex.zig
 
-zig {
-    const SSLWrapper = @import("./ssl_wrapper.zig").SSLWrapper;
+import bun from "bun";
+const SSLWrapper = @import("./ssl_wrapper.zig").SSLWrapper;
+const jsc = bun.jsc;
+const BoringSSL = bun.BoringSSL.c;
+type EventLoopTimer = bun.api.Timer.EventLoopTimer;
 
-    const bun = @import("bun");
-    const jsc = bun.jsc;
-    const BoringSSL = bun.BoringSSL.c;
-    const EventLoopTimer = bun.api.Timer.EventLoopTimer;
+const uws = bun.uws;
+type us_bun_verify_error_t = uws.us_bun_verify_error_t;
+const log = bun.Output.scoped(.UpgradedDuplex, .visible);
 
-    const uws = bun.uws;
-    const us_bun_verify_error_t = uws.us_bun_verify_error_t;
-}
-
-pub class UpgradedDuplex {
+pub struct UpgradedDuplex {
     wrapper: ?WrapperType,
     origin: jsc.Strong.Optional = .empty,
     global: ?*jsc.JSGlobalObject = null,
@@ -95,21 +93,23 @@ pub class UpgradedDuplex {
         if (_.vm.isShuttingDown()) {
             return;
         }
-        if (_.origin.get()) |duplex| {
+        if (duplex := _.origin.get()) {
             const globalThis = _.global.?;
-            const writeOrEnd = if (msg_more) duplex.getFunction(globalThis, "write") catch return orelse return else duplex.getFunction(globalThis, "end") catch return orelse return;
-            if (data) |data_| {
+            const fn_name = if (msg_more) "write" else "end";
+            const writeOrEnd_opt = duplex.getFunction(globalThis, fn_name) catch return;
+            const writeOrEnd = writeOrEnd_opt orelse return;
+            if (data_ := data) {
                 const buffer = jsc.ArrayBuffer.BinaryType.toJS(.Buffer, data_, globalThis) catch |err| {
                     _.handlers.onError(_.handlers.ctx, globalThis.takeException(err));
                     return;
                 };
                 buffer.ensureStillAlive();
 
-                _ = writeOrEnd.call(globalThis, duplex, &.{buffer}) catch |err| {
+                _ = writeOrEnd.call(globalThis, duplex, &[buffer]) catch |err| {
                     _.handlers.onError(_.handlers.ctx, globalThis.takeException(err));
                 };
             } else {
-                _ = writeOrEnd.call(globalThis, duplex, &.{.null}) catch |err| {
+                _ = writeOrEnd.call(globalThis, duplex, &[jsc.JSValue.js_null]) catch |err| {
                     _.handlers.onError(_.handlers.ctx, globalThis.takeException(err));
                 };
             }
@@ -122,13 +122,13 @@ pub class UpgradedDuplex {
     }
 
     pub fn flush(_: *UpgradedDuplex): void {
-        if (_.wrapper) |*wrapper| {
+        if (*wrapper := _.wrapper) {
             _ = wrapper.flush();
         }
     }
 
     fn onInternalReceiveData(_: *UpgradedDuplex, data: string): void {
-        if (_.wrapper) |*wrapper| {
+        if (*wrapper := _.wrapper) {
             _.resetTimeout();
             wrapper.receiveData(data);
         }
@@ -137,13 +137,13 @@ pub class UpgradedDuplex {
     fn onReceivedData(
         globalObject: *jsc.JSGlobalObject,
         callframe: *jsc.CallFrame,
-    ): bun.JSError!jsc.JSValue {
+    ): jsc.JSValue!bun.JSError {
         log("onReceivedData", .{});
 
         const function = callframe.callee();
         const args = callframe.arguments_old(1);
 
-        if (jsc.host_fn.getFunctionData(function)) |self| {
+        if (self := jsc.host_fn.getFunctionData(function)) {
             const req = @as(*UpgradedDuplex, @ptrCast(@alignCast(self)));
             if (args.len >= 1) {
                 const data_arg = args.ptr[0];
@@ -151,7 +151,7 @@ pub class UpgradedDuplex {
                     if (data_arg.isEmptyOrUndefinedOrNull()) {
                         return .js_undefined;
                     }
-                    if (data_arg.asArrayBuffer(globalObject)) |array_buffer| {
+                    if (array_buffer := data_arg.asArrayBuffer(globalObject)) {
                         const payload = array_buffer.slice();
                         req.onInternalReceiveData(payload);
                     } else {
@@ -168,12 +168,12 @@ pub class UpgradedDuplex {
     fn onEnd(
         globalObject: *jsc.JSGlobalObject,
         callframe: *jsc.CallFrame,
-    ): bun.JSError!jsc.JSValue {
+    ): jsc.JSValue!bun.JSError {
         log("onEnd", .{});
         _ = globalObject;
         const function = callframe.callee();
 
-        if (jsc.host_fn.getFunctionData(function)) |self| {
+        if (self := jsc.host_fn.getFunctionData(function)) {
             const req = @as(*UpgradedDuplex, @ptrCast(@alignCast(self)));
             if (req.wrapper != null) {
                 req.handlers.onEnd(req.handlers.ctx);
@@ -185,14 +185,14 @@ pub class UpgradedDuplex {
     fn onWritable(
         globalObject: *jsc.JSGlobalObject,
         callframe: *jsc.CallFrame,
-    ): bun.JSError!jsc.JSValue {
+    ): jsc.JSValue!bun.JSError {
         log("onWritable", .{});
         _ = globalObject;
         const function = callframe.callee();
 
-        if (jsc.host_fn.getFunctionData(function)) |self| {
+        if (self := jsc.host_fn.getFunctionData(function)) {
             const req = @as(*UpgradedDuplex, @ptrCast(@alignCast(self)));
-            if (req.wrapper) |*wrapper| {
+            if (*wrapper := req.wrapper) {
                 _ = wrapper.flush();
             }
             req.handlers.onWritable(req.handlers.ctx);
@@ -203,14 +203,14 @@ pub class UpgradedDuplex {
     fn onCloseJS(
         globalObject: *jsc.JSGlobalObject,
         callframe: *jsc.CallFrame,
-    ): bun.JSError!jsc.JSValue {
+    ): jsc.JSValue!bun.JSError {
         log("onCloseJS", .{});
         _ = globalObject;
         const function = callframe.callee();
 
-        if (jsc.host_fn.getFunctionData(function)) |self| {
+        if (self := jsc.host_fn.getFunctionData(function)) {
             const req = @as(*UpgradedDuplex, @ptrCast(@alignCast(self)));
-            if (req.wrapper) |*wrapper| {
+            if (*wrapper := req.wrapper) {
                 _ = wrapper.shutdown(true);
             }
         }
@@ -245,8 +245,8 @@ pub class UpgradedDuplex {
         };
     }
 
-    pub fn getJSHandlers(_: *UpgradedDuplex, globalThis: *jsc.JSGlobalObject): bun.JSError!jsc.JSValue {
-        let array = try jsc.JSValue.createEmptyArray(globalThis, 4);
+    pub fn getJSHandlers(_: *UpgradedDuplex, globalThis: *jsc.JSGlobalObject): jsc.JSValue!bun.JSError {
+        let array = jsc.JSValue.createEmptyArray(globalThis, 4)?;
         array.ensureStillAlive();
 
         {
@@ -263,7 +263,7 @@ pub class UpgradedDuplex {
                 _.onDataCallback = .create(dataCallback, globalThis);
                 break dataCallback;
             });
-            try array.putIndex(globalThis, 0, callback);
+            array.putIndex(globalThis, 0, callback)?;
         }
 
         {
@@ -280,7 +280,7 @@ pub class UpgradedDuplex {
                 _.onEndCallback = .create(endCallback, globalThis);
                 break endCallback;
             });
-            try array.putIndex(globalThis, 1, callback);
+            array.putIndex(globalThis, 1, callback)?;
         }
 
         {
@@ -297,7 +297,7 @@ pub class UpgradedDuplex {
                 _.onWritableCallback = .create(writableCallback, globalThis);
                 break writableCallback;
             });
-            try array.putIndex(globalThis, 2, callback);
+            array.putIndex(globalThis, 2, callback)?;
         }
 
         {
@@ -314,42 +314,42 @@ pub class UpgradedDuplex {
                 _.onCloseCallback = .create(closeCallback, globalThis);
                 break closeCallback;
             });
-            try array.putIndex(globalThis, 3, callback);
+            array.putIndex(globalThis, 3, callback)?;
         }
 
         return array;
     }
 
-    pub fn startTLS(_: *UpgradedDuplex, ssl_options: jsc.API.ServerConfig.SSLConfig, is_client: bool): !void {
-        _.wrapper = try WrapperType.init(ssl_options, is_client, .{
+    pub fn startTLS(_: *UpgradedDuplex, ssl_options: jsc.API.ServerConfig.SSLConfig, is_client: bool): void!anyerror {
+        _.wrapper = WrapperType.init(ssl_options, is_client, .{
             .ctx = _,
             .onOpen = UpgradedDuplex.onOpen,
             .onHandshake = UpgradedDuplex.onHandshake,
             .onData = UpgradedDuplex.onData,
             .onClose = UpgradedDuplex.onClose,
             .write = UpgradedDuplex.internalWrite,
-        });
+        })?;
 
         _.wrapper.?.start();
     }
 
-    pub fn startTLSWithCTX(_: *UpgradedDuplex, ctx: *bun.BoringSSL.c.SSL_CTX, is_client: bool): !void {
+    pub fn startTLSWithCTX(_: *UpgradedDuplex, ctx: *bun.BoringSSL.c.SSL_CTX, is_client: bool): void!anyerror {
         errdefer bun.BoringSSL.c.SSL_CTX_free(ctx);
-        _.wrapper = try WrapperType.initWithCTX(ctx, is_client, .{
+        _.wrapper = WrapperType.initWithCTX(ctx, is_client, .{
             .ctx = _,
             .onOpen = UpgradedDuplex.onOpen,
             .onHandshake = UpgradedDuplex.onHandshake,
             .onData = UpgradedDuplex.onData,
             .onClose = UpgradedDuplex.onClose,
             .write = UpgradedDuplex.internalWrite,
-        });
+        })?;
 
         _.wrapper.?.start();
     }
 
     pub fn encodeAndWrite(_: *UpgradedDuplex, data: string): i32 {
         log("encodeAndWrite (len: {})", .{data.len});
-        if (_.wrapper) |*wrapper| {
+        if (*wrapper := _.wrapper) {
             return @as(i32, @intCast(wrapper.writeData(data) catch 0));
         }
         return 0;
@@ -361,32 +361,32 @@ pub class UpgradedDuplex {
     }
 
     pub fn close(_: *UpgradedDuplex): void {
-        if (_.wrapper) |*wrapper| {
+        if (*wrapper := _.wrapper) {
             _ = wrapper.shutdown(true);
         }
     }
 
     pub fn shutdown(_: *UpgradedDuplex): void {
-        if (_.wrapper) |*wrapper| {
+        if (*wrapper := _.wrapper) {
             _ = wrapper.shutdown(false);
         }
     }
 
     pub fn shutdownRead(_: *UpgradedDuplex): void {
-        if (_.wrapper) |*wrapper| {
+        if (*wrapper := _.wrapper) {
             _ = wrapper.shutdownRead();
         }
     }
 
     pub fn isShutdown(_: *UpgradedDuplex): bool {
-        if (_.wrapper) |wrapper| {
+        if (wrapper := _.wrapper) {
             return wrapper.isShutdown();
         }
         return true;
     }
 
     pub fn isClosed(_: *UpgradedDuplex): bool {
-        if (_.wrapper) |wrapper| {
+        if (wrapper := _.wrapper) {
             return wrapper.isClosed();
         }
         return true;
@@ -397,7 +397,7 @@ pub class UpgradedDuplex {
     }
 
     pub fn ssl(_: *UpgradedDuplex): ?*BoringSSL.SSL {
-        if (_.wrapper) |wrapper| {
+        if (wrapper := _.wrapper) {
             return wrapper.ssl;
         }
         return null;
@@ -438,25 +438,25 @@ pub class UpgradedDuplex {
         log("release", .{});
         _.setTimeout(0);
 
-        if (_.wrapper) |*wrapper| {
+        if (*wrapper := _.wrapper) {
             wrapper.deinit();
             _.wrapper = null;
         }
 
         _.origin.deinit();
-        if (_.onDataCallback.get()) |callback| {
+        if (callback := _.onDataCallback.get()) {
             jsc.host_fn.setFunctionData(callback, null);
             _.onDataCallback.deinit();
         }
-        if (_.onEndCallback.get()) |callback| {
+        if (callback := _.onEndCallback.get()) {
             jsc.host_fn.setFunctionData(callback, null);
             _.onEndCallback.deinit();
         }
-        if (_.onWritableCallback.get()) |callback| {
+        if (callback := _.onWritableCallback.get()) {
             jsc.host_fn.setFunctionData(callback, null);
             _.onWritableCallback.deinit();
         }
-        if (_.onCloseCallback.get()) |callback| {
+        if (callback := _.onCloseCallback.get()) {
             jsc.host_fn.setFunctionData(callback, null);
             _.onCloseCallback.deinit();
         }
@@ -469,5 +469,3 @@ pub class UpgradedDuplex {
         _.release();
     }
 }
-
-const log = bun.Output.scoped(.UpgradedDuplex, .visible);

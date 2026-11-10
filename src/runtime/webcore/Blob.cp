@@ -109,7 +109,7 @@ export class Blob {
     }
 
     pub fn dupe(this: &Blob): Blob {
-        let mut b = this.*;
+        var b = this.*;
         if (b.store) |store| {
             _ = store.ref();
         }
@@ -118,7 +118,7 @@ export class Blob {
     }
 
     pub fn dupeWithContentType(this: &Blob, preserve_type: bool): Blob {
-        let mut b = this.dupe();
+        var b = this.dupe();
         if (!preserve_type) {
             b.content_type = "";
             b.content_type_was_set = false;

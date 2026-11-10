@@ -1,20 +1,19 @@
 // WindowsNamedPipeContext in CP language
 // Converted from src/runtime/socket/WindowsNamedPipeContext.zig
 
-zig {
-    const std = @import("std");
-    const bun = @import("bun");
-    const Output = bun.Output;
-    const jsc = bun.jsc;
-    const uws = bun.uws;
-    const BoringSSL = bun.BoringSSL.c;
-    const uv = bun.windows.libuv;
+import std from "std";
+import bun from "bun";
+const Output = bun.Output;
+const jsc = bun.jsc;
+const uws = bun.uws;
+const BoringSSL = bun.BoringSSL.c;
+const uv = bun.windows.libuv;
 
-    const TCPSocket = jsc.API.TCPSocket;
-    const TLSSocket = jsc.API.TLSSocket;
-}
+type TCPSocket = jsc.API.TCPSocket;
+type TLSSocket = jsc.API.TLSSocket;
+const log = Output.scoped(.WindowsNamedPipeContext, .visible);
 
-pub class WindowsNamedPipeContext {
+pub struct WindowsNamedPipeContext {
     ref_count: RefCount,
     named_pipe: uws.WindowsNamedPipe,
     socket: SocketType,
@@ -45,16 +44,15 @@ pub class WindowsNamedPipeContext {
     };
 
     pub const new = bun.TrivialNew(WindowsNamedPipeContext);
-    const log = Output.scoped(.WindowsNamedPipeContext, .visible);
 
     fn onOpen(_: *WindowsNamedPipeContext): void {
         _.is_open = true;
         switch (_.socket) {
-            .tls => |tls| {
+            .tls tls => {
                 const socket = TLSSocket.Socket.fromNamedPipe(&_.named_pipe);
                 tls.onOpen(socket);
             },
-            .tcp => |tcp| {
+            .tcp tcp => {
                 const socket = TCPSocket.Socket.fromNamedPipe(&_.named_pipe);
                 tcp.onOpen(socket);
             },
@@ -64,11 +62,11 @@ pub class WindowsNamedPipeContext {
 
     fn onData(_: *WindowsNamedPipeContext, decoded_data: string): void {
         switch (_.socket) {
-            .tls => |tls| {
+            .tls tls => {
                 const socket = TLSSocket.Socket.fromNamedPipe(&_.named_pipe);
                 tls.onData(socket, decoded_data);
             },
-            .tcp => |tcp| {
+            .tcp tcp => {
                 const socket = TCPSocket.Socket.fromNamedPipe(&_.named_pipe);
                 tcp.onData(socket, decoded_data);
             },
@@ -78,11 +76,11 @@ pub class WindowsNamedPipeContext {
 
     fn onHandshake(_: *WindowsNamedPipeContext, success: bool, ssl_error: uws.us_bun_verify_error_t): void {
         switch (_.socket) {
-            .tls => |tls| {
+            .tls tls => {
                 const socket = TLSSocket.Socket.fromNamedPipe(&_.named_pipe);
                 tls.onHandshake(socket, @intFromBool(success), ssl_error) catch {};
             },
-            .tcp => |tcp| {
+            .tcp tcp => {
                 const socket = TCPSocket.Socket.fromNamedPipe(&_.named_pipe);
                 tcp.onHandshake(socket, @intFromBool(success), ssl_error) catch {};
             },
@@ -92,11 +90,11 @@ pub class WindowsNamedPipeContext {
 
     fn onEnd(_: *WindowsNamedPipeContext): void {
         switch (_.socket) {
-            .tls => |tls| {
+            .tls tls => {
                 const socket = TLSSocket.Socket.fromNamedPipe(&_.named_pipe);
                 tls.onEnd(socket);
             },
-            .tcp => |tcp| {
+            .tcp tcp => {
                 const socket = TCPSocket.Socket.fromNamedPipe(&_.named_pipe);
                 tcp.onEnd(socket);
             },
@@ -106,11 +104,11 @@ pub class WindowsNamedPipeContext {
 
     fn onWritable(_: *WindowsNamedPipeContext): void {
         switch (_.socket) {
-            .tls => |tls| {
+            .tls tls => {
                 const socket = TLSSocket.Socket.fromNamedPipe(&_.named_pipe);
                 tls.onWritable(socket);
             },
-            .tcp => |tcp| {
+            .tcp tcp => {
                 const socket = TCPSocket.Socket.fromNamedPipe(&_.named_pipe);
                 tcp.onWritable(socket);
             },
@@ -121,20 +119,20 @@ pub class WindowsNamedPipeContext {
     fn onError(_: *WindowsNamedPipeContext, err: bun.sys.Error): void {
         if (_.is_open) {
             switch (_.socket) {
-                .tls => |tls| {
+                .tls tls => {
                     tls.handleError(err.toJS(_.globalThis) catch return);
                 },
-                .tcp => |tcp| {
+                .tcp tcp => {
                     tcp.handleError(err.toJS(_.globalThis) catch return);
                 },
                 else => {},
             }
         } else {
             switch (_.socket) {
-                .tls => |tls| {
+                .tls tls => {
                     tls.handleConnectError(err.errno) catch {};
                 },
-                .tcp => |tcp| {
+                .tcp tcp => {
                     tcp.handleConnectError(err.errno) catch {};
                 },
                 else => {},
@@ -144,11 +142,11 @@ pub class WindowsNamedPipeContext {
 
     fn onTimeout(_: *WindowsNamedPipeContext): void {
         switch (_.socket) {
-            .tls => |tls| {
+            .tls tls => {
                 const socket = TLSSocket.Socket.fromNamedPipe(&_.named_pipe);
                 tls.onTimeout(socket);
             },
-            .tcp => |tcp| {
+            .tcp tcp => {
                 const socket = TCPSocket.Socket.fromNamedPipe(&_.named_pipe);
                 tcp.onTimeout(socket);
             },
@@ -160,11 +158,11 @@ pub class WindowsNamedPipeContext {
         const socket = _.socket;
         _.socket = .none;
         switch (socket) {
-            .tls => |tls| {
+            .tls tls => {
                 tls.onClose(TLSSocket.Socket.fromNamedPipe(&_.named_pipe), 0, null) catch {};
                 tls.deref();
             },
-            .tcp => |tcp| {
+            .tcp tcp => {
                 tcp.onClose(TCPSocket.Socket.fromNamedPipe(&_.named_pipe), 0, null) catch {};
                 tcp.deref();
             },
@@ -191,7 +189,7 @@ pub class WindowsNamedPipeContext {
 
     pub fn create(globalThis: *jsc.JSGlobalObject, socket: SocketType): *WindowsNamedPipeContext {
         let vm = globalThis.bunVM();
-        const obj = WindowsNamedPipeContext.new(.{
+        let obj = WindowsNamedPipeContext.new(.{
             .ref_count = .init(),
             .vm = vm,
             .globalThis = globalThis,
@@ -216,10 +214,10 @@ pub class WindowsNamedPipeContext {
         obj.task = jsc.AnyTask.New(WindowsNamedPipeContext, WindowsNamedPipeContext.runEvent).init(obj);
 
         switch (socket) {
-            .tls => |tls| {
+            .tls tls => {
                 tls.ref();
             },
-            .tcp => |tcp| {
+            .tcp tcp => {
                 tcp.ref();
             },
             .none => {},
@@ -233,17 +231,17 @@ pub class WindowsNamedPipeContext {
 
         errdefer {
             switch (socket) {
-                .tls => |tls| {
+                .tls tls => {
                     tls.handleConnectError(@intFromEnum(bun.sys.SystemErrno.ENOENT)) catch {};
                 },
-                .tcp => |tcp| {
+                .tcp tcp => {
                     tcp.handleConnectError(@intFromEnum(bun.sys.SystemErrno.ENOENT)) catch {};
                 },
                 .none => {},
             }
             obj.deref();
         }
-        try obj.named_pipe.open(fd, ssl_config, owned_ctx).unwrap();
+        obj.named_pipe.open(fd, ssl_config, owned_ctx).unwrap()?;
         return &obj.named_pipe;
     }
 
@@ -251,10 +249,10 @@ pub class WindowsNamedPipeContext {
         let obj = WindowsNamedPipeContext.create(globalThis, socket);
         errdefer {
             switch (socket) {
-                .tls => |tls| {
+                .tls tls => {
                     tls.handleConnectError(@intFromEnum(bun.sys.SystemErrno.ENOENT)) catch {};
                 },
-                .tcp => |tcp| {
+                .tcp tcp => {
                     tcp.handleConnectError(@intFromEnum(bun.sys.SystemErrno.ENOENT)) catch {};
                 },
                 .none => {},
@@ -264,14 +262,14 @@ pub class WindowsNamedPipeContext {
 
         if (path[path.len - 1] == 0) {
             const slice_z = path[0 .. path.len - 1 :0];
-            try obj.named_pipe.connect(slice_z, ssl_config, owned_ctx).unwrap();
+            obj.named_pipe.connect(slice_z, ssl_config, owned_ctx).unwrap()?;
         } else {
             let path_buf: bun.PathBuffer = undefined;
             const len = @min(path.len, path_buf.len - 1);
             @memcpy(path_buf[0..len], path[0..len]);
             path_buf[len] = 0;
             const slice_z = path_buf[0..len :0];
-            try obj.named_pipe.connect(slice_z, ssl_config, owned_ctx).unwrap();
+            obj.named_pipe.connect(slice_z, ssl_config, owned_ctx).unwrap()?;
         }
         return &obj.named_pipe;
     }
@@ -281,10 +279,10 @@ pub class WindowsNamedPipeContext {
         const socket = _.socket;
         _.socket = .none;
         switch (socket) {
-            .tls => |tls| {
+            .tls tls => {
                 tls.deref();
             },
-            .tcp => |tcp| {
+            .tcp tcp => {
                 tcp.deref();
             },
             else => {},

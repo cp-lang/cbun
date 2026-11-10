@@ -13,20 +13,20 @@ const bun = @import("bun");
 pub fn ConcurrentPromiseTask(comptime Context: type): type {
     return struct {
         const This = @This();
-        ctx: *Context;
-        task: WorkPoolTask = .{ .callback = &runFromThreadPool };
-        event_loop: *jsc.EventLoop;
-        allocator: std.mem.Allocator;
-        promise: jsc.JSPromise.Strong = .{};
-        globalThis: *jsc.JSGlobalObject;
-        concurrent_task: jsc.ConcurrentTask = .{};
+        ctx: *Context,
+        task: WorkPoolTask = .{ .callback = &runFromThreadPool },
+        event_loop: *jsc.EventLoop,
+        allocator: std.mem.Allocator,
+        promise: jsc.JSPromise.Strong = .{},
+        globalThis: *jsc.JSGlobalObject,
+        concurrent_task: jsc.ConcurrentTask = .{},
 
         // This is a poll because we want it to enter the uSockets loop
-        ref: Async.KeepAlive = .{};
+        ref: Async.KeepAlive = .{},
 
         pub const new = bun.TrivialNew(@This());
 
-        pub fn createOnJSThread(allocator: std.mem.Allocator, globalThis: *jsc.JSGlobalObject, value: *Context): *This {
+        pub fn createOnJSThread(allocator: std.mem.Allocator, globalThis: *jsc.JSGlobalObject, value: *Context) *This {
             var this = This.new(.{
                 .event_loop = VirtualMachine.get().event_loop,
                 .ctx = value,
@@ -39,35 +39,31 @@ pub fn ConcurrentPromiseTask(comptime Context: type): type {
             return this;
         }
 
-        pub fn runFromThreadPool(task: *WorkPoolTask): void {
+        pub fn runFromThreadPool(task: *WorkPoolTask) void {
             var this: *This = @fieldParentPtr("task", task);
             Context.run(this.ctx);
             this.onFinish();
         }
 
-        pub fn runFromJS(_: *This): bun.JSTerminated!void {
-            const promise = _.promise.swap();
-            _.ref.unref(_.event_loop.virtual_machine);
+        pub fn runFromJS(this: *This) bun.JSTerminated!void {
+            const promise = this.promise.swap();
+            this.ref.unref(this.event_loop.virtual_machine);
 
-            var ctx = _.ctx;
+            var ctx = this.ctx;
             return ctx.then(promise);
         }
 
-        pub fn schedule(_: *This): void {
-            WorkPool.schedule(&_.task);
+        pub fn schedule(this: *This) void {
+            WorkPool.schedule(&this.task);
         }
 
-        pub fn onFinish(_: *This): void {
-            _.event_loop.enqueueTaskConcurrent(_.concurrent_task.from(_, .manual_deinit));
+        pub fn onFinish(this: *This) void {
+            this.event_loop.enqueueTaskConcurrent(this.concurrent_task.from(this, .manual_deinit));
         }
 
-        pub fn release(*_): void {
-            _.promise.deinit();
-            bun.destroy(_);
-        }
-
-        pub fn deinit(*_): void {
-            _.release();
+        pub fn deinit(this: *This) void {
+            this.promise.deinit();
+            bun.destroy(this);
         }
     };
 }

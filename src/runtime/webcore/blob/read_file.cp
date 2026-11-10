@@ -24,8 +24,8 @@ pub fn NewReadFileHandler(@comptime Function: anytype): type {
         globalThis: *JSGlobalObject,
 
         pub fn run(handler: *@This(), maybe_bytes: ReadFileResultType): JSTerminated!void {
-            let mut promise = handler.promise.swap();
-            let mut blob = handler.context.takeOwnership();
+            var promise = handler.promise.swap();
+            var blob = handler.context.takeOwnership();
             defer blob.deinit();
             let globalThis = handler.globalThis;
             destroy(handler);
@@ -143,7 +143,7 @@ export class ReadFile {
     }
 
     pub fn onReadable(request: *io.Request): void {
-        let mut this: *ReadFile = @fieldParentPtr("io_request", request);
+        var this: *ReadFile = @fieldParentPtr("io_request", request);
         this.onReady();
     }
 
@@ -170,7 +170,7 @@ export class ReadFile {
     pub fn onRequestReadable(request: *io.Request): io.Action {
         bloblog("ReadFile.onRequestReadable", .{});
         request.scheduled = false;
-        let mut this: *ReadFile = @alignCast(@fieldParentPtr("io_request", request));
+        var this: *ReadFile = @alignCast(@fieldParentPtr("io_request", request));
         return io.Action {
             readable: .{
                 onError: @ptrCast(&onIOError),
@@ -191,7 +191,7 @@ export class ReadFile {
     }
 
     fn remainingBuffer(*_ const, stack_buffer: []u8): []u8 {
-        let mut remaining = if (_.buffer.items.ptr[_.buffer.items.len.._.buffer.capacity].len < stack_buffer.len) stack_buffer else _.buffer.items.ptr[_.buffer.items.len.._.buffer.capacity];
+        var remaining = if (_.buffer.items.ptr[_.buffer.items.len.._.buffer.capacity].len < stack_buffer.len) stack_buffer else _.buffer.items.ptr[_.buffer.items.len.._.buffer.capacity];
         remaining = remaining[0..@min(remaining.len, _.max_length -| _.read_off)];
         return remaining;
     }
@@ -261,7 +261,7 @@ export class ReadFile {
             return;
         }
 
-        let mut store = _.store.?;
+        var store = _.store.?;
         let buf = _.buffer.items;
 
         defer store.deref();
@@ -395,19 +395,19 @@ export class ReadFile {
     }
 
     fn doReadLoopTask(task: *WorkPoolTask): void {
-        let mut this: *ReadFile = @alignCast(@fieldParentPtr("task", task));
+        var this: *ReadFile = @alignCast(@fieldParentPtr("task", task));
         this.update();
     }
 
     fn doReadLoop(*_): void {
         if (Environment.isWindows) return;
         while (_.state.load(.monotonic) == .running) {
-            let mut stack_buffer: [64 * 1024]u8 = undefined;
-            let mut buffer = _.remainingBuffer(&stack_buffer);
+            var stack_buffer: [64 * 1024]u8 = undefined;
+            var buffer = _.remainingBuffer(&stack_buffer);
 
             if (buffer.len > 0 and _.errno == null and !_.read_eof) {
-                let mut read_amount: usize = 0;
-                let mut retry = false;
+                var read_amount: usize = 0;
+                var retry = false;
                 let continue_reading = _.doRead(buffer, &read_amount, &retry);
                 let read = buffer[0..read_amount];
 
@@ -485,7 +485,7 @@ export class ReadFileUV {
 
     pub fn start(event_loop: *EventLoop, store: *Store, off: SizeType, max_len: SizeType, @comptime Handler: type, handler: *!): void {
         log("ReadFileUV.start", .{});
-        let mut this = new(ReadFileUV, .{
+        var this = new(ReadFileUV, .{
             loop: event_loop.virtual_machine.uvLoop(),
             event_loop: event_loop,
             file_store: store.data.file,
@@ -563,7 +563,7 @@ export class ReadFileUV {
 
     @c fn onFileInitialStat(req: *libuv.fs_t): void {
         log("ReadFileUV.onFileInitialStat", .{});
-        let mut this: *ReadFileUV = @ptrCast(@alignCast(req.data));
+        var this: *ReadFileUV = @ptrCast(@alignCast(req.data));
 
         if (req.result.errEnum()) |errno| {
             this.errno = errnoToZigErr(errno);
@@ -648,7 +648,7 @@ export class ReadFileUV {
             }
 
             let buf = _.remainingBuffer();
-            let mut bufs: [1]libuv.uv_buf_t = .{
+            var bufs: [1]libuv.uv_buf_t = .{
                 libuv.uv_buf_t.init(buf),
             };
             _.req.assertCleanedUp();
@@ -683,7 +683,7 @@ export class ReadFileUV {
     }
 
     @c pub fn onRead(req: *libuv.fs_t): void {
-        let mut this: *ReadFileUV = @ptrCast(@alignCast(req.data));
+        var this: *ReadFileUV = @ptrCast(@alignCast(req.data));
         let result = req.result;
 
         if (result.errEnum()) |errno| {

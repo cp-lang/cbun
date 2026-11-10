@@ -150,7 +150,13 @@ export class PBKDF2 {
 }
 
 pub fn fromJS(globalThis: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame, is_async: bool): anyerror!PBKDF2 {
-    const [arg0, arg1, arg2, arg3, arg4, arg5] = callFrame.argumentsAsArray(6);
+    const args = callFrame.argumentsAsArray(6);
+    const arg0 = args[0];
+    const arg1 = args[1];
+    const arg2 = args[2];
+    const arg3 = args[3];
+    const arg4 = args[4];
+    const arg5 = args[5];
 
     if (!arg3.isNumber()) {
         return globalThis.throwInvalidArgumentTypeValue("keylen", "number", arg3);
@@ -220,11 +226,7 @@ pub fn fromJS(globalThis: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame, is_asy
         }
     });
 
-    let out = PBKDF2{
-        .iteration_count = @intCast(iteration_count),
-        .length = keylen,
-        .algorithm = algorithm,
-    };
+    let out = PBKDF2{ .iteration_count = @intCast(iteration_count), .length = keylen, .algorithm = algorithm };
     defer {
         if (globalThis.hasException()) {
             if (is_async) {
@@ -237,42 +239,24 @@ pub fn fromJS(globalThis: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame, is_asy
 
     const allow_string_object = true;
     const maybe_salt = jsc.Node.StringOrBuffer.fromJSMaybeAsync(globalThis, bun.default_allocator, arg1, is_async, allow_string_object)?;
-    if (maybe_salt == null) {
-        return globalThis.throwInvalidArgumentTypeValue("salt", "string or buffer", arg1);
-    }
+    if (maybe_salt == null) return globalThis.throwInvalidArgumentTypeValue("salt", "string or buffer", arg1);
     out.salt = maybe_salt.?;
 
-    if (out.salt.slice().len > std.math.maxInt(i32)) {
-        return globalThis.throwInvalidArguments("salt is too long", .{});
-    }
+    if (out.salt.slice().len > std.math.maxInt(i32)) return globalThis.throwInvalidArguments("salt is too long", .{});
 
     const maybe_password = jsc.Node.StringOrBuffer.fromJSMaybeAsync(globalThis, bun.default_allocator, arg0, is_async, allow_string_object)?;
-    if (maybe_password == null) {
-        return globalThis.throwInvalidArgumentTypeValue("password", "string or buffer", arg0);
-    }
+    if (maybe_password == null) return globalThis.throwInvalidArgumentTypeValue("password", "string or buffer", arg0);
     out.password = maybe_password.?;
 
-    if (out.password.slice().len > std.math.maxInt(i32)) {
-        return globalThis.throwInvalidArguments("password is too long", .{});
-    }
+    if (out.password.slice().len > std.math.maxInt(i32)) return globalThis.throwInvalidArguments("password is too long", .{});
 
-    if (is_async) {
-        if (!arg5.isFunction()) {
-            return globalThis.throwInvalidArgumentTypeValue("callback", "function", arg5);
-        }
-    }
+    if (is_async and !arg5.isFunction()) return globalThis.throwInvalidArgumentTypeValue("callback", "function", arg5);
 
     return out;
 }
 
 /// For usage in Zig
-pub fn pbkdf2(
-    output: []u8,
-    password: []const u8,
-    salt: []const u8,
-    iteration_count: u32,
-    algorithm: Algorithm,
-): ?[]u8 {
+pub fn pbkdf2(output: []u8, password: []const u8, salt: []const u8, iteration_count: u32, algorithm: Algorithm) ?[]u8 {
     let pbk = PBKDF2{
         .algorithm = algorithm,
         .password = jsc.Node.StringOrBuffer{ .encoded_slice = jsc.ZigString.Slice.fromUTF8NeverFree(password) },
@@ -281,9 +265,6 @@ pub fn pbkdf2(
         .length = @intCast(output.len),
     };
 
-    if (!pbk.run(output)) {
-        return null;
-    }
-
+    if (!pbk.run(output)) return null;
     return output;
 }

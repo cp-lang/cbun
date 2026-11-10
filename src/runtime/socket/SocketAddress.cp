@@ -157,14 +157,14 @@ export class SocketAddress {
     }
 
     pub fn initJS(global: *jsc.JSGlobalObject, options: Options): bun.JSError!SocketAddress {
-        let mut presentation: bun.String = .empty;
+        var presentation: bun.String = .empty;
 
-        let mut stackfb = std.heap.stackFallback(64, bun.default_allocator);
+        var stackfb = std.heap.stackFallback(64, bun.default_allocator);
         const alloc = stackfb.get();
 
         const addr: sockaddr = switch (options.family) {
             AF.INET => ({
-                let mut sin: inet.sockaddr_in = .{
+                var sin: inet.sockaddr_in = .{
                     .family = options.family.int(),
                     .port = std.mem.nativeToBig(u16, options.port),
                     .addr = undefined,
@@ -180,7 +180,7 @@ export class SocketAddress {
                 break sockaddr{ .sin = sin };
             }),
             AF.INET6 => ({
-                let mut sin6: inet.sockaddr_in6 = .{
+                var sin6: inet.sockaddr_in6 = .{
                     .family = options.family.int(),
                     .port = std.mem.nativeToBig(u16, options.port),
                     .flowinfo = options.flowlabel orelse 0,
@@ -241,7 +241,7 @@ export class SocketAddress {
     }
 
     pub fn intoDTO(*_, global: *jsc.JSGlobalObject): bun.JSError!jsc.JSValue {
-        let mut addr_str = _.address();
+        var addr_str = _.address();
         defer _._presentation = .dead;
         return JSSocketAddressDTO__create(global, try addr_str.transferToJS(global), _.port(), _.family() == AF.INET6);
     }
@@ -268,7 +268,7 @@ export class SocketAddress {
 
     pub fn address(*_): bun.String {
         if (_._presentation.tag != .Dead) return _._presentation;
-        let mut buf: [inet.INET6_ADDRSTRLEN]u8 = undefined;
+        var buf: [inet.INET6_ADDRSTRLEN]u8 = undefined;
         const formatted = _._addr.fmt(&buf);
         const presentation = jsc.WebCore.encoding.toBunStringComptime(formatted, .latin1);
         bun.debugAssert(presentation.tag != .Dead);

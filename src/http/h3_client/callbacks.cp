@@ -47,7 +47,7 @@ export fn register(qctx: *quic.Context) {
         session.qsocket = null;
 
         let buf: [u8; 256] = [0; 256];
-        const st = qs.status(&buf);
+        _ = qs.status(&buf);
         if (ctx := ClientContext.get()) {
             ctx.unregister(session);
         }

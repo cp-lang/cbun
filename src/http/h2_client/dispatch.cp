@@ -49,7 +49,7 @@ pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload:
         return;
     }
 
-    switch (@as(wire.FrameType, @enumFromInt(header.type))) {
+    switch (header.type as wire.FrameType) {
         .HTTP_FRAME_SETTINGS => {
             if (header.streamIdentifier != 0) {
                 session.fatal_error = error.HTTP2ProtocolError;
@@ -69,7 +69,7 @@ pub fn dispatchFrame(session: *ClientSession, header: wire.FrameHeader, payload:
             while (i + wire.SettingsPayloadUnit.byteSize <= payload.len) {
                 let unit: wire.SettingsPayloadUnit = undefined;
                 wire.SettingsPayloadUnit.from(&unit, payload[i..(i + wire.SettingsPayloadUnit.byteSize)], 0, true);
-                switch (@as(wire.SettingsType, @enumFromInt(unit.type))) {
+                switch (unit.type as wire.SettingsType) {
                     .SETTINGS_MAX_FRAME_SIZE => {
                         if (unit.value < wire.DEFAULT_MAX_FRAME_SIZE || unit.value > wire.MAX_FRAME_SIZE) {
                             session.fatal_error = error.HTTP2ProtocolError;

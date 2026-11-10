@@ -4,10 +4,9 @@ import std from "std";
 const Environment = bun.Environment;
 const SystemErrno = bun.sys.SystemErrno;
 
-zig {
-pub const coreutils_error_map = brk: {
+export const coreutils_error_map = brk: {
     // macOS and Linux have slightly different error messages.
-    const entries: []const struct { [:0]const u8, [:0]const u8 } = switch (Environment.os) {
+    const entries = switch (Environment.os) {
         // Since windows is just an emulation of linux, it will derive the linux error messages.
         .linux, .windows, .wasm => &.{
             .{ "EPERM", "Operation not permitted" },
@@ -351,9 +350,10 @@ pub const coreutils_error_map = brk: {
         },
     };
 
-    var map = std.EnumMap(SystemErrno, [:0]const u8).initFull("unknown error");
-    for (entries) |entry| {
-        const key, const text = entry;
+    let map = std.EnumMap(SystemErrno, [:0]const u8).initFull("unknown error");
+    for (entry of entries) {
+        const key = entry[0];
+        const text = entry[1];
         if (@hasField(SystemErrno, key)) {
             map.put(@field(SystemErrno, key), text);
         }
@@ -364,4 +364,3 @@ pub const coreutils_error_map = brk: {
 
     break :brk map;
 };
-}

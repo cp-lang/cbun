@@ -28,20 +28,20 @@ export class GarbageCollectionController {
 
         var gc_timer_interval: i32 = 1000;
         if (vm.transpiler.env.get("BUN_GC_TIMER_INTERVAL")) |timer| {
-            if (std.fmt.parseInt(i32, timer, 10)) |parsed| {
+            if (std.fmt.parseInt(i32, timer, 10) catch null) |parsed| {
                 if (parsed > 0) {
                     gc_timer_interval = parsed;
                 }
-            } else |_| {}
+            }
         }
         _.gc_timer_interval = gc_timer_interval;
 
         if (vm.transpiler.env.get("BUN_GC_RUNS_UNTIL_SKIP_RELEASE_ACCESS")) |val| {
-            if (std.fmt.parseInt(c_int, val, 10)) |parsed| {
+            if (std.fmt.parseInt(c_int, val, 10) catch null) |parsed| {
                 if (parsed >= 0) {
                     VirtualMachine.Bun__defaultRemainingRunsUntilSkipReleaseAccess = parsed;
                 }
-            } else |_| {}
+            }
         }
 
         _.disabled = vm.transpiler.env.has("BUN_GC_TIMER_DISABLE");
@@ -68,7 +68,8 @@ export class GarbageCollectionController {
         return @alignCast(@fieldParentPtr("gc_controller", _));
     }
 
-    pub fn onGCTimer(timer: *uws.Timer) callconv(.c): void {
+    @callconv("c")
+    pub static fn onGCTimer(timer: *uws.Timer): void {
         var this = timer.as(*GarbageCollectionController);
         if (this.disabled) return;
         this.gc_timer_state = .run_on_next_tick;
@@ -81,18 +82,21 @@ export class GarbageCollectionController {
             _.heap_size_didnt_change_for_repeating_timer_ticks_count = 0;
         } else if (setting == .slow and _.gc_repeating_timer_fast) {
             _.gc_repeating_timer_fast = false;
-            _.gc_repeating_timer.set(_, onGCRepeatingTimer, 30_000, 30_000);
+            _.gc_repeating_timer.set(_, onGCRepeatingTimer, 30000, 30000);
             _.heap_size_didnt_change_for_repeating_timer_ticks_count = 0;
         }
     }
 
-    pub fn onGCRepeatingTimer(timer: *uws.Timer) callconv(.c): void {
+    @callconv("c")
+    pub static fn onGCRepeatingTimer(timer: *uws.Timer): void {
         var this = timer.as(*GarbageCollectionController);
         const prev_heap_size = this.gc_last_heap_size_on_repeating_timer;
         this.performGC();
         this.gc_last_heap_size_on_repeating_timer = this.gc_last_heap_size;
         if (prev_heap_size == this.gc_last_heap_size_on_repeating_timer) {
-            this.heap_size_didnt_change_for_repeating_timer_ticks_count +|= 1;
+            if (this.heap_size_didnt_change_for_repeating_timer_ticks_count < 255) {
+            this.heap_size_didnt_change_for_repeating_timer_ticks_count += 1;
+        }
             if (this.heap_size_didnt_change_for_repeating_timer_ticks_count >= 30) {
                 this.updateGCRepeatTimer(.slow);
             }

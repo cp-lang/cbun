@@ -5,7 +5,8 @@ const string = []const u8;
 pub const Mode = std.posix.mode_t;
 pub const E = std.posix.E;
 pub const S = std.posix.S;
-
+const MAX_ERRNO = 98;
+pub const bun = @import("bun");
 pub const SystemErrno = enum(u16) {
     SUCCESS = 0,
     EPERM = 1,
@@ -105,19 +106,33 @@ pub const SystemErrno = enum(u16) {
     ENOTRECOVERABLE = 95,
     EOWNERDEAD = 96,
     EINTEGRITY = 97,
-
-    pub const max = 98;
+    pub fn get(s: []const u8) ?@This() {
+        return std.meta.stringToEnum(@This(), s);
+    }
+    pub fn has(s: []const u8) bool {
+        return std.meta.stringToEnum(@This(), s) != null;
+    }
+    pub fn fromName(s: []const u8) ?@This() {
+        return get(s);
+    }
+    pub fn name(self: @This()) []const u8 {
+        return @tagName(self);
+    }
 
     pub fn init(code: anytype) ?SystemErrno {
-        if (code < 0) {
-            if (code <= -max) {
+        if ((code < 0)) {
+            if ((code <= (0 - MAX_ERRNO))) {
                 return null;
             }
-            return @enumFromInt(-code);
+            return @enumFromInt((0 - code));
         }
-        if (code >= max) return null;
+        if ((code >= MAX_ERRNO)) {
+            return null;
+        }
         return @enumFromInt(code);
     }
+
+    pub const max = MAX_ERRNO;
 };
 
 pub const UV_E = struct {
@@ -195,14 +210,14 @@ pub const UV_E = struct {
 pub fn getErrno(rc: anytype) E {
     const T = @TypeOf(rc);
     const info = @typeInfo(T);
-    const is_neg1 = if (info == .int and info.int.signedness == .unsigned)
-        @as(std.meta.Int(.signed, info.int.bits), @bitCast(rc)) == -1
-    else
-        rc == -1;
+    var is_neg1 = (if (((info == .int) and (info.int.signedness == .unsigned))) blk: {
+        break :blk (rc == std.math.maxInt(T));
+    } else blk: {
+        break :blk (rc == -1);
+    });
+    _ = &is_neg1;
     if (is_neg1) {
-        return @enumFromInt(std.c._errno().*);
+        return @enumFromInt((std.c._errno()).*);
     }
     return .SUCCESS;
 }
-
-const bun = @import("bun");

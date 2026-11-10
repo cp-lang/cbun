@@ -2,14 +2,9 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type { if (@typeInfo(T) == .optional) return T; return ?T; }
-fn CpUnwrapOpt(comptime T: type) type { if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }
-fn cp_opt_is_null(v: anytype) bool { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) return v == null; return false; }
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }
 const bun = @import("bun");
 const quic = bun.uws.quic;
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 pub const ClientContext = @import("./ClientContext.zig").ClientContext;
 pub const Stream = @import("./Stream.zig").Stream;
 pub const HTTPClient = @import("../http.zig").HTTPClient;
@@ -17,6 +12,10 @@ pub const encode = @import("./encode.zig");
 pub const HeaderResult = enum {
     has_body,
     finished,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 };
 
 pub const ClientSession = @This();
@@ -42,11 +41,11 @@ pub fn deinit(self: *ClientSession) void {
         _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
 }
 
-pub fn matches(self: *const ClientSession, hostname: []const u8, port: u16, reject_unauthorized: bool) bool {
+pub fn matches(self: ClientSession, hostname: []const u8, port: u16, reject_unauthorized: bool) bool {
         return ((((!self.closed) and (self.port == port)) and (self.reject_unauthorized == reject_unauthorized)) and bun.strings.eqlLong(self.hostname, hostname, true));
 }
 
-pub fn hasHeadroom(self: *const ClientSession) bool {
+pub fn hasHeadroom(self: ClientSession) bool {
         if (self.closed) {
             return false;
         }
@@ -55,7 +54,7 @@ pub fn hasHeadroom(self: *const ClientSession) bool {
             if ((!self.handshake_done)) {
                 return (self.pending.items.len < 64);
             }
-            return (cp_opt_unwrap(qs).streamsAvail() > 0);
+            return ((qs).?.streamsAvail() > 0);
         }
         return (self.pending.items.len < 64);
 }
@@ -66,8 +65,7 @@ pub fn enqueue(self: *ClientSession, client: *HTTPClient) void {
         client.flags.protocol = .http3;
         client.allow_retry = false;
         var stream = Stream.new(.{ .session = self, .client = client });
-        var __stream_moved = false; _ = &__stream_moved;
-        defer if (!__stream_moved) { const T = @TypeOf(stream); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = stream.release() catch {}; } else { stream.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = stream; _drop_val.release(); } };
+        _ = &stream;
         _ = bun.http.H3.live_streams.fetchAdd(1, .monotonic);
         client.h3 = stream;
         _ = bun.handleOom(self.pending.append(bun.default_allocator, stream));
@@ -75,7 +73,7 @@ pub fn enqueue(self: *ClientSession, client: *HTTPClient) void {
         if (self.handshake_done) {
             if (self.qsocket) |qs| {
                 _ = &qs;
-                _ = cp_opt_unwrap(qs).makeStream();
+                _ = (qs).?.makeStream();
             }
         }
 }
@@ -145,8 +143,6 @@ pub fn retryOrFail(self: *ClientSession, stream: *Stream, err: anyerror) void {
                 _ = &ctx;
                 client.flags.h3_retried = true;
                 self.closed = true;
-                const port = self.port;
-                _ = &port;
                 const host = bun.handleOom(bun.default_allocator.dupe(u8, self.hostname));
                 var __host_moved = false; _ = &__host_moved;
                 defer if (!__host_moved) { const T = @TypeOf(host); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = host.release() catch {}; } else { host.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = host; _drop_val.release(); } };

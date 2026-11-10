@@ -1,8 +1,20 @@
-zig {
-    pub const Version = VersionType(u64);
-    pub const OldV2Version = VersionType(u32);
+import * as std from "std";
+import * as bun from "bun";
 
-    pub fn VersionType(comptime IntType: type) type {
+const Environment = bun.Environment;
+const Output = bun.Output;
+const assert = bun.assert;
+const strings = bun.strings;
+
+const ExternalString = bun.Semver.ExternalString;
+const Query = bun.Semver.Query;
+const SlicedString = bun.Semver.SlicedString;
+const String = bun.Semver.String;
+
+pub const Version = VersionType(u64);
+pub const OldV2Version = VersionType(u32);
+
+pub fn VersionType(comptime IntType: type): type {
         return extern struct {
             major: IntType = 0,
             minor: IntType = 0,
@@ -979,17 +991,3 @@ zig {
             }
         };
     }
-
-    const std = @import("std");
-
-    const bun = @import("bun");
-    const Environment = bun.Environment;
-    const Output = bun.Output;
-    const assert = bun.assert;
-    const strings = bun.strings;
-
-    const ExternalString = bun.Semver.ExternalString;
-    const Query = bun.Semver.Query;
-    const SlicedString = bun.Semver.SlicedString;
-    const String = bun.Semver.String;
-}

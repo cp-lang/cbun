@@ -1,4 +1,3 @@
-zig {
     const DotEnvFileSuffix = enum {
         development,
         production,
@@ -1430,4 +1429,3 @@ zig {
     const s3 = bun.S3;
     const strings = bun.strings;
     const api = bun.schema.api;
-}

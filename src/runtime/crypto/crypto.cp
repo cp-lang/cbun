@@ -1,11 +1,10 @@
 // src/runtime/crypto/crypto.cp
 
-zig {
-    const bun = @import("bun");
-    const jsc = bun.jsc;
-    const JSGlobalObject = jsc.JSGlobalObject;
-    const JSValue = jsc.JSValue;
-}
+import bun from "bun";
+
+const jsc = bun.jsc;
+const JSGlobalObject = jsc.JSGlobalObject;
+const JSValue = jsc.JSValue;
 
 pub fn createCryptoError(globalThis: *jsc.JSGlobalObject, err_code: u32): jsc.JSValue {
     return bun.BoringSSL.ERR_toJS(globalThis, err_code);

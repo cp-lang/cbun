@@ -2,6 +2,8 @@
 const std = @import("std");
 const string = []const u8;
 
+const Win32Error = bun.windows.Win32Error;
+const uv = bun.windows.libuv;
 pub const E = enum(u16) {
     SUCCESS = 0,
     PERM = 1,
@@ -229,7 +231,6 @@ pub const E = enum(u16) {
     UV_EUNATCH = -uv.UV_EUNATCH,
     UV_ENOEXEC = -uv.UV_ENOEXEC,
 };
-
 pub const S = struct {
     pub const IFMT = 0o170000;
 
@@ -285,23 +286,6 @@ pub const S = struct {
         return m & IFMT == IFSOCK;
     }
 };
-
-pub fn getErrno(rc: anytype) E {
-    if (comptime @TypeOf(rc) == bun.windows.NTSTATUS) {
-        return bun.windows.translateNTStatusToErrno(rc);
-    }
-
-    if (Win32Error.get().toSystemErrno()) |sys| {
-        return sys.toE();
-    }
-
-    if (bun.windows.WSAGetLastError()) |wsa| {
-        return wsa.toE();
-    }
-
-    return .SUCCESS;
-}
-
 pub const SystemErrno = enum(u16) {
     SUCCESS = 0,
     EPERM = 1,
@@ -1100,7 +1084,6 @@ pub const SystemErrno = enum(u16) {
         return @as(SystemErrno, @enumFromInt(code));
     }
 };
-
 pub const UV_E = struct {
     pub const @"2BIG" = -uv.UV_E2BIG;
     pub const ACCES = -uv.UV_EACCES;
@@ -1172,8 +1155,19 @@ pub const UV_E = struct {
     pub const UNATCH = -uv.UV_EUNATCH;
     pub const NOEXEC = -uv.UV_ENOEXEC;
 };
+pub const bun = @import("bun");
 
-const bun = @import("bun");
-
-const Win32Error = bun.windows.Win32Error;
-const uv = bun.windows.libuv;
+pub fn getErrno(rc: anytype) E {
+        if (comptime (@TypeOf(rc) == bun.windows.NTSTATUS)) {
+            return bun.windows.translateNTStatusToErrno(rc);
+        }
+        if ((Win32Error.get()).?.toSystemErrno()) |sys| {
+            _ = &sys;
+            return sys.toE();
+        }
+        if (bun.windows.WSAGetLastError()) |wsa| {
+            _ = &wsa;
+            return wsa.toE();
+        }
+        return .SUCCESS;
+}

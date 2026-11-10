@@ -2,87 +2,75 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) {
-        return v.?;
-    } else {
-        return v;
-    }
-}
+const Async = bun.Async;
+const Environment = bun.Environment;
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub const bun = @import("bun");
 pub const PollOrFd = union(enum) {
     poll: *Async.FilePoll,
     fd: bun.FD,
-    closed: void,
+    closed,
+    pub fn has(s: []const u8) bool { if (comptime @typeInfo(@This()).@"union".tag_type) |TagType| { return std.meta.stringToEnum(TagType, s) != null; } return false; }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 
-    pub fn setOwner(this: *const PollOrFd, owner: anytype) void {
-        if (this.* == .poll) {
-            this.poll.owner.set(owner);
-        }
+pub fn setOwner(self: *PollOrFd, owner: anytype) void {
+            if ((self.* == .poll)) {
+                _ = self.poll.owner.set(owner);
+            }
     }
 
-    pub fn getFd(this: *const PollOrFd) bun.FD {
-        return switch (this.*) {
-            .closed => bun.invalid_fd,
-            .fd => this.fd,
-            .poll => this.poll.fd,
-        };
+pub fn getFd(self: PollOrFd) bun.FD {
+            return (switch (self) {
+.closed => bun.invalid_fd,
+.fd => self.fd,
+.poll => self.poll.fd,
+});
     }
 
-    pub fn getPoll(this: *const PollOrFd) ?*Async.FilePoll {
-        return switch (this.*) {
-            .closed => null,
-            .fd => null,
-            .poll => this.poll,
-        };
+pub fn getPoll(self: PollOrFd) ?*Async.FilePoll {
+            return (switch (self) {
+.closed => null,
+.fd => null,
+.poll => self.poll,
+});
     }
 
-    pub fn closeImpl(this: *PollOrFd, ctx: ?*anyopaque, comptime onCloseFn: anytype, close_fd: bool) void {
-        const fd = this.getFd();
-        var close_async = true;
-        if (this.* == .poll) {
-            if (comptime Environment.isMac) {
-                if (this.poll.flags.contains(.poll_writable) and this.poll.flags.contains(.nonblocking)) {
-                    close_async = false;
+pub fn closeImpl(self: *PollOrFd, ctx: ?*anyopaque, comptime onCloseFn: anytype, close_fd: bool) void {
+            const fd = self.getFd();
+            var close_async = true;
+            _ = &close_async;
+            if ((self.* == .poll)) {
+                if (comptime Environment.isMac) {
+                    if ((self.poll.flags.contains(.poll_writable) and self.poll.flags.contains(.nonblocking))) {
+                        close_async = false;
+                    }
                 }
+                _ = self.poll.deinitForceUnregister();
+                self.* = .closed;
             }
-            this.poll.deinitForceUnregister();
-            this.* = .{ .closed = {} };
-        }
-
-        if (fd != bun.invalid_fd) {
-            this.* = .{ .closed = {} };
-
-            //TODO: We should make this call compatible using bun.FD
-            if (Environment.isWindows) {
-                bun.Async.Closer.close(fd, bun.windows.libuv.Loop.get());
-            } else if (close_async and close_fd) {
-                bun.Async.Closer.close(fd, {});
+            if ((fd != bun.invalid_fd)) {
+                self.* = .closed;
+                if (Environment.isWindows) {
+                    _ = bun.Async.Closer.close(fd, bun.windows.libuv.Loop.get());
+                } else {
+                    if ((close_async and close_fd)) {
+                        _ = bun.Async.Closer.close(fd, undefined);
+                    } else {
+                        if (close_fd) {
+                            _ = fd.closeAllowingBadFileDescriptor(null);
+                        }
+                    }
+                }
+                if (comptime (@TypeOf(onCloseFn) != void)) {
+                    _ = onCloseFn(@ptrCast(@alignCast(ctx.?)));
+                }
             } else {
-                if (close_fd) _ = fd.closeAllowingBadFileDescriptor(null);
+                self.* = .closed;
             }
-            if (comptime @TypeOf(onCloseFn) != void)
-                onCloseFn(@ptrCast(@alignCast(ctx.?)));
-        } else {
-            this.* = .{ .closed = {} };
-        }
     }
 
-    pub fn close(this: *PollOrFd, ctx: ?*anyopaque, comptime onCloseFn: anytype) void {
-        this.closeImpl(ctx, onCloseFn, true);
+pub fn close(self: *PollOrFd, ctx: ?*anyopaque, comptime onCloseFn: anytype) void {
+            _ = self.closeImpl(ctx, onCloseFn, true);
     }
 };
 
@@ -91,52 +79,27 @@ pub const FileType = enum {
     pipe,
     nonblocking_pipe,
     socket,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 
-    pub fn isPollable(this: FileType) bool {
-        return this == .pipe or this == .nonblocking_pipe or this == .socket;
+pub fn isPollable(self: FileType) bool {
+            return (((self == .pipe) or (self == .nonblocking_pipe)) or (self == .socket));
     }
 
-    pub fn isBlocking(this: FileType) bool {
-        return this == .pipe;
+pub fn isBlocking(self: FileType) bool {
+            return (self == .pipe);
     }
 };
 
 pub const ReadState = enum {
-    /// The most common scenario
-    /// Neither EOF nor EAGAIN
     progress,
-
-    /// Received a 0-byte read
     eof,
-
-    /// Received an EAGAIN
     drained,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 };
-const Async = bun.Async;
-const Environment = bun.Environment;
-pub fn cp_string_from(val: anytype) []const u8 {
-    const T = @TypeOf(val);
-    if (comptime T == []const u8) {
-        return val;
-    } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) {
-        return std.mem.span(val);
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) {
-        return val;
-    } else if (comptime (@typeInfo(T) == .@"enum")) {
-        return @tagName(val);
-    } else if (comptime T == bool) {
-        return if (val) "true" else "false";
-    } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0";
-    } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0";
-    } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) {
-        return val.toString();
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) {
-        return val.toString();
-    } else {
-        return @typeName(T);
-    }
-}
 
-pub const bun = @import("bun");

@@ -57,57 +57,55 @@ export enum Qpack: u8 {
     x_forwarded_for = 96,
     _,
 
-    zig {
-        pub const Class = union(enum) {
-            forbidden,
-            host,
-            indexed: struct { name: []const u8, index: Qpack },
+    pub const Class = union(enum) {
+        forbidden,
+        host,
+        indexed: struct { name: []const u8, index: Qpack },
 
-            fn idx(comptime hdr_name: []const u8, i: Qpack) Class {
-                return .{ .indexed = .{ .name = hdr_name, .index = i } };
-            }
-        };
-
-        pub fn classify(hdr_name: []const u8) ?Class {
-            return map.getAnyCase(hdr_name);
+        fn idx(comptime hdr_name: []const u8, i: Qpack) Class {
+            return .{ .indexed = .{ .name = hdr_name, .index = i } };
         }
+    };
 
-        const map = bun.ComptimeStringMap(Class, .{
-            .{ "connection", .forbidden },
-            .{ "host", .host },
-            .{ "keep-alive", .forbidden },
-            .{ "proxy-connection", .forbidden },
-            .{ "transfer-encoding", .forbidden },
-            .{ "upgrade", .forbidden },
-
-            .{ "accept", Class.idx("accept", .accept) },
-            .{ "accept-encoding", Class.idx("accept-encoding", .accept_encoding) },
-            .{ "accept-language", Class.idx("accept-language", .accept_language) },
-            .{ "accept-ranges", Class.idx("accept-ranges", .accept_ranges) },
-            .{ "authorization", Class.idx("authorization", .authorization) },
-            .{ "cache-control", Class.idx("cache-control", .cache_control) },
-            .{ "content-disposition", Class.idx("content-disposition", .content_disposition) },
-            .{ "content-encoding", Class.idx("content-encoding", .content_encoding) },
-            .{ "content-length", Class.idx("content-length", .content_length) },
-            .{ "content-type", Class.idx("content-type", .content_type) },
-            .{ "cookie", Class.idx("cookie", .cookie) },
-            .{ "date", Class.idx("date", .date) },
-            .{ "etag", Class.idx("etag", .etag) },
-            .{ "forwarded", Class.idx("forwarded", .forwarded) },
-            .{ "if-modified-since", Class.idx("if-modified-since", .if_modified_since) },
-            .{ "if-none-match", Class.idx("if-none-match", .if_none_match) },
-            .{ "if-range", Class.idx("if-range", .if_range) },
-            .{ "last-modified", Class.idx("last-modified", .last_modified) },
-            .{ "link", Class.idx("link", .link) },
-            .{ "location", Class.idx("location", .location) },
-            .{ "origin", Class.idx("origin", .origin) },
-            .{ "range", Class.idx("range", .range) },
-            .{ "referer", Class.idx("referer", .referer) },
-            .{ "server", Class.idx("server", .server) },
-            .{ "set-cookie", Class.idx("set-cookie", .set_cookie) },
-            .{ "user-agent", Class.idx("user-agent", .user_agent) },
-            .{ "vary", Class.idx("vary", .vary) },
-            .{ "x-forwarded-for", Class.idx("x-forwarded-for", .x_forwarded_for) },
-        });
+    pub fn classify(hdr_name: []const u8) ?Class {
+        return map.getAnyCase(hdr_name);
     }
+
+    const map = bun.ComptimeStringMap(Class, .{
+        .{ "connection", .forbidden },
+        .{ "host", .host },
+        .{ "keep-alive", .forbidden },
+        .{ "proxy-connection", .forbidden },
+        .{ "transfer-encoding", .forbidden },
+        .{ "upgrade", .forbidden },
+
+        .{ "accept", Class.idx("accept", .accept) },
+        .{ "accept-encoding", Class.idx("accept-encoding", .accept_encoding) },
+        .{ "accept-language", Class.idx("accept-language", .accept_language) },
+        .{ "accept-ranges", Class.idx("accept-ranges", .accept_ranges) },
+        .{ "authorization", Class.idx("authorization", .authorization) },
+        .{ "cache-control", Class.idx("cache-control", .cache_control) },
+        .{ "content-disposition", Class.idx("content-disposition", .content_disposition) },
+        .{ "content-encoding", Class.idx("content-encoding", .content_encoding) },
+        .{ "content-length", Class.idx("content-length", .content_length) },
+        .{ "content-type", Class.idx("content-type", .content_type) },
+        .{ "cookie", Class.idx("cookie", .cookie) },
+        .{ "date", Class.idx("date", .date) },
+        .{ "etag", Class.idx("etag", .etag) },
+        .{ "forwarded", Class.idx("forwarded", .forwarded) },
+        .{ "if-modified-since", Class.idx("if-modified-since", .if_modified_since) },
+        .{ "if-none-match", Class.idx("if-none-match", .if_none_match) },
+        .{ "if-range", Class.idx("if-range", .if_range) },
+        .{ "last-modified", Class.idx("last-modified", .last_modified) },
+        .{ "link", Class.idx("link", .link) },
+        .{ "location", Class.idx("location", .location) },
+        .{ "origin", Class.idx("origin", .origin) },
+        .{ "range", Class.idx("range", .range) },
+        .{ "referer", Class.idx("referer", .referer) },
+        .{ "server", Class.idx("server", .server) },
+        .{ "set-cookie", Class.idx("set-cookie", .set_cookie) },
+        .{ "user-agent", Class.idx("user-agent", .user_agent) },
+        .{ "vary", Class.idx("vary", .vary) },
+        .{ "x-forwarded-for", Class.idx("x-forwarded-for", .x_forwarded_for) },
+    });
 }

@@ -1,26 +1,26 @@
 //! This is a slower wrapper around a function pointer.
 //! Prefer adding a task type directly to `Task` instead of using this.
 
-import bun from "bun";
+const bun = @import("bun");
 const jsc = bun.jsc;
 const Task = jsc.Task;
 
-export class AnyTask {
-    ctx: ?*! = null;
-    callback: fn (*!) bun.JSError!void;
+pub const AnyTask = struct {
+    ctx: ?*anyopaque = null,
+    callback: *const (fn (*anyopaque) bun.JSError!void),
 
-    pub fn task(_: *AnyTask): Task {
-        return Task.init(_);
+    pub fn task(this: *AnyTask) Task {
+        return Task.init(this);
     }
 
-    pub fn run(_: *AnyTask): bun.JSError!void {
+    pub fn run(this: *AnyTask) bun.JSError!void {
         @setRuntimeSafety(false);
-        const cb = _.callback;
-        const context = _.ctx;
-        cb(context.?)?;
+        const cb = this.callback;
+        const context = this.ctx;
+        try cb(context.?);
     }
 
-    pub static fn New(comptime Type: type, comptime Callback: auto): type {
+    pub fn New(comptime Type: type, comptime Callback: anytype) type {
         return struct {
             pub fn init(ctx: *Type) AnyTask {
                 return AnyTask{
@@ -34,4 +34,4 @@ export class AnyTask {
             }
         };
     }
-}
+};

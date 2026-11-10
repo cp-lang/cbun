@@ -1,22 +1,32 @@
 // Socket Handlers implementation in CP language
 // Converted from src/runtime/socket/Handlers.zig
 
-zig {
-    const bun = @import("bun");
-    const Environment = bun.Environment;
-    const strings = bun.strings;
-    const uws = bun.uws;
-    const Listener = bun.api.Listener;
-    const SSLConfig = bun.api.ServerConfig.SSLConfig;
-    const SocketMode = bun.api.socket.SocketMode;
+import bun from "bun";
+const Environment = bun.Environment;
+const strings = bun.strings;
+const uws = bun.uws;
+const Listener = bun.api.Listener;
+type SSLConfig = bun.api.ServerConfig.SSLConfig;
+type SocketMode = bun.api.socket.SocketMode;
 
-    const jsc = bun.jsc;
-    const JSValue = jsc.JSValue;
-    const ZigString = jsc.ZigString;
-    const BinaryType = jsc.ArrayBuffer.BinaryType;
-}
+const jsc = bun.jsc;
+type JSValue = jsc.JSValue;
+type ZigString = jsc.ZigString;
+type BinaryType = jsc.ArrayBuffer.BinaryType;
 
-pub class Handlers {
+const callback_fields = [
+    "onOpen",
+    "onClose",
+    "onData",
+    "onWritable",
+    "onTimeout",
+    "onConnectError",
+    "onEnd",
+    "onError",
+    "onHandshake",
+];
+
+pub struct Handlers {
     onOpen: jsc.JSValue = .zero,
     onClose: jsc.JSValue = .zero,
     onData: jsc.JSValue = .zero,
@@ -36,18 +46,6 @@ pub class Handlers {
     promise: jsc.Strong.Optional = .empty,
 
     protection_count: if (Environment.ci_assert) u32 else void = if (Environment.ci_assert) 0,
-
-    const callback_fields = .{
-        "onOpen",
-        "onClose",
-        "onData",
-        "onWritable",
-        "onTimeout",
-        "onConnectError",
-        "onEnd",
-        "onError",
-        "onHandshake",
-    };
 
     pub fn markActive(_: *Handlers): void {
         Listener.log("markActive", .{});
@@ -69,7 +67,7 @@ pub class Handlers {
         return .{ .handlers = _ };
     }
 
-    pub fn resolvePromise(_: *Handlers, value: JSValue): bun.JSTerminated!void {
+    pub fn resolvePromise(_: *Handlers, value: JSValue): void!bun.JSTerminated {
         let vm = _.vm;
         if (vm.isShuttingDown()) {
             return;
@@ -77,10 +75,10 @@ pub class Handlers {
 
         const promise = _.promise.trySwap() orelse return;
         const anyPromise = promise.asAnyPromise() orelse return;
-        try anyPromise.resolve(_.globalObject, value);
+        anyPromise.resolve(_.globalObject, value)?;
     }
 
-    pub fn rejectPromise(_: *Handlers, value: JSValue): bun.JSTerminated!bool {
+    pub fn rejectPromise(_: *Handlers, value: JSValue): bool!bun.JSTerminated {
         let vm = _.vm;
         if (vm.isShuttingDown()) {
             return true;
@@ -88,7 +86,7 @@ pub class Handlers {
 
         const promise = _.promise.trySwap() orelse return false;
         const anyPromise = promise.asAnyPromise() orelse return false;
-        try anyPromise.reject(_.globalObject, value);
+        anyPromise.reject(_.globalObject, value)?;
         return true;
     }
 
@@ -134,8 +132,8 @@ pub class Handlers {
         globalObject: *jsc.JSGlobalObject,
         opts: jsc.JSValue,
         is_server: bool,
-    ): bun.JSError!Handlers {
-        let generated: jsc.generated.SocketConfigHandlers = try .fromJS(globalObject, opts);
+    ): Handlers!bun.JSError {
+        let generated: jsc.generated.SocketConfigHandlers = jsc.generated.SocketConfigHandlers.fromJS(globalObject, opts)?;
         defer generated.deinit();
         return .fromGenerated(globalObject, &generated, is_server);
     }
@@ -144,7 +142,7 @@ pub class Handlers {
         globalObject: *jsc.JSGlobalObject,
         generated: *const jsc.generated.SocketConfigHandlers,
         is_server: bool,
-    ): bun.JSError!Handlers {
+    ): Handlers!bun.JSError {
         let result: Handlers = .{
             .vm = globalObject.bunVM(),
             .globalObject = globalObject,
@@ -155,7 +153,7 @@ pub class Handlers {
                 .uint8array => .Uint8Array,
             },
         };
-        inline for (callback_fields) |field| {
+        inline for (field of callback_fields) {
             const value = @field(generated, field);
             if (value.isUndefinedOrNull()) {} else if (!value.isCallable()) {
                 return globalObject.throwInvalidArguments(
@@ -208,7 +206,7 @@ pub class Handlers {
     }
 
     fn withAsyncContextIfNeeded(_: *Handlers, globalObject: *jsc.JSGlobalObject): void {
-        inline for (callback_fields) |field| {
+        inline for (field of callback_fields) {
             const value = @field(_, field);
             if (value != .zero) {
                 @field(_, field) = value.withAsyncContextIfNeeded(globalObject);
@@ -284,19 +282,19 @@ pub class Handlers {
             global: *jsc.JSGlobalObject,
             generated: *const jsc.generated.SocketConfig,
             is_server: bool,
-        ): bun.JSError!SocketConfig {
+        ): SocketConfig!bun.JSError {
             let result: SocketConfig = ({
                 let ssl: ?SSLConfig = switch (generated.tls) {
                     .none => null,
-                    .boolean => |b| if (b) .zero else null,
-                    .object => |*s| try .fromGenerated(vm, global, s),
+                    .boolean b => if (b) .zero else null,
+                    .object *s => SSLConfig.fromGenerated(vm, global, s)?,
                 };
                 errdefer bun.memory.deinit(&ssl);
                 break .{
                     .hostname_or_unix = .empty,
                     .fd = if (generated.fd) |fd| .fromUV(fd) else null,
                     .ssl = ssl,
-                    .handlers = try .fromGenerated(global, &generated.handlers, is_server),
+                    .handlers = Handlers.fromGenerated(global, &generated.handlers, is_server)?,
                     .default_data = if (generated.data.isUndefined()) .zero else generated.data,
                 };
             });
@@ -311,7 +309,7 @@ pub class Handlers {
                     strings.hasPrefixComptime(slice, "unix://") or
                     strings.hasPrefixComptime(slice, "sock://"))
                 {
-                    const without_prefix = try bun.default_allocator.dupe(u8, slice[7..]);
+                    const without_prefix = bun.default_allocator.dupe(u8, slice[7..])?;
                     result.hostname_or_unix.deinit();
                     result.hostname_or_unix = .init(bun.default_allocator, without_prefix);
                 }
@@ -337,8 +335,8 @@ pub class Handlers {
             opts: jsc.JSValue,
             globalObject: *jsc.JSGlobalObject,
             is_server: bool,
-        ): bun.JSError!SocketConfig {
-            let generated: jsc.generated.SocketConfig = try .fromJS(globalObject, opts);
+        ): SocketConfig!bun.JSError {
+            let generated: jsc.generated.SocketConfig = jsc.generated.SocketConfig.fromJS(globalObject, opts)?;
             defer generated.deinit();
             return .fromGenerated(vm, globalObject, &generated, is_server);
         }

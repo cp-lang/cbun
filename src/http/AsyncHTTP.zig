@@ -2,23 +2,10 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
+fn CpOptType(comptime T: type) type { if (@typeInfo(T) == .optional) return T; return ?T; }
+fn CpUnwrapOpt(comptime T: type) type { if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }
+fn cp_opt_is_null(v: anytype) bool { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) return v == null; return false; }
+fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }
 const bun = @import("bun");
 pub const PercentEncoding = @import("../url/url.zig").PercentEncoding;
 pub const Channel8 = bun.threading.Channel(HTTPClientResult, .{ .Static = 8 });
@@ -27,6 +14,7 @@ fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) ret
 fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
 fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
 fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 fn cp_array_lit(comptime Elem: type, init_slice: []const Elem) []const Elem { const buf = std.heap.page_allocator.alloc(Elem, init_slice.len) catch unreachable; if (init_slice.len > 0) @memcpy(buf, init_slice); return buf; }
 fn CpArrayElemType(comptime PtrT: type) type { const S0 = @typeInfo(PtrT).pointer.child; const S1 = if (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one) @typeInfo(S0).pointer.child else S0; return @typeInfo(S1).pointer.child; }
 fn cp_array_push(arr_ptr: anytype, item: anytype) void { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const SliceT = @TypeOf(target_ptr.*); const Elem = @typeInfo(SliceT).pointer.child; const old_slice = target_ptr.*; const new_slice = std.heap.page_allocator.alloc(Elem, old_slice.len + 1) catch unreachable; if (old_slice.len > 0) @memcpy(new_slice[0..old_slice.len], old_slice); new_slice[old_slice.len] = @as(Elem, cp_val(item)); target_ptr.* = new_slice; }
@@ -46,6 +34,10 @@ pub const State = enum(u32) {
     sending = 2,
     success = 3,
     fail = 4,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 };
 
 pub const Options = struct {
@@ -60,22 +52,6 @@ pub const Options = struct {
     disable_decompression: ?bool = null,
     reject_unauthorized: ?bool = null,
     tls_props: ?bun.api.server.ServerConfig.SSLConfig.SharedPtr = null,
-    
-pub fn _create(allocator: std.mem.Allocator) !*Options { const self_ptr = try allocator.create(Options); self_ptr.* = undefined; return self_ptr; }
-
-pub fn init(self: *Options, http_proxy: ?bun.URL, proxy_headers: ?Headers, hostname: ?[]const u8, signals: ?HTTPClient.Signals, unix_socket_path: ?bun.jsc.ZigString.Slice, disable_timeout: ?bool, verbose: ?HTTPClient.HTTPVerboseLevel, disable_keepalive: ?bool, disable_decompression: ?bool, reject_unauthorized: ?bool, tls_props: ?bun.api.server.ServerConfig.SSLConfig.SharedPtr) void {
-            self.http_proxy = http_proxy;
-            self.proxy_headers = proxy_headers;
-            self.hostname = hostname;
-            self.signals = signals;
-            self.unix_socket_path = unix_socket_path;
-            self.disable_timeout = disable_timeout;
-            self.verbose = verbose;
-            self.disable_keepalive = disable_keepalive;
-            self.disable_decompression = disable_decompression;
-            self.reject_unauthorized = reject_unauthorized;
-            self.tls_props = tls_props;
-    }
 };
 
 pub const Preconnect = struct {
@@ -83,21 +59,6 @@ pub const Preconnect = struct {
     response_buffer: bun.MutableString,
     url: bun.URL,
     is_url_owned: bool,
-    
-pub fn _create(allocator: std.mem.Allocator) !*Preconnect { const self_ptr = try allocator.create(Preconnect); self_ptr.* = undefined; return self_ptr; }
-
-pub fn init(self: *Preconnect, async_http: AsyncHTTP, response_buffer: bun.MutableString, url: bun.URL, is_url_owned: bool) void {
-        var __async_http_moved = false; _ = &__async_http_moved;
-        defer if (!__async_http_moved) { const T = @TypeOf(async_http); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = async_http.release() catch {}; } else { async_http.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { async_http.release(); } };
-        var __response_buffer_moved = false; _ = &__response_buffer_moved;
-        defer if (!__response_buffer_moved) { const T = @TypeOf(response_buffer); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = response_buffer.release() catch {}; } else { response_buffer.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { response_buffer.release(); } };
-        var __url_moved = false; _ = &__url_moved;
-        defer if (!__url_moved) { const T = @TypeOf(url); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = url.release() catch {}; } else { url.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { url.release(); } };
-            self.async_http = async_http;
-            self.response_buffer = response_buffer;
-            self.url = url;
-            self.is_url_owned = is_url_owned;
-    }
 
 pub fn onResult(self: *Preconnect, dummy_async: *AsyncHTTP, dummy_res: HTTPClientResult) void {
         _ = dummy_async;
@@ -115,8 +76,6 @@ pub fn onResult(self: *Preconnect, dummy_async: *AsyncHTTP, dummy_res: HTTPClien
 
 pub const SingleHTTPChannel = struct {
     channel: Channel8,
-    
-pub fn _create(allocator: std.mem.Allocator) !*SingleHTTPChannel { const self_ptr = try allocator.create(SingleHTTPChannel); self_ptr.* = undefined; return self_ptr; }
 
 pub fn reset(self: *SingleHTTPChannel) void {
         _ = &self;
@@ -130,15 +89,6 @@ pub fn init() SingleHTTPChannel {
 pub const HTTPChannelContext = struct {
     http: AsyncHTTP = undefined,
     channel: *Channel1000,
-    
-pub fn _create(allocator: std.mem.Allocator) !*HTTPChannelContext { const self_ptr = try allocator.create(HTTPChannelContext); self_ptr.* = undefined; return self_ptr; }
-
-pub fn init(self: *HTTPChannelContext, http: AsyncHTTP, channel: *Channel1000) void {
-        var __http_moved = false; _ = &__http_moved;
-        defer if (!__http_moved) { const T = @TypeOf(http); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = http.release() catch {}; } else { http.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { http.release(); } };
-            self.http = http;
-            self.channel = channel;
-    }
 
 pub fn callback(self: *HTTPChannelContext, _async: *AsyncHTTP, result: HTTPClientResult) void {
         _ = _async;
@@ -181,7 +131,6 @@ pub fn loadEnv(allocator: std.mem.Allocator, logger: anytype, env: anytype) void
             _ = &max_http_requests;
             const max = (blk_catch_1: { break :blk_catch_1 ((std.fmt.parseInt(u16, max_http_requests, 10)) catch |__ce_1| { _ = &__ce_1; _ = (blk_catch_2: { break :blk_catch_2 ((logger.addErrorFmt(null, bun.logger.Loc.Empty, allocator, "BUN_CONFIG_MAX_HTTP_REQUESTS value \"{s}\" is not a valid integer between 1 and 65535", .{ max_http_requests })) catch |__ce_2| { _ = &__ce_2; @panic("unreachable"); }); });
             return; }); });
-            _ = &max;
             if ((max == 0)) {
                 _ = (blk_catch_3: { break :blk_catch_3 ((logger.addWarningFmt(null, bun.logger.Loc.Empty, allocator, "BUN_CONFIG_MAX_HTTP_REQUESTS value must be a number between 1 and 65535", .{  })) catch |__ce_3| { _ = &__ce_3; @panic("unreachable"); }); });
                 return;
@@ -271,45 +220,36 @@ pub fn init(allocator: std.mem.Allocator, method: HTTPClient.Method, url: bun.UR
                 var username_sfb = std.heap.stackFallback(4096, allocator);
                 _ = &username_sfb;
                 const username_alloc = username_sfb.get();
-                _ = &username_alloc;
                 const username = (blk_catch_5: { break :blk_catch_5 ((PercentEncoding.decodeAlloc(username_alloc, proxy.username)) catch |error_val| { _ = &error_val; _ = bun.Output.scoped(.AsyncHTTP, .visible)("failed to decode proxy username: {}", .{ error_val });
                 return async_http; }); });
-                _ = &username;
                 defer {
-                _ = cp_opt_unwrap(username_alloc).free(username);
+                _ = (username_alloc).?.free(username);
                 }
                 if ((proxy.password.len > 0)) {
                     var password_sfb = std.heap.stackFallback(4096, allocator);
                     _ = &password_sfb;
                     const password_alloc = password_sfb.get();
-                    _ = &password_alloc;
                     const password = (blk_catch_6: { break :blk_catch_6 ((PercentEncoding.decodeAlloc(password_alloc, proxy.password)) catch |error_val| { _ = &error_val; _ = bun.Output.scoped(.AsyncHTTP, .visible)("failed to decode proxy password: {}", .{ error_val });
                     return async_http; }); });
-                    _ = &password;
                     defer {
-                    _ = cp_opt_unwrap(password_alloc).free(password);
+                    _ = (password_alloc).?.free(password);
                     }
                     const auth = (blk_catch_7: { break :blk_catch_7 ((std.fmt.allocPrint(allocator, "{s}:{s}", .{ username, password })) catch |__ce_7| { _ = &__ce_7; @panic("unreachable"); }); });
-                    _ = &auth;
                     defer {
                     _ = allocator.free(auth);
                     }
                     const size = std.base64.standard.Encoder.calcSize(auth.len);
-                    _ = &size;
                     var buf = (blk_catch_8: { break :blk_catch_8 ((async_http.allocator.alloc(u8, (size + "Basic ".len))) catch |__ce_8| { _ = &__ce_8; @panic("unreachable"); }); });
                     _ = &buf;
                     const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], auth);
-                    _ = &encoded;
-                    (buf[0.."Basic ".len]).* = ("Basic ").*;
+                    _ = @memcpy(buf[0.."Basic ".len], "Basic ");
                     async_http.client.proxy_authorization = buf[0..("Basic ".len + encoded.len)];
                 } else {
                     const size = std.base64.standard.Encoder.calcSize(username.len);
-                    _ = &size;
                     var buf = (blk_catch_9: { break :blk_catch_9 ((allocator.alloc(u8, (size + "Basic ".len))) catch |__ce_9| { _ = &__ce_9; @panic("unreachable"); }); });
                     _ = &buf;
                     const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], username);
-                    _ = &encoded;
-                    (buf[0.."Basic ".len]).* = ("Basic ").*;
+                    _ = @memcpy(buf[0.."Basic ".len], "Basic ");
                     async_http.client.proxy_authorization = buf[0..("Basic ".len + encoded.len)];
                 }
             }
@@ -327,7 +267,6 @@ pub fn initSync(allocator: std.mem.Allocator, method: HTTPClient.Method, url: bu
 
 pub fn reset(self: *AsyncHTTP) !void {
         const aborted = self.client.aborted;
-        _ = &aborted;
         self.client = try HTTPClient.init(self.allocator, self.method, self.client.url, self.client.header_entries, self.client.header_buf, aborted);
         self.client.http_proxy = self.http_proxy;
         if (self.http_proxy) |proxy| {
@@ -337,45 +276,36 @@ pub fn reset(self: *AsyncHTTP) !void {
                 var username_sfb = std.heap.stackFallback(4096, self.allocator);
                 _ = &username_sfb;
                 const username_alloc = username_sfb.get();
-                _ = &username_alloc;
-                const username = (blk_catch_11: { break :blk_catch_11 ((PercentEncoding.decodeAlloc(username_alloc, proxy.username)) catch |error_val| { _ = &error_val; _ = bun.Output.scoped(.AsyncHTTP, .visible)("failed to decode proxy username: {}", .{ error_val });
+                const username = (blk_catch_10: { break :blk_catch_10 ((PercentEncoding.decodeAlloc(username_alloc, proxy.username)) catch |error_val| { _ = &error_val; _ = bun.Output.scoped(.AsyncHTTP, .visible)("failed to decode proxy username: {}", .{ error_val });
                 return; }); });
-                _ = &username;
                 defer {
-                _ = cp_opt_unwrap(username_alloc).free(username);
+                _ = (username_alloc).?.free(username);
                 }
                 if ((proxy.password.len > 0)) {
                     var password_sfb = std.heap.stackFallback(4096, self.allocator);
                     _ = &password_sfb;
                     const password_alloc = password_sfb.get();
-                    _ = &password_alloc;
-                    const password = (blk_catch_12: { break :blk_catch_12 ((PercentEncoding.decodeAlloc(password_alloc, proxy.password)) catch |error_val| { _ = &error_val; _ = bun.Output.scoped(.AsyncHTTP, .visible)("failed to decode proxy password: {}", .{ error_val });
+                    const password = (blk_catch_11: { break :blk_catch_11 ((PercentEncoding.decodeAlloc(password_alloc, proxy.password)) catch |error_val| { _ = &error_val; _ = bun.Output.scoped(.AsyncHTTP, .visible)("failed to decode proxy password: {}", .{ error_val });
                     return; }); });
-                    _ = &password;
                     defer {
-                    _ = cp_opt_unwrap(password_alloc).free(password);
+                    _ = (password_alloc).?.free(password);
                     }
-                    const auth = (blk_catch_13: { break :blk_catch_13 ((std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ username, password })) catch |__ce_13| { _ = &__ce_13; @panic("unreachable"); }); });
-                    _ = &auth;
+                    const auth = (blk_catch_12: { break :blk_catch_12 ((std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ username, password })) catch |__ce_12| { _ = &__ce_12; @panic("unreachable"); }); });
                     defer {
                     _ = self.allocator.free(auth);
                     }
                     const size = std.base64.standard.Encoder.calcSize(auth.len);
-                    _ = &size;
-                    var buf = (blk_catch_14: { break :blk_catch_14 ((self.allocator.alloc(u8, (size + "Basic ".len))) catch |__ce_14| { _ = &__ce_14; @panic("unreachable"); }); });
+                    var buf = (blk_catch_13: { break :blk_catch_13 ((self.allocator.alloc(u8, (size + "Basic ".len))) catch |__ce_13| { _ = &__ce_13; @panic("unreachable"); }); });
                     _ = &buf;
                     const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], auth);
-                    _ = &encoded;
-                    (buf[0.."Basic ".len]).* = ("Basic ").*;
+                    _ = @memcpy(buf[0.."Basic ".len], "Basic ");
                     self.client.proxy_authorization = buf[0..("Basic ".len + encoded.len)];
                 } else {
                     const size = std.base64.standard.Encoder.calcSize(username.len);
-                    _ = &size;
-                    var buf = (blk_catch_15: { break :blk_catch_15 ((self.allocator.alloc(u8, (size + "Basic ".len))) catch |__ce_15| { _ = &__ce_15; @panic("unreachable"); }); });
+                    var buf = (blk_catch_14: { break :blk_catch_14 ((self.allocator.alloc(u8, (size + "Basic ".len))) catch |__ce_14| { _ = &__ce_14; @panic("unreachable"); }); });
                     _ = &buf;
                     const encoded = std.base64.url_safe.Encoder.encode(buf["Basic ".len..], username);
-                    _ = &encoded;
-                    (buf[0.."Basic ".len]).* = ("Basic ").*;
+                    _ = @memcpy(buf[0.."Basic ".len], "Basic ");
                     self.client.proxy_authorization = buf[0..("Basic ".len + encoded.len)];
                 }
             }
@@ -398,8 +328,7 @@ pub fn sendSync(self: *AsyncHTTP) !bun.picohttp.Response {
         _ = &batch;
         _ = self.schedule(bun.default_allocator, (&batch));
         _ = bun.http.http_thread.schedule(batch);
-        const result = (blk_catch_17: { break :blk_catch_17 ((ctx.channel.readItem()) catch |__ce_17| { _ = &__ce_17; @panic("unreachable"); }); });
-        _ = &result;
+        const result = (blk_catch_15: { break :blk_catch_15 ((ctx.channel.readItem()) catch |__ce_15| { _ = &__ce_15; @panic("unreachable"); }); });
         if (result.fail) |err| {
             _ = &err;
             return err;
@@ -446,7 +375,6 @@ pub fn onAsyncHTTPCallback(self: *AsyncHTTP, async_http: *AsyncHTTP, result: HTT
             {
                 _ = self.client.deinit();
                 const threadlocal_http: *bun.http.ThreadlocalAsyncHTTP = @fieldParentPtr("async_http", async_http);
-                _ = &threadlocal_http;
                 defer {
                 _ = threadlocal_http.deinit();
                 }
@@ -454,7 +382,6 @@ pub fn onAsyncHTTPCallback(self: *AsyncHTTP, async_http: *AsyncHTTP, result: HTT
                 _ = callback.function(callback.ctx, async_http, result);
             }
             const active_requests = AsyncHTTP.active_requests_count.fetchSub(1, .monotonic);
-            _ = &active_requests;
             _ = bun.assert((active_requests > 0));
         }
         if ((((!bun.http.http_thread.queued_tasks.isEmpty()) or (bun.http.http_thread.deferred_tasks.items.len > 0)) and (AsyncHTTP.active_requests_count.load(.monotonic) < AsyncHTTP.max_simultaneous_requests.load(.monotonic)))) {
@@ -464,7 +391,6 @@ pub fn onAsyncHTTPCallback(self: *AsyncHTTP, async_http: *AsyncHTTP, result: HTT
 
 pub fn startAsyncHTTP(task: *bun.ThreadPool.Task) void {
         const this_ptr: *AsyncHTTP = @fieldParentPtr("task", task);
-        _ = &this_ptr;
         _ = this_ptr.onStart();
 }
 
@@ -488,7 +414,7 @@ pub fn sendSyncCallback(channel_holder: *SingleHTTPChannel, async_http: *AsyncHT
         if (async_http.real) |real| {
             _ = &real;
             real.* = async_http.*;
-            cp_opt_unwrap(real).response_buffer = async_http.response_buffer;
+            (real).?.response_buffer = async_http.response_buffer;
         }
-        _ = (blk_catch_18: { break :blk_catch_18 ((channel_holder.channel.writeItem(result)) catch |__ce_18| { _ = &__ce_18; @panic("unreachable"); }); });
+        _ = (blk_catch_16: { break :blk_catch_16 ((channel_holder.channel.writeItem(result)) catch |__ce_16| { _ = &__ce_16; @panic("unreachable"); }); });
 }

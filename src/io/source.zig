@@ -2,209 +2,21 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) {
-        return v.?;
-    } else {
-        return v;
-    }
-}
 const uv = bun.windows.libuv;
 const log = bun.Output.scoped(.PipeSource, .hidden);
-fn is_string_like(comptime T: type) bool {
-    if (T == []const u8 or T == []u8) return true;
-    if (@typeInfo(T) == .pointer) {
-        const Child = @typeInfo(T).pointer.child;
-        if (Child == u8) return true;
-        if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true;
-    }
-    return false;
-}
-fn to_string_slice(v: anytype) []const u8 {
-    const T = @TypeOf(v);
-    if (comptime (T == []const u8 or T == []u8)) {
-        return v;
-    } else {
-        const cp_str_slice: []const u8 = v;
-        return cp_str_slice;
-    }
-}
-fn CpValType(comptime T: type) type {
-    if (is_string_like(T)) return []const u8;
-    if (T == comptime_int) return i32;
-    if (T == comptime_float) return f32;
-    return T;
-}
-fn cp_val(v: anytype) CpValType(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime is_string_like(T)) {
-        return to_string_slice(v);
-    } else if (comptime T == comptime_int) {
-        return @as(i32, v);
-    } else if (comptime T == comptime_float) {
-        return @as(f32, v);
-    } else {
-        return v;
-    }
-}
+fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 const Message = anyopaque;
-fn cp_msg_to_val(_: anytype) []const u8 {
-    return "";
-}
-pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type {
-    if (T == ?Message or T == Message) return []const u8;
-    if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child;
-    if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child;
-    if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child;
-    if (@typeInfo(T) == .array) return @typeInfo(T).array.child;
-    return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx}));
-}
-pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) {
-    const T = @TypeOf(v);
-    if (comptime T == ?Message) {
-        if (v) |m| {
-            if (m == .array and idx < m.array.len) {
-                return cp_msg_to_val(m.array[idx]);
-            }
-        }
-        return "";
-    } else if (comptime T == Message) {
-        if (v == .array and idx < v.array.len) {
-            return cp_msg_to_val(v.array[idx]);
-        }
-        return "";
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) {
-        return v[idx];
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) {
-        return v.*[idx];
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) {
-        return v[idx];
-    } else if (comptime (@typeInfo(T) == .array)) {
-        return v[idx];
-    } else {
-        return @field(v, std.fmt.comptimePrint("{d}", .{idx}));
-    }
-}
-pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type {
-    if (T == ?Message or T == Message) return []const u8;
-    if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child;
-    if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child;
-    if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child;
-    if (@typeInfo(T) == .array) return @typeInfo(T).array.child;
-    const n = @typeInfo(T).@"struct".fields.len;
-    return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end}));
-}
-pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) {
-    const T = @TypeOf(v);
-    if (comptime T == ?Message) {
-        if (v) |m| {
-            if (m == .array and m.array.len >= offset_from_end) {
-                return cp_msg_to_val(m.array[m.array.len - offset_from_end]);
-            }
-        }
-        return "";
-    } else if (comptime T == Message) {
-        if (v == .array and v.array.len >= offset_from_end) {
-            return cp_msg_to_val(v.array[v.array.len - offset_from_end]);
-        }
-        return "";
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) {
-        return v[v.len - offset_from_end];
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) {
-        return v.*[v.*.len - offset_from_end];
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) {
-        return v[v.len - offset_from_end];
-    } else if (comptime (@typeInfo(T) == .array)) {
-        return v[v.len - offset_from_end];
-    } else {
-        const n = @typeInfo(T).@"struct".fields.len;
-        return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end}));
-    }
-}
-pub fn CpUnpackSliceType(comptime T: type, comptime start_idx: usize) type {
-    if (T == ?Message or T == Message) return []const Message;
-    if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T;
-    if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child;
-    if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child;
-    if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child;
-    const fields = @typeInfo(T).@"struct".fields;
-    if (fields.len == 0) return []const i32;
-    const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type;
-    return []const CpValType(Elem);
-}
-pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) {
-    const T = @TypeOf(v);
-    if (comptime T == ?Message) {
-        if (v) |m| {
-            if (m == .array and m.array.len >= start_idx + suffix_len) {
-                return m.array[start_idx .. m.array.len - suffix_len];
-            }
-        }
-        return &[_]Message{};
-    } else if (comptime T == Message) {
-        if (v == .array and v.array.len >= start_idx + suffix_len) {
-            return v.array[start_idx .. v.array.len - suffix_len];
-        }
-        return &[_]Message{};
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) {
-        return v[start_idx .. v.len - suffix_len];
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) {
-        return v.*[start_idx .. v.*.len - suffix_len];
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) {
-        return v[start_idx .. v.len - suffix_len];
-    } else if (comptime (@typeInfo(T) == .array)) {
-        return v[start_idx .. v.len - suffix_len];
-    } else {
-        const fields = @typeInfo(T).@"struct".fields;
-        const end = fields.len - suffix_len;
-        const count = if (end > start_idx) end - start_idx else 0;
-        const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32;
-        const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable;
-        inline for (start_idx..end, 0..) |f_idx, out_idx| {
-            buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx})));
-        }
-        return buf;
-    }
-}
-pub fn cp_string_from(val: anytype) []const u8 {
-    const T = @TypeOf(val);
-    if (comptime T == []const u8) {
-        return val;
-    } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) {
-        return std.mem.span(val);
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) {
-        return val;
-    } else if (comptime (@typeInfo(T) == .@"enum")) {
-        return @tagName(val);
-    } else if (comptime T == bool) {
-        return if (val) "true" else "false";
-    } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0";
-    } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0";
-    } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) {
-        return val.toString();
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) {
-        return val.toString();
-    } else {
-        return @typeName(T);
-    }
-}
-
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@"struct".fields.len; return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
+pub fn CpUnpackSliceType(comptime T: type, comptime start_idx: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
 pub const bun = @import("bun");
 pub const Source = union(enum) {
     pipe: *Pipe,
@@ -212,338 +24,341 @@ pub const Source = union(enum) {
     file: *File,
     sync_file: *File,
 
-    pub fn isClosed(self: *const Source) bool {
-        return (switch (self) {
-            .pipe => |pipe| pipe.isClosed(),
-            .tty => |tty| tty.isClosed(),
-            .sync_file => |file| (file.file == -1),
-            .file => |file| (file.file == -1),
-        });
+pub fn isClosed(self: *const Source) bool {
+            return (switch (self) {
+.pipe => |pipe| pipe.isClosed(),
+.tty => |tty| tty.isClosed(),
+.sync_file => |file| (file.file == -1),
+.file => |file| (file.file == -1),
+});
     }
 
-    pub fn isActive(self: *const Source) bool {
-        return (switch (self) {
-            .pipe => |pipe| pipe.isActive(),
-            .tty => |tty| tty.isActive(),
-            .sync_file => true,
-            .file => true,
-        });
+pub fn isActive(self: *const Source) bool {
+            return (switch (self) {
+.pipe => |pipe| pipe.isActive(),
+.tty => |tty| tty.isActive(),
+.sync_file => true,
+.file => true,
+});
     }
 
-    pub fn getHandle(self: *const Source) *uv.Handle {
-        return (switch (self) {
-            .pipe => @ptrCast(self.pipe),
-            .tty => @ptrCast(self.tty),
-            .sync_file => unreachable,
-            .file => unreachable,
-        });
+pub fn getHandle(self: *const Source) *uv.Handle {
+            return (switch (self) {
+.pipe => @ptrCast(self.pipe),
+.tty => @ptrCast(self.tty),
+.sync_file => unreachable,
+.file => unreachable,
+});
     }
 
-    pub fn toStream(self: *const Source) *uv.uv_stream_t {
-        return (switch (self) {
-            .pipe => self.pipe.asStream(),
-            .tty => @ptrCast(self.tty),
-            .sync_file => unreachable,
-            .file => unreachable,
-        });
+pub fn toStream(self: *const Source) *uv.uv_stream_t {
+            return (switch (self) {
+.pipe => self.pipe.asStream(),
+.tty => @ptrCast(self.tty),
+.sync_file => unreachable,
+.file => unreachable,
+});
     }
 
-    pub fn getFd(self: *const Source) bun.FD {
-        return (switch (self) {
-            .pipe => |pipe| pipe.fd(),
-            .tty => |tty| tty.fd(),
-            .sync_file => |file| .{ .fromUV = file.file },
-            .file => |file| .{ .fromUV = file.file },
-        });
+pub fn getFd(self: *const Source) bun.FD {
+            return (switch (self) {
+.pipe => |pipe| pipe.fd(),
+.tty => |tty| tty.fd(),
+.sync_file => |file| .{ .fromUV = file.file },
+.file => |file| .{ .fromUV = file.file },
+});
     }
 
-    pub fn setData(self: *const Source, data: ?*anyopaque) void {
-        switch (self) {
-            .pipe => |pipe| {
-                pipe.data = data;
-            },
-            .tty => |tty| {
-                tty.data = data;
-            },
-            .sync_file => |file| {
-                file.fs.data = data;
-            },
-            .file => |file| {
-                file.fs.data = data;
-            },
-        }
+pub fn setData(self: *const Source, data: ?*anyopaque) void {
+            switch (self) {
+.pipe => |pipe| {
+pipe.data = data;
+},
+.tty => |tty| {
+tty.data = data;
+},
+.sync_file => |file| {
+file.fs.data = data;
+},
+.file => |file| {
+file.fs.data = data;
+},
+}
     }
 
-    pub fn getData(self: *const Source) ?*anyopaque {
-        return (switch (self) {
-            .pipe => |pipe| pipe.data,
-            .tty => |tty| tty.data,
-            .sync_file => |file| file.fs.data,
-            .file => |file| file.fs.data,
-        });
+pub fn getData(self: *const Source) ?*anyopaque {
+            return (switch (self) {
+.pipe => |pipe| pipe.data,
+.tty => |tty| tty.data,
+.sync_file => |file| file.fs.data,
+.file => |file| file.fs.data,
+});
     }
 
-    pub fn ref(self: *const Source) void {
-        switch (self) {
-            .pipe => {
-                _ = self.pipe.ref();
-            },
-            .tty => {
-                _ = self.tty.ref();
-            },
-            .sync_file => {},
-            .file => {},
-        }
+pub fn ref(self: *const Source) void {
+            switch (self) {
+.pipe => {
+_ = self.pipe.ref();
+},
+.tty => {
+_ = self.tty.ref();
+},
+.sync_file => {
+
+},
+.file => {
+
+},
+}
     }
 
-    pub fn unref(self: *const Source) void {
-        switch (self) {
-            .pipe => {
-                _ = self.pipe.unref();
-            },
-            .tty => {
-                _ = self.tty.unref();
-            },
-            .sync_file => {},
-            .file => {},
-        }
+pub fn unref(self: *const Source) void {
+            switch (self) {
+.pipe => {
+_ = self.pipe.unref();
+},
+.tty => {
+_ = self.tty.unref();
+},
+.sync_file => {
+
+},
+.file => {
+
+},
+}
     }
 
-    pub fn hasRef(self: *const Source) bool {
-        return (switch (self) {
-            .pipe => |pipe| pipe.hasRef(),
-            .tty => |tty| tty.hasRef(),
-            .sync_file => false,
-            .file => false,
-        });
+pub fn hasRef(self: *const Source) bool {
+            return (switch (self) {
+.pipe => |pipe| pipe.hasRef(),
+.tty => |tty| tty.hasRef(),
+.sync_file => false,
+.file => false,
+});
     }
 
-    pub fn openPipe(self: *const Source, loop: *uv.Loop, fd: bun.FD) bun.sys.Maybe(*Source.Pipe) {
+pub fn openPipe(self: *const Source, loop: *uv.Loop, fd: bun.FD) bun.sys.Maybe(*Source.Pipe) {
         _ = &self;
-        log("openPipe (fd = {f})", .{fd});
+            _ = log("openPipe (fd = {f})", .{ fd });
+            const pipe = bun.new(Source.Pipe, std.mem.zeroes(Source.Pipe));
+            switch (pipe.init(loop, false)) {
+.err => |e| {
+_ = bun.destroy(pipe);
+            return .{ .err = e };
+},
+else => {
 
-        const pipe = bun.new(Source.Pipe, std.mem.zeroes(Source.Pipe));
-        _ = &pipe;
-        switch (pipe.init(loop, false)) {
-            .err => |e| {
-                _ = bun.destroy(pipe);
-                return .{ .err = e };
-            },
-            else => {},
-        }
-        switch (pipe.open(fd)) {
-            .err => |e| {
-                _ = pipe.closeAndDestroy();
-                return .{ .err = e };
-            },
-            .result => {},
-        }
-        return .{ .result = pipe };
+},
+}
+            switch (pipe.open(fd)) {
+.err => |e| {
+_ = pipe.closeAndDestroy();
+            return .{ .err = e };
+},
+.result => {
+
+},
+}
+            return .{ .result = pipe };
     }
 
-    pub fn openTty(self: *const Source, loop: *uv.Loop, fd: bun.FD) bun.sys.Maybe(*Source.Tty) {
+pub fn openTty(self: *const Source, loop: *uv.Loop, fd: bun.FD) bun.sys.Maybe(*Source.Tty) {
         _ = &self;
-        log("openTTY (fd = {f})", .{fd});
+            _ = log("openTTY (fd = {f})", .{ fd });
+            const uv_fd = fd.uv();
+            if ((uv_fd == 0)) {
+                return StdinTTY.getStdinTTY(loop);
+            }
+            const tty = (blk_catch_0: { break :blk_catch_0 ((bun.default_allocator.create(Source.Tty)) catch |err_val| { _ = &err_val; break :blk_catch_0 bun.handleOom(err_val); }); });
+            switch (tty.init(loop, uv_fd)) {
+.err => |e| {
+_ = bun.default_allocator.destroy(tty);
+            return .{ .err = e };
+},
+.result => {
 
-        const uv_fd = fd.uv();
-        _ = &uv_fd;
-        if ((uv_fd == 0)) {
-            return StdinTTY.getStdinTTY(loop);
-        }
-        const tty = (blk_catch_0: {
-            break :blk_catch_0 ((bun.default_allocator.create(Source.Tty)) catch |err_val| {
-                _ = &err_val;
-                break :blk_catch_0 bun.handleOom(err_val);
-            });
-        });
-        _ = &tty;
-        switch (tty.init(loop, uv_fd)) {
-            .err => |e| {
-                _ = bun.default_allocator.destroy(tty);
-                return .{ .err = e };
-            },
-            .result => {},
-        }
-        return .{ .result = tty };
+},
+}
+            return .{ .result = tty };
     }
 
-    pub fn openFile(self: *const Source, fd: bun.FD) *Source.File {
+pub fn openFile(self: *const Source, fd: bun.FD) *Source.File {
         _ = &self;
-        _ = bun.assert((fd.isValid() and (fd.uv() != -1)));
-        log("openFile (fd = {f})", .{fd});
-
-        const file = bun.handleOom(bun.default_allocator.create(Source.File));
-        _ = &file;
-        file.* = std.mem.zeroes(Source.File);
-        file.file = fd.uv();
-        return file;
+            _ = bun.assert((fd.isValid() and (fd.uv() != -1)));
+            _ = log("openFile (fd = {f})", .{ fd });
+            const file = bun.handleOom(bun.default_allocator.create(Source.File));
+            file.* = std.mem.zeroes(Source.File);
+            file.file = fd.uv();
+            return file;
     }
 
-    pub fn open(self: *const Source, loop: *uv.Loop, fd: bun.FD) bun.sys.Maybe(Source) {
+pub fn open(self: *const Source, loop: *uv.Loop, fd: bun.FD) bun.sys.Maybe(Source) {
         _ = &self;
-        const rc = bun.windows.libuv.uv_guess_handle(fd.uv());
-        _ = &rc;
-        log("open(fd: {f}, type: {s})", .{ fd, @tagName(rc) });
-
-        switch (rc) {
-            .named_pipe => {
-                switch (self.openPipe(loop, fd)) {
-                    .result => |pipe| {
-                        return .{ .result = .{ .pipe = pipe } };
-                    },
-                    .err => |e| {
-                        return .{ .err = e };
-                    },
-                }
-            },
-            .tty => {
-                switch (self.openTty(loop, fd)) {
-                    .result => |tty| {
-                        return .{ .result = .{ .tty = tty } };
-                    },
-                    .err => |e| {
-                        return .{ .err = e };
-                    },
-                }
-            },
-            .file => {
+            const rc = bun.windows.libuv.uv_guess_handle(fd.uv());
+            _ = log("open(fd: {f}, type: {s})", .{ fd, @tagName(rc) });
+            switch (rc) {
+.named_pipe => {
+switch (self.openPipe(loop, fd)) {
+.result => |pipe| {
+return .{ .result = .{ .pipe = pipe } };
+},
+.err => |e| {
+return .{ .err = e };
+},
+}
+},
+.tty => {
+switch (self.openTty(loop, fd)) {
+.result => |tty| {
+return .{ .result = .{ .tty = tty } };
+},
+.err => |e| {
+return .{ .err = e };
+},
+}
+},
+.file => {
+return .{ .result = .{ .file = self.openFile(fd) } };
+},
+else => {
+const errno = bun.windows.getLastErrno();
+            if ((errno == .SUCCESS)) {
                 return .{ .result = .{ .file = self.openFile(fd) } };
-            },
-            else => {
-                const errno = bun.windows.getLastErrno();
-                _ = &errno;
-                if ((errno == .SUCCESS)) {
-                    return .{ .result = .{ .file = self.openFile(fd) } };
-                }
-                return .{ .err = bun.sys.Error.fromCode(errno, .open) };
-            },
-        }
+            }
+            return .{ .err = bun.sys.Error.fromCode(errno, .open) };
+},
+}
     }
 
-    pub fn setRawMode(self: *const Source, value: bool) bun.sys.Maybe(void) {
-        return (switch (self) {
-            .tty => |tty| {
-                if (tty.setMode((if (value) .raw else .normal)).toError(.uv_tty_set_mode)) |err_val| {
-                    _ = &err_val;
-                    return .{ .err = err_val };
-                } else {
-                    return .success;
-                }
-            },
-            else => .{ .err = .{ .errno = @intFromEnum(bun.sys.E.NOTSUP), .syscall = .uv_tty_set_mode, .fd = self.getFd() } },
-        });
+pub fn setRawMode(self: *const Source, value: bool) bun.sys.Maybe(void) {
+            return (switch (self) {
+.tty => |tty| {
+if (tty.setMode((if (value) .raw else .normal)).toError(.uv_tty_set_mode)) |err_val| {
+                _ = &err_val;
+                return .{ .err = err_val };
+            } else {
+                return .success;
+            }
+},
+else => .{ .err = .{ .errno = @intFromEnum(bun.sys.E.NOTSUP), .syscall = .uv_tty_set_mode, .fd = self.getFd() } },
+});
     }
     pub const Pipe = uv.Pipe;
     pub const Tty = uv.uv_tty_t;
     pub const File = struct {
-        fs: uv.fs_t,
-        iov: uv.uv_buf_t,
-        file: uv.uv_file,
-        state: enum(u8) {
-            deinitialized,
-            operating,
-            canceling,
-            closing,
-        } = .deinitialized,
-        close_after_operation: bool = false,
-
-        pub fn fromFS(fs: *uv.fs_t) *File {
-            return @fieldParentPtr("fs", fs);
-        }
-
-        pub fn canStart(this: *const File) bool {
-            return this.state == .deinitialized and this.fs.data != null;
-        }
-
-        pub fn prepare(this: *File) void {
-            bun.assert(this.state == .deinitialized);
-            bun.assert(this.fs.data != null);
-            this.state = .operating;
-            this.close_after_operation = false;
-        }
-
-        pub fn stop(this: *File) void {
-            if (this.state != .operating) return;
-
-            const cancel_result = uv.uv_cancel(@ptrCast(&this.fs));
-            if (cancel_result == 0) {
-                this.state = .canceling;
+            fs: uv.fs_t,
+            iov: uv.uv_buf_t,
+            file: uv.uv_file,
+            state: enum(u8) {
+                deinitialized,
+                operating,
+                canceling,
+                closing,
+            } = .deinitialized,
+            close_after_operation: bool = false,
+    
+            pub fn fromFS(fs: *uv.fs_t) *File {
+                return @fieldParentPtr("fs", fs);
             }
-        }
-
-        pub fn detach(this: *File) void {
-            this.fs.data = null;
-            this.close_after_operation = true;
-            this.stop();
-
-            if (this.state == .deinitialized) {
+    
+            pub fn canStart(this: *const File) bool {
+                return this.state == .deinitialized and this.fs.data != null;
+            }
+    
+            pub fn prepare(this: *File) void {
+                bun.assert(this.state == .deinitialized);
+                bun.assert(this.fs.data != null);
+                this.state = .operating;
                 this.close_after_operation = false;
-                this.startClose();
             }
-        }
-
-        pub fn complete(this: *File, was_canceled: bool) void {
-            bun.assert(this.state == .operating or this.state == .canceling);
-            if (was_canceled) {
-                bun.assert(this.state == .canceling);
-            }
-
-            this.fs.deinit();
-            this.state = .deinitialized;
-
-            if (this.close_after_operation) {
-                this.close_after_operation = false;
-                this.startClose();
-            }
-        }
-
-        fn startClose(this: *File) void {
-            bun.assert(this.state == .deinitialized);
-            this.state = .closing;
-            _ = uv.uv_fs_close(uv.Loop.get(), &this.fs, this.file, onCloseComplete);
-        }
-
-        fn onCloseComplete(fs: *uv.fs_t) callconv(.c) void {
-            const file = File.fromFS(fs);
-            bun.assert(file.state == .closing);
-            fs.deinit();
-            bun.default_allocator.destroy(file);
-        }
-    };
-    pub const StdinTTY = struct {
-        var data: uv.uv_tty_t = undefined;
-        var lock: bun.Mutex = .{};
-        var initialized = std.atomic.Value(bool).init(false);
-        const value: *uv.uv_tty_t = &data;
-
-        pub fn isStdinTTY(tty: *const Source.Tty) bool {
-            return tty == StdinTTY.value;
-        }
-
-        fn getStdinTTY(loop: *uv.Loop) bun.sys.Maybe(*Source.Tty) {
-            StdinTTY.lock.lock();
-            defer StdinTTY.lock.unlock();
-
-            if (StdinTTY.initialized.swap(true, .monotonic) == false) {
-                const rc = uv.uv_tty_init(loop, StdinTTY.value, 0, 0);
-                if (rc.toError(.open)) |err_val| {
-                    StdinTTY.initialized.store(false, .monotonic);
-                    return .{ .err = err_val };
+    
+            pub fn stop(this: *File) void {
+                if (this.state != .operating) return;
+    
+                const cancel_result = uv.uv_cancel(@ptrCast(&this.fs));
+                if (cancel_result == 0) {
+                    this.state = .canceling;
                 }
             }
-
-            return .{ .result = StdinTTY.value };
-        }
-    };
+    
+            pub fn detach(this: *File) void {
+                this.fs.data = null;
+                this.close_after_operation = true;
+                this.stop();
+    
+                if (this.state == .deinitialized) {
+                    this.close_after_operation = false;
+                    this.startClose();
+                }
+            }
+    
+            pub fn complete(this: *File, was_canceled: bool) void {
+                bun.assert(this.state == .operating or this.state == .canceling);
+                if (was_canceled) {
+                    bun.assert(this.state == .canceling);
+                }
+    
+                this.fs.deinit();
+                this.state = .deinitialized;
+    
+                if (this.close_after_operation) {
+                    this.close_after_operation = false;
+                    this.startClose();
+                }
+            }
+    
+            fn startClose(this: *File) void {
+                bun.assert(this.state == .deinitialized);
+                this.state = .closing;
+                _ = uv.uv_fs_close(uv.Loop.get(), &this.fs, this.file, onCloseComplete);
+            }
+    
+            fn onCloseComplete(fs: *uv.fs_t) callconv(.c) void {
+                const file = File.fromFS(fs);
+                bun.assert(file.state == .closing);
+                fs.deinit();
+                bun.default_allocator.destroy(file);
+            }
+        };
+    pub const StdinTTY = struct {
+            var data: uv.uv_tty_t = undefined;
+            var lock: bun.Mutex = .{};
+            var initialized = std.atomic.Value(bool).init(false);
+            const value: *uv.uv_tty_t = &data;
+    
+            pub fn isStdinTTY(tty: *const Source.Tty) bool {
+                return tty == StdinTTY.value;
+            }
+    
+            fn getStdinTTY(loop: *uv.Loop) bun.sys.Maybe(*Source.Tty) {
+                StdinTTY.lock.lock();
+                defer StdinTTY.lock.unlock();
+    
+                if (StdinTTY.initialized.swap(true, .monotonic) == false) {
+                    const rc = uv.uv_tty_init(loop, StdinTTY.value, 0, 0);
+                    if (rc.toError(.open)) |err_val| {
+                        StdinTTY.initialized.store(false, .monotonic);
+                        return .{ .err = err_val };
+                    }
+                }
+    
+                return .{ .result = StdinTTY.value };
+            }
+        };
 };
 
+
 pub fn Source__setRawModeStdin(raw: bool) c_int {
-    const tty = switch (Source.openTty(bun.jsc.VirtualMachine.get().uvLoop(), .stdin())) {
-        .result => |tty| tty,
-        .err => |e| return e.errno,
-    };
-    if (tty.setMode(if (raw) .vt else .normal).toError(.uv_tty_set_mode)) |err| {
-        return err.errno;
-    }
-    return 0;
+        const tty = (switch (Source.openTty((bun.jsc.VirtualMachine.get()).?.uvLoop(), .stdin)) {
+.result => |t| t,
+.err => |e| {
+return e.errno;
+},
+});
+        if (tty.setMode((if (raw) .vt else .normal)).toError(.uv_tty_set_mode)) |err| {
+            _ = &err;
+            return err.errno;
+        }
+        return 0;
 }

@@ -342,14 +342,14 @@ export class Request {
                     });
 
                     if (url_bytelength < 128) {
-                        let mut buffer: [128]u8 = undefined;
+                        var buffer: [128]u8 = undefined;
                         let url = sys.fmt.bufPrint(&buffer, "{s}{f}{s}", .{
                             this.getProtocol(),
                             fmt,
                             req_url,
                         }) catch @panic("Unexpected error while printing URL");
 
-                        let mut href = jsc.URL.hrefFromString(String.fromBytes(url));
+                        var href = jsc.URL.hrefFromString(String.fromBytes(url));
                         if (!href.isEmpty()) {
                             if (href.byteSlice().ptr == url.ptr) {
                                 this.url = String.cloneLatin1(url[0..href.length()]);

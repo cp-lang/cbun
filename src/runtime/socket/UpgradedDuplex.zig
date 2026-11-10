@@ -1,504 +1,448 @@
-//! UpgradedDuplex provides TLS/SSL encryption for Node.js-style duplex streams.
-//!
-//! This is used when you need to add TLS encryption to streams that are not traditional
-//! network sockets. In Node.js, you can have duplex streams that represent arbitrary
-//! read/write channels - these could be in-memory streams, custom transport protocols,
-//! or any other bidirectional data flow that implements the duplex stream interface.
-//!
-//! Since these duplex streams don't have native SSL support (they're not actual socket
-//! file descriptors),
-//!
-//! The duplex stream manages the SSL handshake, certificate validation, encryption/decryption,
-//! and integrates with Bun's event loop for timeouts and async operations. It maintains
-//! JavaScript callbacks for handling connection events and errors.
-
-const UpgradedDuplex = @This();
-
-wrapper: ?WrapperType,
-origin: jsc.Strong.Optional = .empty, // any duplex
-global: ?*jsc.JSGlobalObject = null,
-ssl_error: CertError = .{},
-vm: *jsc.VirtualMachine,
-handlers: Handlers,
-onDataCallback: jsc.Strong.Optional = .empty,
-onEndCallback: jsc.Strong.Optional = .empty,
-onWritableCallback: jsc.Strong.Optional = .empty,
-onCloseCallback: jsc.Strong.Optional = .empty,
-event_loop_timer: EventLoopTimer = .{
-    .next = .epoch,
-    .tag = .UpgradedDuplex,
-},
-current_timeout: u32 = 0,
-
-pub const CertError = struct {
-    error_no: i32 = 0,
-    code: [:0]const u8 = "",
-    reason: [:0]const u8 = "",
-
-    pub fn deinit(this: *CertError) void {
-        if (this.code.len > 0) {
-            bun.default_allocator.free(this.code);
-        }
-        if (this.reason.len > 0) {
-            bun.default_allocator.free(this.reason);
-        }
-    }
-};
-
-const WrapperType = SSLWrapper(*UpgradedDuplex);
-
-pub const Handlers = struct {
-    ctx: *anyopaque,
-    onOpen: *const fn (*anyopaque) void,
-    onHandshake: *const fn (*anyopaque, bool, uws.us_bun_verify_error_t) void,
-    onData: *const fn (*anyopaque, []const u8) void,
-    onClose: *const fn (*anyopaque) void,
-    onEnd: *const fn (*anyopaque) void,
-    onWritable: *const fn (*anyopaque) void,
-    onError: *const fn (*anyopaque, jsc.JSValue) void,
-    onTimeout: *const fn (*anyopaque) void,
-};
-
-fn onOpen(this: *UpgradedDuplex) void {
-    log("onOpen", .{});
-    this.handlers.onOpen(this.handlers.ctx);
-}
-
-fn onData(this: *UpgradedDuplex, decoded_data: []const u8) void {
-    log("onData ({})", .{decoded_data.len});
-    this.handlers.onData(this.handlers.ctx, decoded_data);
-}
-
-fn onHandshake(this: *UpgradedDuplex, handshake_success: bool, ssl_error: uws.us_bun_verify_error_t) void {
-    log("onHandshake", .{});
-
-    this.ssl_error = .{
-        .error_no = ssl_error.error_no,
-        .code = if (ssl_error.code == null or ssl_error.error_no == 0) "" else bun.handleOom(bun.default_allocator.dupeZ(u8, ssl_error.code[0..bun.len(ssl_error.code) :0])),
-        .reason = if (ssl_error.reason == null or ssl_error.error_no == 0) "" else bun.handleOom(bun.default_allocator.dupeZ(u8, ssl_error.reason[0..bun.len(ssl_error.reason) :0])),
-    };
-    this.handlers.onHandshake(this.handlers.ctx, handshake_success, ssl_error);
-}
-
-fn onClose(this: *UpgradedDuplex) void {
-    log("onClose", .{});
-    defer this.deinit();
-
-    this.handlers.onClose(this.handlers.ctx);
-    // closes the underlying duplex
-    this.callWriteOrEnd(null, false);
-}
-
-fn callWriteOrEnd(this: *UpgradedDuplex, data: ?[]const u8, msg_more: bool) void {
-    if (this.vm.isShuttingDown()) {
-        return;
-    }
-    if (this.origin.get()) |duplex| {
-        const globalThis = this.global.?;
-        const writeOrEnd = if (msg_more) duplex.getFunction(globalThis, "write") catch return orelse return else duplex.getFunction(globalThis, "end") catch return orelse return;
-        if (data) |data_| {
-            const buffer = jsc.ArrayBuffer.BinaryType.toJS(.Buffer, data_, globalThis) catch |err| {
-                this.handlers.onError(this.handlers.ctx, globalThis.takeException(err));
-                return;
-            };
-            buffer.ensureStillAlive();
-
-            _ = writeOrEnd.call(globalThis, duplex, &.{buffer}) catch |err| {
-                this.handlers.onError(this.handlers.ctx, globalThis.takeException(err));
-            };
-        } else {
-            _ = writeOrEnd.call(globalThis, duplex, &.{.null}) catch |err| {
-                this.handlers.onError(this.handlers.ctx, globalThis.takeException(err));
-            };
-        }
-    }
-}
-
-fn internalWrite(this: *UpgradedDuplex, encoded_data: []const u8) void {
-    this.resetTimeout();
-
-    // Possible scenarios:
-    // Scenario 1: will not write if vm is shutting down (we cannot do anything about it)
-    // Scenario 2: will not write if a exception is thrown (will be handled by onError)
-    // Scenario 3: will be queued in memory and will be flushed later
-    // Scenario 4: no write/end function exists (will be handled by onError)
-    this.callWriteOrEnd(encoded_data, true);
-}
-
-pub fn flush(this: *UpgradedDuplex) void {
-    if (this.wrapper) |*wrapper| {
-        _ = wrapper.flush();
-    }
-}
-
-fn onInternalReceiveData(this: *UpgradedDuplex, data: []const u8) void {
-    if (this.wrapper) |*wrapper| {
-        this.resetTimeout();
-        wrapper.receiveData(data);
-    }
-}
-
-fn onReceivedData(
-    globalObject: *jsc.JSGlobalObject,
-    callframe: *jsc.CallFrame,
-) bun.JSError!jsc.JSValue {
-    log("onReceivedData", .{});
-
-    const function = callframe.callee();
-    const args = callframe.arguments_old(1);
-
-    if (jsc.host_fn.getFunctionData(function)) |self| {
-        const this = @as(*UpgradedDuplex, @ptrCast(@alignCast(self)));
-        if (args.len >= 1) {
-            const data_arg = args.ptr[0];
-            if (this.origin.has()) {
-                if (data_arg.isEmptyOrUndefinedOrNull()) {
-                    return .js_undefined;
-                }
-                if (data_arg.asArrayBuffer(globalObject)) |array_buffer| {
-                    // yay we can read the data
-                    const payload = array_buffer.slice();
-                    this.onInternalReceiveData(payload);
-                } else {
-                    // node.js errors in this case with the same error, lets keep it consistent
-                    const error_value = globalObject.ERR(.STREAM_WRAP, "Stream has StringDecoder set or is in objectMode", .{}).toJS();
-                    error_value.ensureStillAlive();
-                    this.handlers.onError(this.handlers.ctx, error_value);
-                }
-            }
-        }
-    }
-    return .js_undefined;
-}
-
-fn onEnd(
-    globalObject: *jsc.JSGlobalObject,
-    callframe: *jsc.CallFrame,
-) bun.JSError!jsc.JSValue {
-    log("onEnd", .{});
-    _ = globalObject;
-    const function = callframe.callee();
-
-    if (jsc.host_fn.getFunctionData(function)) |self| {
-        const this = @as(*UpgradedDuplex, @ptrCast(@alignCast(self)));
-
-        if (this.wrapper != null) {
-            this.handlers.onEnd(this.handlers.ctx);
-        }
-    }
-    return .js_undefined;
-}
-
-fn onWritable(
-    globalObject: *jsc.JSGlobalObject,
-    callframe: *jsc.CallFrame,
-) bun.JSError!jsc.JSValue {
-    log("onWritable", .{});
-
-    _ = globalObject;
-    const function = callframe.callee();
-
-    if (jsc.host_fn.getFunctionData(function)) |self| {
-        const this = @as(*UpgradedDuplex, @ptrCast(@alignCast(self)));
-        // flush pending data
-        if (this.wrapper) |*wrapper| {
-            _ = wrapper.flush();
-        }
-        // call onWritable (will flush on demand)
-        this.handlers.onWritable(this.handlers.ctx);
-    }
-
-    return .js_undefined;
-}
-
-fn onCloseJS(
-    globalObject: *jsc.JSGlobalObject,
-    callframe: *jsc.CallFrame,
-) bun.JSError!jsc.JSValue {
-    log("onCloseJS", .{});
-
-    _ = globalObject;
-    const function = callframe.callee();
-
-    if (jsc.host_fn.getFunctionData(function)) |self| {
-        const this = @as(*UpgradedDuplex, @ptrCast(@alignCast(self)));
-        // flush pending data
-        if (this.wrapper) |*wrapper| {
-            _ = wrapper.shutdown(true);
-        }
-    }
-
-    return .js_undefined;
-}
-
-pub fn onTimeout(this: *UpgradedDuplex) void {
-    log("onTimeout", .{});
-
-    const has_been_cleared = this.event_loop_timer.state == .CANCELLED or this.vm.scriptExecutionStatus() != .running;
-
-    this.event_loop_timer.state = .FIRED;
-    this.event_loop_timer.heap = .{};
-
-    if (has_been_cleared) {
-        return;
-    }
-
-    this.handlers.onTimeout(this.handlers.ctx);
-}
-
-pub fn from(
-    globalThis: *jsc.JSGlobalObject,
-    origin: jsc.JSValue,
-    handlers: UpgradedDuplex.Handlers,
-) UpgradedDuplex {
-    return UpgradedDuplex{
-        .vm = globalThis.bunVM(),
-        .origin = .create(origin, globalThis),
-        .global = globalThis,
-        .wrapper = null,
-        .handlers = handlers,
-    };
-}
-
-pub fn getJSHandlers(this: *UpgradedDuplex, globalThis: *jsc.JSGlobalObject) bun.JSError!jsc.JSValue {
-    const array = try jsc.JSValue.createEmptyArray(globalThis, 4);
-    array.ensureStillAlive();
-
-    {
-        const callback = this.onDataCallback.get() orelse brk: {
-            const dataCallback = jsc.host_fn.NewFunctionWithData(
-                globalThis,
-                null,
-                0,
-                onReceivedData,
-                this,
-            );
-            dataCallback.ensureStillAlive();
-
-            jsc.host_fn.setFunctionData(dataCallback, this);
-
-            this.onDataCallback = .create(dataCallback, globalThis);
-            break :brk dataCallback;
-        };
-        try array.putIndex(globalThis, 0, callback);
-    }
-
-    {
-        const callback = this.onEndCallback.get() orelse brk: {
-            const endCallback = jsc.host_fn.NewFunctionWithData(
-                globalThis,
-                null,
-                0,
-                onEnd,
-                this,
-            );
-            endCallback.ensureStillAlive();
-
-            jsc.host_fn.setFunctionData(endCallback, this);
-
-            this.onEndCallback = .create(endCallback, globalThis);
-            break :brk endCallback;
-        };
-        try array.putIndex(globalThis, 1, callback);
-    }
-
-    {
-        const callback = this.onWritableCallback.get() orelse brk: {
-            const writableCallback = jsc.host_fn.NewFunctionWithData(
-                globalThis,
-                null,
-                0,
-                onWritable,
-                this,
-            );
-            writableCallback.ensureStillAlive();
-
-            jsc.host_fn.setFunctionData(writableCallback, this);
-            this.onWritableCallback = .create(writableCallback, globalThis);
-            break :brk writableCallback;
-        };
-        try array.putIndex(globalThis, 2, callback);
-    }
-
-    {
-        const callback = this.onCloseCallback.get() orelse brk: {
-            const closeCallback = jsc.host_fn.NewFunctionWithData(
-                globalThis,
-                null,
-                0,
-                onCloseJS,
-                this,
-            );
-            closeCallback.ensureStillAlive();
-
-            jsc.host_fn.setFunctionData(closeCallback, this);
-            this.onCloseCallback = .create(closeCallback, globalThis);
-            break :brk closeCallback;
-        };
-        try array.putIndex(globalThis, 3, callback);
-    }
-
-    return array;
-}
-
-pub fn startTLS(this: *UpgradedDuplex, ssl_options: jsc.API.ServerConfig.SSLConfig, is_client: bool) !void {
-    this.wrapper = try WrapperType.init(ssl_options, is_client, .{
-        .ctx = this,
-        .onOpen = UpgradedDuplex.onOpen,
-        .onHandshake = UpgradedDuplex.onHandshake,
-        .onData = UpgradedDuplex.onData,
-        .onClose = UpgradedDuplex.onClose,
-        .write = UpgradedDuplex.internalWrite,
-    });
-
-    this.wrapper.?.start();
-}
-
-/// Adopts `ctx` (one ref) — freed on both success (via `wrapper.deinit`) and
-/// error. Mirrors `startTLS` but skips the
-/// `SSLConfig.asUSockets() → us_ssl_ctx_from_options()` round-trip so a
-/// memoised `SecureContext` can be reused on the duplex/named-pipe path.
-pub fn startTLSWithCTX(this: *UpgradedDuplex, ctx: *bun.BoringSSL.c.SSL_CTX, is_client: bool) !void {
-    errdefer bun.BoringSSL.c.SSL_CTX_free(ctx);
-    this.wrapper = try WrapperType.initWithCTX(ctx, is_client, .{
-        .ctx = this,
-        .onOpen = UpgradedDuplex.onOpen,
-        .onHandshake = UpgradedDuplex.onHandshake,
-        .onData = UpgradedDuplex.onData,
-        .onClose = UpgradedDuplex.onClose,
-        .write = UpgradedDuplex.internalWrite,
-    });
-
-    this.wrapper.?.start();
-}
-
-pub fn encodeAndWrite(this: *UpgradedDuplex, data: []const u8) i32 {
-    log("encodeAndWrite (len: {})", .{data.len});
-    if (this.wrapper) |*wrapper| {
-        return @as(i32, @intCast(wrapper.writeData(data) catch 0));
-    }
-    return 0;
-}
-
-pub fn rawWrite(this: *UpgradedDuplex, encoded_data: []const u8) i32 {
-    this.internalWrite(encoded_data);
-    return @intCast(encoded_data.len);
-}
-
-pub fn close(this: *UpgradedDuplex) void {
-    if (this.wrapper) |*wrapper| {
-        _ = wrapper.shutdown(true);
-    }
-}
-
-pub fn shutdown(this: *UpgradedDuplex) void {
-    if (this.wrapper) |*wrapper| {
-        _ = wrapper.shutdown(false);
-    }
-}
-
-pub fn shutdownRead(this: *UpgradedDuplex) void {
-    if (this.wrapper) |*wrapper| {
-        _ = wrapper.shutdownRead();
-    }
-}
-
-pub fn isShutdown(this: *UpgradedDuplex) bool {
-    if (this.wrapper) |wrapper| {
-        return wrapper.isShutdown();
-    }
-    return true;
-}
-
-pub fn isClosed(this: *UpgradedDuplex) bool {
-    if (this.wrapper) |wrapper| {
-        return wrapper.isClosed();
-    }
-    return true;
-}
-
-pub fn isEstablished(this: *UpgradedDuplex) bool {
-    return !this.isClosed();
-}
-
-pub fn ssl(this: *UpgradedDuplex) ?*BoringSSL.SSL {
-    if (this.wrapper) |wrapper| {
-        return wrapper.ssl;
-    }
-    return null;
-}
-
-pub fn sslError(this: *UpgradedDuplex) us_bun_verify_error_t {
-    return .{
-        .error_no = this.ssl_error.error_no,
-        .code = @ptrCast(this.ssl_error.code.ptr),
-        .reason = @ptrCast(this.ssl_error.reason.ptr),
-    };
-}
-
-pub fn resetTimeout(this: *UpgradedDuplex) void {
-    this.setTimeoutInMilliseconds(this.current_timeout);
-}
-pub fn setTimeoutInMilliseconds(this: *UpgradedDuplex, ms: c_uint) void {
-    if (this.event_loop_timer.state == .ACTIVE) {
-        this.vm.timer.remove(&this.event_loop_timer);
-    }
-    this.current_timeout = ms;
-
-    // if the interval is 0 means that we stop the timer
-    if (ms == 0) {
-        return;
-    }
-
-    // reschedule the timer
-    this.event_loop_timer.next = bun.timespec.msFromNow(.allow_mocked_time, ms);
-    this.vm.timer.insert(&this.event_loop_timer);
-}
-pub fn setTimeout(this: *UpgradedDuplex, seconds: c_uint) void {
-    log("setTimeout({d})", .{seconds});
-    this.setTimeoutInMilliseconds(seconds * 1000);
-}
-
-pub fn deinit(this: *UpgradedDuplex) void {
-    log("deinit", .{});
-    // clear the timer
-    this.setTimeout(0);
-
-    if (this.wrapper) |*wrapper| {
-        wrapper.deinit();
-        this.wrapper = null;
-    }
-
-    this.origin.deinit();
-    if (this.onDataCallback.get()) |callback| {
-        jsc.host_fn.setFunctionData(callback, null);
-        this.onDataCallback.deinit();
-    }
-    if (this.onEndCallback.get()) |callback| {
-        jsc.host_fn.setFunctionData(callback, null);
-        this.onEndCallback.deinit();
-    }
-    if (this.onWritableCallback.get()) |callback| {
-        jsc.host_fn.setFunctionData(callback, null);
-        this.onWritableCallback.deinit();
-    }
-    if (this.onCloseCallback.get()) |callback| {
-        jsc.host_fn.setFunctionData(callback, null);
-        this.onCloseCallback.deinit();
-    }
-    var ssl_error = this.ssl_error;
-    ssl_error.deinit();
-    this.ssl_error = .{};
-}
-
-const log = bun.Output.scoped(.UpgradedDuplex, .visible);
-
+// Generated by CP Compiler (RFC-002 Production SDK)
+const std = @import("std");
+const string = []const u8;
+
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const SSLWrapper = @import("./ssl_wrapper.zig").SSLWrapper;
-
-const bun = @import("bun");
 const jsc = bun.jsc;
 const BoringSSL = bun.BoringSSL.c;
-const EventLoopTimer = bun.api.Timer.EventLoopTimer;
-
 const uws = bun.uws;
+const log = bun.Output.scoped(.UpgradedDuplex, .visible);
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub const bun = @import("bun");
+pub const UpgradedDuplex = struct {
+    wrapper: ?WrapperType,
+    origin: jsc.Strong.Optional = .empty,
+    global: ?*jsc.JSGlobalObject = null,
+    ssl_error: CertError = .{},
+    vm: *jsc.VirtualMachine,
+    handlers: Handlers,
+    onDataCallback: jsc.Strong.Optional = .empty,
+    onEndCallback: jsc.Strong.Optional = .empty,
+    onWritableCallback: jsc.Strong.Optional = .empty,
+    onCloseCallback: jsc.Strong.Optional = .empty,
+    event_loop_timer: EventLoopTimer = .{ .next = .epoch, .tag = .UpgradedDuplex },
+    current_timeout: u32 = 0,
+
+pub fn onOpen(self: *UpgradedDuplex) void {
+            _ = log("onOpen", .{});
+            _ = self.handlers.onOpen(self.handlers.ctx);
+    }
+
+pub fn onData(self: *UpgradedDuplex, decoded_data: []const u8) void {
+            _ = log("onData ({})", .{ decoded_data.len });
+            _ = self.handlers.onData(self.handlers.ctx, decoded_data);
+    }
+
+pub fn onHandshake(self: *UpgradedDuplex, handshake_success: bool, ssl_error: uws.us_bun_verify_error_t) void {
+            _ = log("onHandshake", .{});
+            self.ssl_error = .{ .error_no = ssl_error.error_no, .code = (if (((ssl_error.code == null) or (ssl_error.error_no == 0))) "" else bun.handleOom(bun.default_allocator.dupeZ(u8, ssl_error.code[0..bun.len(ssl_error.code) :0]))), .reason = (if (((ssl_error.reason == null) or (ssl_error.error_no == 0))) "" else bun.handleOom(bun.default_allocator.dupeZ(u8, ssl_error.reason[0..bun.len(ssl_error.reason) :0]))) };
+            _ = self.handlers.onHandshake(self.handlers.ctx, handshake_success, ssl_error);
+    }
+
+pub fn onClose(self: *UpgradedDuplex) void {
+            _ = log("onClose", .{});
+            defer {
+            _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
+            }
+            _ = self.handlers.onClose(self.handlers.ctx);
+            _ = self.callWriteOrEnd(null, false);
+    }
+
+pub fn callWriteOrEnd(self: *UpgradedDuplex, data: ?[]const u8, msg_more: bool) void {
+            if (self.vm.isShuttingDown()) {
+                return;
+            }
+            if (self.origin.get()) |duplex| {
+                _ = &duplex;
+                const globalThis = self.global.?;
+                const fn_name = (if (msg_more) "write" else "end");
+                const writeOrEnd_opt = (blk_catch_0: { break :blk_catch_0 ((duplex.getFunction(globalThis, fn_name)) catch |__ce_0| { _ = &__ce_0; return; }); });
+                var __writeOrEnd_opt_moved = false; _ = &__writeOrEnd_opt_moved;
+                defer if (!__writeOrEnd_opt_moved) { const T = @TypeOf(writeOrEnd_opt); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = writeOrEnd_opt.release() catch {}; } else { writeOrEnd_opt.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = writeOrEnd_opt; _drop_val.release(); } };
+                const writeOrEnd = ((writeOrEnd_opt) orelse { return; });
+                var __writeOrEnd_moved = false; _ = &__writeOrEnd_moved;
+                defer if (!__writeOrEnd_moved) { const T = @TypeOf(writeOrEnd); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = writeOrEnd.release() catch {}; } else { writeOrEnd.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = writeOrEnd; _drop_val.release(); } };
+                if (data) |data_| {
+                    _ = &data_;
+                    const buffer = (blk_catch_1: { break :blk_catch_1 ((jsc.ArrayBuffer.BinaryType.toJS(.Buffer, data_, globalThis)) catch |err| { _ = &err; _ = self.handlers.onError(self.handlers.ctx, globalThis.takeException(err));
+                    return; }); });
+                    var __buffer_moved = false; _ = &__buffer_moved;
+                    defer if (!__buffer_moved) { const T = @TypeOf(buffer); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = buffer.release() catch {}; } else { buffer.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = buffer; _drop_val.release(); } };
+                    _ = buffer.ensureStillAlive();
+                    _ = (blk_catch_2: { break :blk_catch_2 ((writeOrEnd.call(globalThis, duplex, (&.{ buffer }))) catch |err| { _ = &err; break :blk_catch_2 self.handlers.onError(self.handlers.ctx, globalThis.takeException(err)); }); });
+                } else {
+                    _ = (blk_catch_3: { break :blk_catch_3 ((writeOrEnd.call(globalThis, duplex, (&.{ jsc.JSValue.js_null }))) catch |err| { _ = &err; break :blk_catch_3 self.handlers.onError(self.handlers.ctx, globalThis.takeException(err)); }); });
+                }
+            }
+    }
+
+pub fn internalWrite(self: *UpgradedDuplex, encoded_data: []const u8) void {
+            _ = self.resetTimeout();
+            _ = self.callWriteOrEnd(encoded_data, true);
+    }
+
+pub fn flush(self: *UpgradedDuplex) void {
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                _ = (wrapper.*).flush();
+            }
+    }
+
+pub fn onInternalReceiveData(self: *UpgradedDuplex, data: []const u8) void {
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                _ = self.resetTimeout();
+                _ = (wrapper.*).receiveData(data);
+            }
+    }
+
+pub fn onReceivedData(self: UpgradedDuplex, globalObject: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
+            _ = log("onReceivedData", .{});
+            const function = callframe.callee();
+            var __function_moved = false; _ = &__function_moved;
+            defer if (!__function_moved) { const T = @TypeOf(function); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = function.release() catch {}; } else { function.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = function; _drop_val.release(); } };
+            const args = callframe.arguments_old(1);
+            var __args_moved = false; _ = &__args_moved;
+            defer if (!__args_moved) { const T = @TypeOf(args); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = args.release() catch {}; } else { args.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = args; _drop_val.release(); } };
+            if (jsc.host_fn.getFunctionData(function)) |self| {
+                _ = &self;
+                const req = @as(*UpgradedDuplex, @ptrCast(@alignCast(@ptrCast(@alignCast(self)))));
+                var __req_moved = false; _ = &__req_moved;
+                defer if (!__req_moved) { const T = @TypeOf(req); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = req.release() catch {}; } else { req.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = req; _drop_val.release(); } };
+                if ((args.len >= 1)) {
+                    const data_arg = args.ptr[0];
+                    if (req.origin.has()) {
+                        if (data_arg.isEmptyOrUndefinedOrNull()) {
+                            return error.js_undefined;
+                        }
+                        if (data_arg.asArrayBuffer(globalObject)) |array_buffer| {
+                            _ = &array_buffer;
+                            const payload = array_buffer.slice();
+                            var __payload_moved = false; _ = &__payload_moved;
+                            defer if (!__payload_moved) { const T = @TypeOf(payload); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = payload.release() catch {}; } else { payload.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = payload; _drop_val.release(); } };
+                            _ = req.onInternalReceiveData(payload);
+                        } else {
+                            const error_value = globalObject.ERR(.STREAM_WRAP, "Stream has StringDecoder set or is in objectMode", .{}).toJS();
+                            var __error_value_moved = false; _ = &__error_value_moved;
+                            defer if (!__error_value_moved) { const T = @TypeOf(error_value); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = error_value.release() catch {}; } else { error_value.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = error_value; _drop_val.release(); } };
+                            _ = error_value.ensureStillAlive();
+                            _ = req.handlers.onError(req.handlers.ctx, error_value);
+                        }
+                    }
+                }
+            }
+            return error.js_undefined;
+    }
+
+pub fn onEnd(self: UpgradedDuplex, globalObject: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
+            _ = log("onEnd", .{});
+            _ = globalObject;
+            const function = callframe.callee();
+            var __function_moved = false; _ = &__function_moved;
+            defer if (!__function_moved) { const T = @TypeOf(function); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = function.release() catch {}; } else { function.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = function; _drop_val.release(); } };
+            if (jsc.host_fn.getFunctionData(function)) |self| {
+                _ = &self;
+                const req = @as(*UpgradedDuplex, @ptrCast(@alignCast(@ptrCast(@alignCast(self)))));
+                var __req_moved = false; _ = &__req_moved;
+                defer if (!__req_moved) { const T = @TypeOf(req); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = req.release() catch {}; } else { req.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = req; _drop_val.release(); } };
+                if ((req.wrapper != null)) {
+                    _ = req.handlers.onEnd(req.handlers.ctx);
+                }
+            }
+            return error.js_undefined;
+    }
+
+pub fn onWritable(self: UpgradedDuplex, globalObject: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
+            _ = log("onWritable", .{});
+            _ = globalObject;
+            const function = callframe.callee();
+            var __function_moved = false; _ = &__function_moved;
+            defer if (!__function_moved) { const T = @TypeOf(function); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = function.release() catch {}; } else { function.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = function; _drop_val.release(); } };
+            if (jsc.host_fn.getFunctionData(function)) |self| {
+                _ = &self;
+                const req = @as(*UpgradedDuplex, @ptrCast(@alignCast(@ptrCast(@alignCast(self)))));
+                var __req_moved = false; _ = &__req_moved;
+                defer if (!__req_moved) { const T = @TypeOf(req); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = req.release() catch {}; } else { req.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = req; _drop_val.release(); } };
+                if (req.wrapper) |*wrapper| {
+                    _ = &wrapper;
+                    _ = (wrapper.*).flush();
+                }
+                _ = req.handlers.onWritable(req.handlers.ctx);
+            }
+            return error.js_undefined;
+    }
+
+pub fn onCloseJS(self: UpgradedDuplex, globalObject: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
+            _ = log("onCloseJS", .{});
+            _ = globalObject;
+            const function = callframe.callee();
+            var __function_moved = false; _ = &__function_moved;
+            defer if (!__function_moved) { const T = @TypeOf(function); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = function.release() catch {}; } else { function.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = function; _drop_val.release(); } };
+            if (jsc.host_fn.getFunctionData(function)) |self| {
+                _ = &self;
+                const req = @as(*UpgradedDuplex, @ptrCast(@alignCast(@ptrCast(@alignCast(self)))));
+                var __req_moved = false; _ = &__req_moved;
+                defer if (!__req_moved) { const T = @TypeOf(req); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = req.release() catch {}; } else { req.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = req; _drop_val.release(); } };
+                if (req.wrapper) |*wrapper| {
+                    _ = &wrapper;
+                    _ = (wrapper.*).shutdown(true);
+                }
+            }
+            return error.js_undefined;
+    }
+
+pub fn onTimeout(self: *UpgradedDuplex) void {
+            _ = log("onTimeout", .{});
+            const has_been_cleared = ((self.event_loop_timer.state == .CANCELLED) or (self.vm.scriptExecutionStatus() != .running));
+            self.event_loop_timer.state = .FIRED;
+            self.event_loop_timer.heap = .{};
+            if (has_been_cleared) {
+                return;
+            }
+            _ = self.handlers.onTimeout(self.handlers.ctx);
+    }
+
+pub fn from(self: UpgradedDuplex, globalThis: *jsc.JSGlobalObject, origin: jsc.JSValue, handlers: UpgradedDuplex.Handlers) UpgradedDuplex {
+        _ = &self;
+            return UpgradedDuplex{ .vm = globalThis.bunVM(), .origin = .{ .create = .{ origin, globalThis } }, .global = globalThis, .wrapper = null, .handlers = handlers };
+    }
+
+pub fn getJSHandlers(self: *UpgradedDuplex, globalThis: *jsc.JSGlobalObject) bun.JSError!jsc.JSValue {
+            var array = try jsc.JSValue.createEmptyArray(globalThis, 4);
+            var __array_moved = false; _ = &__array_moved;
+            defer if (!__array_moved) { const T = @TypeOf(array); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = array.release() catch {}; } else { array.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = array; _drop_val.release(); } };
+            _ = array.ensureStillAlive();
+            {
+                const callback = ((self.onDataCallback.get()) orelse (blk: {
+                var dataCallback = jsc.host_fn.NewFunctionWithData(globalThis, null, 0, onReceivedData, self);
+                var __dataCallback_moved = false; _ = &__dataCallback_moved;
+                defer if (!__dataCallback_moved) { const T = @TypeOf(dataCallback); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = dataCallback.release() catch {}; } else { dataCallback.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = dataCallback; _drop_val.release(); } };
+                _ = dataCallback.ensureStillAlive();
+                _ = jsc.host_fn.setFunctionData(dataCallback, self);
+                self.onDataCallback = .{ .create = .{ dataCallback, globalThis } };
+                break :blk dataCallback;
+}));
+                var __callback_moved = false; _ = &__callback_moved;
+                defer if (!__callback_moved) { const T = @TypeOf(callback); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = callback.release() catch {}; } else { callback.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = callback; _drop_val.release(); } };
+                _ = try array.putIndex(globalThis, 0, callback);
+            }
+            {
+                const callback = ((self.onEndCallback.get()) orelse (blk: {
+                var endCallback = jsc.host_fn.NewFunctionWithData(globalThis, null, 0, onEnd, self);
+                var __endCallback_moved = false; _ = &__endCallback_moved;
+                defer if (!__endCallback_moved) { const T = @TypeOf(endCallback); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = endCallback.release() catch {}; } else { endCallback.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = endCallback; _drop_val.release(); } };
+                _ = endCallback.ensureStillAlive();
+                _ = jsc.host_fn.setFunctionData(endCallback, self);
+                self.onEndCallback = .{ .create = .{ endCallback, globalThis } };
+                break :blk endCallback;
+}));
+                var __callback_moved = false; _ = &__callback_moved;
+                defer if (!__callback_moved) { const T = @TypeOf(callback); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = callback.release() catch {}; } else { callback.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = callback; _drop_val.release(); } };
+                _ = try array.putIndex(globalThis, 1, callback);
+            }
+            {
+                const callback = ((self.onWritableCallback.get()) orelse (blk: {
+                var writableCallback = jsc.host_fn.NewFunctionWithData(globalThis, null, 0, onWritable, self);
+                var __writableCallback_moved = false; _ = &__writableCallback_moved;
+                defer if (!__writableCallback_moved) { const T = @TypeOf(writableCallback); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = writableCallback.release() catch {}; } else { writableCallback.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = writableCallback; _drop_val.release(); } };
+                _ = writableCallback.ensureStillAlive();
+                _ = jsc.host_fn.setFunctionData(writableCallback, self);
+                self.onWritableCallback = .{ .create = .{ writableCallback, globalThis } };
+                break :blk writableCallback;
+}));
+                var __callback_moved = false; _ = &__callback_moved;
+                defer if (!__callback_moved) { const T = @TypeOf(callback); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = callback.release() catch {}; } else { callback.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = callback; _drop_val.release(); } };
+                _ = try array.putIndex(globalThis, 2, callback);
+            }
+            {
+                const callback = ((self.onCloseCallback.get()) orelse (blk: {
+                var closeCallback = jsc.host_fn.NewFunctionWithData(globalThis, null, 0, onCloseJS, self);
+                var __closeCallback_moved = false; _ = &__closeCallback_moved;
+                defer if (!__closeCallback_moved) { const T = @TypeOf(closeCallback); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = closeCallback.release() catch {}; } else { closeCallback.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = closeCallback; _drop_val.release(); } };
+                _ = closeCallback.ensureStillAlive();
+                _ = jsc.host_fn.setFunctionData(closeCallback, self);
+                self.onCloseCallback = .{ .create = .{ closeCallback, globalThis } };
+                break :blk closeCallback;
+}));
+                var __callback_moved = false; _ = &__callback_moved;
+                defer if (!__callback_moved) { const T = @TypeOf(callback); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = callback.release() catch {}; } else { callback.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = callback; _drop_val.release(); } };
+                _ = try array.putIndex(globalThis, 3, callback);
+            }
+            __array_moved = true;
+            return array;
+    }
+
+pub fn startTLS(self: *UpgradedDuplex, ssl_options: jsc.API.ServerConfig.SSLConfig, is_client: bool) anyerror!void {
+            self.wrapper = try WrapperType.init(ssl_options, is_client, .{ .ctx = self, .onOpen = UpgradedDuplex.onOpen, .onHandshake = UpgradedDuplex.onHandshake, .onData = UpgradedDuplex.onData, .onClose = UpgradedDuplex.onClose, .write = UpgradedDuplex.internalWrite });
+            _ = self.wrapper.?.start();
+    }
+
+pub fn startTLSWithCTX(self: *UpgradedDuplex, ctx: *bun.BoringSSL.c.SSL_CTX, is_client: bool) anyerror!void {
+            errdefer {
+            _ = bun.BoringSSL.c.SSL_CTX_free(ctx);
+            }
+            self.wrapper = try WrapperType.initWithCTX(ctx, is_client, .{ .ctx = self, .onOpen = UpgradedDuplex.onOpen, .onHandshake = UpgradedDuplex.onHandshake, .onData = UpgradedDuplex.onData, .onClose = UpgradedDuplex.onClose, .write = UpgradedDuplex.internalWrite });
+            _ = self.wrapper.?.start();
+    }
+
+pub fn encodeAndWrite(self: *UpgradedDuplex, data: []const u8) i32 {
+            _ = log("encodeAndWrite (len: {})", .{ data.len });
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                return @as(i32, @intCast((blk_catch_4: { break :blk_catch_4 (((wrapper.*).writeData(data)) catch |__ce_4| { _ = &__ce_4; break :blk_catch_4 0; }); })));
+            }
+            return 0;
+    }
+
+pub fn rawWrite(self: *UpgradedDuplex, encoded_data: []const u8) i32 {
+            _ = self.internalWrite(encoded_data);
+            return @intCast(encoded_data.len);
+    }
+
+pub fn close(self: *UpgradedDuplex) void {
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                _ = (wrapper.*).shutdown(true);
+            }
+    }
+
+pub fn shutdown(self: *UpgradedDuplex) void {
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                _ = (wrapper.*).shutdown(false);
+            }
+    }
+
+pub fn shutdownRead(self: *UpgradedDuplex) void {
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                _ = (wrapper.*).shutdownRead();
+            }
+    }
+
+pub fn isShutdown(self: *UpgradedDuplex) bool {
+            if (self.wrapper) |wrapper| {
+                _ = &wrapper;
+                return wrapper.isShutdown();
+            }
+            return true;
+    }
+
+pub fn isClosed(self: *UpgradedDuplex) bool {
+            if (self.wrapper) |wrapper| {
+                _ = &wrapper;
+                return wrapper.isClosed();
+            }
+            return true;
+    }
+
+pub fn isEstablished(self: *UpgradedDuplex) bool {
+            return (!self.isClosed());
+    }
+
+pub fn ssl(self: *UpgradedDuplex) ?*BoringSSL.SSL {
+            if (self.wrapper) |wrapper| {
+                _ = &wrapper;
+                return wrapper.ssl;
+            }
+            return null;
+    }
+
+pub fn sslError(self: *UpgradedDuplex) us_bun_verify_error_t {
+            return .{ .error_no = self.ssl_error.error_no, .code = @ptrCast(self.ssl_error.code.ptr), .reason = @ptrCast(self.ssl_error.reason.ptr) };
+    }
+
+pub fn resetTimeout(self: *UpgradedDuplex) void {
+            _ = self.setTimeoutInMilliseconds(self.current_timeout);
+    }
+
+pub fn setTimeoutInMilliseconds(self: *UpgradedDuplex, ms: u32) void {
+            if ((self.event_loop_timer.state == .ACTIVE)) {
+                _ = self.vm.timer.remove((&self.event_loop_timer));
+            }
+            self.current_timeout = ms;
+            if ((ms == 0)) {
+                return;
+            }
+            self.event_loop_timer.next = bun.timespec.msFromNow(.allow_mocked_time, ms);
+            _ = self.vm.timer.insert((&self.event_loop_timer));
+    }
+
+pub fn setTimeout(self: *UpgradedDuplex, seconds: u32) void {
+            _ = log("setTimeout({d})", .{ seconds });
+            _ = self.setTimeoutInMilliseconds((seconds * 1000));
+    }
+
+pub fn release(self: *UpgradedDuplex) void {
+            _ = log("release", .{});
+            _ = self.setTimeout(0);
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                _ = (wrapper.*).deinit();
+                self.wrapper = null;
+            }
+            _ = self.origin.deinit();
+            if (self.onDataCallback.get()) |callback| {
+                _ = &callback;
+                _ = jsc.host_fn.setFunctionData(callback, null);
+                _ = self.onDataCallback.deinit();
+            }
+            if (self.onEndCallback.get()) |callback| {
+                _ = &callback;
+                _ = jsc.host_fn.setFunctionData(callback, null);
+                _ = self.onEndCallback.deinit();
+            }
+            if (self.onWritableCallback.get()) |callback| {
+                _ = &callback;
+                _ = jsc.host_fn.setFunctionData(callback, null);
+                _ = self.onWritableCallback.deinit();
+            }
+            if (self.onCloseCallback.get()) |callback| {
+                _ = &callback;
+                _ = jsc.host_fn.setFunctionData(callback, null);
+                _ = self.onCloseCallback.deinit();
+            }
+            var ssl_error = self.ssl_error;
+            _ = &ssl_error;
+            _ = (if (comptime @typeInfo(@TypeOf(ssl_error)) == .pointer) (ssl_error) else &(ssl_error)).release();
+            self.ssl_error = .{};
+    }
+
+pub fn deinit(self: *UpgradedDuplex) void {
+            _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
+    }
+    pub struct CertError {
+            error_no: i32 = 0,
+            code: [:0]const u8 = "",
+            reason: [:0]const u8 = "",
+    
+            pub fn release(_: *CertError): void {
+                if (_.code.len > 0) {
+                    bun.default_allocator.free(_.code);
+                }
+                if (_.reason.len > 0) {
+                    bun.default_allocator.free(_.reason);
+                }
+            }
+    
+            pub fn deinit(_: *CertError): void {
+                _.release();
+            }
+        }
+    const WrapperType = SSLWrapper(*UpgradedDuplex);
+    pub struct Handlers {
+            ctx: *any,
+            onOpen: *const fn (*any) void,
+            onHandshake: *const fn (*any, bool, uws.us_bun_verify_error_t) void,
+            onData: *const fn (*any, string) void,
+            onClose: *const fn (*any) void,
+            onEnd: *const fn (*any) void,
+            onWritable: *const fn (*any) void,
+            onError: *const fn (*any, jsc.JSValue) void,
+            onTimeout: *const fn (*any) void,
+        }
+};
+
+const EventLoopTimer = bun.api.Timer.EventLoopTimer;
 const us_bun_verify_error_t = uws.us_bun_verify_error_t;

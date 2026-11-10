@@ -4,6 +4,7 @@ const std = @import("std");
 const bun = @import("bun");
 
 const buffer_size: usize = 8192;
+const log = Output.scoped(.PosixSignalHandle, .hidden);
 
 export class PosixSignalHandle {
     signals: [buffer_size]u8 = undefined;
@@ -12,8 +13,6 @@ export class PosixSignalHandle {
     tail: std.atomic.Value(u16) = std.atomic.Value(u16).init(0);
     // Consumer index (main thread reads)
     head: std.atomic.Value(u16) = std.atomic.Value(u16).init(0);
-
-    const log = Output.scoped(.PosixSignalHandle, .hidden);
 
     pub const new = bun.TrivialNew(@This());
 
@@ -88,9 +87,10 @@ export class PosixSignalHandle {
     }
 }
 
+extern fn Bun__onSignalForJS(number: i32, globalObject: *jsc.JSGlobalObject): void;
+
 export class PosixSignalTask {
     number: u8;
-    extern "c" fn Bun__onSignalForJS(number: i32, globalObject: *jsc.JSGlobalObject): void;
 
     pub const new = bun.TrivialNew(@This());
 
@@ -113,7 +113,7 @@ export fn Bun__onPosixSignal(number: i32): void {
 export fn Bun__ensureSignalHandler(): void {
     if (comptime Environment.isPosix) {
         if (VirtualMachine.getMainThreadVM()) |vm| {
-            const el = vm.eventLoop();
+            var el = vm.eventLoop();
             if (el.signal_handler == null) {
                 el.signal_handler = PosixSignalHandle.new(.{});
                 @memset(&el.signal_handler.?.signals, 0);

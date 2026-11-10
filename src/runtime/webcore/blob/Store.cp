@@ -69,12 +69,12 @@ export class Store {
 
     @c pub fn external(ptr: *!?, _: *!?, _: usize): void {
         if (ptr == null) return;
-        let mut this_store = cast(*Store, ptr);
+        var this_store = cast(*Store, ptr);
         this_store.deref();
     }
 
     pub fn initS3WithReferencedCredentials(pathlike: node.PathLike, mime_type: ?MimeType, credentials: *S3Credentials, allocator: Allocator): !*Store {
-        let mut path = pathlike;
+        var path = pathlike;
         path.toThreadSafe();
 
         return new(Store, .{
@@ -84,7 +84,7 @@ export class Store {
                     mime_type ?? brk: {
                         let sliced = path.slice();
                         if (sliced.len > 0) {
-                            let mut extname = std.fs.path.extension(sliced);
+                            var extname = std.fs.path.extension(sliced);
                             extname = std.mem.trim(u8, extname, ".");
                             if (MimeType.byExtensionNoDefault(extname)) |mime| {
                                 break :brk mime;
@@ -101,7 +101,7 @@ export class Store {
     }
 
     pub fn initS3(pathlike: node.PathLike, mime_type: ?MimeType, credentials: S3Credentials, allocator: Allocator): !*Store {
-        let mut path = pathlike;
+        var path = pathlike;
         path.toThreadSafe();
 
         return new(Store, .{
@@ -111,7 +111,7 @@ export class Store {
                     mime_type ?? brk: {
                         let sliced = path.slice();
                         if (sliced.len > 0) {
-                            let mut extname = std.fs.path.extension(sliced);
+                            var extname = std.fs.path.extension(sliced);
                             extname = std.mem.trim(u8, extname, ".");
                             if (MimeType.byExtensionNoDefault(extname)) |mime| {
                                 break :brk mime;
@@ -136,7 +136,7 @@ export class Store {
                         if (pathlike == .path) {
                             let sliced = pathlike.path.slice();
                             if (sliced.len > 0) {
-                                let mut extname = std.fs.path.extension(sliced);
+                                var extname = std.fs.path.extension(sliced);
                                 extname = std.mem.trim(u8, extname, ".");
                                 if (MimeType.byExtensionNoDefault(extname)) |mime| {
                                     break :brk mime;
@@ -302,7 +302,7 @@ export class Store {
         }
 
         pub fn path(*_): string {
-            let mut path_name = URL.parse(_.pathlike.slice()).s3Path();
+            var path_name = URL.parse(_.pathlike.slice()).s3Path();
             if (strings.endsWith(path_name, "/")) {
                 path_name = path_name[0..path_name.len];
             } else if (strings.endsWith(path_name, "\\")) {
@@ -347,7 +347,7 @@ export class Store {
             let value = promise.value();
             let proxy_url = globalThis.bunVM().transpiler.env.getHttpProxy(true, null, null);
             let proxy = if (proxy_url) |url| url.href else null;
-            let mut aws_options = try _.getCredentialsWithOptions(extra_options, globalThis);
+            var aws_options = try _.getCredentialsWithOptions(extra_options, globalThis);
             defer aws_options.deinit();
             store.ref();
 
@@ -399,7 +399,7 @@ export class Store {
             let value = promise.value();
             let proxy_url = globalThis.bunVM().transpiler.env.getHttpProxy(true, null, null);
             let proxy = if (proxy_url) |url| url.href else null;
-            let mut aws_options = try _.getCredentialsWithOptions(extra_options, globalThis);
+            var aws_options = try _.getCredentialsWithOptions(extra_options, globalThis);
             defer aws_options.deinit();
 
             let options = try getListObjectsOptionsFromJS(globalThis, listOptions);

@@ -2,462 +2,407 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) {
-        return v.?;
-    } else {
-        return v;
-    }
-}
-pub const ParentDeathWatchdog = @This();
-
-/// Exit code used when the watchdog fires. 128 + SIGHUP, matching the
-/// convention for "terminated because the controlling end went away".
-pub const exit_code: u8 = 128 + 1;
-
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const Environment = bun.Environment;
+const jsc = bun.jsc;
 var enabled: bool = false;
 var original_ppid: std.c.pid_t = 0;
 var install_thread_id: std.Thread.Id = 0;
-
-/// Whether no-orphans mode was enabled at startup. Read by the spawn path to
-/// decide whether to default `linux_pdeathsig` on children.
-pub fn isEnabled() bool {
-    return enabled;
-}
-
-/// The original parent pid to watch from contexts that have no event loop
-/// (`bun run` blocking in `spawnSync`, etc.). Returns null when no-orphans
-/// isn't enabled or there is no parent worth watching. Both Linux and macOS
-/// use this from `spawnSync` so the pgroup-kill cleanup path runs even though
-/// Linux already has a SIGKILL PDEATHSIG backstop.
-pub fn ppidToWatch() ?std.c.pid_t {
-    if (comptime !Environment.isPosix) return null;
-    if (!enabled or original_ppid <= 1) return null;
-    return original_ppid;
-}
-
-/// `bun run`/`bunx` set this to the script's pgid (= script pid, since we
-/// `setpgid(0,0)` in the child) so the exit callback can `kill(-pgid, KILL)`.
-/// Process-group membership survives reparenting to launchd/init, so this
-/// reaches grandchildren that the libproc/procfs walk would miss once the
-/// script itself has exited. Stack-disciplined for nested `spawnSync` (e.g.
-/// `pre`/`post` lifecycle scripts) — though in practice depth is 1.
-var sync_pgids_buf: [4]std.c.pid_t = .{0} ** 4;
+var sync_pgids_buf: [4]std.c.pid_t = .{ 0, 0, 0, 0 };
 var sync_pgids: []std.c.pid_t = sync_pgids_buf[0..0];
+var event_loop_installed = std.atomic.Value(bool).init(false);
+var instance: ParentDeathWatchdog = .{};
+fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@"struct".fields.len; return @FieldType(T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
+pub fn CpUnpackSliceType(comptime T: type, comptime start_idx: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
+pub const bun = @import("bun");
+pub const ParentDeathWatchdog = @This();
 
-/// Returns true if the push was recorded; caller must pop iff true. Depth >4
-/// would lose stack discipline if push were a silent no-op while pop wasn't.
+pub const exit_code: u8 = 128 + 1;
+
+pub fn isEnabled() bool {
+        return enabled;
+}
+
+pub fn ppidToWatch() ?std.c.pid_t {
+        if (comptime (!Environment.isPosix)) {
+            return null;
+        }
+        if (((!enabled) or (original_ppid <= 1))) {
+            return null;
+        }
+        return original_ppid;
+}
+
 pub fn pushSyncPgid(pgid: std.c.pid_t) bool {
-    if (comptime !Environment.isPosix) return false;
-    if (sync_pgids.len >= sync_pgids_buf.len) return false;
-    sync_pgids.len += 1;
-    sync_pgids[sync_pgids.len - 1] = pgid;
-    return true;
+        if (comptime (!Environment.isPosix)) {
+            return false;
+        }
+        if ((sync_pgids.len >= sync_pgids_buf.len)) {
+            return false;
+        }
+        sync_pgids.len = (sync_pgids.len + 1);
+        sync_pgids[cp_cast_int(usize, (sync_pgids.len - 1))] = pgid;
+        return true;
 }
 
 pub fn popSyncPgid() void {
-    if (comptime !Environment.isPosix) return;
-    if (sync_pgids.len > 0) sync_pgids.len -= 1;
+        if (comptime (!Environment.isPosix)) {
+            return;
+        }
+        if ((sync_pgids.len > 0)) {
+            sync_pgids.len = (sync_pgids.len - 1);
+        }
 }
 
-/// SIGKILL every registered script pgroup + the macOS uniqueid-tracked set.
-/// Scoped to the `spawnSync` script(s) — does NOT call `killDescendants()`,
-/// which is rooted at `getpid()` and would take out unrelated `Bun.spawn`
-/// siblings when `spawnSync` is reached from inside a live VM (e.g.
-/// `ffi.zig:getSystemRootDirOnce` shelling out to `xcrun`).
 pub fn killSyncScriptTree() void {
-    if (comptime !Environment.isPosix) return;
-    for (sync_pgids) |pgid| {
-        if (pgid > 1) _ = std.c.kill(-pgid, std.posix.SIG.KILL);
-    }
-    if (comptime Environment.isMac) Bun__noOrphans_killTracked();
-    // Linux: subreaper-adopted setsid escapees are killed by
-    // `killSubreaperAdoptees()` in `spawnPosix`'s disarm defer (which can
-    // tell them apart from `Bun.spawn` siblings via the pre-arm snapshot).
+        if (comptime (!Environment.isPosix)) {
+            return;
+        }
+        for (cp_iter_slice(sync_pgids)) |pgid| {
+            _ = &pgid;
+            if ((pgid > 1)) {
+                _ = std.c.kill((0 - pgid), std.posix.SIG.KILL);
+            }
+        }
+        if (comptime Environment.isMac) {
+            _ = Bun__noOrphans_killTracked();
+        }
 }
 
-/// Full-process teardown: pgroups + tracked + getpid()-rooted tree.
-/// Only safe to call when the whole Bun process is exiting.
-fn killSyncPgroupsAndDescendants() void {
-    if (comptime !Environment.isPosix) return;
-    killSyncScriptTree();
-    killDescendants();
+pub fn killSyncPgroupsAndDescendants() void {
+        if (comptime (!Environment.isPosix)) {
+            return;
+        }
+        _ = killSyncScriptTree();
+        _ = killDescendants();
 }
 
-extern "c" fn Bun__noOrphans_killTracked() void;
+pub extern "c" fn Bun__noOrphans_killTracked() callconv(.c) void;
 
-/// Whether the spawn-side `linux_pdeathsig` default should apply to a child
-/// being spawned *right now*. `PR_SET_PDEATHSIG` is thread-scoped: it fires
-/// when the *thread* that vforked the child exits, not when the parent
-/// process exits. A `Bun.spawn()` from a JS `Worker` vforks on that Worker's
-/// OS thread, so defaulting PDEATHSIG there would kill the child on
-/// `worker.terminate()` while Bun itself is still alive. Restricting the
-/// default to the main thread keeps "die with Bun" semantics; Workers can
-/// still opt in explicitly via the (Zig-level) `linux_pdeathsig` option.
 pub fn shouldDefaultSpawnPdeathsig() bool {
-    return enabled and std.Thread.getCurrentId() == install_thread_id;
+        return (enabled and (std.Thread.getCurrentId() == install_thread_id));
 }
-var event_loop_installed = std.atomic.Value(bool).init(false);
-/// Singleton instance — `FilePoll.Owner` needs a real pointer, but we have no
-/// per-instance state.
-var instance: ParentDeathWatchdog = .{};
 
-/// Called from `main()` before the CLI starts. Checks the env var and enables
-/// the watchdog as early as possible so the Linux `prctl` window is minimal.
-/// `bunfig.toml`'s `[run] noOrphans` and the `--no-orphans` flag call
-/// `enable()` directly later in startup if the env var wasn't set.
 pub fn install() void {
-    if (comptime !Environment.isPosix) return;
-    if (!bun.env_var.BUN_FEATURE_FLAG_NO_ORPHANS.get()) return;
-    enable();
+        if (comptime (!Environment.isPosix)) {
+            return;
+        }
+        if ((!bun.env_var.BUN_FEATURE_FLAG_NO_ORPHANS.get())) {
+            return;
+        }
+        _ = enable();
 }
 
-/// Idempotent. Arms the watchdog: Linux `prctl(PR_SET_PDEATHSIG)`, exit-time
-/// descendant reaper, and (lazily) the macOS kqueue parent watch. Safe to call
-/// from `main()` (env-var path) and again from bunfig / CLI flag parsing.
 pub fn enable() void {
-    if (comptime !Environment.isPosix) return;
-    if (enabled) return;
-
-    enabled = true;
-    install_thread_id = std.Thread.getCurrentId();
-    // Export the env var so any Bun child we spawn (e.g. `bun run` → script →
-    // nested bun) inherits no-orphans mode without the parent having to thread
-    // the flag through. No-op if we got here via the env var.
-    _ = setenv("BUN_FEATURE_FLAG_NO_ORPHANS", "1", 1);
-
-    // PR_SET_CHILD_SUBREAPER is NOT armed here — it's process-wide and would
-    // make every orphaned grandchild reparent to us, but only the spawnSync
-    // wait loop has a `wait4(-1, WNOHANG)` to reap them. `bun foo.js` /
-    // `--filter` / `bun test` would accumulate zombies. Subreaper is armed
-    // per-script in `spawnPosix` (just before the spawn) and cleared on return.
-    // Descendant cleanup runs on every clean exit regardless of whether we end
-    // up watching a parent (Bun may have been spawned directly by launchd/init).
-    bun.Global.addExitCallback(&onProcessExit);
-
-    original_ppid = std.c.getppid();
-    // Already orphaned (parent died before we got here, or launchd/init
-    // spawned us directly) — nothing to watch.
-    if (original_ppid <= 1) return;
-
-    if (comptime Environment.isLinux) {
-        // PR_SET_PDEATHSIG: kernel sends SIGKILL when the thread that forked
-        // us exits. Persists across exec; cleared on fork (Bun's own children
-        // do not inherit it). SIGKILL is uncatchable so user code can't
-        // swallow it. The macOS path goes through Global.exit instead and so
-        // also runs the descendant reaper; on Linux the SIGKILL case relies on
-        // env-var inheritance — Bun-spawning-Bun chains self-reap because each
-        // link sets its own PDEATHSIG.
-        _ = std.posix.prctl(.SET_PDEATHSIG, .{std.posix.SIG.KILL}) catch return;
-        // Race: parent may have died between getppid() above and prctl()
-        // taking effect. If so we've already been reparented and the kernel
-        // will never deliver the signal — exit now.
-        if (std.c.getppid() != original_ppid) {
-            killDescendants();
-            std.c._exit(exit_code);
+        if (comptime (!Environment.isPosix)) {
+            return;
         }
-    }
-    // macOS: parent watch installs lazily via installOnEventLoop() once the
-    // event loop's kqueue exists.
+        if (enabled) {
+            return;
+        }
+        enabled = true;
+        install_thread_id = std.Thread.getCurrentId();
+        _ = setenv("BUN_FEATURE_FLAG_NO_ORPHANS", "1", 1);
+        _ = bun.Global.addExitCallback((&onProcessExit));
+        original_ppid = std.c.getppid();
+        if ((original_ppid <= 1)) {
+            return;
+        }
+        if (comptime Environment.isLinux) {
+            _ = (blk_catch_0: { break :blk_catch_0 ((std.posix.prctl(.SET_PDEATHSIG, .{ std.posix.SIG.KILL })) catch |__ce_0| { _ = &__ce_0; return; }); });
+            if ((std.c.getppid() != original_ppid)) {
+                _ = killDescendants();
+                _ = std.c._exit(ParentDeathWatchdog.exit_code);
+            }
+        }
 }
 
-/// Register `EVFILT_PROC`/`NOTE_EXIT` for the original parent on the main
-/// event loop's kqueue. Called from `VirtualMachine.init` once the uws loop is
-/// up. macOS-only; no-op elsewhere and on subsequent calls.
 pub fn installOnEventLoop(handle: jsc.EventLoopHandle) void {
-    if (comptime !Environment.isMac) return;
-    if (!enabled or original_ppid <= 1) return;
-    if (event_loop_installed.swap(true, .monotonic)) return;
-
-    // Race: parent may have died between install() and now (before the event
-    // loop existed). We've been reparented; kqueue would ESRCH — exit now.
-    if (std.c.getppid() != original_ppid) {
-        bun.Global.exit(exit_code);
-    }
-
-    const poll = bun.Async.FilePoll.init(handle, .fromNative(original_ppid), .{}, ParentDeathWatchdog, &instance);
-    switch (poll.register(handle.loop(), .process, true)) {
-        .result => {
-            // Do not keep the event loop alive on this poll's behalf — the
-            // watchdog must never prevent Bun from exiting when there is no
-            // other work. `register()` only bumps the *active* count when
-            // `.keeps_event_loop_alive` was set beforehand, which we didn't.
-        },
-        .err => |err| {
-            // ESRCH: parent already gone before we registered — treat as fired.
-            if (err.getErrno() == .SRCH) {
-                bun.Global.exit(exit_code);
-            }
-            // Any other registration error: best-effort feature, just don't watch.
-        },
-    }
-}
-
-/// `FilePoll.Owner` dispatch target — see the `ParentDeathWatchdog` arm in
-/// `posix_event_loop.zig`'s `onUpdate`. The kqueue `NOTE_EXIT` for our parent
-/// fired.
-pub fn onParentExit(_: *ParentDeathWatchdog) void {
-    // Global.exit → Bun__onExit → onProcessExit → killDescendants.
-    bun.Global.exit(exit_code);
-}
-
-/// Registered with `Global.addExitCallback` so it runs from `Bun__onExit`
-/// (atexit on macOS, at_quick_exit on Linux, and the explicit `Global.exit`
-/// path). C calling convention because that's the exit-callback ABI.
-fn onProcessExit() callconv(.c) void {
-    killSyncPgroupsAndDescendants();
-}
-
-/// Walk the process tree rooted at `getpid()` and SIGKILL every descendant.
-pub fn killDescendants() void {
-    if (comptime !Environment.isPosix) return;
-
-    const self_pid = std.c.getpid();
-
-    var to_visit: std.ArrayListUnmanaged(std.c.pid_t) = .{};
-    defer to_visit.deinit(bun.default_allocator);
-    var to_kill: std.ArrayListUnmanaged(std.c.pid_t) = .{};
-    defer to_kill.deinit(bun.default_allocator);
-
-    to_visit.append(bun.default_allocator, self_pid) catch return;
-
-    var buf: [4096]std.c.pid_t = undefined;
-    // Hard cap on tree size so a fork bomb under us can't make exit hang.
-    while (to_visit.items.len > 0 and to_kill.items.len < 4096) {
-        const parent = to_visit.swapRemove(to_visit.items.len - 1);
-        const n = listChildPids(parent, &buf) orelse continue;
-        for (buf[0..n]) |child| {
-            if (child == self_pid or child <= 1) continue;
-            // Freeze first, then confirm it's still the process we enumerated.
-            if (std.c.kill(child, std.posix.SIG.STOP) != 0) continue;
-            if (parentPidOf(child) != parent) {
-                // Recycled between enumerate and STOP — undo and skip.
-                _ = std.c.kill(child, std.posix.SIG.CONT);
-                continue;
-            }
-            to_kill.append(bun.default_allocator, child) catch {
-                // OOM after we've already STOPped+verified this child — kill it
-                // now rather than leaving it frozen and absent from to_kill.
-                _ = std.c.kill(child, std.posix.SIG.KILL);
-                continue;
-            };
-            to_visit.append(bun.default_allocator, child) catch {};
+        if (comptime (!Environment.isMac)) {
+            return;
         }
-    }
+        if (((!enabled) or (original_ppid <= 1))) {
+            return;
+        }
+        if (event_loop_installed.swap(true, .monotonic)) {
+            return;
+        }
+        if ((std.c.getppid() != original_ppid)) {
+            _ = bun.Global.exit(ParentDeathWatchdog.exit_code);
+        }
+        const poll = bun.Async.FilePoll.init(handle, .{ .fromNative = original_ppid }, .{}, ParentDeathWatchdog, (&instance));
+        switch (poll.register(handle.loop(), .process, true)) {
+.result => {
 
-    // Leaves-first: iterate backwards so children die before their parents.
-    // Avoids spurious reparent-to-subreaper churn on the way down.
-    var i: usize = to_kill.items.len;
-    while (i > 0) {
-        i -= 1;
-        _ = std.c.kill(to_kill.items[i], std.posix.SIG.KILL);
-    }
+},
+.err => |e| {
+if ((e.getErrno() == .SRCH)) {
+            _ = bun.Global.exit(ParentDeathWatchdog.exit_code);
+        }
+},
+}
 }
 
-/// Linux-only: enumerate our direct children into `out`. Used by `spawnPosix`
-/// to snapshot pre-existing siblings before arming subreaper, so the post-wait
-/// `killSubreaperAdoptees` can tell adopted orphans apart from `Bun.spawn`
-/// siblings (both have ppid==us). Returns the slice written; empty on
-/// non-Linux or enumeration failure.
+pub fn onParentExit(_: *ParentDeathWatchdog) void {
+        _ = bun.Global.exit(ParentDeathWatchdog.exit_code);
+}
+
+pub fn onProcessExit() callconv(.c) void {
+        _ = killSyncPgroupsAndDescendants();
+}
+
+pub fn killDescendants() void {
+        if (comptime (!Environment.isPosix)) {
+            return;
+        }
+        const self_pid = std.c.getpid();
+        var to_visit: std.ArrayListUnmanaged(std.c.pid_t) = .{};
+        _ = &to_visit;
+        defer {
+        _ = to_visit.deinit(bun.default_allocator);
+        }
+        var to_kill: std.ArrayListUnmanaged(std.c.pid_t) = .{};
+        _ = &to_kill;
+        defer {
+        _ = to_kill.deinit(bun.default_allocator);
+        }
+        _ = (blk_catch_1: { break :blk_catch_1 ((to_visit.append(bun.default_allocator, self_pid)) catch |__ce_1| { _ = &__ce_1; return; }); });
+        var buf: [4096]std.c.pid_t = undefined;
+        _ = &buf;
+        while (((to_visit.items.len > 0) and (to_kill.items.len < 4096))) {
+            const parent = to_visit.swapRemove((to_visit.items.len - 1));
+            const n = ((listChildPids(parent, (&buf))) orelse continue);
+            for (cp_iter_slice(buf[0..n])) |child| {
+                _ = &child;
+                if (((child == self_pid) or (child <= 1))) {
+                    continue;
+                }
+                if ((std.c.kill(child, std.posix.SIG.STOP) != 0)) {
+                    continue;
+                }
+                if ((parentPidOf(child) != parent)) {
+                    _ = std.c.kill(child, std.posix.SIG.CONT);
+                    continue;
+                }
+                _ = (blk_catch_2: { break :blk_catch_2 ((to_kill.append(bun.default_allocator, child)) catch |__ce_2| { _ = &__ce_2; _ = std.c.kill(child, std.posix.SIG.KILL);
+                continue; }); });
+                _ = (blk_catch_3: { break :blk_catch_3 ((to_visit.append(bun.default_allocator, child)) catch |__ce_3| { _ = &__ce_3;  }); });
+            }
+        }
+        var i: usize = to_kill.items.len;
+        _ = &i;
+        while ((i > 0)) {
+            i = (i - 1);
+            _ = std.c.kill(to_kill.items[@as(usize, @intCast(i))], std.posix.SIG.KILL);
+        }
+}
+
 pub fn snapshotChildren(out: []std.c.pid_t) []const std.c.pid_t {
-    if (comptime !Environment.isLinux) return out[0..0];
-    return out[0 .. listChildPids(std.c.getpid(), out) orelse 0];
+        if (comptime (!Environment.isLinux)) {
+            return out[0..0];
+        }
+        return out[0..((listChildPids(std.c.getpid(), out)) orelse (0))];
 }
 
 pub fn killSubreaperAdoptees(siblings: []const std.c.pid_t) void {
-    if (comptime !Environment.isLinux) return;
-
-    const self_pid = std.c.getpid();
-    var buf: [4096]std.c.pid_t = undefined;
-
-    var rounds: u8 = 64;
-    while (rounds > 0) : (rounds -= 1) {
-        const n = listChildPids(self_pid, &buf) orelse return;
-        var killed_any = false;
-        for (buf[0..n]) |child| {
-            if (child <= 1 or child == self_pid) continue;
-            if (std.mem.indexOfScalar(std.c.pid_t, siblings, child) != null) continue;
-            killTreeRootedAt(child, self_pid);
-            killed_any = true;
+        if (comptime (!Environment.isLinux)) {
+            return;
         }
-        // Reap what we just killed so their children (if any raced) reparent.
-        while (true) {
-            var st: c_int = undefined;
-            if (std.c.waitpid(-1, &st, std.posix.W.NOHANG) <= 0) break;
-        }
-        if (!killed_any) return;
-    }
-}
-
-fn killTreeRootedAt(root: std.c.pid_t, expected_ppid_of_root: std.c.pid_t) void {
-    if (comptime !Environment.isPosix) return;
-
-    var to_visit: std.ArrayListUnmanaged(std.c.pid_t) = .{};
-    defer to_visit.deinit(bun.default_allocator);
-    var to_kill: std.ArrayListUnmanaged(std.c.pid_t) = .{};
-    defer to_kill.deinit(bun.default_allocator);
-
-    if (std.c.kill(root, std.posix.SIG.STOP) != 0) return;
-    if (parentPidOf(root) != expected_ppid_of_root) {
-        _ = std.c.kill(root, std.posix.SIG.CONT);
-        return;
-    }
-    to_kill.append(bun.default_allocator, root) catch {
-        _ = std.c.kill(root, std.posix.SIG.KILL);
-        return;
-    };
-    to_visit.append(bun.default_allocator, root) catch {};
-
-    var buf: [4096]std.c.pid_t = undefined;
-    while (to_visit.items.len > 0 and to_kill.items.len < 4096) {
-        const parent = to_visit.swapRemove(to_visit.items.len - 1);
-        const n = listChildPids(parent, &buf) orelse continue;
-        for (buf[0..n]) |child| {
-            if (child <= 1) continue;
-            if (std.c.kill(child, std.posix.SIG.STOP) != 0) continue;
-            if (parentPidOf(child) != parent) {
-                _ = std.c.kill(child, std.posix.SIG.CONT);
-                continue;
+        const self_pid = std.c.getpid();
+        var buf: [4096]std.c.pid_t = undefined;
+        _ = &buf;
+        var rounds: u8 = 64;
+        _ = &rounds;
+        while ((rounds > 0)) {
+            rounds = (rounds - 1);
+            const n = ((listChildPids(self_pid, (&buf))) orelse { return; });
+            var killed_any = false;
+            _ = &killed_any;
+            for (cp_iter_slice(buf[0..n])) |child| {
+                _ = &child;
+                if (((child <= 1) or (child == self_pid))) {
+                    continue;
+                }
+                if ((std.mem.indexOfScalar(std.c.pid_t, siblings, child) != null)) {
+                    continue;
+                }
+                _ = killTreeRootedAt(child, self_pid);
+                killed_any = true;
             }
-            to_kill.append(bun.default_allocator, child) catch {
-                _ = std.c.kill(child, std.posix.SIG.KILL);
-                continue;
-            };
-            to_visit.append(bun.default_allocator, child) catch {};
-        }
-    }
-
-    var i: usize = to_kill.items.len;
-    while (i > 0) {
-        i -= 1;
-        _ = std.c.kill(to_kill.items[i], std.posix.SIG.KILL);
-    }
-}
-
-fn parentPidOf(pid: std.c.pid_t) ?std.c.pid_t {
-    if (comptime Environment.isMac) {
-        var info: std.c.proc_bsdinfo = undefined;
-        const rc = std.c.proc_pidinfo(
-            pid,
-            std.c.PROC_PIDTBSDINFO,
-            0,
-            &info,
-            @sizeOf(std.c.proc_bsdinfo),
-        );
-        if (rc <= 0) return null;
-        return @intCast(info.pbi_ppid);
-    }
-
-    if (comptime Environment.isLinux) {
-        var path_buf: [64]u8 = undefined;
-        const stat_path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/stat", .{pid}) catch return null;
-        var read_buf: [512]u8 = undefined;
-        const contents = readFileOnce(stat_path, &read_buf) orelse return null;
-        const rparen = std.mem.lastIndexOfScalar(u8, contents, ')') orelse return null;
-        const rest = std.mem.trimLeft(u8, contents[rparen + 1 ..], " ");
-        var it = std.mem.splitScalar(u8, rest, ' ');
-        _ = it.next(); // state
-        const ppid_str = it.next() orelse return null;
-        return std.fmt.parseInt(std.c.pid_t, ppid_str, 10) catch null;
-    }
-
-    return null;
-}
-
-fn listChildPids(parent: std.c.pid_t, out: []std.c.pid_t) ?usize {
-    if (comptime Environment.isMac) {
-        const bytes_needed = std.c.proc_listchildpids(parent, null, 0);
-        if (bytes_needed <= 0) return 0;
-        const cap: c_int = @intCast(@min(out.len, @as(usize, @intCast(bytes_needed)) / @sizeOf(std.c.pid_t)));
-        const count = std.c.proc_listchildpids(parent, out.ptr, @intCast(cap * @as(c_int, @sizeOf(std.c.pid_t))));
-        if (count < 0) return null;
-        return @intCast(count);
-    }
-
-    if (comptime Environment.isLinux) {
-        var dir_buf: [64]u8 = undefined;
-        const task_dir_path = std.fmt.bufPrintZ(&dir_buf, "/proc/{d}/task", .{parent}) catch return null;
-        var dir = std.fs.openDirAbsoluteZ(task_dir_path, .{ .iterate = true }) catch return null;
-        defer dir.close();
-
-        var written: usize = 0;
-        var it = dir.iterate();
-        while (it.next() catch null) |entry| {
-            if (entry.kind != .directory) continue;
-            var child_path_buf: [128]u8 = undefined;
-            const child_path = std.fmt.bufPrintZ(
-                &child_path_buf,
-                "/proc/{d}/task/{s}/children",
-                .{ parent, entry.name },
-            ) catch continue;
-            var read_buf: [4096]u8 = undefined;
-            const contents = readFileOnce(child_path, &read_buf) orelse continue;
-            var tok = std.mem.tokenizeScalar(u8, contents, ' ');
-            while (tok.next()) |pid_str| {
-                if (written >= out.len) break;
-                const child = std.fmt.parseInt(std.c.pid_t, pid_str, 10) catch continue;
-                out[written] = child;
-                written += 1;
+            while (true) {
+                var st: c_int = undefined;
+                _ = &st;
+                if ((std.c.waitpid(-1, (&st), std.posix.W.NOHANG) <= 0)) {
+                    break;
+                }
+            }
+            if ((!killed_any)) {
+                return;
             }
         }
-        return written;
-    }
-
-    return 0;
 }
 
-fn readFileOnce(path: [:0]const u8, buf: []u8) ?[]const u8 {
-    const file = switch (bun.sys.File.open(path, bun.O.RDONLY, 0)) {
-        .result => |f| f,
-        .err => return null,
-    };
-    defer file.close();
-    return switch (file.readAll(buf)) {
-        .result => |n| buf[0..n],
-        .err => null,
-    };
+pub fn killTreeRootedAt(root: std.c.pid_t, expected_ppid_of_root: std.c.pid_t) void {
+        if (comptime (!Environment.isPosix)) {
+            return;
+        }
+        var to_visit: std.ArrayListUnmanaged(std.c.pid_t) = .{};
+        _ = &to_visit;
+        defer {
+        _ = to_visit.deinit(bun.default_allocator);
+        }
+        var to_kill: std.ArrayListUnmanaged(std.c.pid_t) = .{};
+        _ = &to_kill;
+        defer {
+        _ = to_kill.deinit(bun.default_allocator);
+        }
+        if ((std.c.kill(root, std.posix.SIG.STOP) != 0)) {
+            return;
+        }
+        if ((parentPidOf(root) != expected_ppid_of_root)) {
+            _ = std.c.kill(root, std.posix.SIG.CONT);
+            return;
+        }
+        _ = (blk_catch_4: { break :blk_catch_4 ((to_kill.append(bun.default_allocator, root)) catch |__ce_4| { _ = &__ce_4; _ = std.c.kill(root, std.posix.SIG.KILL);
+        return; }); });
+        _ = (blk_catch_5: { break :blk_catch_5 ((to_visit.append(bun.default_allocator, root)) catch |__ce_5| { _ = &__ce_5;  }); });
+        var buf: [4096]std.c.pid_t = undefined;
+        _ = &buf;
+        while (((to_visit.items.len > 0) and (to_kill.items.len < 4096))) {
+            const parent = to_visit.swapRemove((to_visit.items.len - 1));
+            const n = ((listChildPids(parent, (&buf))) orelse continue);
+            for (cp_iter_slice(buf[0..n])) |child| {
+                _ = &child;
+                if ((child <= 1)) {
+                    continue;
+                }
+                if ((std.c.kill(child, std.posix.SIG.STOP) != 0)) {
+                    continue;
+                }
+                if ((parentPidOf(child) != parent)) {
+                    _ = std.c.kill(child, std.posix.SIG.CONT);
+                    continue;
+                }
+                _ = (blk_catch_6: { break :blk_catch_6 ((to_kill.append(bun.default_allocator, child)) catch |__ce_6| { _ = &__ce_6; _ = std.c.kill(child, std.posix.SIG.KILL);
+                continue; }); });
+                _ = (blk_catch_7: { break :blk_catch_7 ((to_visit.append(bun.default_allocator, child)) catch |__ce_7| { _ = &__ce_7;  }); });
+            }
+        }
+        var i: usize = to_kill.items.len;
+        _ = &i;
+        while ((i > 0)) {
+            i = (i - 1);
+            _ = std.c.kill(to_kill.items[@as(usize, @intCast(i))], std.posix.SIG.KILL);
+        }
 }
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-const Environment = bun.Environment;
-const jsc = bun.jsc;
-pub fn cp_string_from(val: anytype) []const u8 {
-    const T = @TypeOf(val);
-    if (comptime T == []const u8) {
-        return val;
-    } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) {
-        return std.mem.span(val);
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) {
-        return val;
-    } else if (comptime (@typeInfo(T) == .@"enum")) {
-        return @tagName(val);
-    } else if (comptime T == bool) {
-        return if (val) "true" else "false";
-    } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0";
-    } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0";
-    } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) {
-        return val.toString();
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) {
-        return val.toString();
-    } else {
-        return @typeName(T);
-    }
+pub fn parentPidOf(pid: std.c.pid_t) ?std.c.pid_t {
+        if (comptime Environment.isMac) {
+            var info: std.c.proc_bsdinfo = undefined;
+            _ = &info;
+            const rc = std.c.proc_pidinfo(pid, std.c.PROC_PIDTBSDINFO, 0, (&info), @sizeOf(std.c.proc_bsdinfo));
+            if ((rc <= 0)) {
+                return null;
+            }
+            return @intCast(info.pbi_ppid);
+        }
+        if (comptime Environment.isLinux) {
+            var path_buf: [64]u8 = undefined;
+            _ = &path_buf;
+            const stat_path = (blk_catch_8: { break :blk_catch_8 ((std.fmt.bufPrintZ((&path_buf), "/proc/{d}/stat", .{ pid })) catch |__ce_8| { _ = &__ce_8; return null; }); });
+            var read_buf: [512]u8 = undefined;
+            _ = &read_buf;
+            const contents = ((readFileOnce(stat_path, (&read_buf))) orelse { return null; });
+            const rparen = ((std.mem.lastIndexOfScalar(u8, contents, 41)) orelse { return null; });
+            const rest = std.mem.trimLeft(u8, contents[(rparen + 1)..], " ");
+            var it = std.mem.splitScalar(u8, rest, 32);
+            _ = &it;
+            _ = it.next();
+            const ppid_str = ((it.next()) orelse { return null; });
+            return (blk_catch_9: { break :blk_catch_9 ((std.fmt.parseInt(std.c.pid_t, ppid_str, 10)) catch |__ce_9| { _ = &__ce_9; break :blk_catch_9 null; }); });
+        }
+        return null;
 }
 
-pub const bun = @import("bun");
+pub fn listChildPids(parent: std.c.pid_t, out: []std.c.pid_t) ?usize {
+        if (comptime Environment.isMac) {
+            const bytes_needed = std.c.proc_listchildpids(parent, null, 0);
+            if ((bytes_needed <= 0)) {
+                return 0;
+            }
+            const cap: c_int = @intCast(@min(out.len, (@as(usize, @intCast(bytes_needed)) / @sizeOf(std.c.pid_t))));
+            const count = std.c.proc_listchildpids(parent, out.ptr, @intCast((cap * c_int(@sizeOf(std.c.pid_t)))));
+            if ((count < 0)) {
+                return null;
+            }
+            return @intCast(count);
+        }
+        if (comptime Environment.isLinux) {
+            var dir_buf: [64]u8 = undefined;
+            _ = &dir_buf;
+            const task_dir_path = (blk_catch_10: { break :blk_catch_10 ((std.fmt.bufPrintZ((&dir_buf), "/proc/{d}/task", .{ parent })) catch |__ce_10| { _ = &__ce_10; return null; }); });
+            var dir = (blk_catch_11: { break :blk_catch_11 ((std.fs.openDirAbsoluteZ(task_dir_path, .{ .iterate = true })) catch |__ce_11| { _ = &__ce_11; return null; }); });
+            _ = &dir;
+            defer {
+            _ = dir.close();
+            }
+            var written: usize = 0;
+            _ = &written;
+            var it = dir.iterate();
+            _ = &it;
+            while ((blk_catch_12: { break :blk_catch_12 ((it.next()) catch |__ce_12| { _ = &__ce_12; break :blk_catch_12 null; }); })) |entry| {
+                if ((entry.kind != .directory)) {
+                    continue;
+                }
+                var child_path_buf: [128]u8 = undefined;
+                _ = &child_path_buf;
+                const child_path = (blk_catch_13: { break :blk_catch_13 ((std.fmt.bufPrintZ((&child_path_buf), "/proc/{d}/task/{s}/children", .{ parent, (if (comptime @typeInfo(@TypeOf(entry)) == .@"enum" or @typeInfo(@TypeOf(entry)) == .@"union") @tagName(entry) else entry.name) })) catch |__ce_13| { _ = &__ce_13; continue; }); });
+                var read_buf: [4096]u8 = undefined;
+                _ = &read_buf;
+                const contents = ((readFileOnce(child_path, (&read_buf))) orelse continue);
+                var tok = std.mem.tokenizeScalar(u8, contents, 32);
+                _ = &tok;
+                while (tok.next()) |pid_str| {
+                    if ((written >= out.len)) {
+                        break;
+                    }
+                    const child = (blk_catch_14: { break :blk_catch_14 ((std.fmt.parseInt(std.c.pid_t, pid_str, 10)) catch |__ce_14| { _ = &__ce_14; continue; }); });
+                    out[cp_cast_int(usize, written)] = child;
+                    written = (written + 1);
+                }
+            }
+            return written;
+        }
+        return 0;
+}
+
+pub fn readFileOnce(path: [:0]const u8, buf: []u8) ?[]const u8 {
+        const file = (switch (bun.sys.File.open(path, bun.O.RDONLY, 0)) {
+.result => |f| f,
+.err => {
+return null;
+},
+});
+        defer {
+        _ = file.close();
+        }
+        return (switch (file.readAll(buf)) {
+.result => |n| buf[0..n],
+.err => null,
+});
+}
+
+pub extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) callconv(.c) c_int;

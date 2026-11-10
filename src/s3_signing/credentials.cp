@@ -1,16 +1,15 @@
 import { ACL } from "./acl.cp";
 import { StorageClass } from "./storage_class.cp";
+import * as bun from "bun";
+import * as std from "std";
+import * as multipart_options from "../runtime/webcore/s3/multipart_options.zig";
 
-zig {
-    const MultiPartUploadOptions = @import("../runtime/webcore/s3/multipart_options.zig").MultiPartUploadOptions;
+const MultiPartUploadOptions = multipart_options.MultiPartUploadOptions;
+const jsc = bun.jsc;
+const picohttp = bun.picohttp;
+const strings = bun.strings;
 
-    const bun = @import("bun");
-    const jsc = bun.jsc;
-    const picohttp = bun.picohttp;
-    const strings = bun.strings;
-}
-
-export @value struct S3Credentials {
+pub const S3Credentials = struct {
     ref_count: RefCount,
     accessKeyId: string,
     secretAccessKey: string,
@@ -18,14 +17,13 @@ export @value struct S3Credentials {
     endpoint: string,
     bucket: string,
     sessionToken: string,
-    storage_class: StorageClass? = null,
+    storage_class: ?StorageClass = null,
     insecure_http: bool = false,
     virtual_hosted_style: bool = false,
 
-    zig {
-        const RefCount = bun.ptr.RefCount(@This(), "ref_count", deinit, .{});
-        pub const ref = RefCount.ref;
-        pub const deref = RefCount.deref;
+    const RefCount = bun.ptr.RefCount(@This(), "ref_count", deinit, .{});
+    pub const ref = RefCount.ref;
+    pub const deref = RefCount.deref;
 
         pub fn estimatedSize(this: *const @This()) usize {
             return @sizeOf(S3Credentials) + this.accessKeyId.len + this.region.len + this.secretAccessKey.len + this.endpoint.len + this.bucket.len;
@@ -770,47 +768,43 @@ export @value struct S3Credentials {
 
             return result;
         }
-    }
-}
+    };
 
-export @value struct S3CredentialsWithOptions {
+pub const S3CredentialsWithOptions = struct {
     credentials: S3Credentials,
-    options: MultiPartUploadOptions = {},
-    acl: ACL? = null,
-    storage_class: StorageClass? = null,
-    content_disposition: string? = null,
-    content_type: string? = null,
-    content_encoding: string? = null,
+    options: MultiPartUploadOptions = .{},
+    acl: ?ACL = null,
+    storage_class: ?StorageClass = null,
+    content_disposition: ?string = null,
+    content_type: ?string = null,
+    content_encoding: ?string = null,
     request_payer: bool = false,
     changed_credentials: bool = false,
     virtual_hosted_style: bool = false,
-    _accessKeyIdSlice: jsc.ZigString.Slice? = null,
-    _secretAccessKeySlice: jsc.ZigString.Slice? = null,
-    _regionSlice: jsc.ZigString.Slice? = null,
-    _endpointSlice: jsc.ZigString.Slice? = null,
-    _bucketSlice: jsc.ZigString.Slice? = null,
-    _sessionTokenSlice: jsc.ZigString.Slice? = null,
-    _contentDispositionSlice: jsc.ZigString.Slice? = null,
-    _contentTypeSlice: jsc.ZigString.Slice? = null,
-    _contentEncodingSlice: jsc.ZigString.Slice? = null,
+    _accessKeyIdSlice: ?jsc.ZigString.Slice = null,
+    _secretAccessKeySlice: ?jsc.ZigString.Slice = null,
+    _regionSlice: ?jsc.ZigString.Slice = null,
+    _endpointSlice: ?jsc.ZigString.Slice = null,
+    _bucketSlice: ?jsc.ZigString.Slice = null,
+    _sessionTokenSlice: ?jsc.ZigString.Slice = null,
+    _contentDispositionSlice: ?jsc.ZigString.Slice = null,
+    _contentTypeSlice: ?jsc.ZigString.Slice = null,
+    _contentEncodingSlice: ?jsc.ZigString.Slice = null,
 
-    zig {
-        pub fn deinit(this: *@This()) void {
-            if (this._accessKeyIdSlice) |slice| slice.deinit();
-            if (this._secretAccessKeySlice) |slice| slice.deinit();
-            if (this._regionSlice) |slice| slice.deinit();
-            if (this._endpointSlice) |slice| slice.deinit();
-            if (this._bucketSlice) |slice| slice.deinit();
-            if (this._sessionTokenSlice) |slice| slice.deinit();
-            if (this._contentDispositionSlice) |slice| slice.deinit();
-            if (this._contentTypeSlice) |slice| slice.deinit();
-            if (this._contentEncodingSlice) |slice| slice.deinit();
-        }
+    pub fn deinit(this: *@This()) void {
+        if (this._accessKeyIdSlice) |slice| slice.deinit();
+        if (this._secretAccessKeySlice) |slice| slice.deinit();
+        if (this._regionSlice) |slice| slice.deinit();
+        if (this._endpointSlice) |slice| slice.deinit();
+        if (this._bucketSlice) |slice| slice.deinit();
+        if (this._sessionTokenSlice) |slice| slice.deinit();
+        if (this._contentDispositionSlice) |slice| slice.deinit();
+        if (this._contentTypeSlice) |slice| slice.deinit();
+        if (this._contentEncodingSlice) |slice| slice.deinit();
     }
-}
+};
 
-zig {
-    /// Comptime-generated lookup table for signed headers strings.
+/// Comptime-generated lookup table for signed headers strings.
     /// Headers must be in alphabetical order per AWS Signature V4 spec.
     const SignedHeaders = struct {
         const Key = packed struct(u7) {
@@ -939,4 +933,3 @@ zig {
     fn containsNewlineOrCR(value: []const u8) bool {
         return strings.indexOfAny(value, "\r\n") != null;
     }
-}

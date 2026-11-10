@@ -4,35 +4,35 @@ const bun = @import("bun");
 
 /// A task created from C++ code, usually via ScriptExecutionContext.
 pub const CppTask = opaque {
-    pub fn run(_: *CppTask, global: *jsc.JSGlobalObject): bun.JSError!void {
+    pub fn run(this: *CppTask, global: *jsc.JSGlobalObject) bun.JSError!void {
         jsc.markBinding(@src());
-        return bun.cpp.Bun__performTask(global, _);
+        return bun.cpp.Bun__performTask(global, this);
     }
 };
 
 /// A task created from C++ code that runs inside the workpool, usually via ScriptExecutionContext.
-export class ConcurrentCppTask {
+pub const ConcurrentCppTask = struct {
     pub const new = bun.TrivialNew(@This());
 
-    cpp_task: *EventLoopTaskNoContext;
-    workpool_task: jsc.WorkPoolTask = .{ .callback = &runFromWorkpool };
+    cpp_task: *EventLoopTaskNoContext,
+    workpool_task: jsc.WorkPoolTask = .{ .callback = &runFromWorkpool },
 
     pub const EventLoopTaskNoContext = opaque {
-        extern fn Bun__EventLoopTaskNoContext__performTask(task: *EventLoopTaskNoContext): void;
-        extern fn Bun__EventLoopTaskNoContext__createdInBunVm(task: *const EventLoopTaskNoContext): ?*VirtualMachine;
+        extern fn Bun__EventLoopTaskNoContext__performTask(task: *EventLoopTaskNoContext) void;
+        extern fn Bun__EventLoopTaskNoContext__createdInBunVm(task: *const EventLoopTaskNoContext) ?*VirtualMachine;
 
         /// Releases task resources
-        pub fn run(_: *EventLoopTaskNoContext): void {
-            Bun__EventLoopTaskNoContext__performTask(_);
+        pub fn run(this: *EventLoopTaskNoContext) void {
+            Bun__EventLoopTaskNoContext__performTask(this);
         }
 
         /// Get the VM that created this task
-        pub fn getVM(_: *const EventLoopTaskNoContext): ?*VirtualMachine {
-            return Bun__EventLoopTaskNoContext__createdInBunVm(_);
+        pub fn getVM(this: *const EventLoopTaskNoContext) ?*VirtualMachine {
+            return Bun__EventLoopTaskNoContext__createdInBunVm(this);
         }
     };
 
-    pub fn runFromWorkpool(task: *jsc.WorkPoolTask): void {
+    pub fn runFromWorkpool(task: *jsc.WorkPoolTask) void {
         const this: *ConcurrentCppTask = @fieldParentPtr("workpool_task", task);
         // Extract all the info we need from `this` and `cpp_task` before we call functions that free them
         const cpp_task = this.cpp_task;
@@ -44,7 +44,7 @@ export class ConcurrentCppTask {
         }
     }
 
-    pub export fn ConcurrentCppTask__createAndRun(cpp_task: *EventLoopTaskNoContext): void {
+    pub export fn ConcurrentCppTask__createAndRun(cpp_task: *EventLoopTaskNoContext) void {
         jsc.markBinding(@src());
         if (cpp_task.getVM()) |vm| {
             vm.event_loop.refConcurrently();
@@ -52,7 +52,7 @@ export class ConcurrentCppTask {
         const cpp = ConcurrentCppTask.new(.{ .cpp_task = cpp_task });
         jsc.WorkPool.schedule(&cpp.workpool_task);
     }
-}
+};
 
 comptime {
     _ = ConcurrentCppTask.ConcurrentCppTask__createAndRun;

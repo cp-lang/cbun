@@ -1,6 +1,4 @@
-zig {
-    const bun = @import("bun");
-}
+import * as bun from "bun";
 
 export enum ACL {
     @"private",
@@ -25,18 +23,16 @@ export enum ACL {
         };
     }
 
-    zig {
-        pub const Map = bun.ComptimeStringMap(ACL, .{
-            .{ "private", .@"private" },
-            .{ "public-read", .public_read },
-            .{ "public-read-write", .public_read_write },
-            .{ "aws-exec-read", .aws_exec_read },
-            .{ "authenticated-read", .authenticated_read },
-            .{ "bucket-owner-read", .bucket_owner_read },
-            .{ "bucket-owner-full-control", .bucket_owner_full_control },
-            .{ "log-delivery-write", .log_delivery_write },
-        });
-    }
+    pub const Map = bun.ComptimeStringMap(ACL, .{
+        .{ "private", .@"private" },
+        .{ "public-read", .public_read },
+        .{ "public-read-write", .public_read_write },
+        .{ "aws-exec-read", .aws_exec_read },
+        .{ "authenticated-read", .authenticated_read },
+        .{ "bucket-owner-read", .bucket_owner_read },
+        .{ "bucket-owner-full-control", .bucket_owner_full_control },
+        .{ "log-delivery-write", .log_delivery_write },
+    });
 }
 
 pub const ACL_MAP = @map(ACL, {

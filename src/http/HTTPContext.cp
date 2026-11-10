@@ -386,7 +386,7 @@ export class HTTPContext<const ssl: bool> {
         if (hostname.len > MAX_KEEPALIVE_HOSTNAME)
             return null;
 
-        let iter = this.pending_sockets.used.iterator(.{ kind: .set });
+        let iter = this.pending_sockets.used.iterator(.{ .kind = .set });
 
         while (pending_socket_index := iter.next()) {
             let socket = this.pending_sockets.at(@as(u16, @intCast(pending_socket_index)));
@@ -451,7 +451,7 @@ export class HTTPContext<const ssl: bool> {
                 const h2_session = socket.h2_session;
                 socket.h2_session = null;
                 bun.assert(this.pending_sockets.put(socket));
-                return .{ socket: http_socket, tunnel: tunnel, h2_session: h2_session };
+                return .{ .socket = http_socket, .tunnel = tunnel, .h2_session = h2_session };
             }
         }
 
@@ -556,9 +556,9 @@ export class HTTPContext<const ssl: bool> {
         if (ssl) {
             if (client.canOfferH2()) {
                 const pc = bun.http.H2.PendingConnect.new(.{
-                    hostname: bun.handleOom(bun.default_allocator.dupe(u8, hostname)),
-                    port: port,
-                    ssl_config: bun.api.server.ServerConfig.SSLConfig.rawPtr(client.tls_props),
+                    .hostname = bun.handleOom(bun.default_allocator.dupe(u8, hostname)),
+                    .port = port,
+                    .ssl_config = bun.api.server.ServerConfig.SSLConfig.rawPtr(client.tls_props),
                 });
                 bun.handleOom(this.pending_h2_connects.append(bun.default_allocator, pc));
                 client.pending_h2 = pc;
@@ -589,17 +589,17 @@ export class HTTPContext<const ssl: bool> {
     pub fn initWithThreadOpts(*this, init_opts: *const bun.http.HTTPThread.InitOpts): bun.http.InitError!void {
         if (!ssl) @compileError("ssl only");
         let opts: bun.uws.SocketContext.BunSocketContextOptions = .{
-            ca: if (init_opts.ca.len > 0) @ptrCast(init_opts.ca) else null,
-            ca_count: @intCast(init_opts.ca.len),
-            ca_file_name: if (init_opts.abs_ca_file_name.len > 0) init_opts.abs_ca_file_name else null,
-            request_cert: 1,
+            .ca = if (init_opts.ca.len > 0) @ptrCast(init_opts.ca) else null,
+            .ca_count = @intCast(init_opts.ca.len),
+            .ca_file_name = if (init_opts.abs_ca_file_name.len > 0) init_opts.abs_ca_file_name else null,
+            .request_cert = 1,
         };
         this.initWithOpts(&opts) catch (err) return err;
     }
 
     fn deinit(*this) {
         {
-            let iter = this.pending_sockets.used.iterator(.{ kind: .set });
+            let iter = this.pending_sockets.used.iterator(.{ .kind = .set });
             while (idx := iter.next()) {
                 let pooled = this.pending_sockets.at(@intCast(idx));
                 if (s := pooled.ssl_config) s.deinit();

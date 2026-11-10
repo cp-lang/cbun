@@ -2,34 +2,8 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
-const bun = @import("bun");
-export fn Bun__HTTPMethod__from(str: [*]const u8, len: usize) i16 {
-        const method: Method = Method.find(str[0..len]) orelse return -1;
-        return @intFromEnum(method);
-    }
-
-    comptime {
-        _ = Bun__HTTPMethod__from;
-    }
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+pub const bun = @import("bun");
 pub const Method = enum(u8) {
     ACL = 0,
     BIND = 1,
@@ -67,6 +41,10 @@ pub const Method = enum(u8) {
     UNLINK = 33,
     UNLOCK = 34,
     UNSUBSCRIBE = 35,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 
 pub fn hasBody(self: Method) bool {
             return with_body.contains(self);
@@ -89,140 +67,150 @@ pub fn which(str: []const u8) ?Method {
     }
     
     pub const fromJS = Map.fromJS;
-            pub const Set = std.enums.EnumSet(Method);
     
-            const with_body: Set = brk: {
-                var values = Set.initFull();
-                values.remove(.HEAD);
-                values.remove(.TRACE);
-                break :brk values;
-            };
+    pub const Set = std.enums.EnumSet(Method);
     
-            const with_request_body: Set = brk: {
-                var values = Set.initFull();
-                values.remove(.GET);
-                values.remove(.HEAD);
-                values.remove(.OPTIONS);
-                values.remove(.TRACE);
-                break :brk values;
-            };
+    const with_body: Set = brk: {
+            var values = Set.initFull();
+            values.remove(.HEAD);
+            values.remove(.TRACE);
+            break :brk values;
+        };
     
-            const idempotent: Set = brk: {
-                var values = Set.initEmpty();
-                values.insert(.GET);
-                values.insert(.HEAD);
-                values.insert(.PUT);
-                values.insert(.DELETE);
-                values.insert(.OPTIONS);
-                values.insert(.TRACE);
-                values.insert(.QUERY);
-                break :brk values;
-            };
+    const with_request_body: Set = brk: {
+            var values = Set.initFull();
+            values.remove(.GET);
+            values.remove(.HEAD);
+            values.remove(.OPTIONS);
+            values.remove(.TRACE);
+            break :brk values;
+        };
     
-            const Map = bun.ComptimeStringMap(Method, .{
-                .{ "ACL", Method.ACL },
-                .{ "BIND", Method.BIND },
-                .{ "CHECKOUT", Method.CHECKOUT },
-                .{ "CONNECT", Method.CONNECT },
-                .{ "COPY", Method.COPY },
-                .{ "DELETE", Method.DELETE },
-                .{ "GET", Method.GET },
-                .{ "HEAD", Method.HEAD },
-                .{ "LINK", Method.LINK },
-                .{ "LOCK", Method.LOCK },
-                .{ "M-SEARCH", Method.@"M-SEARCH" },
-                .{ "MERGE", Method.MERGE },
-                .{ "MKACTIVITY", Method.MKACTIVITY },
-                .{ "MKADDRESSBOOK", Method.MKADDRESSBOOK },
-                .{ "MKCALENDAR", Method.MKCALENDAR },
-                .{ "MKCOL", Method.MKCOL },
-                .{ "MOVE", Method.MOVE },
-                .{ "NOTIFY", Method.NOTIFY },
-                .{ "OPTIONS", Method.OPTIONS },
-                .{ "PATCH", Method.PATCH },
-                .{ "POST", Method.POST },
-                .{ "PROPFIND", Method.PROPFIND },
-                .{ "PROPPATCH", Method.PROPPATCH },
-                .{ "PURGE", Method.PURGE },
-                .{ "PUT", Method.PUT },
-                .{ "QUERY", Method.QUERY },
-                .{ "REBIND", Method.REBIND },
-                .{ "REPORT", Method.REPORT },
-                .{ "SEARCH", Method.SEARCH },
-                .{ "SOURCE", Method.SOURCE },
-                .{ "SUBSCRIBE", Method.SUBSCRIBE },
-                .{ "TRACE", Method.TRACE },
-                .{ "UNBIND", Method.UNBIND },
-                .{ "UNLINK", Method.UNLINK },
-                .{ "UNLOCK", Method.UNLOCK },
-                .{ "UNSUBSCRIBE", Method.UNSUBSCRIBE },
+    const idempotent: Set = brk: {
+            var values = Set.initEmpty();
+            values.insert(.GET);
+            values.insert(.HEAD);
+            values.insert(.PUT);
+            values.insert(.DELETE);
+            values.insert(.OPTIONS);
+            values.insert(.TRACE);
+            values.insert(.QUERY);
+            break :brk values;
+        };
     
-                .{ "acl", Method.ACL },
-                .{ "bind", Method.BIND },
-                .{ "checkout", Method.CHECKOUT },
-                .{ "connect", Method.CONNECT },
-                .{ "copy", Method.COPY },
-                .{ "delete", Method.DELETE },
-                .{ "get", Method.GET },
-                .{ "head", Method.HEAD },
-                .{ "link", Method.LINK },
-                .{ "lock", Method.LOCK },
-                .{ "m-search", Method.@"M-SEARCH" },
-                .{ "merge", Method.MERGE },
-                .{ "mkactivity", Method.MKACTIVITY },
-                .{ "mkaddressbook", Method.MKADDRESSBOOK },
-                .{ "mkcalendar", Method.MKCALENDAR },
-                .{ "mkcol", Method.MKCOL },
-                .{ "move", Method.MOVE },
-                .{ "notify", Method.NOTIFY },
-                .{ "options", Method.OPTIONS },
-                .{ "patch", Method.PATCH },
-                .{ "post", Method.POST },
-                .{ "propfind", Method.PROPFIND },
-                .{ "proppatch", Method.PROPPATCH },
-                .{ "purge", Method.PURGE },
-                .{ "put", Method.PUT },
-                .{ "query", Method.QUERY },
-                .{ "rebind", Method.REBIND },
-                .{ "report", Method.REPORT },
-                .{ "search", Method.SEARCH },
-                .{ "source", Method.SOURCE },
-                .{ "subscribe", Method.SUBSCRIBE },
-                .{ "trace", Method.TRACE },
-                .{ "unbind", Method.UNBIND },
-                .{ "unlink", Method.UNLINK },
-                .{ "unlock", Method.UNLOCK },
-                .{ "unsubscribe", Method.UNSUBSCRIBE },
-            });
+    const Map = bun.ComptimeStringMap(Method, .{
+            .{ "ACL", Method.ACL },
+            .{ "BIND", Method.BIND },
+            .{ "CHECKOUT", Method.CHECKOUT },
+            .{ "CONNECT", Method.CONNECT },
+            .{ "COPY", Method.COPY },
+            .{ "DELETE", Method.DELETE },
+            .{ "GET", Method.GET },
+            .{ "HEAD", Method.HEAD },
+            .{ "LINK", Method.LINK },
+            .{ "LOCK", Method.LOCK },
+            .{ "M-SEARCH", Method.@"M-SEARCH" },
+            .{ "MERGE", Method.MERGE },
+            .{ "MKACTIVITY", Method.MKACTIVITY },
+            .{ "MKADDRESSBOOK", Method.MKADDRESSBOOK },
+            .{ "MKCALENDAR", Method.MKCALENDAR },
+            .{ "MKCOL", Method.MKCOL },
+            .{ "MOVE", Method.MOVE },
+            .{ "NOTIFY", Method.NOTIFY },
+            .{ "OPTIONS", Method.OPTIONS },
+            .{ "PATCH", Method.PATCH },
+            .{ "POST", Method.POST },
+            .{ "PROPFIND", Method.PROPFIND },
+            .{ "PROPPATCH", Method.PROPPATCH },
+            .{ "PURGE", Method.PURGE },
+            .{ "PUT", Method.PUT },
+            .{ "QUERY", Method.QUERY },
+            .{ "REBIND", Method.REBIND },
+            .{ "REPORT", Method.REPORT },
+            .{ "SEARCH", Method.SEARCH },
+            .{ "SOURCE", Method.SOURCE },
+            .{ "SUBSCRIBE", Method.SUBSCRIBE },
+            .{ "TRACE", Method.TRACE },
+            .{ "UNBIND", Method.UNBIND },
+            .{ "UNLINK", Method.UNLINK },
+            .{ "UNLOCK", Method.UNLOCK },
+            .{ "UNSUBSCRIBE", Method.UNSUBSCRIBE },
     
-            pub const toJS = @import("../http_jsc/method_jsc.zig").toJS;
+            .{ "acl", Method.ACL },
+            .{ "bind", Method.BIND },
+            .{ "checkout", Method.CHECKOUT },
+            .{ "connect", Method.CONNECT },
+            .{ "copy", Method.COPY },
+            .{ "delete", Method.DELETE },
+            .{ "get", Method.GET },
+            .{ "head", Method.HEAD },
+            .{ "link", Method.LINK },
+            .{ "lock", Method.LOCK },
+            .{ "m-search", Method.@"M-SEARCH" },
+            .{ "merge", Method.MERGE },
+            .{ "mkactivity", Method.MKACTIVITY },
+            .{ "mkaddressbook", Method.MKADDRESSBOOK },
+            .{ "mkcalendar", Method.MKCALENDAR },
+            .{ "mkcol", Method.MKCOL },
+            .{ "move", Method.MOVE },
+            .{ "notify", Method.NOTIFY },
+            .{ "options", Method.OPTIONS },
+            .{ "patch", Method.PATCH },
+            .{ "post", Method.POST },
+            .{ "propfind", Method.PROPFIND },
+            .{ "proppatch", Method.PROPPATCH },
+            .{ "purge", Method.PURGE },
+            .{ "put", Method.PUT },
+            .{ "query", Method.QUERY },
+            .{ "rebind", Method.REBIND },
+            .{ "report", Method.REPORT },
+            .{ "search", Method.SEARCH },
+            .{ "source", Method.SOURCE },
+            .{ "subscribe", Method.SUBSCRIBE },
+            .{ "trace", Method.TRACE },
+            .{ "unbind", Method.UNBIND },
+            .{ "unlink", Method.UNLINK },
+            .{ "unlock", Method.UNLOCK },
+            .{ "unsubscribe", Method.UNSUBSCRIBE },
+        });
     
-            pub const Optional = union(enum) {
-                any: void,
-                method: Set,
+    pub const toJS = @import("../http_jsc/method_jsc.zig").toJS;
     
-                pub fn contains(this: Optional, other: Optional) bool {
-                    if (this == .any) {
-                        return true;
-                    }
-                    if (other == .any) {
-                        return true;
-                    }
+    pub const Optional = union(enum) {
+            any: void,
+            method: Set,
     
-                    return this.method.intersectWith(other.method).count() > 0;
+            pub fn contains(this: Optional, other: Optional) bool {
+                if (this == .any) {
+                    return true;
+                }
+                if (other == .any) {
+                    return true;
                 }
     
-                pub fn insert(this: *Optional, method: Method) void {
-                    switch (this.*) {
-                        .any => {},
-                        .method => |*set| {
-                            set.insert(method);
-                            if (set.eql(Set.initFull())) {
-                                this.* = .any;
-                            }
-                        },
-                    }
+                return this.method.intersectWith(other.method).count() > 0;
+            }
+    
+            pub fn insert(this: *Optional, method: Method) void {
+                switch (this.*) {
+                    .any => {},
+                    .method => |*set| {
+                        set.insert(method);
+                        if (set.eql(Set.initFull())) {
+                            this.* = .any;
+                        }
+                    },
                 }
-            };
+            }
+        };
 };
 
+
+pub fn Bun__HTTPMethod__from(str: [*]const u8, len: usize) i16 {
+        var method: ?Method = Method{ .find = str[0..len] };
+        _ = &method;
+        if ((method == null)) {
+            return 0xffffffffffffffff;
+        }
+        return (if (comptime @typeInfo(@TypeOf(@intFromEnum(method.?))) == .@"enum") cp_cast_int(i16, @intFromEnum(@intFromEnum(method.?))) else cp_cast_int(i16, @intFromEnum(method.?)));
+}

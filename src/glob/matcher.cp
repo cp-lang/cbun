@@ -1,5 +1,7 @@
-zig {
-    const Brace = struct {
+import * as bun from "bun";
+import * as std from "std";
+
+const Brace = struct {
         open_brace_idx: u32,
         branch_idx: u32,
     };
@@ -13,7 +15,7 @@ zig {
         negate_match,
 
         pub fn matches(this: MatchResult) bool {
-            return this == .match or this == .negate_match;
+            return this == MatchResult.match or this == MatchResult.negate_match;
         }
     };
 
@@ -71,9 +73,9 @@ zig {
         const matched = globMatchImpl(&state, glob, 0, path, &brace_stack);
 
         if (negated) {
-            return if (matched) .negate_no_match else .negate_match;
+            return if (matched) MatchResult.negate_no_match else MatchResult.negate_match;
         } else {
-            return if (matched) .match else .no_match;
+            return if (matched) MatchResult.match else MatchResult.no_match;
         }
     }
 
@@ -122,71 +124,75 @@ zig {
 
                             continue;
                         },
-                        '?' => if (state.path_index < path.len) {
-                            if (!isSeparator(path[state.path_index])) {
+                        '?' => {
+                            if (state.path_index < path.len) {
+                                if (!isSeparator(path[state.path_index])) {
+                                    state.glob_index += 1;
+                                    state.path_index += bun.strings.wtf8ByteSequenceLength(path[state.path_index]);
+                                    continue;
+                                }
+                                break :fallthrough;
+                            } else break :to_else;
+                        },
+                        '[' => {
+                            if (state.path_index < path.len) {
                                 state.glob_index += 1;
-                                state.path_index += bun.strings.wtf8ByteSequenceLength(path[state.path_index]);
-                                continue;
-                            }
-                            break :fallthrough;
-                        } else break :to_else,
-                        '[' => if (state.path_index < path.len) {
-                            state.glob_index += 1;
 
-                            var negated = false;
-                            if (state.glob_index < glob.len and (glob[state.glob_index] == '^' or glob[state.glob_index] == '!')) {
-                                negated = true;
-                                state.glob_index += 1;
-                            }
-
-                            var first = true;
-                            var is_match = false;
-
-                            const len = bun.strings.wtf8ByteSequenceLength(path[state.path_index]);
-                            const c = bun.strings.decodeWTF8RuneT(path[state.path_index..].ptr[0..4], len, u32, 0xFFFD);
-
-                            while (state.glob_index < glob.len and (first or glob[state.glob_index] != ']')) {
-                                var low: u32 = glob[state.glob_index];
-                                var low_len: u8 = 1;
-                                if (!getUnicode(&low, &low_len, glob, &state.glob_index)) {
-                                    return false;
+                                var negated = false;
+                                if (state.glob_index < glob.len and (glob[state.glob_index] == '^' or glob[state.glob_index] == '!')) {
+                                    negated = true;
+                                    state.glob_index += 1;
                                 }
 
-                                state.glob_index += low_len;
+                                var first = true;
+                                var is_match = false;
 
-                                const high = if (state.glob_index + 1 < glob.len and glob[state.glob_index] == '-' and glob[state.glob_index + 1] != ']') blk: {
-                                    state.glob_index += 1;
+                                const len = bun.strings.wtf8ByteSequenceLength(path[state.path_index]);
+                                const rune = bun.strings.decodeWTF8RuneT(path[state.path_index..].ptr[0..4], len, u32, 0xFFFD);
 
-                                    var high: u32 = glob[state.glob_index];
-                                    var high_len: u8 = 1;
-                                    if (!getUnicode(&high, &high_len, glob, &state.glob_index)) {
+                                while (state.glob_index < glob.len and (first or glob[state.glob_index] != ']')) {
+                                    var low: u32 = glob[state.glob_index];
+                                    var low_len: u8 = 1;
+                                    if (!getUnicode(&low, &low_len, glob, &state.glob_index)) {
                                         return false;
                                     }
 
-                                    state.glob_index += high_len;
-                                    break :blk high;
-                                } else low;
+                                    state.glob_index += low_len;
 
-                                if (low <= c and c <= high) {
-                                    is_match = true;
+                                    const high = if (state.glob_index + 1 < glob.len and glob[state.glob_index] == '-' and glob[state.glob_index + 1] != ']') blk: {
+                                        state.glob_index += 1;
+
+                                        var high: u32 = glob[state.glob_index];
+                                        var high_len: u8 = 1;
+                                        if (!getUnicode(&high, &high_len, glob, &state.glob_index)) {
+                                            return false;
+                                        }
+
+                                        state.glob_index += high_len;
+                                        break :blk high;
+                                    } else low;
+
+                                    if (low <= rune and rune <= high) {
+                                        is_match = true;
+                                    }
+
+                                    first = false;
                                 }
 
-                                first = false;
-                            }
+                                if (state.glob_index >= glob.len) {
+                                    return false;
+                                }
 
-                            if (state.glob_index >= glob.len) {
-                                return false;
-                            }
-
-                            state.glob_index += 1;
-                            if (is_match != negated) {
-                                state.path_index += len;
-                                continue;
-                            }
-                            break :fallthrough;
-                        } else break :to_else,
+                                state.glob_index += 1;
+                                if (is_match != negated) {
+                                    state.path_index += len;
+                                    continue;
+                                }
+                                break :fallthrough;
+                            } else break :to_else;
+                        },
                         '{' => {
-                            for (brace_stack.slice()) |brace| {
+                            for (brace of brace_stack.slice()) {
                                 if (brace.open_brace_idx == state.glob_index) {
                                     state.glob_index = brace.branch_idx;
                                     state.brace_depth += 1;
@@ -195,14 +201,18 @@ zig {
                             }
                             return matchBrace(state, glob, path, brace_stack);
                         },
-                        ',' => if (state.brace_depth > 0) {
-                            skipBranch(state, glob);
-                            continue;
-                        } else break :to_else,
-                        '}' => if (state.brace_depth > 0) {
-                            skipBranch(state, glob);
-                            continue;
-                        } else break :to_else,
+                        ',' => {
+                            if (state.brace_depth > 0) {
+                                skipBranch(state, glob);
+                                continue;
+                            } else break :to_else;
+                        },
+                        '}' => {
+                            if (state.brace_depth > 0) {
+                                skipBranch(state, glob);
+                                continue;
+                            } else break :to_else;
+                        },
                         else => break :to_else,
                     }
                 }
@@ -269,17 +279,21 @@ zig {
                         break;
                     }
                 },
-                ',' => if (brace_depth == 1) {
-                    if (matchBraceBranch(state, glob, path, open_brace_index, branch_index, brace_stack)) {
-                        return true;
+                ',' => {
+                    if (brace_depth == 1) {
+                        if (matchBraceBranch(state, glob, path, open_brace_index, branch_index, brace_stack)) {
+                            return true;
+                        }
+                        branch_index = state.glob_index + 1;
                     }
-                    branch_index = state.glob_index + 1;
                 },
-                '[' => if (!in_brackets) {
-                    in_brackets = true;
+                '[' => {
+                    if (!in_brackets) {
+                        in_brackets = true;
+                    }
                 },
-                ']' => in_brackets = false,
-                0x5C => state.glob_index += 1,
+                ']' => { in_brackets = false; },
+                0x5C => { state.glob_index += 1; },
                 else => {},
             }
             state.glob_index += 1;
@@ -308,21 +322,27 @@ zig {
         const end_brace_depth = state.brace_depth - 1;
         while (state.glob_index < glob.len) {
             switch (glob[state.glob_index]) {
-                '{' => if (!in_brackets) {
-                    state.brace_depth += 1;
-                },
-                '}' => if (!in_brackets) {
-                    state.brace_depth -= 1;
-                    if (state.brace_depth == end_brace_depth) {
-                        state.glob_index += 1;
-                        return;
+                '{' => {
+                    if (!in_brackets) {
+                        state.brace_depth += 1;
                     }
                 },
-                '[' => if (!in_brackets) {
-                    in_brackets = true;
+                '}' => {
+                    if (!in_brackets) {
+                        state.brace_depth -= 1;
+                        if (state.brace_depth == end_brace_depth) {
+                            state.glob_index += 1;
+                            return;
+                        }
+                    }
                 },
-                ']' => in_brackets = false,
-                0x5C => state.glob_index += 1,
+                '[' => {
+                    if (!in_brackets) {
+                        in_brackets = true;
+                    }
+                },
+                ']' => { in_brackets = false; },
+                0x5C => { state.glob_index += 1; },
                 else => {},
             }
             state.glob_index += 1;
@@ -334,26 +354,26 @@ zig {
         return c == '/';
     }
 
-    inline fn unescape(c: *u8, glob: []const u8, glob_index: *u32) bool {
+    inline fn unescape(*c: u8, glob: []const u8, *glob_index: u32) bool {
         if (c.* == 0x5C) {
             glob_index.* += 1;
             if (glob_index.* >= glob.len)
                 return false;
 
-            c.* = switch (glob[glob_index.*]) {
+            c.* = @truncate(switch (glob[glob_index.*]) {
                 'a' => 0x61,
                 'b' => 0x08,
                 'n' => '\n',
                 'r' => '\r',
                 't' => '\t',
-                else => |cc| cc,
-            };
+                else => glob[glob_index.*],
+            });
         }
 
         return true;
     }
 
-    inline fn getUnicode(c: *u32, clen: *u8, glob: []const u8, glob_index: *u32) bool {
+    inline fn getUnicode(*c: u32, *clen: u8, glob: []const u8, *glob_index: u32) bool {
         bun.debugAssert(clen.* == 1);
         switch (c.*) {
             0x0...0x5B, 0x5D...0x7F => {
@@ -364,13 +384,14 @@ zig {
                 if (glob_index.* >= glob.len)
                     return false;
 
-                c.* = switch (glob[glob_index.*]) {
+                c.* = @truncate(switch (glob[glob_index.*]) {
                     'a' => 0x61,
                     'b' => 0x08,
                     'n' => '\n',
                     'r' => '\r',
                     't' => '\t',
-                    else => |cc| brk: {
+                    else => brk: {
+                        const cc = glob[glob_index.*];
                         const len = bun.strings.wtf8ByteSequenceLength(cc);
                         clen.* = len;
                         if (len == 1) {
@@ -379,7 +400,7 @@ zig {
 
                         break :brk bun.strings.decodeWTF8RuneT(glob[glob_index.*..].ptr[0..4], len, u32, 0xFFFD);
                     },
-                };
+                });
             },
             else => {
                 const len = bun.strings.wtf8ByteSequenceLength(@truncate(c.*));
@@ -392,7 +413,7 @@ zig {
         return true;
     }
 
-    inline fn skipGlobstars(glob: []const u8, glob_index: *u32) void {
+    inline fn skipGlobstars(glob: []const u8, *glob_index: u32) void {
         glob_index.* += 2;
 
         while (glob_index.* + 4 <= glob.len and std.mem.eql(u8, glob[glob_index.*..][0..4], "/**/")) {
@@ -410,7 +431,3 @@ zig {
         start: u32 = 0,
         end: u32 = 0,
     };
-
-    const bun = @import("bun");
-    const std = @import("std");
-}

@@ -53,8 +53,8 @@ export class ReadableStream {
     extern fn ReadableStream__tee(stream: JSValue, globalThis: *JSGlobalObject, out1: *JSValue, out2: *JSValue): bool;
 
     pub fn tee(this, globalThis: *JSGlobalObject): bun.JSError!?struct { ReadableStream, ReadableStream } {
-        let mut out1: JSValue = .zero;
-        let mut out2: JSValue = .zero;
+        var out1: JSValue = .zero;
+        var out2: JSValue = .zero;
         if (!bun.jsc.fromJSHostCallGeneric(globalThis, @src(), ReadableStream__tee, .{ this.value, globalThis, &out1, &out2 })?) {
             return null;
         }
@@ -94,7 +94,7 @@ export class ReadableStream {
             },
             .File => |blobby| {
                 if (blobby.lazy == .blob) {
-                    let mut blob = Blob.initWithStore(blobby.lazy.blob, globalThis);
+                    var blob = Blob.initWithStore(blobby.lazy.blob, globalThis);
                     blob.store.?.ref();
                     bun.assert(!blobby.started);
                     stream.done(globalThis);
@@ -208,9 +208,9 @@ export class ReadableStream {
     pub fn fromJS(value: JSValue, globalThis: *JSGlobalObject): bun.JSError!?ReadableStream {
         jsc.markBinding(@src());
         value.ensureStillAlive();
-        let mut out = value;
+        var out = value;
 
-        let mut ptr: *!? = null;
+        var ptr: *!? = null;
         return match (bun.jsc.fromJSHostCallGeneric(globalThis, @src(), ReadableStreamTag__tagged, .{ globalThis, &out, &ptr })?) {
             .JavaScript => ReadableStream{
                 .value = out,
@@ -248,19 +248,19 @@ export class ReadableStream {
     }
 
     pub fn fromOwnedSlice(globalThis: *JSGlobalObject, bytes: []u8, recommended_chunk_size: Blob.SizeType): bun.JSError!JSValue {
-        let mut blob = Blob.init(bytes, default_allocator, globalThis);
+        var blob = Blob.init(bytes, default_allocator, globalThis);
         defer blob.deinit();
         return fromBlobCopyRef(globalThis, &blob, recommended_chunk_size);
     }
 
     pub fn fromBlobCopyRef(globalThis: *JSGlobalObject, blob: *const Blob, recommended_chunk_size: Blob.SizeType): bun.JSError!JSValue {
         jsc.markBinding(@src());
-        let mut store = blob.store orelse {
+        var store = blob.store orelse {
             return ReadableStream.empty(globalThis);
         };
         match (store.data) {
             .bytes => {
-                let mut reader = webcore.ByteBlobLoader.Source.new(
+                var reader = webcore.ByteBlobLoader.Source.new(
                     .{
                         .globalThis = globalThis,
                         .context = undefined,
@@ -270,7 +270,7 @@ export class ReadableStream {
                 return reader.toReadableStream(globalThis);
             },
             .file => {
-                let mut reader = webcore.FileReader.Source.new(.{
+                var reader = webcore.FileReader.Source.new(.{
                     .globalThis = globalThis,
                     .context = .{
                         .event_loop = jsc.EventLoopHandle.init(globalThis.bunVM().eventLoop()),
@@ -301,12 +301,12 @@ export class ReadableStream {
         offset: usize,
     ): bun.JSError!JSValue {
         jsc.markBinding(@src());
-        let mut store = blob.store orelse {
+        var store = blob.store orelse {
             return ReadableStream.empty(globalThis);
         };
         match (store.data) {
             .file => {
-                let mut reader = webcore.FileReader.Source.new(.{
+                var reader = webcore.FileReader.Source.new(.{
                     .globalThis = globalThis,
                     .context = .{
                         .event_loop = jsc.EventLoopHandle.init(globalThis.bunVM().eventLoop()),
@@ -332,7 +332,7 @@ export class ReadableStream {
     ): bun.JSError!JSValue {
         _ = parent;
         jsc.markBinding(@src());
-        let mut source = webcore.FileReader.Source.new(.{
+        var source = webcore.FileReader.Source.new(.{
             .globalThis = globalThis,
             .context = .{
                 .event_loop = jsc.EventLoopHandle.init(globalThis.bunVM().eventLoop()),
@@ -552,7 +552,7 @@ export class ReadableStream {
                     const view = arguments.ptr[0];
                     view.ensureStillAlive();
                     this.this_jsvalue = this_jsvalue;
-                    let mut buffer = view.asArrayBuffer(globalThis) orelse return .js_undefined;
+                    var buffer = view.asArrayBuffer(globalThis) orelse return .js_undefined;
                     return processResult(
                         this_jsvalue,
                         globalThis,
@@ -676,7 +676,7 @@ export class ReadableStream {
 
                 fn onClose(ptr: *!?): void {
                     jsc.markBinding(@src());
-                    let mut this = ptr.? as *ReadableStreamSourceType!;
+                    var this = ptr.? as *ReadableStreamSourceType!;
                     if (this.close_jsvalue.trySwap()) |cb| {
                         this.globalThis.queueMicrotask(cb, &.{});
                     }

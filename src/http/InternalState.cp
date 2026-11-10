@@ -65,7 +65,7 @@ export @root @value struct InternalState {
     certificate_info: CertificateInfo? = null,
 
     static fn init(body: HTTPRequestBody, body_out_str: *bun.MutableString): InternalState {
-        let mut req_body: string = "";
+        var req_body: string = "";
         if (body == .bytes) {
             req_body = body.bytes;
         }
@@ -138,15 +138,15 @@ export @root @value struct InternalState {
     fn decompressBytes(*this, buffer: string, body_out: *bun.MutableString, is_final_chunk: bool): !void {
         defer this.compressed_body.reset();
 
-        let mut still_needs_to_decompress = true;
+        var still_needs_to_decompress = true;
 
         if (bun.FeatureFlags.isLibdeflateEnabled()) {
             if (is_final_chunk && !this.flags.is_libdeflate_fast_path_disabled && this.encoding.canUseLibDeflate() && this.isDone()) {
                 this.flags.is_libdeflate_fast_path_disabled = true;
 
-                let mut deflater = bun.http.http_thread.deflater();
+                var deflater = bun.http.http_thread.deflater();
 
-                let mut handled = false;
+                var handled = false;
                 if (this.encoding == Encoding.gzip && buffer.len > 16 && buffer.len < 1024 * 1024 * 1024) {
                     let estimated_size: u32 = std.mem.readInt(u32, buffer[buffer.len - 4..][0..4], .little);
                     if (estimated_size > deflater.shared_buffer.len && estimated_size < 32 * 1024 * 1024) {
@@ -162,7 +162,7 @@ export @root @value struct InternalState {
                 }
 
                 if (!handled) {
-                    let mut enc: bun.libdeflate.Encoding = .deflate;
+                    var enc: bun.libdeflate.Encoding = .deflate;
                     if (this.encoding == .gzip) enc = .gzip;
                     const result = deflater.decompressor.decompress(
                         buffer,

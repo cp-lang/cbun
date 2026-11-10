@@ -1,20 +1,29 @@
 import bun from "bun";
 import std from "std";
 
-zig {
-    const Walker = @This();
+const Allocator = std.mem.Allocator;
+const path = std.fs.path;
 
+const DirIterator = bun.DirIterator;
+const Environment = bun.Environment;
+const FD = bun.FD;
+const OOM = bun.OOM;
+const OSPathSlice = bun.OSPathSlice;
+const OSPathSliceZ = bun.OSPathSliceZ;
+
+@root struct Walker {
     stack: std.array_list.Managed(StackItem),
     name_buffer: NameBufferList,
-    skip_filenames: []const u64 = &[_]u64{},
-    skip_dirnames: []const u64 = &[_]u64{},
-    skip_all: []const u64 = &[_]u64{},
+    skip_filenames: u64[] = &[],
+    skip_dirnames: u64[] = &[],
+    skip_all: u64[] = &[],
     seed: u64 = 0,
     resolve_unknown_entry_types: bool = false,
 
     const NameBufferList = std.array_list.Managed(bun.OSPathChar);
 
-    const WrappedIterator = DirIterator.NewWrappedIterator(if (Environment.isWindows) .u16 else .u8);
+    const iter_kind = if (Environment.isWindows) .u16 else .u8;
+    const WrappedIterator = DirIterator.NewWrappedIterator(iter_kind);
 
     pub const WalkerEntry = struct {
         /// The containing directory. This can be used to operate directly on `basename`
@@ -34,15 +43,15 @@ zig {
     /// After each call to this function, and on deinit(), the memory returned
     /// from this function becomes invalid. A copy must be made in order to keep
     /// a reference to the path.
-    pub fn next(self: *Walker) bun.sys.Maybe(?WalkerEntry) {
+    pub fn next(self: *Walker): bun.sys.Maybe(?WalkerEntry) {
         while (self.stack.items.len != 0) {
             // `top` becomes invalid after appending to `self.stack`
-            var top = &self.stack.items[self.stack.items.len - 1];
-            var dirname_len = top.dirname_len;
+            let top = &self.stack.items[self.stack.items.len - 1];
+            let dirname_len = top.dirname_len;
             switch (top.iter.next()) {
-                .err => |err| return .initErr(err),
-                .result => |res| {
-                    if (res) |base| {
+                .err e => return .initErr(e),
+                .result res => {
+                    if (base := res) {
                         // Some filesystems (NFS, FUSE, bind mounts) don't provide
                         // d_type and return DT_UNKNOWN. Optionally resolve via
                         // fstatat so callers get accurate types for recursion.
@@ -51,8 +60,8 @@ zig {
                             (if (base.kind == .unknown and self.resolve_unknown_entry_types) brk: {
                                 const dir_fd = top.iter.iter.dir;
                                 break :brk switch (bun.sys.lstatat(dir_fd, base.name.sliceAssumeZ())) {
-                                    .result => |stat_buf| bun.sys.kindFromMode(stat_buf.mode),
-                                    .err => continue, // skip entries we can't stat
+                                    .result stat_buf => bun.sys.kindFromMode(stat_buf.mode),
+                                    .err _ => continue, // skip entries we can't stat
                                 };
                             } else base.kind)
                         else
@@ -100,14 +109,14 @@ zig {
 
                         if (kind == .directory) {
                             const new_dir = switch (bun.openDirForIterationOSPath(top.iter.iter.dir, base.name.slice())) {
-                                .result => |fd| fd,
-                                .err => |err| return .initErr(err),
+                                .result fd => fd,
+                                .err e => return .initErr(e),
                             };
                             {
                                 self.stack.append(StackItem{
-                                    .iter = DirIterator.iterate(new_dir, if (Environment.isWindows) .u16 else .u8),
+                                    .iter = DirIterator.iterate(new_dir, iter_kind),
                                     .dirname_len = cur_len,
-                                }) catch |err| bun.handleOom(err);
+                                }) catch (e) bun.handleOom(e);
                                 top = &self.stack.items[self.stack.items.len - 1];
                             }
                         }
@@ -118,7 +127,7 @@ zig {
                             .kind = kind,
                         });
                     } else {
-                        var item = self.stack.pop().?;
+                        let item = self.stack.pop().?;
                         if (self.stack.items.len != 0) {
                             item.iter.iter.dir.close();
                         }
@@ -129,9 +138,9 @@ zig {
         return .initResult(null);
     }
 
-    pub fn deinit(self: *Walker) void {
+    pub fn deinit(self: *Walker): void {
         if (self.stack.items.len > 0) {
-            for (self.stack.items[1..]) |*item| {
+            for (item of self.stack.items[1..]) {
                 if (self.stack.items.len != 0) {
                     item.iter.iter.dir.close();
                 }
@@ -153,32 +162,34 @@ zig {
         allocator: Allocator,
         skip_filenames: []const OSPathSlice,
         skip_dirnames: []const OSPathSlice,
-    ) OOM!Walker {
-        var name_buffer = NameBufferList.init(allocator);
+    ): Walker!OOM {
+        let name_buffer = NameBufferList.init(allocator);
         errdefer name_buffer.deinit();
 
-        var stack = std.array_list.Managed(Walker.StackItem).init(allocator);
+        let stack = std.array_list.Managed(Walker.StackItem).init(allocator);
         errdefer stack.deinit();
 
-        var skip_names = try allocator.alloc(u64, skip_filenames.len + skip_dirnames.len);
+        let skip_names = allocator.alloc(u64, skip_filenames.len + skip_dirnames.len)?;
         const seed = skip_filenames.len + skip_dirnames.len;
-        var skip_name_i: usize = 0;
+        let skip_name_i: usize = 0;
 
-        for (skip_filenames) |name| {
+        for (name of skip_filenames) {
             skip_names[skip_name_i] = bun.hashWithSeed(seed, std.mem.sliceAsBytes(name));
             skip_name_i += 1;
         }
         const skip_filenames_ = skip_names[0..skip_name_i];
-        var skip_dirnames_ = skip_names[skip_name_i..];
+        let skip_dirnames_ = skip_names[skip_name_i..];
 
-        for (skip_dirnames, 0..) |name, i| {
-            skip_dirnames_[i] = bun.hashWithSeed(seed, std.mem.sliceAsBytes(name));
+        let mut_i: usize = 0;
+        for (name of skip_dirnames) {
+            skip_dirnames_[mut_i] = bun.hashWithSeed(seed, std.mem.sliceAsBytes(name));
+            mut_i += 1;
         }
 
-        try stack.append(Walker.StackItem{
-            .iter = DirIterator.iterate(self, if (Environment.isWindows) .u16 else .u8),
+        stack.append(Walker.StackItem{
+            .iter = DirIterator.iterate(self, iter_kind),
             .dirname_len = 0,
-        });
+        })?;
 
         return Walker{
             .stack = stack,
@@ -189,14 +200,4 @@ zig {
             .skip_dirnames = skip_dirnames_,
         };
     }
-
-    const Allocator = std.mem.Allocator;
-    const path = std.fs.path;
-
-    const DirIterator = bun.DirIterator;
-    const Environment = bun.Environment;
-    const FD = bun.FD;
-    const OOM = bun.OOM;
-    const OSPathSlice = bun.OSPathSlice;
-    const OSPathSliceZ = bun.OSPathSliceZ;
 }

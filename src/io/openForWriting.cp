@@ -1,8 +1,8 @@
-import bun from "bun";
-import std from "std";
+import * as bun from "bun";
+import * as std from "std";
 const Environment = bun.Environment;
-
-zig {
+type SentinelConstU8 = [:0]const u8;
+type SentinelU8 = [:0]u8;
     pub fn openForWriting(
         dir: bun.FD,
         input_path: anytype,
@@ -13,10 +13,10 @@ zig {
         force_sync: bool,
         out_nonblocking: *bool,
         comptime Ctx: type,
-        ctx: Ctx,
-        comptime onForceSyncOrIsaTTY: *const fn (Ctx) void,
+        ctx: anytype,
+        comptime onForceSyncOrIsaTTY: anytype,
         comptime isPollable: *const fn (mode: bun.Mode) bool,
-    ) bun.sys.Maybe(bun.FD) {
+    ): bun.sys.Maybe(bun.FD) {
         return openForWritingImpl(
             dir,
             input_path,
@@ -44,48 +44,43 @@ zig {
         force_sync: bool,
         out_nonblocking: *bool,
         comptime Ctx: type,
-        ctx: Ctx,
-        comptime onForceSyncOrIsaTTY: *const fn (Ctx) void,
+        ctx: anytype,
+        comptime onForceSyncOrIsaTTY: anytype,
         comptime isPollable: *const fn (mode: bun.Mode) bool,
         comptime openat: *const fn (dir: bun.FD, path: [:0]const u8, flags: i32, mode: bun.Mode) bun.sys.Maybe(bun.FD),
-    ) bun.sys.Maybe(bun.FD) {
+    ): bun.sys.Maybe(bun.FD) {
+        _ = Ctx;
         const PathT = @TypeOf(input_path);
-        if (PathT != bun.webcore.PathOrFileDescriptor and PathT != [:0]const u8 and PathT != [:0]u8) {
-            @compileError("Only string or PathOrFileDescriptor is supported but got: " ++ @typeName(PathT));
+        if (PathT != bun.webcore.PathOrFileDescriptor && PathT != SentinelConstU8 && PathT != SentinelU8) {
+            @compileError("Only string or PathOrFileDescriptor is supported but got: " + @typeName(PathT));
         }
 
         // TODO: this should be concurrent.
-        var isatty = false;
-        var is_nonblocking = false;
-        const result =
-            switch (PathT) {
-                bun.webcore.PathOrFileDescriptor => switch (input_path) {
-                    .path => |path| brk: {
-                        is_nonblocking = true;
-                        break :brk bun.sys.openatA(dir, path.slice(), input_flags, mode);
-                    },
-                    .fd => |fd_| brk: {
-                        const duped = bun.sys.dupWithFlags(fd_, 0);
-
-                        break :brk duped;
-                    },
-                },
-                [:0]const u8, [:0]u8 => openat(dir, input_path, input_flags, mode),
-                else => unreachable,
-            };
-        const fd = switch (result) {
-            .err => |err| return .{ .err = err },
-            .result => |fd| fd,
+        let isatty = false;
+        let is_nonblocking = false;
+        const result = if (PathT == bun.webcore.PathOrFileDescriptor) {
+            match (input_path) {
+                .path(path) => (brk: {
+                    is_nonblocking = true;
+                    break :brk bun.sys.openatA(dir, path.slice(), input_flags, mode);
+                }),
+                .fd(fd_) => bun.sys.dupWithFlags(fd_, 0),
+            }
+        } else {
+            openat(dir, input_path, input_flags, mode)
+        };
+        const fd = match (result) {
+            .err(err) => return .{ .err = err },
+            .result(fd_val) => fd_val,
         };
 
-        if (comptime Environment.isPosix) {
-            switch (bun.sys.fstat(fd)) {
-                .err => |err| {
+        if (comptime (Environment.isPosix)) {
+            match (bun.sys.fstat(fd)) {
+                .err(err) => {
                     fd.close();
                     return .{ .err = err };
                 },
-                .result => |stat| {
-                    // pollable.* = bun.sys.isPollable(stat.mode);
+                .result(stat) => {
                     pollable.* = isPollable(stat.mode);
                     if (!pollable.*) {
                         isatty = std.posix.isatty(fd.native());
@@ -97,26 +92,19 @@ zig {
 
                     is_socket.* = std.posix.S.ISSOCK(stat.mode);
 
-                    if (force_sync or isatty) {
-                        // Prevents interleaved or dropped stdout/stderr output for terminals.
-                        // As noted in the following reference, local TTYs tend to be quite fast and
-                        // this behavior has become expected due historical functionality on OS X,
-                        // even though it was originally intended to change in v1.0.2 (Libuv 1.2.1).
-                        // Ref: https://github.com/nodejs/node/pull/1771#issuecomment-119351671
+                    if (force_sync || isatty) {
                         _ = bun.sys.updateNonblocking(fd, false);
                         is_nonblocking = false;
-                        // this.force_sync = true;
-                        // this.writer.force_sync = true;
                         onForceSyncOrIsaTTY(ctx);
                     } else if (!is_nonblocking) {
-                        const flags = switch (bun.sys.getFcntlFlags(fd)) {
-                            .result => |flags| flags,
-                            .err => |err| {
+                        const flags = match (bun.sys.getFcntlFlags(fd)) {
+                            .result(fl) => fl,
+                            .err(err) => {
                                 fd.close();
                                 return .{ .err = err };
                             },
                         };
-                        is_nonblocking = (flags & @as(@TypeOf(flags), bun.O.NONBLOCK)) != 0;
+                        is_nonblocking = (flags & (bun.O.NONBLOCK as @TypeOf(flags))) != 0;
 
                         if (!is_nonblocking) {
                             if (bun.sys.setNonblocking(fd) == .result) {
@@ -125,16 +113,15 @@ zig {
                         }
                     }
 
-                    out_nonblocking.* = is_nonblocking and pollable.*;
+                    out_nonblocking.* = is_nonblocking && pollable.*;
                 },
             }
 
             return .{ .result = fd };
         }
 
-        if (comptime Environment.isWindows) {
-            pollable.* = (bun.windows.GetFileType(fd.cast()) & bun.windows.FILE_TYPE_PIPE) != 0 and !force_sync;
+        if (comptime (Environment.isWindows)) {
+            pollable.* = (bun.windows.GetFileType(fd.cast()) & bun.windows.FILE_TYPE_PIPE) != 0 && !force_sync;
             return .{ .result = fd };
         }
     }
-}
