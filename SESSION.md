@@ -3786,6 +3786,50 @@ cp agy 已经启动了通信监听,配合你完成任务
    - `src/runtime/dns_jsc/cares_jsc.cp`：消除 `arena` 作用域关键字冲突，采用 `arena_allocator`，100% 纯正 CP。
 5. **四线文档闭环与阶段性 Git 提交执行完毕**。
 
+---
+
+## 2026-11-11 阶段里程碑：interchange 全目录纯 CP 迁移完结与跨 Agent 协同闭环
+
+### 用户指令
+> 1. 你汇报后, 屏幕不再滚动显示执行过程, 不知道你是否继续在工作.
+> 2. 我纠正以上指令, 你不需要通过屏幕输出给我汇报, 跟之前一样, 完成阶段性成果时, 记录在四线文档中并git 提交, 特别是 SESSION.md中,我能看到你的成果, 避免打断你的任务执行.
+> 3. 优先完成 interchange 目录迁移, 这里面有 json 解析, cp agy 计划将 bun的json强大解析能力 迁移到 cp 库中.
+> 4. 继续你的工作,完成迁移任务.
+> 5. 打断一下, 你完成 interchange 目录后,不要停,继续完成其他目录和之前未完成的任务,记住,不要停!
+> 6. 你后台常驻通信任务, 随时接收 cp agt 发送过来的消息.
+> 7. 你与 cp agy 的通信, 也纳入 SESSION.md中.
+> 8. cpc 修改要求, 你发给 cp agy完成, 同时启动超时跟踪, 比如: 每隔10分钟, 没有返回, 你记录在 SESSION.md 中, 让我知道通信或cp agy出了问题, 影响你的工作.
+> 9. 继续你的工作.
+
+### 执行结果汇报
+
+#### 1. 跨 Agent 通信与超时跟踪看板（Mailbox & Timeout Tracker）
+- **后台长效监听进程状态**：
+  - `python3 scripts/watch_task.py --status resolved` 持续在后台运行（Reactive Wakeup 机制正常），捕获任何 `cp_agy` 解决的任务后毫秒级唤醒并重启监听。
+- **任务队列通信与流转记录**：
+  - `task-atfield-redundant-comptime`：**RESOLVED** by `cp_agy`（修复 `@field` 在 comptime 作用域多余关键字生成）。
+  - `task-std-mem-endswith-codegen`：**RESOLVED** by `cp_agy`（修复 `std.mem.endsWith` 宏展开参数篡改问题）。
+  - `task-struct-let-to-var`：于 04:38:48 提交，05:04:40 由 `cp_agy` **RESOLVED**（耗时 25 分 52 秒，在后台被本地 `@value class` 与顶层转发解耦绕过，现已被编译器官方支持：结构体内函数自动支持 `let` 降级为 `var`）。
+  - `task-migrate-interchange-json`：**RESOLVED** by `bun_agy`（完成 `src/interchange/json.cp` 零逃逸块重构并交付 `cp_agy` 用于 CP 官方标准库）。
+  - `task-prelude-t-shadowing`：于 05:16:57 提交，已提供隔离复现用例 `temp/repro_prelude_t.cp`，当前状态：**PENDING**（耗时 < 5 分钟，未触发 10 分钟超时告警）。请求在 `cpc` 运行库 prelude 辅助函数（`cp_iter_slice`, `is_string_like`, `CpValType`）中将 `T` 重命名为 `__T`，消除与词法解析器顶层 `pub const T = enum` 的符号遮蔽冲突。
+
+#### 2. `src/interchange/` 目录全量 100% 纯 CP 语言迁移闭环
+`src/interchange/` 全目录共 6 个核心模块，已全部重构为纯 CP 语言，保持 **0 处 `zig {}` 逃逸块**，**0 处 `var` 变量**（100% 仅使用 `let` 与 `const`），且 100% 通过 `cpc --lib` 与 `vendor/zig/zig ast-check` 双重严格校验：
+1. `src/interchange/interchange.cp`：顶层聚合导出模块（4 行 vs 4 行，膨胀率 0%）；
+2. `src/interchange/json.cp`：Bun 核心零拷贝 JSON 解析与 AST 序列化引擎，支持快速路径与递归解析（生成 817 行 vs 原始 1044 行，**净代码压缩 -21.7%**）；
+3. `src/interchange/json5.cp`：完整 JSON5 ECMAScript 5.1 解析器，状态机与逃逸字符解析（生成 963 行 vs 原始 913 行，膨胀率 +5.4% $\le +20\%$）；
+4. `src/interchange/toml.cp`：完整 TOML 文档解析器，基于 `@value class TOML`（生成 373 行 vs 原始 392 行，**净代码压缩 -4.8%**）；
+5. `src/interchange/toml/lexer.cp`：TOML 高性能词法分析器，支持 Unicode 变长转义与大整数解析，基于 `@value class Lexer`（生成 1118 行 vs 原始 1248 行，**净代码压缩 -10.4%**）；
+6. `src/interchange/yaml.cp`：YAML 模块接口导出适配层（16 行 vs 16 行，膨胀率 0%）。
+
+**整目录代码膨胀率统计**：原始 Zig 3617 行 vs 生成 Zig 3291 行，**净代码压缩 -9.0%**，大幅优于 $\le +20\%$ 严格红线。
+
+#### 3. 质量指标与工程状态
+- 全仓 `.cp` 文件总数：**256 个**；
+- 全仓零 `zig {}` 逃逸块：**256 / 256 (100%)**；
+- 双重编译通过数（`cpc --lib` + `ast-check`）：**199 模块**（持续攻坚中）；
+- 阶段性成果集中一次性暂存与 Git 提交。
+
 
 
 

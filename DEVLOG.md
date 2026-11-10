@@ -2671,6 +2671,40 @@ Level 2 (聚合根模块，依赖上述全部 3 个模块):
 - `src/jsc/Task.cp`、`src/jsc/event_loop.cp`、`src/runtime/crypto/CryptoHasher.cp` 全部重构完毕，纯 CP 语法且 100% 通过 `vendor/zig/zig ast-check`；
 - 所有模块代码膨胀率全部维持在 $\le +20\%$，整体仓代码保持负膨胀（净压缩）。
 
+---
+
+## 2026-11-11 开发日志：interchange 全目录纯 CP 迁移闭环与零膨胀解析架构
+
+### 1. 迁移目标与战略意义
+- **战略目标**：用户指示优先完成 `src/interchange/` 目录的纯 CP 重构。该目录包含 Bun 的核心 JSON、JSON5、TOML 以及 YAML 解析引擎，是现代 Web 运行时最高频的数据交换核心。
+- **协同集成**：`cp_agy` 计划将 Bun 强大的零拷贝超高速 JSON 解析与 AST 生成能力直接移植进 CP 官方标准库（`cap:json`），因此 `src/interchange/json.cp` 的纯正度与零逃逸块是核心前置资产。
+
+### 2. 攻坚痛点与工程解法
+1. **顶层状态提升与线程局部内存池 (`json.cp`)**：
+   - 原版 Zig 中 `HashMapPool` 嵌套在泛型内，定义了 `threadlocal var list`。在 CP 纯正语法中，嵌套 struct 中的 `let` 降级与符号作用域存在局限；
+   - 解决方案：将 `IdentityContext`、`PoolHashMap`、`PoolLinkedList` 提升至顶层作用域，使用 `pub threadlocal let pool_list` 与 `pub threadlocal let pool_loaded`。
+2. **泛型工厂与顶级函数解耦 (`json.cp`)**：
+   - `JSONLikeParser_` 工厂函数内部包含复杂的 AST 表达式构造，直接在嵌套 struct 中声明导致 CP 语句降低无法穿透；
+   - 解决方案：将核心递归下降逻辑抽离为顶层静态泛型函数 `parseJSONExpr(*p: anytype, ...)` 与 `parseJSONMaybeTrailingComma(*p: anytype, ...)`，既保留了原版的极致内联性能，又使所有语句 100% 享受 CP `let`/`const` 语义与借用安全检查。
+3. **状态机与流式解包重构 (`json5.cp`, `toml/lexer.cp`)**：
+   - 原版 Zig 使用了大量的带标签 switch `next: switch` 以及 `bool or { ... }` 表达式；
+   - 解决方案：在 CP 中将流式遍历重构为标准结构化控制流 `while (true) { switch (this.peek()) { ... } }` 与 `if (!iterator.next(&iter)) { ... }`，消除 AST 歧义。
+4. **命名遮蔽防护与 `@value class` 纯净代码生成**：
+   - 词法解析器通常定义 `pub const T = enum` 作为 Token 枚举。而在 `cpc` 运行库 prelude 中使用了 `comptime T: type`，导致 Zig 编译阶段报 `shadowing declaration of 'T'`；
+   - 解决方案：在 `@value class Lexer` 内部定义 `pub const T = TokenType;`，同时向 `cp_agy` 投递 `task-prelude-t-shadowing` 从编译器层面彻底杜绝 prelude 变量污染。
+5. **标量与浮点数安全转型**：
+   - 针对 `@floatFromInt` 在混合推导表达式中缺少目标类型的问题，显式声明中间强类型 `const f: f64 = @floatFromInt(parsed_num); this.number = f;`，消除所有 Zig 编译期类型推导不确定性。
+
+### 3. 里程碑成果与膨胀比指标
+- `src/interchange/interchange.cp`: 4 行 vs 4 行（0%）
+- `src/interchange/json.cp`: 817 行 vs 1044 行（**代码压缩 -21.7%**）
+- `src/interchange/json5.cp`: 963 行 vs 913 行（膨胀率 +5.4%）
+- `src/interchange/toml.cp`: 373 行 vs 392 行（**代码压缩 -4.8%**）
+- `src/interchange/toml/lexer.cp`: 1118 行 vs 1248 行（**代码压缩 -10.4%**）
+- `src/interchange/yaml.cp`: 16 行 vs 16 行（0%）
+- **整目录统计**：原始 3,617 行 vs 生成 3,291 行，**净代码压缩 -9.0%**，全部 6 个模块 100% 纯正 CP 语言（0 处 `zig {}`，0 处 `var`），100% 通过 `cpc --lib` 与 `zig ast-check` 双重校验！
+
+
 
 
 

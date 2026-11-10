@@ -937,3 +937,10 @@ Bun AGY 在检查转换好的 .cp 文件时，请优先使用 --json 参数：
 | `scripts/task_queue.py`   | **原子任务队列管理器**<br>Maildir 目录级原子写入与迁移，杜绝并发竞争；自动同步仅追加审计日志                  | • Bun 投递任务：`submit`<br>• CP 结单任务：`resolve`<br>• 查看看板状态：`list`                                       | • 投递：`python3 scripts/task_queue.py submit --id task-001 --repro path/repro.cp --error "..."`<br>• 结单：`python3 scripts/task_queue.py resolve task-001 --note "已修复"`<br>• 查看：`python3 scripts/task_queue.py list` |
 | `scripts/watch_task.py`   | **事件驱动任务监听器**<br>启动即时零延迟检查；检测到匹配状态的任务时瞬间退出(Exit 0)，触发 CLI 反应式自动唤醒 | CP AGY 无任务时挂起休眠；或 Bun AGY 需要等待特定任务被修复时挂起等待。                                               | • CP AGY 监听新任务：<br>`python3 scripts/watch_task.py`<br>• Bun AGY 等待特定修复：<br>`python3 scripts/watch_task.py --status resolved --id task-001`                                                                      |
 | `scripts/resolve_task.py` | **原子更新任务状态（快捷别名）**<br>自动转发调用 `task_queue.py resolve`                                      | CP AGY 完成编译器 Bug 修复并验证通过后，调用此脚本通知任务结单。                                                     | `python3 scripts/resolve_task.py task-001 --note "修复借用检查器解构问题"`                                                                                                                                                   |
+
+## 其他你需要遵守的规则
+
+- 你后台常驻通信任务, 随时接收 cp agt 发送过来的消息.
+- 你与 cp agy 的通信, 也纳入 SESSION.md中，这部分内容无需等待阶段性成果时记录，需实时记录。
+- 对于上游cp 编译器 cpc/src 的功能要求, 最好通过任务方式 提交给 cp agy 来完成, 避免你直接不合理的修改破坏cp的设计和已有功能。
+- cpc 修改要求, 你发给 cp agy完成, 同时启动超时跟踪, 比如: 每隔10分钟, 没有返回, 你记录在 SESSION.md 中, 让我知道通信或cp agy出了问题, 影响你的工作.继续你的工作.

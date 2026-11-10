@@ -1215,6 +1215,39 @@
 - `/data/dev/cp/cp_ref.md`:
   - 补充 3.3.0 `@c` 推荐规范、无 `var` 铁律、嵌套结构体表达式定义及 Result 类型顺序。
 
+### 2026-11-11 interchange 全目录纯 CP 重构与双向协作闭环
+
+#### 核心源码模块重构 (100% 纯 CP, 0 处 zig {}, 0 处 var, 通过 ast-check)
+- `src/interchange/interchange.cp`:
+  - 顶层聚合导出模块（4 行 vs 4 行，膨胀率 0%）。
+- `src/interchange/json.cp`:
+  - Bun 核心零拷贝 JSON 解析与 AST 序列化引擎；
+  - 顶层提升 `IdentityContext`, `PoolHashMap`, `PoolLinkedList`，使用 `threadlocal let`；
+  - 封装 `@value class PackageJSONVersionChecker` 与顶层转发函数，彻底避免泛型 struct token 降级限制；
+  - 生成 817 行 vs 原始 1044 行（净代码压缩 -21.7%）。
+- `src/interchange/json5.cp`:
+  - ECMAScript 5.1 JSON5 解析器，声明 `err ParseError` 与 `err ExternalError`；
+  - 将标签式 switch 状态机重构为 CP 循环，采用 `.@"null"` 消除符号混淆；
+  - 基于 `@value class JSON5Parser` 实现借用安全接收者；
+  - 生成 963 行 vs 原始 913 行（膨胀率 +5.4% $\le +20\%$）。
+- `src/interchange/toml.cp`:
+  - TOML 解析器核心，基于 `@value class TOML` 重构；
+  - 显式可选守卫重构参数列表中嵌套三元语法；
+  - 生成 373 行 vs 原始 392 行（净代码压缩 -4.8%）。
+- `src/interchange/toml/lexer.cp`:
+  - TOML 词法解析器，支持 Unicode 转义、大整数以及前缀浮点解析；
+  - 采用 `@value class Lexer` 与 `pub err Error`，彻底消除字段与局部变量命名冲突；
+  - 生成 1118 行 vs 原始 1248 行（净代码压缩 -10.4%）。
+- `src/interchange/yaml.cp`:
+  - YAML 顶层模块导出适配层（16 行 vs 16 行，膨胀率 0%）。
+
+#### 跨智能体协作与编译器自愈任务
+- `scripts/task_queue.py`:
+  - `task-struct-let-to-var`: RESOLVED by `cp_agy`（支持 struct 内方法中的 `let` 自动降级为 `var` 并消除冒号）；
+  - `task-migrate-interchange-json`: RESOLVED by `bun_agy`（交付 `src/interchange/json.cp` 供 CP 标准库集成）；
+  - `task-prelude-t-shadowing`: SUBMITTED（请求在 `cpc` 预置辅助函数中将 `T` 重命名为 `__T`，消除符号遮蔽冲突）。
+
+
 
 
 
