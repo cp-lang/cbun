@@ -1265,3 +1265,14 @@
 
 
 
+
+
+#### 2026-11-11
+- `src/runtime/server/WebSocketServerContext.cp` / `WebSocketServerContext.zig`:
+  - 采用 `pub @value class Handler` 与 `export @root struct WebSocketServerContext` 完成结构化建模；
+  - 彻底清理 `var` 并采用海象操作符重构解包逻辑；
+  - 生成行数 278 行 vs 原版 284 行（-2.1% 净压缩），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
+- `src/runtime/server/ServerConfig.cp` / `ServerConfig.zig`:
+  - 封装为 `export @root struct ServerConfig`，提取 `Address` 联合体与 `StringZ` 类型别名；
+  - 修复多处字段同名遮蔽与借用参数可变性定义；
+  - 生成行数 1043 行 vs 原版 1126 行（-7.4% 净压缩），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。

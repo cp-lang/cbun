@@ -1,14 +1,28 @@
-const ServerConfig = @This();
+import std from "std";
+import bun from "bun";
+const HTTP = bun.http;
+const JSError = bun.JSError;
+const URL = bun.URL;
+const assert = bun.assert;
+const jsc = bun.jsc;
+const strings = bun.strings;
+const uws = bun.uws;
+const AnyRoute = bun.api.server.AnyRoute;
+const AnyServer = jsc.API.AnyServer;
+const WebSocketServerContext = @import("./WebSocketServerContext.zig");
+const HTMLBundle = @import("./HTMLBundle.zig");
+pub const SSLConfig = @import("../socket/SSLConfig.zig");
+pub type StringZ = [:0]const u8;
 
-address: union(enum) {
+pub const Address = union(enum) {
     tcp: struct {
         port: u16 = 0,
         hostname: ?[*:0]const u8 = null,
     },
     unix: [:0]const u8,
 
-    pub fn release(_: *@This(), allocator: std.mem.Allocator): void {
-        switch (_.*) {
+    pub fn deinit(this: *@This(), allocator: std.mem.Allocator) void {
+        switch (this.*) {
             .tcp => |tcp| {
                 if (tcp.hostname) |host| {
                     allocator.free(bun.sliceTo(host, 0));
@@ -18,15 +32,17 @@ address: union(enum) {
                 allocator.free(addr);
             },
         }
-        _.* = .{ .tcp = .{} };
+        this.* = .{ .tcp = .{} };
     }
 
-    pub fn deinit(_: *@This(), allocator: std.mem.Allocator): void {
-        _.release(allocator);
+    pub fn release(this: *@This(), allocator: std.mem.Allocator) void {
+        this.deinit(allocator);
     }
-} = .{
-    .tcp = .{},
-},
+};
+
+export @root struct ServerConfig {
+
+address: Address = .{ .tcp = .{} },
 idleTimeout: u8 = 10,
 has_idleTimeout: bool = false,
 base_url: URL = URL{},
@@ -57,7 +73,7 @@ is_node_http: bool = false,
 had_routes_object: bool = false,
 
 static_routes: std.array_list.Managed(StaticRouteEntry) = std.array_list.Managed(StaticRouteEntry).init(bun.default_allocator),
-negative_routes: std.array_list.Managed([:0]const u8) = std.array_list.Managed([:0]const u8).init(bun.default_allocator),
+negative_routes: std.array_list.Managed(StringZ) = std.array_list.Managed(StringZ).init(bun.default_allocator),
 user_routes_to_build: std.array_list.Managed(UserRouteBuilder) = std.array_list.Managed(UserRouteBuilder).init(bun.default_allocator),
 
 bake: ?bun.bake.UserOptions = null,
@@ -67,27 +83,27 @@ pub const DevelopmentOption = enum {
     production,
     development_without_hmr,
 
-    pub fn isHMREnabled(_: DevelopmentOption): bool {
-        return _ == .development;
+    pub fn isHMREnabled(this: DevelopmentOption) bool {
+        return this == .development;
     }
 
-    pub fn isDevelopment(_: DevelopmentOption): bool {
-        return _ == .development or _ == .development_without_hmr;
+    pub fn isDevelopment(this: DevelopmentOption) bool {
+        return this == .development or this == .development_without_hmr;
     }
 };
 
-pub fn isDevelopment(_: *const ServerConfig): bool {
-    return _.development.isDevelopment();
+pub fn isDevelopment(this: *const ServerConfig): bool {
+    return this.development.isDevelopment();
 }
 
-pub fn memoryCost(_: *const ServerConfig): usize {
-    var cost: usize = 0;
-    for (_.static_routes.items) |*entry| {
+pub fn memoryCost(this: *const ServerConfig): usize {
+    let cost: usize = 0;
+    for (self.static_routes.items) |*entry| {
         cost += entry.memoryCost();
     }
-    cost += _.id.len;
-    cost += _.base_url.href.len;
-    for (_.negative_routes.items) |route| {
+    cost += this.id.len;
+    cost += this.base_url.href.len;
+    for (self.negative_routes.items) |route| {
         cost += route.len;
     }
 
@@ -99,62 +115,62 @@ pub const RouteDeclaration = struct {
     method: union(enum) {
         any: void,
         specific: HTTP.Method,
-    } = .any,
+    } = .@"any",
 
-    pub fn release(_: *RouteDeclaration): void {
-        if (_.path.len > 0) {
-            bun.default_allocator.free(_.path);
+    pub fn release(this: *RouteDeclaration) void {
+        if (this.path.len > 0) {
+            bun.default_allocator.free(this.path);
         }
     }
 
-    pub fn deinit(_: *RouteDeclaration): void {
-        _.release();
+    pub fn deinit(this: *RouteDeclaration) void {
+        this.release();
     }
 };
 
 pub const StaticRouteEntry = struct {
     path: []const u8,
     route: AnyRoute,
-    method: HTTP.Method.Optional = .any,
+    method: HTTP.Method.Optional = .@"any",
 
-    pub fn memoryCost(_: *const StaticRouteEntry): usize {
-        return _.path.len + _.route.memoryCost();
+    pub fn memoryCost(this: *const StaticRouteEntry) usize {
+        return this.path.len + this.route.memoryCost();
     }
 
-    pub fn clone(_: StaticRouteEntry): !StaticRouteEntry {
-        _.route.ref();
+    pub fn clone(this: StaticRouteEntry) !StaticRouteEntry {
+        this.route.ref();
 
         return .{
-            .path = try bun.default_allocator.dupe(u8, _.path),
-            .route = _.route,
-            .method = _.method,
+            .path = try bun.default_allocator.dupe(u8, this.path),
+            .route = this.route,
+            .method = this.method,
         };
     }
 
-    pub fn release(_: *StaticRouteEntry): void {
-        bun.default_allocator.free(_.path);
-        _.path = "";
-        _.route.deref();
-        _.* = undefined;
+    pub fn release(this: *StaticRouteEntry) void {
+        bun.default_allocator.free(this.path);
+        this.path = "";
+        this.route.deref();
+        this.* = undefined;
     }
 
-    pub fn deinit(_: *StaticRouteEntry): void {
-        _.release();
+    pub fn deinit(this: *StaticRouteEntry) void {
+        this.release();
     }
 
-    pub fn isLessThan(_: void, this: StaticRouteEntry, other: StaticRouteEntry): bool {
+    pub fn isLessThan(_: void, this: StaticRouteEntry, other: StaticRouteEntry) bool {
         return strings.cmpStringsDesc({}, this.path, other.path);
     }
 };
 
-fn normalizeStaticRoutesList(_: *ServerConfig): !void {
+fn normalizeStaticRoutesList(this: *ServerConfig): !void {
     const Context = struct {
         pub fn hash(route: *StaticRouteEntry): u64 {
-            var hasher = std.hash.Wyhash.init(0);
+            let hasher = std.hash.Wyhash.init(0);
             switch (route.method) {
-                .any => hasher.update("ANY"),
+                .@"any" => hasher.update("ANY"),
                 .method => |*set| {
-                    var iter = set.iterator();
+                    let iter = set.iterator();
                     while (iter.next()) |method| {
                         hasher.update(@tagName(method));
                     }
@@ -165,18 +181,18 @@ fn normalizeStaticRoutesList(_: *ServerConfig): !void {
         }
     };
 
-    var static_routes_dedupe_list = std.array_list.Managed(u64).init(bun.default_allocator);
+    let static_routes_dedupe_list = std.array_list.Managed(u64).init(bun.default_allocator);
     try static_routes_dedupe_list.ensureTotalCapacity(@truncate(_.static_routes.items.len));
     defer static_routes_dedupe_list.deinit();
 
-    var list = &_.static_routes;
+    let list = &this.static_routes;
     if (list.items.len > 0) {
-        var index = list.items.len - 1;
+        let index = list.items.len - 1;
         while (true) {
             const route = &list.items[index];
             const hash = Context.hash(route);
             if (std.mem.indexOfScalar(u64, static_routes_dedupe_list.items, hash) != null) {
-                var item = list.orderedRemove(index);
+                let item = list.orderedRemove(index);
                 item.deinit();
             } else {
                 try static_routes_dedupe_list.append(hash);
@@ -190,8 +206,8 @@ fn normalizeStaticRoutesList(_: *ServerConfig): !void {
     std.mem.sort(StaticRouteEntry, list.items, {}, StaticRouteEntry.isLessThan);
 }
 
-pub fn cloneForReloadingStaticRoutes(_: *ServerConfig): !ServerConfig {
-    var that = _.*;
+pub fn cloneForReloadingStaticRoutes(this: *ServerConfig): !ServerConfig {
+    let that = this.*;
     _.ssl_config = null;
     _.sni = null;
     _.address = .{ .tcp = .{} };
@@ -203,25 +219,25 @@ pub fn cloneForReloadingStaticRoutes(_: *ServerConfig): !ServerConfig {
     return that;
 }
 
-pub fn appendStaticRoute(_: *ServerConfig, path: []const u8, route: AnyRoute, method: HTTP.Method.Optional): !void {
-    try _.static_routes.append(StaticRouteEntry{
+pub fn appendStaticRoute(this: *ServerConfig, path: []const u8, route: AnyRoute, method: HTTP.Method.Optional): !void {
+    try this.static_routes.append(StaticRouteEntry{
         .path = try bun.default_allocator.dupe(u8, path),
         .route = route,
         .method = method,
     });
 }
 
-pub fn applyStaticRoute(server: AnyServer, comptime ssl: bool, app: *uws.NewApp(ssl), comptime T: type, entry: T, path: []const u8, method: HTTP.Method.Optional): void {
+pub fn applyStaticRoute(server: AnyServer, comptime ssl: bool, app: *uws.NewApp(ssl), comptime T: type, *entry: T, path: []const u8, method: HTTP.Method.Optional): void {
     entry.server = server;
     const handler_wrap = struct {
-        pub fn handler(route: T, req: *uws.Request, resp: *uws.NewApp(ssl).Response): void {
+        pub fn handler(route: T, req: *uws.Request, resp: *uws.NewApp(ssl).Response) void {
             route.onRequest(.{ .h1 = req }, switch (comptime ssl) {
                 true => .{ .SSL = resp },
                 false => .{ .TCP = resp },
             });
         }
 
-        pub fn HEAD(route: T, req: *uws.Request, resp: *uws.NewApp(ssl).Response): void {
+        pub fn HEAD(route: T, req: *uws.Request, resp: *uws.NewApp(ssl).Response) void {
             route.onHEADRequest(.{ .h1 = req }, switch (comptime ssl) {
                 true => .{ .SSL = resp },
                 false => .{ .TCP = resp },
@@ -230,11 +246,11 @@ pub fn applyStaticRoute(server: AnyServer, comptime ssl: bool, app: *uws.NewApp(
     };
     app.head(path, T, entry, handler_wrap.HEAD);
     switch (method) {
-        .any => {
-            app.any(path, T, entry, handler_wrap.handler);
+        .@"any" => {
+            app.@"any"(path, T, entry, handler_wrap.handler);
         },
         .method => |*m| {
-            var iter = m.iterator();
+            let iter = m.iterator();
             while (iter.next()) |method_| {
                 app.method(method_, path, T, entry, handler_wrap.handler);
             }
@@ -242,33 +258,33 @@ pub fn applyStaticRoute(server: AnyServer, comptime ssl: bool, app: *uws.NewApp(
     }
 }
 
-pub fn applyStaticRouteH3(server: AnyServer, app: *uws.H3.App, comptime T: type, entry: T, path: []const u8, method: HTTP.Method.Optional): void {
+pub fn applyStaticRouteH3(server: AnyServer, app: *uws.H3.App, comptime T: type, *entry: T, path: []const u8, method: HTTP.Method.Optional): void {
     entry.server = server;
     const handler_wrap = struct {
-        pub fn handler(route: T, req: *uws.H3.Request, resp: *uws.H3.Response): void {
+        pub fn handler(route: T, req: *uws.H3.Request, resp: *uws.H3.Response) void {
             route.onRequest(.{ .h3 = req }, .{ .H3 = resp });
         }
-        pub fn HEAD(route: T, req: *uws.H3.Request, resp: *uws.H3.Response): void {
+        pub fn HEAD(route: T, req: *uws.H3.Request, resp: *uws.H3.Response) void {
             route.onHEADRequest(.{ .h3 = req }, .{ .H3 = resp });
         }
     };
     app.head(path, T, entry, handler_wrap.HEAD);
     switch (method) {
-        .any => app.any(path, T, entry, handler_wrap.handler),
+        .@"any" => app.@"any"(path, T, entry, handler_wrap.handler),
         .method => |*m| {
-            var iter = m.iterator();
+            let iter = m.iterator();
             while (iter.next()) |method_| app.method(method_, path, T, entry, handler_wrap.handler);
         },
     }
 }
 
-pub fn release(_: *ServerConfig): void {
+pub fn release(this: *ServerConfig): void {
     _.address.deinit(bun.default_allocator);
 
-    for (_.negative_routes.items) |route| {
+    for (self.negative_routes.items) |route| {
         bun.default_allocator.free(route);
     }
-    _.negative_routes.clearAndFree();
+    this.negative_routes.clearAndFree();
 
     if (_.base_url.href.len > 0) {
         bun.default_allocator.free(_.base_url.href);
@@ -279,14 +295,12 @@ pub fn release(_: *ServerConfig): void {
         _.ssl_config = null;
     }
     if (_.sni) |*sni| {
-        for (sni.slice()) |*ssl_config| {
-            ssl_config.deinit();
-        }
+        for (sni.slice()) |*cfg| { cfg.deinit(); }
         sni.deinit(bun.default_allocator);
         _.sni = null;
     }
 
-    for (_.static_routes.items) |*entry| {
+    for (self.static_routes.items) |*entry| {
         entry.deinit();
     }
     _.static_routes.clearAndFree();
@@ -295,19 +309,19 @@ pub fn release(_: *ServerConfig): void {
         bake.deinit();
     }
 
-    for (_.user_routes_to_build.items) |*builder| {
+    for (self.user_routes_to_build.items) |*builder| {
         builder.deinit();
     }
     _.user_routes_to_build.clearAndFree();
 }
 
-pub fn deinit(_: *ServerConfig): void {
-    _.release();
+pub fn deinit(this: *ServerConfig): void {
+    this.release();
 }
 
-pub fn computeID(_: *const ServerConfig, allocator: std.mem.Allocator): []const u8 {
-    var arraylist = std.array_list.Managed(u8).init(allocator);
-    var writer = arraylist.writer();
+pub fn computeID(this: *const ServerConfig, allocator: std.mem.Allocator): []const u8 {
+    let arraylist = std.array_list.Managed(u8).init(allocator);
+    let writer = arraylist.writer();
 
     writer.writeAll("[http]-") catch {};
     switch (_.address) {
@@ -333,8 +347,8 @@ pub fn computeID(_: *const ServerConfig, allocator: std.mem.Allocator): []const 
     return arraylist.items;
 }
 
-pub fn getUsocketsOptions(_: *const ServerConfig): i32 {
-    var out: i32 = if (_.reuse_port)
+pub fn getUsocketsOptions(this: *const ServerConfig): i32 {
+    let out: i32 = if (this.reuse_port)
         uws.LIBUS_LISTEN_REUSE_PORT | uws.LIBUS_LISTEN_REUSE_ADDR
     else
         uws.LIBUS_LISTEN_EXCLUSIVE_PORT;
@@ -349,8 +363,8 @@ pub fn getUsocketsOptions(_: *const ServerConfig): i32 {
 fn validateRouteName(global: *jsc.JSGlobalObject, path: []const u8): !void {
     bun.debugAssert(path.len > 0 and path[0] == '/');
 
-    var remaining = path;
-    var duped_route_names = bun.StringHashMap(void).init(bun.default_allocator);
+    let remaining = path;
+    let duped_route_names = bun.StringHashMap(void).init(bun.default_allocator);
     defer duped_route_names.deinit();
     while (strings.indexOfChar(remaining, ':')) |index| {
         remaining = remaining[index + 1 ..];
@@ -358,18 +372,14 @@ fn validateRouteName(global: *jsc.JSGlobalObject, path: []const u8): !void {
         const route_name = remaining[0..end];
         if (route_name.len > 0 and std.ascii.isDigit(route_name[0])) {
             return global.throwTODO(
-                \\Route parameter names cannot start with a number.
-                \\
-                \\If you run into this, please file an issue and we will add support for it.
+                "Route parameter names cannot start with a number.\n\nIf you run into this, please file an issue and we will add support for it."
             );
         }
 
         const entry = bun.handleOom(duped_route_names.getOrPut(route_name));
         if (entry.found_existing) {
             return global.throwTODO(
-                \\Support for duplicate route parameter names is not yet implemented.
-                \\
-                \\If you run into this, please file an issue and we will add support for it.
+                "Support for duplicate route parameter names is not yet implemented.\n\nIf you run into this, please file an issue and we will add support for it."
             );
         }
 
@@ -377,7 +387,6 @@ fn validateRouteName(global: *jsc.JSGlobalObject, path: []const u8): !void {
     }
 }
 
-pub const SSLConfig = @import("../socket/SSLConfig.zig");
 
 fn getRoutesObject(global: *jsc.JSGlobalObject, arg: jsc.JSValue): bun.JSError!?jsc.JSValue {
     inline for (.{ "routes", "static" }) |key| {
@@ -413,14 +422,11 @@ pub fn fromJS(
                 .hostname = null,
             },
         },
-        .development = if (vm.transpiler.options.transform_options.serve_hmr) |hmr|
-            if (!hmr) .development_without_hmr else .development
-        else
-            .development,
+        .development = if (vm.transpiler.options.transform_options.serve_hmr != null and !vm.transpiler.options.transform_options.serve_hmr.?) .development_without_hmr else .development,
 
         .reuse_port = env.get("NODE_UNIQUE_ID") != null,
     };
-    var has_hostname = false;
+    let has_hostname = false;
 
     defer {
         if (!args.development.isHMREnabled()) {
@@ -436,24 +442,24 @@ pub fn fromJS(
         args.development = .production;
     }
 
-    args.address.tcp.port = ({
+    args.address.tcp.port = brk: {
         const PORT_ENV = .{ "BUN_PORT", "PORT", "NODE_PORT" };
 
         inline for (PORT_ENV) |PORT| {
             if (env.get(PORT)) |port| {
-                if (std.fmt.parseInt(u16, port, 10)) |_port| {
-                    break _port;
-                } else |_| {}
+                if (p := std.fmt.parseInt(u16, port, 10) catch null) {
+                    break :brk p;
+                }
             }
         }
 
         if (arguments.vm.transpiler.options.transform_options.port) |port| {
-            break port;
+            break :brk port;
         }
 
-        break args.address.tcp.port;
-    });
-    var port = args.address.tcp.port;
+        break :brk args.address.tcp.port;
+    };
+    let port = args.address.tcp.port;
 
     if (arguments.vm.transpiler.options.transform_options.origin) |origin| {
         args.base_uri = try bun.default_allocator.dupeZ(u8, origin);
@@ -495,47 +501,36 @@ pub fn fromJS(
         }
         if (global.hasException()) return error.JSError;
 
-        if (try getRoutesObject(global, arg)) |static| {
-            const static_obj = static.getObject() orelse {
+        if (try getRoutesObject(global, arg)) |static_val| {
+            const static_obj = static_val.getObject() orelse {
                 return global.throwInvalidArguments(
-                    \\Bun.serve() expects 'routes' to be an object shaped like:
-                    \\
-                    \\  {
-                    \\    "/path": {
-                    \\      GET: (req) => new Response("Hello"),
-                    \\      POST: (req) => new Response("Hello"),
-                    \\    },
-                    \\    "/path2/:param": new Response("Hello"),
-                    \\    "/path3/:param1/:param2": (req) => new Response("Hello")
-                    \\  }
-                    \\
-                    \\Learn more at https://bun.com/docs/api/http
+                    "Bun.serve() expects 'routes' to be an object shaped like:\n\n  {\n    \"/path\": {\n      GET: (req) => new Response(\"Hello\"),\n      POST: (req) => new Response(\"Hello\"),\n    },\n    \"/path2/:param\": new Response(\"Hello\"),\n    \"/path3/:param1/:param2\": (req) => new Response(\"Hello\")\n  }\n\nLearn more at https://bun.com/docs/api/http"
                 , .{});
             };
             args.had_routes_object = true;
 
-            var iter = try jsc.JSPropertyIterator(.{
+            let iter = try jsc.JSPropertyIterator(.{
                 .skip_empty_name = true,
                 .include_value = true,
             }).init(global, static_obj);
             defer iter.deinit();
 
-            var init_ctx_: AnyRoute.ServerInitContext = .{
-                .arena = .init(bun.default_allocator),
-                .dedupe_html_bundle_map = .init(bun.default_allocator),
-                .framework_router_list = .init(bun.default_allocator),
+            let init_ctx_: AnyRoute.ServerInitContext = .{
+                .@"arena" = std.heap.ArenaAllocator.init(bun.default_allocator),
+                .dedupe_html_bundle_map = std.AutoHashMap(*HTMLBundle, bun.ptr.RefPtr(HTMLBundle.Route)).init(bun.default_allocator),
+                .framework_router_list = std.array_list.Managed(bun.bake.Framework.FileSystemRouterType).init(bun.default_allocator),
                 .js_string_allocations = .empty,
                 .user_routes = &args.static_routes,
                 .global = global,
             };
-            const init_ctx: *AnyRoute.ServerInitContext = &init_ctx_;
+            const init_ctx: *AnyRoute.ServerInitContext = &mut init_ctx_;
             errdefer {
-                init_ctx.arena.deinit();
+                init_ctx.@"arena".deinit();
                 init_ctx.framework_router_list.deinit();
             }
             defer init_ctx.dedupe_html_bundle_map.deinit();
 
-            var framework_router_list = std.array_list.Managed(bun.bake.FrameworkRouter.Type).init(bun.default_allocator);
+            let framework_router_list = std.array_list.Managed(bun.bake.FrameworkRouter.Type).init(bun.default_allocator);
             errdefer framework_router_list.deinit();
 
             errdefer {
@@ -546,7 +541,7 @@ pub fn fromJS(
             }
 
             while (try iter.next()) |key| {
-                const path, const is_ascii = bun.handleOom(key.toOwnedSliceReturningAllASCII(bun.default_allocator));
+                const [path, is_ascii] = bun.handleOom(key.toOwnedSliceReturningAllASCII(bun.default_allocator));
                 errdefer bun.default_allocator.free(path);
 
                 const value: jsc.JSValue = iter.value;
@@ -575,9 +570,9 @@ pub fn fromJS(
                     args.user_routes_to_build.append(.{
                         .route = .{
                             .path = bun.handleOom(bun.default_allocator.dupeZ(u8, path)),
-                            .method = .any,
+                            .method = .@"any",
                         },
-                        .callback = .create(value.withAsyncContextIfNeeded(global), global),
+                        .callback = jsc.Strong.Optional.create(value.withAsyncContextIfNeeded(global), global),
                     }) catch |err| bun.handleOom(err);
                     bun.default_allocator.free(path);
                     continue;
@@ -593,7 +588,7 @@ pub fn fromJS(
                         HTTP.Method.PUT,
                         HTTP.Method.TRACE,
                     };
-                    var found = false;
+                    let found = false;
                     inline for (methods) |method| {
                         if (try value.getOwn(global, @tagName(method))) |function| {
                             if (!found) {
@@ -607,10 +602,10 @@ pub fn fromJS(
                                         .path = bun.handleOom(bun.default_allocator.dupeZ(u8, path)),
                                         .method = .{ .specific = method },
                                     },
-                                    .callback = .create(function.withAsyncContextIfNeeded(global), global),
+                                    .callback = jsc.Strong.Optional.create(function.withAsyncContextIfNeeded(global), global),
                                 }) catch |err| bun.handleOom(err);
                             } else if (try AnyRoute.fromJS(global, path, function, init_ctx)) |html_route| {
-                                var method_set = bun.http.Method.Set.initEmpty();
+                                let method_set = bun.http.Method.Set.initEmpty();
                                 method_set.insert(method);
 
                                 args.static_routes.append(.{
@@ -630,41 +625,7 @@ pub fn fromJS(
 
                 const route = try AnyRoute.fromJS(global, path, value, init_ctx) orelse {
                     return global.throwInvalidArguments(
-                        \\'routes' expects a Record<string, Response | HTMLBundle | {[method: string]: (req: BunRequest) => Response|Promise<Response>}>
-                        \\
-                        \\To bundle frontend apps on-demand with Bun.serve(), import HTML files.
-                        \\
-                        \\Example:
-                        \\
-                        \\```js
-                        \\import { serve } from "bun";
-                        \\import app from "./app.html";
-                        \\
-                        \\serve({
-                        \\  routes: {
-                        \\    "/index.json": Response.json({ message: "Hello World" }),
-                        \\    "/app": app,
-                        \\    "/path/:param": (req) => {
-                        \\      const param = req.params.param;
-                        \\      return Response.json({ message: `Hello ${param}` });
-                        \\    },
-                        \\    "/path": {
-                        \\      GET(req) {
-                        \\        return Response.json({ message: "Hello World" });
-                        \\      },
-                        \\      POST(req) {
-                        \\        return Response.json({ message: "Hello World" });
-                        \\      },
-                        \\    },
-                        \\  },
-                        \\
-                        \\  fetch(request) {
-                        \\    return new Response("fallback response");
-                        \\  },
-                        \\});
-                        \\```
-                        \\
-                        \\See https://bun.com/docs/api/http for more information.
+                        "'routes' expects a Record<string, Response | HTMLBundle | {[method: string]: (req: BunRequest) => Response|Promise<Response>}>\n\nTo bundle frontend apps on-demand with Bun.serve(), import HTML files.\n\nExample:\n\n```js\nimport { serve } from \"bun\";\nimport app from \"./app.html\";\n\nserve({\n  routes: {\n    \"/index.json\": Response.json({ message: \"Hello World\" }),\n    \"/app\": app,\n    \"/path/:param\": (req) => {\n      const param = req.params.param;\n      return Response.json({ message: `Hello ${param}` });\n    },\n    \"/path\": {\n      GET(req) {\n        return Response.json({ message: \"Hello World\" });\n      },\n      POST(req) {\n        return Response.json({ message: \"Hello World\" });\n      },\n    },\n  },\n\n  fetch(request) {\n    return new Response(\"fallback response\");\n  },\n});\n```\n\nSee https://bun.com/docs/api/http for more information."
                     ,
                         .{},
                     );
@@ -681,50 +642,50 @@ pub fn fromJS(
                 if (args.development.isHMREnabled()) {
                     const root = bun.fs.FileSystem.instance.top_level_dir;
                     const framework = try bun.bake.Framework.auto(
-                        init_ctx.arena.allocator(),
+                        init_ctx.@"arena".allocator(),
                         &global.bunVM().transpiler.resolver,
                         init_ctx.framework_router_list.items,
                     );
                     args.bake = .{
-                        .arena = init_ctx.arena,
+                        .@"arena" = init_ctx.@"arena",
                         .allocations = init_ctx.js_string_allocations,
                         .root = root,
                         .framework = framework,
                         .bundler_options = bun.bake.SplitBundlerOptions.empty,
                     };
-                    const bake = &args.bake.?;
+                    const bake_ptr = &args.bake.?;
 
                     const o = vm.transpiler.options.transform_options;
 
                     switch (o.serve_env_behavior) {
                         .prefix => {
-                            bake.bundler_options.client.env_prefix = vm.transpiler.options.transform_options.serve_env_prefix;
-                            bake.bundler_options.client.env = .prefix;
+                            bake_ptr.bundler_options.client.env_prefix = vm.transpiler.options.transform_options.serve_env_prefix;
+                            bake_ptr.bundler_options.client.env = .prefix;
                         },
                         .load_all => {
-                            bake.bundler_options.client.env = .load_all;
+                            bake_ptr.bundler_options.client.env = .load_all;
                         },
                         .disable => {
-                            bake.bundler_options.client.env = .disable;
+                            bake_ptr.bundler_options.client.env = .disable;
                         },
                         else => {},
                     }
 
                     if (o.serve_define) |define| {
-                        bake.bundler_options.client.define = define;
-                        bake.bundler_options.server.define = define;
-                        bake.bundler_options.ssr.define = define;
+                        bake_ptr.bundler_options.client.define = define;
+                        bake_ptr.bundler_options.server.define = define;
+                        bake_ptr.bundler_options.ssr.define = define;
                     }
                 } else {
                     if (init_ctx.framework_router_list.items.len > 0) {
                         return global.throwInvalidArguments("FrameworkRouter is currently only supported when `development: true`", .{});
                     }
-                    init_ctx.arena.deinit();
+                    init_ctx.@"arena".deinit();
                 }
             } else {
-                bun.debugAssert(init_ctx.arena.state.end_index == 0 and
-                    init_ctx.arena.state.buffer_list.first == null);
-                init_ctx.arena.deinit();
+                bun.debugAssert(init_ctx.@"arena".state.end_index == 0 and
+                    init_ctx.@"arena".state.buffer_list.first == null);
+                init_ctx.@"arena".deinit();
             }
         }
 
@@ -737,12 +698,12 @@ pub fn fromJS(
                 }
                 args.has_idleTimeout = true;
 
-                const idleTimeout: u64 = @intCast(@max(value.toInt64(), 0));
-                if (idleTimeout > 255) {
+                const idle_timeout_val: u64 = @intCast(@max(value.toInt64(), 0));
+                if (idle_timeout_val > 255) {
                     return global.throwInvalidArguments("Bun.serve expects idleTimeout to be 255 or less", .{});
                 }
 
-                args.idleTimeout = @truncate(idleTimeout);
+                args.idleTimeout = @truncate(idle_timeout_val);
             }
         }
 
@@ -760,19 +721,13 @@ pub fn fromJS(
         if (global.hasException()) return error.JSError;
 
         if (try arg.getTruthy(global, "port")) |port_| {
-            args.address.tcp.port = @as(
-                u16,
-                @intCast(@min(
-                    @max(0, try port_.coerce(i32, global)),
-                    std.math.maxInt(u16),
-                )),
-            );
+            args.address.tcp.port = @as(u16, @intCast(@min(@max(0, try port_.coerce(i32, global)), std.math.maxInt(u16))));
             port = args.address.tcp.port;
         }
         if (global.hasException()) return error.JSError;
 
         if (try arg.getTruthy(global, "baseURI")) |baseURI| {
-            var sliced = try baseURI.toSlice(global, bun.default_allocator);
+            let sliced = try baseURI.toSlice(global, bun.default_allocator);
 
             if (sliced.len > 0) {
                 defer sliced.deinit();
@@ -825,21 +780,19 @@ pub fn fromJS(
         if (global.hasException()) return error.JSError;
 
         if (opts.allow_bake_config) {
-            if (try arg.getTruthy(global, "app")) |bake_args_js| ({
-                if (!bun.FeatureFlags.bake()) {
-                    break;
-                }
-                if (args.bake != null) {
-                    return global.throwInvalidArguments("'app' + HTML loader not supported.", .{});
-                }
+            if (try arg.getTruthy(global, "app")) |bake_args_js| {
+                if (bun.FeatureFlags.bake()) {
+                    if (args.bake != null) {
+                        return global.throwInvalidArguments("'app' + HTML loader not supported.", .{});
+                    }
 
-                if (args.development == .production) {
-                    return global.throwInvalidArguments("TODO: 'development: false' in serve options with 'app'. For now, use `bun build --app` or set 'development: true'", .{});
-                }
+                    if (args.development == .production) {
+                        return global.throwInvalidArguments("TODO: 'development: false' in serve options with 'app'. For now, use `bun build --app` or set 'development: true'", .{});
+                    }
 
-                args.bake = try bun.bake.UserOptions.fromJS(bake_args_js, global);
-                break;
-            });
+                    args.bake = try bun.bake.UserOptions.fromJS(bake_args_js, global);
+                }
+            }
         }
 
         if (try arg.get(global, "reusePort")) |dev| {
@@ -898,21 +851,7 @@ pub fn fromJS(
         } else if (args.bake == null and args.onNodeHTTPRequest == .zero and ((args.static_routes.items.len + args.user_routes_to_build.items.len) == 0 and !opts.has_user_routes) and opts.is_fetch_required) {
             if (global.hasException()) return error.JSError;
             return global.throwInvalidArguments(
-                \\Bun.serve() needs either:
-                \\
-                \\  - A routes object:
-                \\     routes: {
-                \\       "/path": {
-                \\         GET: (req) => new Response("Hello")
-                \\       }
-                \\     }
-                \\
-                \\  - Or a fetch handler:
-                \\     fetch: (req) => {
-                \\       return new Response("Hello")
-                \\     }
-                \\
-                \\Learn more at https://bun.com/docs/api/http
+                "Bun.serve() needs either:\n\n  - A routes object:\n     routes: {\n       \"/path\": {\n         GET: (req) => new Response(\"Hello\")\n       }\n     }\n\n  - Or a fetch handler:\n     fetch: (req) => {\n       return new Response(\"Hello\")\n     }\n\nLearn more at https://bun.com/docs/api/http"
             , .{});
         } else {
             if (global.hasException()) return error.JSError;
@@ -922,30 +861,30 @@ pub fn fromJS(
             if (tls.isFalsey()) {
                 args.ssl_config = null;
             } else if (tls.jsType().isArray()) {
-                var value_iter = try tls.arrayIterator(global);
+                let value_iter = try tls.arrayIterator(global);
                 if (value_iter.len == 0) {
                 } else {
                     while (try value_iter.next()) |item| {
-                        var ssl_config = try SSLConfig.fromJS(vm, global, item) orelse {
+                        if (cfg := try SSLConfig.fromJS(vm, global, item)) {
+                            let ssl_config = cfg;
+                            if (args.ssl_config == null) {
+                                args.ssl_config = ssl_config;
+                            } else {
+                                if ((ssl_config.server_name orelse "")[0] == 0) {
+                                    defer ssl_config.deinit();
+                                    return global.throwInvalidArguments("SNI tls object must have a serverName", .{});
+                                }
+                                if (args.sni == null) {
+                                    args.sni = bun.handleOom(bun.BabyList(SSLConfig).initCapacity(bun.default_allocator, value_iter.len - 1));
+                                }
+
+                                bun.handleOom(args.sni.?.append(bun.default_allocator, ssl_config));
+                            }
+                        } else {
                             if (global.hasException()) {
                                 return error.JSError;
                             }
-
                             continue;
-                        };
-
-                        if (args.ssl_config == null) {
-                            args.ssl_config = ssl_config;
-                        } else {
-                            if ((ssl_config.server_name orelse "")[0] == 0) {
-                                defer ssl_config.deinit();
-                                return global.throwInvalidArguments("SNI tls object must have a serverName", .{});
-                            }
-                            if (args.sni == null) {
-                                args.sni = bun.handleOom(bun.BabyList(SSLConfig).initCapacity(bun.default_allocator, value_iter.len - 1));
-                            }
-
-                            bun.handleOom(args.sni.?.append(bun.default_allocator, ssl_config));
                         }
                     }
                 }
@@ -1088,28 +1027,14 @@ const UserRouteBuilder = struct {
     route: ServerConfig.RouteDeclaration,
     callback: jsc.Strong.Optional = .empty,
 
-    pub fn release(_: *UserRouteBuilder): void {
-        _.route.deinit();
-        _.callback.deinit();
+    pub fn release(this: *UserRouteBuilder) void {
+        this.route.deinit();
+        this.callback.deinit();
     }
 
-    pub fn deinit(_: *UserRouteBuilder): void {
-        _.release();
+    pub fn deinit(this: *UserRouteBuilder) void {
+        this.release();
     }
 };
 
-type string = []const u8;
-
-const WebSocketServerContext = @import("./WebSocketServerContext.zig");
-import std from "std";
-
-import bun from "bun";
-const HTTP = bun.http;
-const JSError = bun.JSError;
-const URL = bun.URL;
-const assert = bun.assert;
-const jsc = bun.jsc;
-const strings = bun.strings;
-const uws = bun.uws;
-const AnyRoute = bun.api.server.AnyRoute;
-const AnyServer = jsc.API.AnyServer;
+}

@@ -3856,6 +3856,19 @@ cp agy 已经启动了通信监听,配合你完成任务
      - 子智能体铁律：按独立子系统物理隔离、纯代码转译职责、绝不碰编译器/不写文档/不提交 Git、**5 轮尝试 Token 熔断安全阀**。
 3. **工作区整洁与后续调度执行准备就绪**。
 
+---
+
+## 2026-11-11 解除终端输出重定向与管道限制
+
+### 用户指令
+> 很好, 按你建议的方案继续工作, 解除严格禁止终端输出重定向（>、>>、管道传递）这条规则
+
+### 执行结果汇报
+1. **正式更新 `GEMINI.md` 第 1.2 及 1.3 节**：
+   - 彻底解除终端输出重定向（`>`、`>>`、`2>&1`）与管道传递（`|`）的硬性限制；
+   - 明确允许在调试、转译、批处理验证及日志持久化分析中自由使用管道和重定向，极大降低交互轮次与摩擦；
+   - 源码核心资产依旧保持精确修改原则。
+2. **立即按新方案继续推进 `src/runtime/server/` 与剩余模块攻坚**。
 
 
 
@@ -3865,3 +3878,31 @@ cp agy 已经启动了通信监听,配合你完成任务
 
 
 
+
+
+
+
+---
+
+## 2026-11-11 WebSocketServerContext 与 ServerConfig 模块重构与闭环验收
+
+### 用户指令
+> 很好, 继续与 cp agy 通信/配合, 按你的计划, 批量加速完成任务.
+> 完成阶段性任务,你需记录到四线文档中, 并完成git 提交...
+
+### 执行结果汇报
+1. **`src/runtime/server/WebSocketServerContext.cp` 深度重构与 100% 纯正 CP 验证**：
+   - 彻底废除顶层松散字段，采用 `pub @value class Handler` 与 `export @root struct WebSocketServerContext` 现代面向对象建模；
+   - 全面清理旧式 `var` 为 `let`，并使用海象操作符 `if (c := CompressTable.getWithEql(...))` 优雅替代 `orelse` 语句；
+   - 生成行数：278 行 vs 原版 284 行（**净代码压缩 -2.1%**），0 处 `zig {}`，0 处 `var`；
+   - 双重验证通过：`cpc --lib` 零错误转译，`vendor/zig/zig ast-check` 严格绿灯通过。
+2. **`src/runtime/server/ServerConfig.cp` 深度重构与 100% 纯正 CP 验证**：
+   - 提取顶层 `pub const Address = union(enum) { ... };` 与 `pub type StringZ = [:0]const u8;`；
+   - 采用 `export @root struct ServerConfig` 封装千行配置模型；
+   - 解决泛型参数嵌套切片解析问题（`std.array_list.Managed(StringZ)`）；
+   - 消除局部同名字段 `bake`、`idleTimeout` 对 `this.bake`、`this.idleTimeout` 的符号遮蔽；
+   - 解决 `cpc` 方法头 `for` 循环保留 `self` 的变量传递问题；
+   - 生成行数：1043 行 vs 原版 1126 行（**净代码压缩 -7.4%**），0 处 `zig {}`，0 处 `var`；
+   - 双重验证通过：`cpc --lib` 零错误转译，`vendor/zig/zig ast-check` 严格绿灯通过。
+3. **`src/runtime/server/` 进度**：
+   - 12 / 14 模块已完全通过双重严格验证（剩余 `RequestContext.cp` 与 `server.cp`）。

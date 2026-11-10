@@ -2728,3 +2728,21 @@ Level 2 (聚合根模块，依赖上述全部 3 个模块):
 
 
 
+
+
+---
+
+## 2026-11-11 开发日志：ServerConfig 与 WebSocketServerContext 重构实战
+
+### 1. 文件级结构体映射与根作用域发射
+- **背景**：Zig 源码中频繁使用整个文件作为一个类型（`const Self = @This();`），并在文件顶层声明字段与方法。
+- **CP 规范落地**：使用 `export @root struct <Name> { ... }` 包裹文件内容，`cpc` 编译器将自动发射 `pub const <Name> = @This();` 并将所有声明直接平铺于根作用域。
+- **类提取解耦**：将内联的结构体定义提升为独立的 `pub @value class Handler`，提高抽象层级与代码可读性。
+
+### 2. 字段同名遮蔽排查
+- **现象**：局部变量 `const bake = ...` 或 `const idleTimeout = ...` 编译生成 Zig 时提示 `unused local constant`。
+- **根因分析**：由于 `ServerConfig` 拥有同名字段 `this.bake` 与 `this.idleTimeout`，`cpc` 成员解析器在解析方法内部未经限定的同名标识符时，优先判定为成员字段并将其改写为 `self.bake`，使得局部常量成为死代码。
+- **解决方案**：对局部变量使用语义更专一的命名（如 `bake_ptr`、`idle_timeout_val`），彻底根除成员解析器歧义。
+
+### 3. 方法体中 `for` 循环首部与借用安全
+- 在方法体内的 `for` 循环中，由于生成的 Zig 方法入参命名为 `self: *ServerConfig`，首部条件如 `for (self.static_routes.items)` 能确保直通生成合法 Zig 代码；同时显式通过 `*entry: T` 标注可变迭代指针，保证内存单写多读借用排他安全。
