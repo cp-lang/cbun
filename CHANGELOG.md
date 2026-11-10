@@ -1276,3 +1276,15 @@
   - 封装为 `export @root struct ServerConfig`，提取 `Address` 联合体与 `StringZ` 类型别名；
   - 修复多处字段同名遮蔽与借用参数可变性定义；
   - 生成行数 1043 行 vs 原版 1126 行（-7.4% 净压缩），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
+
+- `src/runtime/server/RequestContext.cp` / `RequestContext.zig`:
+  - 修复泛型函数返回结构体类型标记与元组返回类型 `[MimeType, bool, bool]`；
+  - 清理全文件 `var` 为 `let`（0 处 `var`，0 处 `zig {}`）；
+  - 生成行数 2721 行 vs 原版 2736 行（-0.5% 净压缩），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
+- `src/runtime/server/server.cp` / `server.zig`:
+  - 顶层声明 `ProtocolEnum` 与 `DevelopmentKind` 具名枚举类型，重构 `NewServer` 参数；
+  - 迁移所有 C 外部调用接口至标准 `@c extern fn` 修饰符；
+  - 清理全文件 `var` 为 `let`（0 处 `var`，0 处 `zig {}`）；
+  - 生成行数 3855 行 vs 原版 3855 行（0% 膨胀），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
+- `src/runtime/server/`:
+  - 全目录 14 个核心网络与 HTTP 服务端模块 100% 达成双重编译验证（通过率 14/14，整目录净压缩 -0.93%）。

@@ -12,7 +12,7 @@ pub const os_path_buffer_pool = (if (Environment.isWindows) w_path_buffer_pool e
 pub const bun = @import("bun");
 
 pub fn PathBufferPoolT(comptime T: type) type {
-    return struct {
+        return struct {
         const Pool = ObjectPool(T, null, true, 4);
 
         pub fn get() *T {

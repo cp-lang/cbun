@@ -2,43 +2,41 @@
 const std = @import("std");
 const string = []const u8;
 
-const c = struct {
-        extern fn us_quic_stream_socket(s: *Stream) ?*Socket;
-        extern fn us_quic_stream_shutdown(s: *Stream) void;
-        extern fn us_quic_stream_close(s: *Stream) void;
-        extern fn us_quic_stream_reset(s: *Stream) void;
-        extern fn us_quic_stream_header_count(s: *Stream) c_uint;
-        extern fn us_quic_stream_header(s: *Stream, i: c_uint) ?*const Header;
-        extern fn us_quic_stream_ext(s: *Stream) *anyopaque;
-        extern fn us_quic_stream_write(s: *Stream, data: [*]const u8, len: c_uint) c_int;
-        extern fn us_quic_stream_want_write(s: *Stream, want: c_int) void;
-        extern fn us_quic_stream_send_headers(s: *Stream, h: [*]const Header, n: c_uint, end_stream: c_int) c_int;
-    };
-
 pub const Header = @import("./Header.zig").Header;
 pub const Socket = @import("./Socket.zig").Socket;
-pub const Stream = opaque {
-
-pub fn write(self: *Stream, data: []const u8) i32 {
-            return c.us_quic_stream_write(self, data.ptr, @intCast(data.len));
-    }
-
-pub fn wantWrite(self: *Stream, want: bool) void {
-            c.us_quic_stream_want_write(self, @intFromBool(want));
-    }
-
-pub fn sendHeaders(self: *Stream, headers: anytype, end_stream: bool) i32 {
-            return c.us_quic_stream_send_headers(self, headers.ptr, @intCast(headers.len), @intFromBool(end_stream));
-    }
-    pub const socket = c.us_quic_stream_socket;
-            pub const shutdown = c.us_quic_stream_shutdown;
-            pub const close = c.us_quic_stream_close;
-            pub const reset = c.us_quic_stream_reset;
-            pub const headerCount = c.us_quic_stream_header_count;
-            pub const header = c.us_quic_stream_header;
-    pub fn ext(self: *Stream, comptime T: type) *?*T {
-                const PtrT: type = *?*T;
-                return @as(PtrT, @ptrCast(@alignCast(c.us_quic_stream_ext(self))));
-            }
+const c = struct {
+    extern fn us_quic_stream_socket(s: *Stream) ?*Socket;
+    extern fn us_quic_stream_shutdown(s: *Stream) void;
+    extern fn us_quic_stream_close(s: *Stream) void;
+    extern fn us_quic_stream_reset(s: *Stream) void;
+    extern fn us_quic_stream_header_count(s: *Stream) c_uint;
+    extern fn us_quic_stream_header(s: *Stream, i: c_uint) ?*const Header;
+    extern fn us_quic_stream_ext(s: *Stream) *anyopaque;
+    extern fn us_quic_stream_write(s: *Stream, data: [*]const u8, len: c_uint) c_int;
+    extern fn us_quic_stream_want_write(s: *Stream, want: c_int) void;
+    extern fn us_quic_stream_send_headers(s: *Stream, h: [*]const Header, n: c_uint, end_stream: c_int) c_int;
 };
+pub const Stream = opaque {
+    pub fn write(self: *Stream, data: []const u8) i32 {
+        return c.us_quic_stream_write(self, data.ptr, @intCast(data.len));
+    }
 
+    pub fn wantWrite(self: *Stream, want: bool) void {
+        c.us_quic_stream_want_write(self, @intFromBool(want));
+    }
+
+    pub fn sendHeaders(self: *Stream, headers: anytype, end_stream: bool) i32 {
+        return c.us_quic_stream_send_headers(self, headers.ptr, @intCast(headers.len), @intFromBool(end_stream));
+    }
+
+    pub const socket = c.us_quic_stream_socket;
+    pub const shutdown = c.us_quic_stream_shutdown;
+    pub const close = c.us_quic_stream_close;
+    pub const reset = c.us_quic_stream_reset;
+    pub const headerCount = c.us_quic_stream_header_count;
+    pub const header = c.us_quic_stream_header;
+
+    pub fn ext(self: *Stream, comptime T: type) *?*T {
+        return @ptrCast(c.us_quic_stream_ext(self));
+    }
+};

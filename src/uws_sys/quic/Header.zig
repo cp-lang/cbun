@@ -53,7 +53,7 @@ pub fn classify(self: Qpack, hdr_name: []const u8) ?Class {
             host,
             indexed: struct { name: []const u8, index: Qpack },
     
-            fn idx(comptime hdr_name: []const u8, i: Qpack): Class {
+            fn idx(comptime hdr_name: []const u8, i: Qpack) Class {
                 return .{ .indexed = .{ .name = hdr_name, .index = i } };
             }
         };
@@ -102,10 +102,10 @@ pub const Header = extern struct {
     name_len: u32,
     value: [*]const u8,
     value_len: u32,
-    qpack_index: i32 = 0xffffffffffffffff,
+    qpack_index: i32 = -1,
 
 pub fn init(name_: []const u8, value_: []const u8, idx: ?Qpack) Header {
-            var qidx: i32 = 0xffffffffffffffff;
+            var qidx: i32 = -1;
             _ = &qidx;
             if (idx) |i| {
                 _ = &i;

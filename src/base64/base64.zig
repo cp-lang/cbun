@@ -12,29 +12,35 @@ pub const url_safe_alphabet_chars = ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop
 pub const url_safe = Codecs{ .alphabet_chars = url_safe_alphabet_chars, .pad_char = 61, .decoderWithIgnore = urlSafeBase64DecoderWithIgnore, .Encoder = Base64Encoder.init(url_safe_alphabet_chars, 61), .Decoder = Base64Decoder.init(url_safe_alphabet_chars, 61) };
 pub const url_safe_no_pad = Codecs{ .alphabet_chars = url_safe_alphabet_chars, .pad_char = null, .decoderWithIgnore = urlSafeBase64DecoderWithIgnore, .Encoder = Base64Encoder.init(url_safe_alphabet_chars, null), .Decoder = Base64Decoder.init(url_safe_alphabet_chars, null) };
 const mixed_decoder = createMixedDecoder();
-fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
-fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
 fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
 fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
-    const T = @TypeOf(val);
-    if (comptime @typeInfo(T) == .comptime_int) return val << shift;
-    if (comptime @typeInfo(T) == .int) {
-        const ShiftType = std.math.Log2Int(T);
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val << shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
         const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
         return val << @as(ShiftType, @truncate(u_shift));
     }
     return val << shift;
 }
 fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
-    const T = @TypeOf(val);
-    if (comptime @typeInfo(T) == .comptime_int) return val >> shift;
-    if (comptime @typeInfo(T) == .int) {
-        const ShiftType = std.math.Log2Int(T);
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val >> shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
         const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
         return val >> @as(ShiftType, @truncate(u_shift));
     }
     return val >> shift;
 }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
 pub const bun = @import("bun");
 pub const Base64Encoder = struct {
     alphabet_chars: [64]u8,

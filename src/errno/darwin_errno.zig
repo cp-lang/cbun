@@ -115,32 +115,24 @@ pub const SystemErrno = enum(u16) {
     ENOTRECOVERABLE = 104,
     EOWNERDEAD = 105,
     EQFULL = 106,
-    pub fn get(s: []const u8) ?@This() {
-        return std.meta.stringToEnum(@This(), s);
-    }
-    pub fn has(s: []const u8) bool {
-        return std.meta.stringToEnum(@This(), s) != null;
-    }
-    pub fn fromName(s: []const u8) ?@This() {
-        return get(s);
-    }
-    pub fn name(self: @This()) []const u8 {
-        return @tagName(self);
-    }
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 
-    pub fn init(code: anytype) ?SystemErrno {
-        if ((code < 0)) {
-            if ((code <= (0 - MAX_ERRNO))) {
+pub fn init(code: anytype) ?SystemErrno {
+            if ((code < 0)) {
+                if ((code <= (0 - MAX_ERRNO))) {
+                    return null;
+                }
+                return @enumFromInt((0 - code));
+            }
+            if ((code >= MAX_ERRNO)) {
                 return null;
             }
-            return @enumFromInt((0 - code));
-        }
-        if ((code >= MAX_ERRNO)) {
-            return null;
-        }
-        return @enumFromInt(code);
+            return @enumFromInt(code);
     }
-
+    
     pub const max = MAX_ERRNO;
 };
 
@@ -216,10 +208,11 @@ pub const UV_E = struct {
     pub const NOEXEC: i32 = @intFromEnum(SystemErrno.ENOEXEC);
 };
 
+
 pub fn getErrno(rc: anytype) E {
-    if ((rc == -1)) {
-        return @enumFromInt((std.c._errno()).*);
-    } else {
-        return .SUCCESS;
-    }
+        if ((rc == -1)) {
+            return @enumFromInt((std.c._errno()).*);
+        } else {
+            return .SUCCESS;
+        }
 }

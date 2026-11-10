@@ -6,22 +6,24 @@ const AbsPath = bun.AbsPath;
 const OOM = bun.OOM;
 const strings = bun.strings;
 pub const bun = @import("bun");
-pub const EnvPathOptions = struct {};
+pub const EnvPathOptions = struct {
+};
+
 
 pub fn trimPathDelimiters(input: []const u8) []const u8 {
-    var trimmed = input;
-    _ = &trimmed;
-    while (((trimmed.len > 0) and (trimmed[0] == std.fs.path.delimiter))) {
-        trimmed = trimmed[1..];
-    }
-    while (((trimmed.len > 0) and (trimmed[@as(usize, @intCast((trimmed.len - 1)))] == std.fs.path.delimiter))) {
-        trimmed = trimmed[0..(trimmed.len - 1)];
-    }
-    return trimmed;
+        var trimmed = input;
+        _ = &trimmed;
+        while (((trimmed.len > 0) and (trimmed[0] == std.fs.path.delimiter))) {
+            trimmed = trimmed[1..];
+        }
+        while (((trimmed.len > 0) and (trimmed[@as(usize, @intCast((trimmed.len - 1)))] == std.fs.path.delimiter))) {
+            trimmed = trimmed[0..(trimmed.len - 1)];
+        }
+        return trimmed;
 }
 
 pub fn EnvPath(comptime opts: EnvPathOptions) type {
-    return struct {
+        return struct {
         allocator: std.mem.Allocator,
         buf: std.ArrayListUnmanaged(u8) = .empty,
 

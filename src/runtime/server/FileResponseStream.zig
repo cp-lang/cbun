@@ -8,27 +8,33 @@ const jsc = bun.jsc;
 const uws = bun.uws;
 const AnyResponse = uws.AnyResponse;
 const log = bun.Output.scoped(.FileResponseStream, .hidden);
-fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
-    const T = @TypeOf(val);
-    if (comptime @typeInfo(T) == .comptime_int) return val << shift;
-    if (comptime @typeInfo(T) == .int) {
-        const ShiftType = std.math.Log2Int(T);
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val << shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
         const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
         return val << @as(ShiftType, @truncate(u_shift));
     }
     return val << shift;
 }
 fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
-    const T = @TypeOf(val);
-    if (comptime @typeInfo(T) == .comptime_int) return val >> shift;
-    if (comptime @typeInfo(T) == .int) {
-        const ShiftType = std.math.Log2Int(T);
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val >> shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
         const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
         return val >> @as(ShiftType, @truncate(u_shift));
     }
     return val >> shift;
 }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
 pub const bun = @import("bun");
 pub const FileResponseStream = @This();
 
@@ -54,7 +60,7 @@ pub fn start(self: FileResponseStream, opts: StartOptions) void {
         const use_sendfile = self.canSendfile(opts.resp, opts.file_type, opts.length);
         var stream = bun.new(FileResponseStream, .{ .ref_count = .init, .resp = opts.resp, .vm = opts.vm, .fd = opts.fd, .auto_close = opts.auto_close, .idle_timeout = opts.idle_timeout, .ctx = opts.ctx, .on_complete = opts.on_complete, .on_abort = opts.on_abort, .on_error = opts.on_error, .mode = (if (use_sendfile) .sendfile else .reader) });
         var __stream_moved = false; _ = &__stream_moved;
-        defer if (!__stream_moved) { const T = @TypeOf(stream); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = stream.release() catch {}; } else { stream.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = stream; _drop_val.release(); } };
+        defer if (!__stream_moved) { const __T = @TypeOf(stream); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = stream.release() catch {}; } else { stream.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = stream; _drop_val.release(); } };
         _ = stream.resp.timeout(stream.idle_timeout);
         _ = stream.resp.onAborted(*FileResponseStream, onAborted, stream);
         _ = log("start mode={s} len={?d}", .{ @tagName(stream.mode), opts.length });
@@ -220,15 +226,15 @@ pub fn onSendfile(self: *FileResponseStream) bool {
             while (true) {
                 const adjusted = @min(self.sendfile.remain, (if (comptime @typeInfo(@TypeOf(std.math.maxInt(i32))) == .@"enum") cp_cast_int(u64, @intFromEnum(std.math.maxInt(i32))) else cp_cast_int(u64, std.math.maxInt(i32))));
                 var __adjusted_moved = false; _ = &__adjusted_moved;
-                defer if (!__adjusted_moved) { const T = @TypeOf(adjusted); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = adjusted.release() catch {}; } else { adjusted.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = adjusted; _drop_val.release(); } };
+                defer if (!__adjusted_moved) { const __T = @TypeOf(adjusted); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = adjusted.release() catch {}; } else { adjusted.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = adjusted; _drop_val.release(); } };
                 var off: i64 = @intCast(self.sendfile.offset);
                 _ = &off;
                 const rc = std.os.linux.sendfile(self.sendfile.socket_fd.cast(), self.fd.cast(), (&off), adjusted);
                 var __rc_moved = false; _ = &__rc_moved;
-                defer if (!__rc_moved) { const T = @TypeOf(rc); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = rc.release() catch {}; } else { rc.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = rc; _drop_val.release(); } };
+                defer if (!__rc_moved) { const __T = @TypeOf(rc); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = rc.release() catch {}; } else { rc.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = rc; _drop_val.release(); } };
                 const errno = bun.sys.getErrno(rc);
                 var __errno_moved = false; _ = &__errno_moved;
-                defer if (!__errno_moved) { const T = @TypeOf(errno); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = errno.release() catch {}; } else { errno.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = errno; _drop_val.release(); } };
+                defer if (!__errno_moved) { const __T = @TypeOf(errno); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = errno.release() catch {}; } else { errno.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = errno; _drop_val.release(); } };
                 const sent: u64 = @intCast(@max((@as(i64, @intCast(off)) - @as(i64, @intCast(self.sendfile.offset))), 0));
                 self.sendfile.offset = @intCast(off);
                 self.sendfile.remain = (self.sendfile.remain -| sent);
@@ -259,7 +265,7 @@ _ = self.failWith(.{ .errno = @intFromEnum(errno), .syscall = .sendfile, .fd = s
                     _ = &sbytes;
                     const errno = bun.sys.getErrno(std.c.sendfile(self.fd.cast(), self.sendfile.socket_fd.cast(), @intCast(self.sendfile.offset), (&sbytes), null, 0));
                     var __errno_moved = false; _ = &__errno_moved;
-                    defer if (!__errno_moved) { const T = @TypeOf(errno); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = errno.release() catch {}; } else { errno.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = errno; _drop_val.release(); } };
+                    defer if (!__errno_moved) { const __T = @TypeOf(errno); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = errno.release() catch {}; } else { errno.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = errno; _drop_val.release(); } };
                     const sent: u64 = @intCast(sbytes);
                     self.sendfile.offset = (self.sendfile.offset + sent);
                     self.sendfile.remain = (self.sendfile.remain -| sent);

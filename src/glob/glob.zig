@@ -11,37 +11,37 @@ pub const matcher = @import("./matcher.zig");
 pub const walk_mod = @import("./GlobWalker.zig");
 
 pub fn detectGlobSyntax(potential_pattern: []const u8) bool {
-    if (((potential_pattern.len > 0) and (potential_pattern[0] == 33))) {
-        return true;
-    }
-    const SPECIAL_SYNTAX: []const u8 = "*{[?";
-    var i_tok: usize = 0;
-    _ = &i_tok;
-    while ((i_tok < SPECIAL_SYNTAX.len)) {
-        var token = SPECIAL_SYNTAX[@as(usize, @intCast(i_tok))];
-        _ = &token;
-        i_tok = (i_tok + 1);
-        var slice = potential_pattern[0..];
-        _ = &slice;
-        while ((slice.len > 0)) {
-            if (std.mem.indexOfScalar(u8, slice, token)) |idx| {
-                _ = &idx;
-                var i = idx;
-                _ = &i;
-                var backslash_count: u16 = 0;
-                _ = &backslash_count;
-                while (((i > 0) and (potential_pattern[@as(usize, @intCast((i - 1)))] == 92))) {
-                    backslash_count = (backslash_count + 1);
-                    i = (i - 1);
+        if (((potential_pattern.len > 0) and (potential_pattern[0] == 33))) {
+            return true;
+        }
+        const SPECIAL_SYNTAX: []const u8 = "*{[?";
+        var i_tok: usize = 0;
+        _ = &i_tok;
+        while ((i_tok < SPECIAL_SYNTAX.len)) {
+            var token = SPECIAL_SYNTAX[@as(usize, @intCast(i_tok))];
+            _ = &token;
+            i_tok = (i_tok + 1);
+            var slice = potential_pattern[0..];
+            _ = &slice;
+            while ((slice.len > 0)) {
+                if (std.mem.indexOfScalar(u8, slice, token)) |idx| {
+                    _ = &idx;
+                    var i = idx;
+                    _ = &i;
+                    var backslash_count: u16 = 0;
+                    _ = &backslash_count;
+                    while (((i > 0) and (potential_pattern[@as(usize, @intCast((i - 1)))] == 92))) {
+                        backslash_count = (backslash_count + 1);
+                        i = (i - 1);
+                    }
+                    if (((backslash_count % 2) == 0)) {
+                        return true;
+                    }
+                    slice = slice[(idx + 1)..];
+                } else {
+                    break;
                 }
-                if (((backslash_count % 2) == 0)) {
-                    return true;
-                }
-                slice = slice[(idx + 1)..];
-            } else {
-                break;
             }
         }
-    }
-    return false;
+        return false;
 }

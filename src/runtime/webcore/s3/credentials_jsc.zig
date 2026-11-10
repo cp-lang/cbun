@@ -2,23 +2,6 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
 const MultiPartUploadOptions = @import("./multipart_options.zig").MultiPartUploadOptions;
 const bun = @import("bun");
 const jsc = bun.jsc;
@@ -27,7 +10,12 @@ const ACL = bun.S3.ACL;
 const S3Credentials = bun.S3.S3Credentials;
 const S3CredentialsWithOptions = bun.S3.S3CredentialsWithOptions;
 const StorageClass = bun.S3.StorageClass;
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
 
 
 pub fn getCredentialsWithOptions(this: S3Credentials, default_options: MultiPartUploadOptions, options: ?jsc.JSValue, default_acl: ?ACL, default_storage_class: ?StorageClass, default_request_payer: bool, globalObject: *jsc.JSGlobalObject) bun.JSError!S3CredentialsWithOptions {
@@ -47,7 +35,6 @@ pub fn getCredentialsWithOptions(this: S3Credentials, default_options: MultiPart
                     if ((!js_value.isEmptyOrUndefinedOrNull())) {
                         if (js_value.isString()) {
                             const str = try bun.String.fromJS(js_value, globalObject);
-                            _ = &str;
                             defer {
                             _ = str.deref();
                             }
@@ -66,7 +53,6 @@ pub fn getCredentialsWithOptions(this: S3Credentials, default_options: MultiPart
                     if ((!js_value.isEmptyOrUndefinedOrNull())) {
                         if (js_value.isString()) {
                             const str = try bun.String.fromJS(js_value, globalObject);
-                            _ = &str;
                             defer {
                             _ = str.deref();
                             }
@@ -85,7 +71,6 @@ pub fn getCredentialsWithOptions(this: S3Credentials, default_options: MultiPart
                     if ((!js_value.isEmptyOrUndefinedOrNull())) {
                         if (js_value.isString()) {
                             const str = try bun.String.fromJS(js_value, globalObject);
-                            _ = &str;
                             defer {
                             _ = str.deref();
                             }
@@ -104,18 +89,14 @@ pub fn getCredentialsWithOptions(this: S3Credentials, default_options: MultiPart
                     if ((!js_value.isEmptyOrUndefinedOrNull())) {
                         if (js_value.isString()) {
                             const str = try bun.String.fromJS(js_value, globalObject);
-                            _ = &str;
                             defer {
                             _ = str.deref();
                             }
                             if (((str.tag != .Empty) and (str.tag != .Dead))) {
                                 new_credentials._endpointSlice = str.toUTF8(bun.default_allocator);
                                 const endpoint = new_credentials._endpointSlice.?.slice();
-                                _ = &endpoint;
                                 const url = bun.URL.parse(endpoint);
-                                _ = &url;
                                 const normalized_endpoint = url.hostWithPath();
-                                _ = &normalized_endpoint;
                                 if ((normalized_endpoint.len > 0)) {
                                     new_credentials.credentials.endpoint = normalized_endpoint;
                                     new_credentials.credentials.insecure_http = url.isHTTP();
@@ -136,7 +117,6 @@ pub fn getCredentialsWithOptions(this: S3Credentials, default_options: MultiPart
                     if ((!js_value.isEmptyOrUndefinedOrNull())) {
                         if (js_value.isString()) {
                             const str = try bun.String.fromJS(js_value, globalObject);
-                            _ = &str;
                             defer {
                             _ = str.deref();
                             }
@@ -160,7 +140,6 @@ pub fn getCredentialsWithOptions(this: S3Credentials, default_options: MultiPart
                     if ((!js_value.isEmptyOrUndefinedOrNull())) {
                         if (js_value.isString()) {
                             const str = try bun.String.fromJS(js_value, globalObject);
-                            _ = &str;
                             defer {
                             _ = str.deref();
                             }
@@ -219,14 +198,12 @@ pub fn getCredentialsWithOptions(this: S3Credentials, default_options: MultiPart
                     if ((!js_value.isEmptyOrUndefinedOrNull())) {
                         if (js_value.isString()) {
                             const str = try bun.String.fromJS(js_value, globalObject);
-                            _ = &str;
                             defer {
                             _ = str.deref();
                             }
                             if (((str.tag != .Empty) and (str.tag != .Dead))) {
                                 new_credentials._contentDispositionSlice = str.toUTF8(bun.default_allocator);
                                 const slice = new_credentials._contentDispositionSlice.?.slice();
-                                _ = &slice;
                                 if (containsNewlineOrCR(slice)) {
                                     return globalObject.throwInvalidArguments("contentDisposition must not contain newline characters (CR/LF)", .{});
                                 }
@@ -242,14 +219,12 @@ pub fn getCredentialsWithOptions(this: S3Credentials, default_options: MultiPart
                     if ((!js_value.isEmptyOrUndefinedOrNull())) {
                         if (js_value.isString()) {
                             const str = try bun.String.fromJS(js_value, globalObject);
-                            _ = &str;
                             defer {
                             _ = str.deref();
                             }
                             if (((str.tag != .Empty) and (str.tag != .Dead))) {
                                 new_credentials._contentTypeSlice = str.toUTF8(bun.default_allocator);
                                 const slice = new_credentials._contentTypeSlice.?.slice();
-                                _ = &slice;
                                 if (containsNewlineOrCR(slice)) {
                                     return globalObject.throwInvalidArguments("type must not contain newline characters (CR/LF)", .{});
                                 }
@@ -265,14 +240,12 @@ pub fn getCredentialsWithOptions(this: S3Credentials, default_options: MultiPart
                     if ((!js_value.isEmptyOrUndefinedOrNull())) {
                         if (js_value.isString()) {
                             const str = try bun.String.fromJS(js_value, globalObject);
-                            _ = &str;
                             defer {
                             _ = str.deref();
                             }
                             if (((str.tag != .Empty) and (str.tag != .Dead))) {
                                 new_credentials._contentEncodingSlice = str.toUTF8(bun.default_allocator);
                                 const slice = new_credentials._contentEncodingSlice.?.slice();
-                                _ = &slice;
                                 if (containsNewlineOrCR(slice)) {
                                     return globalObject.throwInvalidArguments("contentEncoding must not contain newline characters (CR/LF)", .{});
                                 }

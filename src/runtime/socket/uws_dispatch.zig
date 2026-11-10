@@ -2,10 +2,6 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type { if (@typeInfo(T) == .optional) return T; return ?T; }
-fn CpUnwrapOpt(comptime T: type) type { if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }
-fn cp_opt_is_null(v: anytype) bool { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) return v == null; return false; }
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }
 const bun = @import("bun");
 const handlers = @import("./uws_handlers.zig");
 const vtable = @import("../../uws_sys/vtable.zig");
@@ -14,7 +10,7 @@ const ConnectingSocket = uws.ConnectingSocket;
 const SocketKind = uws.SocketKind;
 const us_socket_t = uws.us_socket_t;
 const VTable = uws.SocketGroup.VTable;
-const tables = (blk: {
+const tables = blk: {
     var t = std.EnumArray(SocketKind, OptVTable).initFill(null);
     _ = &t;
     _ = t.set(.bun_socket_tcp, vtable.make(handlers.BunSocket(false)));
@@ -35,14 +31,33 @@ const tables = (blk: {
     _ = t.set(.valkey_tls, vtable.make(handlers.Valkey(true)));
     _ = t.set(.spawn_ipc, vtable.make(handlers.SpawnIPC));
     break :blk t;
-});
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+};
+comptime {
+    _ = us_dispatch_open;
+    _ = us_dispatch_data;
+    _ = us_dispatch_fd;
+    _ = us_dispatch_writable;
+    _ = us_dispatch_close;
+    _ = us_dispatch_timeout;
+    _ = us_dispatch_long_timeout;
+    _ = us_dispatch_end;
+    _ = us_dispatch_connect_error;
+    _ = us_dispatch_connecting_error;
+    _ = us_dispatch_handshake;
+    _ = us_dispatch_ssl_raw_tap;
+
+}
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
 
 const OptVTable = ?*const VTable;
 
 pub inline fn vt(s: *us_socket_t) *const VTable {
         const kind = s.kind();
-        _ = &kind;
         return (switch (kind) {
 .invalid => bun.Output.panic("us_socket_t with kind=invalid (group={*})", .{ s.rawGroup() }),
 .dynamic, .uws_http, .uws_http_tls, .uws_ws, .uws_ws_tls => s.rawGroup().vtable.?,
@@ -52,7 +67,6 @@ else => (tables.get(kind)).?,
 
 pub inline fn vtc(c: *ConnectingSocket) *const VTable {
         const kind = c.kind();
-        _ = &kind;
         return (switch (kind) {
 .invalid => bun.Output.panic("us_connecting_socket_t with kind=invalid", .{  }),
 .dynamic, .uws_http, .uws_http_tls, .uws_ws, .uws_ws_tls => c.rawGroup().vtable.?,
@@ -150,9 +164,7 @@ pub export fn us_dispatch_handshake(s: *us_socket_t, ok: i32, err: uws.us_bun_ve
 pub export fn us_dispatch_ssl_raw_tap(s: *us_socket_t, data: [*c]u8, len: i32) ?*us_socket_t {
         _ = bun.debugAssert((s.kind() == .bun_socket_tls));
         const TLSSocket = bun.jsc.API.NewSocket(true);
-        _ = &TLSSocket;
         const tls = (s.ext(TLSSocket)).*;
-        _ = &tls;
         if (tls.twin) |raw| {
             _ = &raw;
             _ = raw.onData(TLSSocket.Socket.from(s), data[0..@intCast(len)]);

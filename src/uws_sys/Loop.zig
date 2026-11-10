@@ -3,41 +3,6 @@ const std = @import("std");
 const string = []const u8;
 
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
-pub const FieldInfo = struct {
-    name: []const u8,
-    typeName: []const u8,
-    meta: *Map,
-};
-
-pub const MethodInfo = struct {
-    name: []const u8,
-    returnTypeName: []const u8,
-    paramNames: []const []const u8,
-    isAsync: bool,
-    isStatic: bool,
-    meta: *Map,
-};
-
-pub const TypeInfo = struct {
-    name: []const u8,
-    isRef: bool,
-    fields: []const FieldInfo,
-    methods: []const MethodInfo,
-    meta: *Map,
-    pub fn getField(self: *const TypeInfo, field_name: []const u8) ?FieldInfo {
-        for (self.fields) |f| {
-            if (std.mem.eql(u8, f.name, field_name)) return f;
-        }
-        return null;
-    }
-    pub fn getMethod(self: *const TypeInfo, method_name: []const u8) ?MethodInfo {
-        for (self.methods) |m| {
-            if (std.mem.eql(u8, m.name, method_name)) return m;
-        }
-        return null;
-    }
-};
-
 pub const bun = @import("bun");
 pub const InternalLoopData = @import("./InternalLoopData.zig").InternalLoopData;
 pub const LoopHandler = struct {
@@ -147,10 +112,10 @@ pub fn drainQuicIfNecessary(self: *PosixLoop) void {
 pub fn create(comptime Handler: type) *Loop {
             var mut_pre_cb = (if (@hasDecl(Handler, "pre")) Handler.pre else null);
             var __mut_pre_cb_moved = false; _ = &__mut_pre_cb_moved;
-            defer if (!__mut_pre_cb_moved) { const T = @TypeOf(mut_pre_cb); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = mut_pre_cb.release() catch {}; } else { mut_pre_cb.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = mut_pre_cb; _drop_val.release(); } };
+            defer if (!__mut_pre_cb_moved) { const __T = @TypeOf(mut_pre_cb); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = mut_pre_cb.release() catch {}; } else { mut_pre_cb.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = mut_pre_cb; _drop_val.release(); } };
             var mut_post_cb = (if (@hasDecl(Handler, "post")) Handler.post else null);
             var __mut_post_cb_moved = false; _ = &__mut_post_cb_moved;
-            defer if (!__mut_post_cb_moved) { const T = @TypeOf(mut_post_cb); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = mut_post_cb.release() catch {}; } else { mut_post_cb.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = mut_post_cb; _drop_val.release(); } };
+            defer if (!__mut_post_cb_moved) { const __T = @TypeOf(mut_post_cb); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = mut_post_cb.release() catch {}; } else { mut_post_cb.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = mut_post_cb; _drop_val.release(); } };
             return (us_create_loop(null, Handler.wakeup, mut_pre_cb, mut_post_cb, 0)).?;
     }
 
@@ -163,7 +128,7 @@ pub fn tick(self: *PosixLoop) void {
     }
 
 pub fn tickWithoutIdle(self: *PosixLoop) void {
-            const ts: bun.timespec = .{ sec = 0, nsec = 0 };
+            const ts: bun.timespec = .{ .sec = 0, .nsec = 0 };
             _ = us_loop_run_bun_tick(@as(*Loop, @ptrCast(@alignCast(self))), (&ts));
     }
 
@@ -186,7 +151,7 @@ pub fn nextTick(self: *PosixLoop, comptime UserType: type, user_data: UserType, 
             }
         };
             var __Handler_moved = false; _ = &__Handler_moved;
-            defer if (!__Handler_moved) { const T = @TypeOf(Handler); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = Handler.release() catch {}; } else { Handler.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = Handler; _drop_val.release(); } };
+            defer if (!__Handler_moved) { const __T = @TypeOf(Handler); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = Handler.release() catch {}; } else { Handler.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = Handler; _drop_val.release(); } };
             {
                 _ = uws_loop_defer(@as(*Loop, @ptrCast(@alignCast(self))), @as(*anyopaque, @ptrCast(@alignCast(user_data))), Handler.callback);
             }
@@ -269,10 +234,10 @@ pub fn drainQuicIfNecessary(self: *WindowsLoop) void {
 pub fn create(comptime Handler: type) *WindowsLoop {
             var mut_pre_cb = (if (@hasDecl(Handler, "pre")) Handler.pre else null);
             var __mut_pre_cb_moved = false; _ = &__mut_pre_cb_moved;
-            defer if (!__mut_pre_cb_moved) { const T = @TypeOf(mut_pre_cb); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = mut_pre_cb.release() catch {}; } else { mut_pre_cb.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = mut_pre_cb; _drop_val.release(); } };
+            defer if (!__mut_pre_cb_moved) { const __T = @TypeOf(mut_pre_cb); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = mut_pre_cb.release() catch {}; } else { mut_pre_cb.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = mut_pre_cb; _drop_val.release(); } };
             var mut_post_cb = (if (@hasDecl(Handler, "post")) Handler.post else null);
             var __mut_post_cb_moved = false; _ = &__mut_post_cb_moved;
-            defer if (!__mut_post_cb_moved) { const T = @TypeOf(mut_post_cb); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = mut_post_cb.release() catch {}; } else { mut_post_cb.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = mut_post_cb; _drop_val.release(); } };
+            defer if (!__mut_post_cb_moved) { const __T = @TypeOf(mut_post_cb); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = mut_post_cb.release() catch {}; } else { mut_post_cb.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = mut_post_cb; _drop_val.release(); } };
             return @as(*WindowsLoop, @ptrCast(@alignCast((us_create_loop(null, Handler.wakeup, mut_pre_cb, mut_post_cb, 0)).?)));
     }
 
@@ -303,7 +268,7 @@ pub fn nextTick(self: *WindowsLoop, comptime UserType: type, user_data: UserType
             }
         };
             var __Handler_moved = false; _ = &__Handler_moved;
-            defer if (!__Handler_moved) { const T = @TypeOf(Handler); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = Handler.release() catch {}; } else { Handler.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = Handler; _drop_val.release(); } };
+            defer if (!__Handler_moved) { const __T = @TypeOf(Handler); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = Handler.release() catch {}; } else { Handler.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = Handler; _drop_val.release(); } };
             {
                 _ = uws_loop_defer(@as(*Loop, @ptrCast(@alignCast(self))), @as(*anyopaque, @ptrCast(@alignCast(user_data))), Handler.callback);
             }

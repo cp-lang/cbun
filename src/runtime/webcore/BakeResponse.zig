@@ -1,146 +1,143 @@
-pub fn fixDeadCodeElimination() void {
-    std.mem.doNotOptimizeAway(&BakeResponseClass__constructForSSR);
-    std.mem.doNotOptimizeAway(&BakeResponseClass__constructRender);
-}
-
-extern "C" fn BakeResponse__createForSSR(globalObject: *JSGlobalObject, this: *Response, kind: u8) callconv(jsc.conv) jsc.JSValue;
-
-/// Corresponds to `JSBakeResponseKind` in
-/// `src/jsc/bindings/JSBakeResponse.h`
-const SSRKind = enum(u8) {
-    regular = 0,
-    redirect = 1,
-    render = 2,
-};
-
-pub fn toJSForSSR(this: *Response, globalObject: *JSGlobalObject, kind: SSRKind) JSValue {
-    this.calculateEstimatedByteSize();
-    return BakeResponse__createForSSR(globalObject, this, @intFromEnum(kind));
-}
-
-pub export fn BakeResponseClass__constructForSSR(globalObject: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame, bake_ssr_has_jsx: *c_int, js_this: jsc.JSValue) callconv(jsc.conv) ?*anyopaque {
-    return @as(*Response, constructor(globalObject, callFrame, bake_ssr_has_jsx, js_this) catch |err| switch (err) {
-        error.JSError => return null,
-        error.OutOfMemory => {
-            globalObject.throwOutOfMemory() catch {};
-            return null;
-        },
-        error.JSTerminated => return null,
-    });
-}
-
-pub fn constructor(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame, bake_ssr_has_jsx: *c_int, js_this: jsc.JSValue) bun.JSError!*Response {
-    var arguments = callframe.argumentsAsArray(2);
-
-    // Allow `return new Response(<jsx> ... </jsx>, { ... }`
-    // inside of a react component
-    if (!arguments[0].isUndefinedOrNull() and arguments[0].isObject()) {
-        bake_ssr_has_jsx.* = 0;
-        if (try arguments[0].isJSXElement(globalThis)) {
-            const vm = globalThis.bunVM();
-            if (try vm.getDevServerAsyncLocalStorage()) |async_local_storage| {
-                try assertStreamingDisabled(globalThis, async_local_storage, "new Response(<jsx />, { ... })");
-            }
-            bake_ssr_has_jsx.* = 1;
-        }
-    }
-
-    return Response.constructor(globalThis, callframe, js_this);
-}
-
-pub export fn BakeResponseClass__constructRedirect(globalObject: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame) callconv(jsc.conv) jsc.JSValue {
-    return jsc.toJSHostCall(globalObject, @src(), constructRedirect, .{ globalObject, callFrame });
-}
-
-pub fn constructRedirect(
-    globalThis: *jsc.JSGlobalObject,
-    callframe: *jsc.CallFrame,
-) bun.JSError!JSValue {
-    const response = try Response.constructRedirectImpl(globalThis, callframe);
-    const ptr = bun.new(Response, response);
-
-    const vm = globalThis.bunVM();
-    // Check if dev_server_async_local_storage is set (indicating we're in Bun dev server)
-    if (try vm.getDevServerAsyncLocalStorage()) |async_local_storage| {
-        try assertStreamingDisabled(globalThis, async_local_storage, "Response.redirect");
-        return toJSForSSR(ptr, globalThis, .redirect);
-    }
-
-    return ptr.toJS(globalThis);
-}
-
-pub export fn BakeResponseClass__constructRender(globalObject: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame) callconv(jsc.conv) jsc.JSValue {
-    return @call(bun.callmod_inline, jsc.toJSHostFn(constructRender), .{ globalObject, callFrame });
-}
-
-/// This function is only available on JSBakeResponse
-pub fn constructRender(
-    globalThis: *jsc.JSGlobalObject,
-    callframe: *jsc.CallFrame,
-) bun.JSError!JSValue {
-    const arguments = callframe.argumentsAsArray(2);
-    const vm = globalThis.bunVM();
-
-    // Check if dev server async local_storage is set
-    const async_local_storage = (try vm.getDevServerAsyncLocalStorage()) orelse {
-        return globalThis.throwInvalidArguments("Response.render() is only available in the Bun dev server", .{});
-    };
-
-    try assertStreamingDisabled(globalThis, async_local_storage, "Response.render");
-
-    // Validate arguments
-    if (arguments.len < 1) {
-        return globalThis.throwInvalidArguments("Response.render() requires at least a path argument", .{});
-    }
-
-    const path_arg = arguments[0];
-    if (!path_arg.isString()) {
-        return globalThis.throwInvalidArguments("Response.render() path must be a string", .{});
-    }
-
-    // Get the path string
-    const path_str = try path_arg.toBunString(globalThis);
-    defer path_str.deref();
-
-    const path_utf8 = path_str.toUTF8(bun.default_allocator);
-    defer path_utf8.deinit();
-
-    // Create a Response with Render body
-    const response = bun.new(Response, Response.init(
-        .{
-            .status_code = 200,
-            .headers = headers: {
-                var headers = bun.webcore.FetchHeaders.createEmpty();
-                try headers.put(.Location, path_utf8.slice(), globalThis);
-                break :headers headers;
-            },
-        },
-        .{ .value = .Empty },
-        bun.String.empty,
-        false,
-    ));
-
-    const response_js = toJSForSSR(response, globalThis, .render);
-    response_js.ensureStillAlive();
-
-    return response_js;
-}
-
-fn assertStreamingDisabled(globalThis: *jsc.JSGlobalObject, async_local_storage: JSValue, display_function: []const u8) bun.JSError!void {
-    if (async_local_storage.isEmptyOrUndefinedOrNull() or !async_local_storage.isObject()) return globalThis.throwInvalidArguments("store value must be an object", .{});
-    const getStoreFn = (try async_local_storage.getPropertyValue(globalThis, "getStore")) orelse return globalThis.throwInvalidArguments("store value must have a \"getStore\" field", .{});
-    if (!getStoreFn.isCallable()) return globalThis.throwInvalidArguments("\"getStore\" must be a function", .{});
-    const store_value = try getStoreFn.call(globalThis, async_local_storage, &.{});
-    const streaming_val = (try store_value.getPropertyValue(globalThis, "streaming")) orelse return globalThis.throwInvalidArguments("store value must have a \"streaming\" field", .{});
-    if (!streaming_val.isBoolean()) return globalThis.throwInvalidArguments("\"streaming\" field must be a boolean", .{});
-    if (streaming_val.asBoolean()) return globalThis.throwInvalidArguments("\"{s}\" is not available when `export const streaming = true`", .{display_function});
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
 const Response = bun.webcore.Response;
-
 const jsc = bun.jsc;
 const JSGlobalObject = jsc.JSGlobalObject;
 const JSValue = jsc.JSValue;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const SSRKind = enum(u8) {
+    regular = 0,
+    redirect = 1,
+    render = 2,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
+
+
+pub fn fixDeadCodeElimination() void {
+        _ = std.mem.doNotOptimizeAway(*const BakeResponseClass__constructForSSR);
+        _ = std.mem.doNotOptimizeAway(*const BakeResponseClass__constructRender);
+}
+
+pub extern "c" fn BakeResponse__createForSSR(globalObject: *JSGlobalObject, this: *Response, kind: u8) callconv(jsc.conv) jsc.JSValue;
+
+pub fn toJSForSSR(this: *Response, globalObject: *JSGlobalObject, kind: SSRKind) JSValue {
+        _ = this.calculateEstimatedByteSize();
+        return BakeResponse__createForSSR(globalObject, this, @intFromEnum(kind));
+}
+
+pub fn BakeResponseClass__constructForSSR(globalObject: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame, bake_ssr_has_jsx: *c_int, js_this: jsc.JSValue) callconv(jsc.conv) ?*anyopaque {
+        const res = (blk_catch_0: { break :blk_catch_0 ((constructor(globalObject, callFrame, bake_ssr_has_jsx, js_this)) catch |err| { _ = &err; break :blk_catch_0 @as(*Response, (switch (err) {
+error.JSError => {
+return null;
+},
+error.OutOfMemory => {
+{
+            _ = (blk_catch_1: { break :blk_catch_1 ((globalObject.throwOutOfMemory()) catch |__ce_1| { _ = &__ce_1;  }); });
+            return null;
+        }
+},
+error.JSTerminated => {
+return null;
+},
+})); }); });
+        return @as(?*anyopaque, @ptrCast(@alignCast(&(res))));
+}
+
+pub fn constructor(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame, bake_ssr_has_jsx: *c_int, js_this: jsc.JSValue) bun.JSError!*Response {
+        var arguments = callframe.argumentsAsArray(2);
+        _ = &arguments;
+        if (((!arguments[0].isUndefinedOrNull()) and arguments[0].isObject())) {
+            bake_ssr_has_jsx.* = 0;
+            if (try arguments[0].isJSXElement(globalThis)) {
+                const vm = globalThis.bunVM();
+                if (try vm.getDevServerAsyncLocalStorage()) |async_local_storage| {
+                    _ = &async_local_storage;
+                    _ = try assertStreamingDisabled(globalThis, async_local_storage, "new Response(<jsx />, { ... })");
+                }
+                bake_ssr_has_jsx.* = 1;
+            }
+        }
+        return Response.constructor(globalThis, callframe, js_this);
+}
+
+pub fn BakeResponseClass__constructRedirect(globalObject: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame) callconv(jsc.conv) jsc.JSValue {
+        return jsc.toJSHostCall(globalObject, @src(), constructRedirect, .{ globalObject, callFrame });
+}
+
+pub fn constructRedirect(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!JSValue {
+        const response = try Response.constructRedirectImpl(globalThis, callframe);
+        const ptr = bun.new(Response, response);
+        const vm = globalThis.bunVM();
+        if (try vm.getDevServerAsyncLocalStorage()) |async_local_storage| {
+            _ = &async_local_storage;
+            _ = try assertStreamingDisabled(globalThis, async_local_storage, "Response.redirect");
+            return toJSForSSR(ptr, globalThis, .redirect);
+        }
+        return ptr.toJS(globalThis);
+}
+
+pub fn BakeResponseClass__constructRender(globalObject: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame) callconv(jsc.conv) jsc.JSValue {
+        return @call(bun.callmod_inline, jsc.toJSHostFn(constructRender), .{ globalObject, callFrame });
+}
+
+pub fn constructRender(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!JSValue {
+        const arguments = callframe.argumentsAsArray(2);
+        const vm = globalThis.bunVM();
+        const async_local_storage = ((try vm.getDevServerAsyncLocalStorage()) orelse { return .{ .ok = globalThis.throwInvalidArguments("Response.render() is only available in the Bun dev server", .{}) }; });
+        _ = try assertStreamingDisabled(globalThis, async_local_storage, "Response.render");
+        if ((arguments.len < 1)) {
+            return globalThis.throwInvalidArguments("Response.render() requires at least a path argument", .{});
+        }
+        const path_arg = arguments[0];
+        if ((!path_arg.isString())) {
+            return globalThis.throwInvalidArguments("Response.render() path must be a string", .{});
+        }
+        const path_str = try path_arg.toBunString(globalThis);
+        defer {
+        _ = path_str.deref();
+        }
+        const path_utf8 = path_str.toUTF8(bun.default_allocator);
+        defer {
+        _ = path_utf8.deinit();
+        }
+        const response = bun.new(Response, Response.init(.{ .status_code = 200, .headers = headers: {
+        var headers = bun.webcore.FetchHeaders.createEmpty();
+        _ = &headers;
+        _ = try headers.put(.Location, path_utf8.slice(), globalThis);
+        break :headers headers;
+} }, .{ .value = .Empty }, bun.String.empty, false));
+        const response_js = toJSForSSR(response, globalThis, .render);
+        _ = response_js.ensureStillAlive();
+        return response_js;
+}
+
+pub fn assertStreamingDisabled(globalThis: *jsc.JSGlobalObject, async_local_storage: JSValue, display_function: []const u8) !void {
+        if ((async_local_storage.isEmptyOrUndefinedOrNull() or (!async_local_storage.isObject()))) {
+            return globalThis.throwInvalidArguments("store value must be an object", .{});
+        }
+        const getStoreFn = ((try async_local_storage.getPropertyValue(globalThis, "getStore")) orelse { return globalThis.throwInvalidArguments("store value must have a \"getStore\" field", .{}); });
+        if ((!getStoreFn.isCallable())) {
+            return globalThis.throwInvalidArguments("\"getStore\" must be a function", .{});
+        }
+        const store_value = try getStoreFn.call(globalThis, async_local_storage, (&.{}));
+        const streaming_val = ((try store_value.getPropertyValue(globalThis, "streaming")) orelse { return globalThis.throwInvalidArguments("store value must have a \"streaming\" field", .{}); });
+        if ((!streaming_val.isBoolean())) {
+            return globalThis.throwInvalidArguments("\"streaming\" field must be a boolean", .{});
+        }
+        if (streaming_val.asBoolean()) {
+            return globalThis.throwInvalidArguments("\"{s}\" is not available when `export const streaming = true`", .{ display_function });
+        }
+}

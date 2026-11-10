@@ -1,209 +1,233 @@
-//! `fromJS`/`toJS` for `GetAddrInfo` and its nested option types, plus
-//! `addressToJS`/`addrInfoToJSArray`. The pure types stay in `src/dns/`.
-
-pub fn optionsFromJS(value: jsc.JSValue, globalObject: *jsc.JSGlobalObject) FromJSError!Options {
-    if (value.isEmptyOrUndefinedOrNull())
-        return Options{};
-
-    if (value.isObject()) {
-        var options = Options{};
-
-        if (try value.get(globalObject, "family")) |family| {
-            options.family = try Family.fromJS(family, globalObject);
-        }
-
-        if (try value.get(globalObject, "socketType") orelse try value.get(globalObject, "socktype")) |socktype| {
-            options.socktype = try SocketType.fromJS(socktype, globalObject);
-        }
-
-        if (try value.get(globalObject, "protocol")) |protocol| {
-            options.protocol = try Protocol.fromJS(protocol, globalObject);
-        }
-
-        if (try value.get(globalObject, "backend")) |backend| {
-            options.backend = try Backend.fromJS(backend, globalObject);
-        }
-
-        if (try value.get(globalObject, "flags")) |flags| {
-            if (!flags.isNumber())
-                return error.InvalidFlags;
-
-            options.flags = try flags.coerce(std.c.AI, globalObject);
-
-            // hints & ~(AI_ADDRCONFIG | AI_ALL | AI_V4MAPPED)) !== 0
-            const filter = ~@as(u32, @bitCast(std.c.AI{ .ALL = true, .ADDRCONFIG = true, .V4MAPPED = true }));
-            const int = @as(u32, @bitCast(options.flags));
-            if (int & filter != 0) return error.InvalidFlags;
-        }
-
-        return options;
-    }
-
-    return error.InvalidOptions;
-}
-pub fn familyFromJS(value: jsc.JSValue, globalObject: *jsc.JSGlobalObject) FromJSError!Family {
-    if (value.isEmptyOrUndefinedOrNull())
-        return .unspecified;
-
-    if (value.isNumber()) {
-        return switch (try value.coerce(i32, globalObject)) {
-            0 => .unspecified,
-            4 => .inet,
-            6 => .inet6,
-            else => return error.InvalidFamily,
-        };
-    }
-
-    if (value.isString()) {
-        return try Family.map.fromJS(globalObject, value) orelse {
-            if ((try value.toJSString(globalObject)).length() == 0) {
-                return .unspecified;
-            }
-
-            return error.InvalidFamily;
-        };
-    }
-
-    return error.InvalidFamily;
-}
-pub fn socketTypeFromJS(value: jsc.JSValue, globalObject: *jsc.JSGlobalObject) FromJSError!SocketType {
-    if (value.isEmptyOrUndefinedOrNull())
-        // Default to .stream
-        return .stream;
-
-    if (value.isNumber()) {
-        return switch (value.to(i32)) {
-            0 => .unspecified,
-            1 => .stream,
-            2 => .dgram,
-            else => return error.InvalidSocketType,
-        };
-    }
-
-    if (value.isString()) {
-        return try SocketType.map.fromJS(globalObject, value) orelse {
-            if ((try value.toJSString(globalObject)).length() == 0)
-                return .unspecified;
-
-            return error.InvalidSocketType;
-        };
-    }
-
-    return error.InvalidSocketType;
-}
-pub fn protocolFromJS(value: jsc.JSValue, globalObject: *jsc.JSGlobalObject) FromJSError!Protocol {
-    if (value.isEmptyOrUndefinedOrNull())
-        return .unspecified;
-
-    if (value.isNumber()) {
-        return switch (value.to(i32)) {
-            0 => .unspecified,
-            6 => .tcp,
-            17 => .udp,
-            else => return error.InvalidProtocol,
-        };
-    }
-
-    if (value.isString()) {
-        return try Protocol.map.fromJS(globalObject, value) orelse {
-            const str = try value.toJSString(globalObject);
-            if (str.length() == 0)
-                return .unspecified;
-
-            return error.InvalidProtocol;
-        };
-    }
-
-    return error.InvalidProtocol;
-}
-pub fn backendFromJS(value: jsc.JSValue, globalObject: *jsc.JSGlobalObject) Backend.FromJSError!Backend {
-    if (value.isEmptyOrUndefinedOrNull())
-        return Backend.default;
-
-    if (value.isString()) {
-        return try Backend.label.fromJS(globalObject, value) orelse {
-            if ((try value.toJSString(globalObject)).length() == 0) {
-                return Backend.default;
-            }
-
-            return error.InvalidBackend;
-        };
-    }
-
-    return error.InvalidBackend;
-}
-pub fn resultAnyToJS(this: *const Result.Any, globalThis: *jsc.JSGlobalObject) bun.JSError!?jsc.JSValue {
-    return switch (this.*) {
-        .addrinfo => |addrinfo| try addrInfoToJSArray(addrinfo orelse return null, globalThis),
-        .list => |list| brk: {
-            const array = try jsc.JSValue.createEmptyArray(globalThis, @as(u32, @truncate(list.items.len)));
-            var i: u32 = 0;
-            const items: []const Result = list.items;
-            for (items) |item| {
-                try array.putIndex(globalThis, i, try item.toJS(globalThis));
-                i += 1;
-            }
-            break :brk array;
-        },
-    };
-}
-pub fn resultToJS(this: *const Result, globalThis: *jsc.JSGlobalObject) bun.JSError!JSValue {
-    const obj = jsc.JSValue.createEmptyObject(globalThis, 3);
-    obj.put(globalThis, jsc.ZigString.static("address"), try addressToJS(&this.address, globalThis));
-    obj.put(globalThis, jsc.ZigString.static("family"), switch (this.address.any.family) {
-        std.posix.AF.INET => JSValue.jsNumber(4),
-        std.posix.AF.INET6 => JSValue.jsNumber(6),
-        else => JSValue.jsNumber(0),
-    });
-    obj.put(globalThis, jsc.ZigString.static("ttl"), JSValue.jsNumber(this.ttl));
-    return obj;
-}
-pub fn addressToJS(address: *const std.net.Address, globalThis: *jsc.JSGlobalObject) bun.JSError!jsc.JSValue {
-    var str = addressToString(address) catch return globalThis.throwOutOfMemory();
-    return str.transferToJS(globalThis);
-}
-pub fn addrInfoToJSArray(addr_info: *std.c.addrinfo, globalThis: *jsc.JSGlobalObject) bun.JSError!jsc.JSValue {
-    const array = try jsc.JSValue.createEmptyArray(
-        globalThis,
-        addrInfoCount(addr_info),
-    );
-
-    {
-        var j: u32 = 0;
-        var current: ?*std.c.addrinfo = addr_info;
-        while (current) |this_node| : (current = current.?.next) {
-            try array.putIndex(
-                globalThis,
-                j,
-                try GetAddrInfo.Result.toJS(
-                    &(GetAddrInfo.Result.fromAddrInfo(this_node) orelse continue),
-                    globalThis,
-                ),
-            );
-            j += 1;
-        }
-    }
-
-    return array;
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
 const JSError = bun.JSError;
-
 const addrInfoCount = bun.dns.addrInfoCount;
 const addressToString = bun.dns.addressToString;
-
 const GetAddrInfo = bun.dns.GetAddrInfo;
 const Backend = GetAddrInfo.Backend;
 const Family = GetAddrInfo.Family;
 const Protocol = GetAddrInfo.Protocol;
 const Result = GetAddrInfo.Result;
 const SocketType = GetAddrInfo.SocketType;
-
 const Options = GetAddrInfo.Options;
 const FromJSError = Options.FromJSError;
-
 const jsc = bun.jsc;
 const JSValue = jsc.JSValue;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+
+pub fn optionsFromJS(value: jsc.JSValue, globalObject: *jsc.JSGlobalObject) !Options {
+        if (value.isEmptyOrUndefinedOrNull()) {
+            return Options{  };
+        }
+        if (value.isObject()) {
+            var options = Options{  };
+            _ = &options;
+            if ((blk_catch_0: { break :blk_catch_0 ((value.get(globalObject, "family")) catch |err| { _ = &err; return err; }); })) |family| {
+                _ = &family;
+                options.family = (blk_catch_1: { break :blk_catch_1 ((Family.fromJS(family, globalObject)) catch |err| { _ = &err; return err; }); });
+            }
+            if ((((blk_catch_2: { break :blk_catch_2 ((value.get(globalObject, "socketType")) catch |err| { _ = &err; return err; }); })) orelse ((blk_catch_3: { break :blk_catch_3 ((value.get(globalObject, "socktype")) catch |err| { _ = &err; return err; }); })))) |socktype| {
+                _ = &socktype;
+                options.socktype = (blk_catch_4: { break :blk_catch_4 ((SocketType.fromJS(socktype, globalObject)) catch |err| { _ = &err; return err; }); });
+            }
+            if ((blk_catch_5: { break :blk_catch_5 ((value.get(globalObject, "protocol")) catch |err| { _ = &err; return err; }); })) |protocol| {
+                _ = &protocol;
+                options.protocol = (blk_catch_6: { break :blk_catch_6 ((Protocol.fromJS(protocol, globalObject)) catch |err| { _ = &err; return err; }); });
+            }
+            if ((blk_catch_7: { break :blk_catch_7 ((value.get(globalObject, "backend")) catch |err| { _ = &err; return err; }); })) |backend| {
+                _ = &backend;
+                options.backend = (blk_catch_8: { break :blk_catch_8 ((Backend.fromJS(backend, globalObject)) catch |err| { _ = &err; return err; }); });
+            }
+            if ((blk_catch_9: { break :blk_catch_9 ((value.get(globalObject, "flags")) catch |err| { _ = &err; return err; }); })) |flags| {
+                _ = &flags;
+                if ((!flags.isNumber())) {
+                    return error.InvalidFlags;
+                }
+                options.flags = (blk_catch_10: { break :blk_catch_10 ((flags.coerce(std.c.AI, globalObject)) catch |err| { _ = &err; return err; }); });
+                const filter = (~@as(u32, @bitCast(std.c.AI{ .ALL = true, .ADDRCONFIG = true, .V4MAPPED = true })));
+                const int = @as(u32, @bitCast(options.flags));
+                if (((int & filter) != 0)) {
+                    return error.InvalidFlags;
+                }
+            }
+            return options;
+        }
+        return error.InvalidOptions;
+}
+
+pub fn familyFromJS(value: jsc.JSValue, globalObject: *jsc.JSGlobalObject) !Family {
+        if (value.isEmptyOrUndefinedOrNull()) {
+            return .unspecified;
+        }
+        if (value.isNumber()) {
+            const val = (blk_catch_11: { break :blk_catch_11 ((value.coerce(i32, globalObject)) catch |err| { _ = &err; return err; }); });
+            if ((val == 0)) {
+                return .unspecified;
+            }
+            if ((val == 4)) {
+                return .inet;
+            }
+            if ((val == 6)) {
+                return .inet6;
+            }
+            return error.InvalidFamily;
+        }
+        if (value.isString()) {
+            if ((blk_catch_12: { break :blk_catch_12 ((Family.map.fromJS(globalObject, value)) catch |err| { _ = &err; return err; }); })) |f| {
+                _ = &f;
+                return f;
+            }
+            if (((blk_catch_13: { break :blk_catch_13 ((value.toJSString(globalObject)) catch |err| { _ = &err; return err; }); }).length() == 0)) {
+                return .unspecified;
+            }
+            return error.InvalidFamily;
+        }
+        return error.InvalidFamily;
+}
+
+pub fn socketTypeFromJS(value: jsc.JSValue, globalObject: *jsc.JSGlobalObject) !SocketType {
+        if (value.isEmptyOrUndefinedOrNull()) {
+            return .stream;
+        }
+        if (value.isNumber()) {
+            const val = value.to(i32);
+            if ((val == 0)) {
+                return .unspecified;
+            }
+            if ((val == 1)) {
+                return .stream;
+            }
+            if ((val == 2)) {
+                return .dgram;
+            }
+            return error.InvalidSocketType;
+        }
+        if (value.isString()) {
+            if ((blk_catch_14: { break :blk_catch_14 ((SocketType.map.fromJS(globalObject, value)) catch |err| { _ = &err; return err; }); })) |st| {
+                _ = &st;
+                return st;
+            }
+            if (((blk_catch_15: { break :blk_catch_15 ((value.toJSString(globalObject)) catch |err| { _ = &err; return err; }); }).length() == 0)) {
+                return .unspecified;
+            }
+            return error.InvalidSocketType;
+        }
+        return error.InvalidSocketType;
+}
+
+pub fn protocolFromJS(value: jsc.JSValue, globalObject: *jsc.JSGlobalObject) !Protocol {
+        if (value.isEmptyOrUndefinedOrNull()) {
+            return .unspecified;
+        }
+        if (value.isNumber()) {
+            const val = value.to(i32);
+            if ((val == 0)) {
+                return .unspecified;
+            }
+            if ((val == 6)) {
+                return .tcp;
+            }
+            if ((val == 17)) {
+                return .udp;
+            }
+            return error.InvalidProtocol;
+        }
+        if (value.isString()) {
+            if ((blk_catch_16: { break :blk_catch_16 ((Protocol.map.fromJS(globalObject, value)) catch |err| { _ = &err; return err; }); })) |p| {
+                _ = &p;
+                return p;
+            }
+            const str = (blk_catch_17: { break :blk_catch_17 ((value.toJSString(globalObject)) catch |err| { _ = &err; return err; }); });
+            if ((str.length() == 0)) {
+                return .unspecified;
+            }
+            return error.InvalidProtocol;
+        }
+        return error.InvalidProtocol;
+}
+
+pub fn backendFromJS(value: jsc.JSValue, globalObject: *jsc.JSGlobalObject) !Backend {
+        if (value.isEmptyOrUndefinedOrNull()) {
+            return Backend.default;
+        }
+        if (value.isString()) {
+            if ((blk_catch_18: { break :blk_catch_18 ((Backend.label.fromJS(globalObject, value)) catch |err| { _ = &err; return err; }); })) |b| {
+                _ = &b;
+                return b;
+            }
+            if (((blk_catch_19: { break :blk_catch_19 ((value.toJSString(globalObject)) catch |err| { _ = &err; return err; }); }).length() == 0)) {
+                return Backend.default;
+            }
+            return error.InvalidBackend;
+        }
+        return error.InvalidBackend;
+}
+
+pub fn resultAnyToJS(this: *const Result.Any, globalThis: *jsc.JSGlobalObject) !?jsc.JSValue {
+        if ((this.* == .addrinfo)) {
+            const addrinfo = ((this.addrinfo) orelse { return null; });
+            return (blk_catch_20: { break :blk_catch_20 ((addrInfoToJSArray(addrinfo, globalThis)) catch |err| { _ = &err; return err; }); });
+        } else {
+            const list = this.list;
+            const array = (blk_catch_21: { break :blk_catch_21 ((jsc.JSValue.createEmptyArray(globalThis, @as(u32, @truncate(list.items.len)))) catch |err| { _ = &err; return err; }); });
+            var i: u32 = 0;
+            _ = &i;
+            while ((i < list.items.len)) {
+                const js_item = (blk_catch_22: { break :blk_catch_22 ((list.items[@as(usize, @intCast(i))].toJS(globalThis)) catch |err| { _ = &err; return err; }); });
+                _ = (blk_catch_23: { break :blk_catch_23 ((array.putIndex(globalThis, i, js_item)) catch |err| { _ = &err; return err; }); });
+                i = (i + 1);
+            }
+            return array;
+        }
+}
+
+pub fn resultToJS(this: *const Result, globalThis: *jsc.JSGlobalObject) !JSValue {
+        const obj = jsc.JSValue.createEmptyObject(globalThis, 3);
+        const addr_js = (blk_catch_24: { break :blk_catch_24 ((addressToJS((&this.address), globalThis)) catch |err| { _ = &err; return err; }); });
+        _ = obj.put(globalThis, jsc.ZigString.static("address"), addr_js);
+        var family_num: i32 = 0;
+        _ = &family_num;
+        if ((this.address.any.family == std.posix.AF.INET)) {
+            family_num = 4;
+        } else {
+            if ((this.address.any.family == std.posix.AF.INET6)) {
+                family_num = 6;
+            }
+        }
+        _ = obj.put(globalThis, jsc.ZigString.static("family"), JSValue.jsNumber(family_num));
+        _ = obj.put(globalThis, jsc.ZigString.static("ttl"), JSValue.jsNumber(this.ttl));
+        return obj;
+}
+
+pub fn addressToJS(address: *const std.net.Address, globalThis: *jsc.JSGlobalObject) !jsc.JSValue {
+        var str = (blk_catch_25: { break :blk_catch_25 ((addressToString(address)) catch |__ce_25| { _ = &__ce_25; return globalThis.throwOutOfMemory(); }); });
+        _ = &str;
+        return str.transferToJS(globalThis);
+}
+
+pub fn addrInfoToJSArray(addr_info: *std.c.addrinfo, globalThis: *jsc.JSGlobalObject) !jsc.JSValue {
+        const array = (blk_catch_26: { break :blk_catch_26 ((jsc.JSValue.createEmptyArray(globalThis, addrInfoCount(addr_info))) catch |err| { _ = &err; return err; }); });
+        var j: u32 = 0;
+        _ = &j;
+        var current: ?*std.c.addrinfo = addr_info;
+        _ = &current;
+        while ((current != null)) {
+            const this_node = current.?;
+            current = this_node.next;
+            const res = ((GetAddrInfo.Result.fromAddrInfo(this_node)) orelse continue);
+            const js_res = (blk_catch_27: { break :blk_catch_27 ((GetAddrInfo.Result.toJS((&res), globalThis)) catch |err| { _ = &err; return err; }); });
+            _ = (blk_catch_28: { break :blk_catch_28 ((array.putIndex(globalThis, j, js_res)) catch |err| { _ = &err; return err; }); });
+            j = (j + 1);
+        }
+        return array;
+}

@@ -4,7 +4,13 @@ const string = []const u8;
 
 const bun = @import("bun");
 const quic = bun.uws.quic;
-fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and T == @field(@This(), "Error")) or (@typeInfo(T) == .@"struct" and @hasField(T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
 pub const ClientContext = @import("./ClientContext.zig").ClientContext;
 pub const Stream = @import("./Stream.zig").Stream;
 pub const HTTPClient = @import("../http.zig").HTTPClient;
@@ -124,7 +130,7 @@ pub fn detach(self: *ClientSession, stream: *Stream) void {
 pub fn fail(self: *ClientSession, stream: *Stream, err: anyerror) void {
         var client = stream.client;
         var __client_moved = false; _ = &__client_moved;
-        defer if (!__client_moved) { const T = @TypeOf(client); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = client.release() catch {}; } else { client.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = client; _drop_val.release(); } };
+        defer if (!__client_moved) { const __T = @TypeOf(client); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = client.release() catch {}; } else { client.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = client; _drop_val.release(); } };
         _ = stream.abort();
         _ = self.detach(stream);
         if (client) |cl| {
@@ -145,7 +151,7 @@ pub fn retryOrFail(self: *ClientSession, stream: *Stream, err: anyerror) void {
                 self.closed = true;
                 const host = bun.handleOom(bun.default_allocator.dupe(u8, self.hostname));
                 var __host_moved = false; _ = &__host_moved;
-                defer if (!__host_moved) { const T = @TypeOf(host); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = host.release() catch {}; } else { host.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = host; _drop_val.release(); } };
+                defer if (!__host_moved) { const __T = @TypeOf(host); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = host.release() catch {}; } else { host.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = host; _drop_val.release(); } };
                 defer {
                 _ = bun.default_allocator.free(host);
                 }
@@ -179,7 +185,7 @@ pub fn abortByHttpId(self: *ClientSession, async_http_id: u32) bool {
 pub fn deliver(self: *ClientSession, stream: *Stream, done: bool) void {
         var client_opt = stream.client;
         var __client_opt_moved = false; _ = &__client_opt_moved;
-        defer if (!__client_opt_moved) { const T = @TypeOf(client_opt); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = client_opt.release() catch {}; } else { client_opt.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = client_opt; _drop_val.release(); } };
+        defer if (!__client_opt_moved) { const __T = @TypeOf(client_opt); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = client_opt.release() catch {}; } else { client_opt.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = client_opt; _drop_val.release(); } };
         if ((client_opt == null)) {
             if (done) {
                 _ = self.detach(stream);
@@ -188,7 +194,7 @@ pub fn deliver(self: *ClientSession, stream: *Stream, done: bool) void {
         }
         var client = client_opt.?;
         var __client_moved = false; _ = &__client_moved;
-        defer if (!__client_moved) { const T = @TypeOf(client); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = client.release() catch {}; } else { client.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = client; _drop_val.release(); } };
+        defer if (!__client_moved) { const __T = @TypeOf(client); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = client.release() catch {}; } else { client.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = client; _drop_val.release(); } };
         if (client.signals.get(.aborted)) {
             return self.fail(stream, error.Aborted);
         }
@@ -236,7 +242,7 @@ pub fn deliver(self: *ClientSession, stream: *Stream, done: bool) void {
             const report = (blk_catch_1: { break :blk_catch_1 ((client.handleResponseBody(stream.body_buffer.items, false)) catch |err| { _ = &err; _ = stream.body_buffer.clearRetainingCapacity();
             return self.fail(stream, err); }); });
             var __report_moved = false; _ = &__report_moved;
-            defer if (!__report_moved) { const T = @TypeOf(report); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = report.release() catch {}; } else { report.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = report; _drop_val.release(); } };
+            defer if (!__report_moved) { const __T = @TypeOf(report); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = report.release() catch {}; } else { report.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = report; _drop_val.release(); } };
             _ = stream.body_buffer.clearRetainingCapacity();
             if (done) {
                 _ = self.detach(stream);
@@ -265,7 +271,7 @@ pub fn applyHeaders(self: *ClientSession, stream: *Stream, client: *HTTPClient) 
         client.state.pending_response = response;
         const should_continue = try client.handleResponseMetadata((&response));
         var __should_continue_moved = false; _ = &__should_continue_moved;
-        defer if (!__should_continue_moved) { const T = @TypeOf(should_continue); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = should_continue.release() catch {}; } else { should_continue.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = should_continue; _drop_val.release(); } };
+        defer if (!__should_continue_moved) { const __T = @TypeOf(should_continue); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = should_continue.release() catch {}; } else { should_continue.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = should_continue; _drop_val.release(); } };
         client.state.pending_response = response;
         client.state.transfer_encoding = .identity;
         if ((client.state.response_stage == .body_chunk)) {

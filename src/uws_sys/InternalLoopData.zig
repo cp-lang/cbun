@@ -2,13 +2,14 @@
 const std = @import("std");
 const string = []const u8;
 
-const jsc = bun.jsc;
-    const uws = bun.uws;
-    pub const us_internal_async = opaque {};
-    const LIBUS_RECV_BUFFER_LENGTH = 524288;
-    pub const ManyU8 = [*]u8;
-    pub const PreCb = *const fn (?*Loop) callconv(.c) void;
-    pub const PostCb = *const fn (?*Loop) callconv(.c) void;
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const LIBUS_RECV_BUFFER_LENGTH: usize = 524288;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
 
 pub const bun = @import("bun");
 pub const ConnectingSocket = @import("./ConnectingSocket.zig").ConnectingSocket;
@@ -17,20 +18,23 @@ pub const SocketGroup = @import("./SocketGroup.zig").SocketGroup;
 pub const Timer = @import("./Timer.zig").Timer;
 pub const udp = @import("./udp.zig");
 pub const us_socket_t = @import("./us_socket_t.zig").us_socket_t;
+pub const us_internal_async = opaque {
+};
+
 pub const InternalLoopData = extern struct {
     sweep_timer: ?*Timer = null,
     sweep_timer_count: i32 = 0,
-    wakeup_async: ?*us_internal_async = null,
+    wakeup_async: *?*us_internal_async = null,
     head: ?*SocketGroup = null,
     quic_head: ?*anyopaque = null,
     quic_next_tick_us: i64 = 0,
     quic_timer: ?*Timer = null,
     iterator: ?*SocketGroup = null,
-    recv_buf: ManyU8 = undefined,
-    send_buf: ManyU8 = undefined,
+    recv_buf: [*]u8,
+    send_buf: [*]u8,
     ssl_data: ?*anyopaque = null,
-    pre_cb: ?PreCb = null,
-    post_cb: ?PostCb = null,
+    pre_cb: ?*const fn (?*Loop) callconv(.c) void = null,
+    post_cb: ?*const fn (?*Loop) callconv(.c) void = null,
     closed_udp_head: ?*udp.Socket = null,
     closed_head: ?*us_socket_t = null,
     low_prio_head: ?*us_socket_t = null,
@@ -39,12 +43,12 @@ pub const InternalLoopData = extern struct {
     closed_connecting_head: *ConnectingSocket,
     mutex: bun.Mutex.ReleaseImpl.Type,
     parent_ptr: ?*anyopaque = null,
-    parent_tag: c_char = 0,
+    parent_tag: i8 = 0,
     iteration_nr: usize = 0,
-    jsc_vm: ?*jsc.VM = null,
-    tick_depth: c_int = 0,
+    jsc_vm: ?*bun.jsc.VM = null,
+    tick_depth: i32 = 0,
 
-pub fn recvSlice(self: *InternalLoopData) []u8 {
+pub fn recvSlice(self: *InternalLoopData) []const u8 {
             return self.recv_buf[0..LIBUS_RECV_BUFFER_LENGTH];
     }
 
@@ -54,27 +58,35 @@ pub fn shouldEnableDateHeaderTimer(self: *const InternalLoopData) bool {
 
 pub fn setParentEventLoop(self: *InternalLoopData, parent: anytype) void {
             switch (parent) {
-                .js => |ptr| {
-                    self.parent_tag = 1;
-                    self.parent_ptr = ptr;
-                },
-                .mini => |ptr| {
-                    self.parent_tag = 2;
-                    self.parent_ptr = ptr;
-                },
+.js => |ptr| {
+self.parent_tag = 1;
+            {
+                self.parent_ptr = @as(*anyopaque, @ptrCast(@alignCast(ptr)));
             }
-
+},
+.mini => |ptr| {
+self.parent_tag = 2;
+            {
+                self.parent_ptr = @as(*anyopaque, @ptrCast(@alignCast(ptr)));
+            }
+},
+}
     }
 
-pub fn getParent(self: *InternalLoopData) jsc.EventLoopHandle {
-            const parent = self.parent_ptr orelse @panic("Parent loop not set - pointer is null");
-            return switch (self.parent_tag) {
-                0 => @panic("Parent loop not set - tag is zero"),
-                1 => .{ .js = bun.cast(*jsc.EventLoop, parent) },
-                2 => .{ .mini = bun.cast(*jsc.MiniEventLoop, parent) },
-                else => @panic("Parent loop data corrupted - tag is invalid"),
-            };
+pub fn getParent(self: *InternalLoopData) bun.jsc.EventLoopHandle {
+            var parent = ((self.parent_ptr) orelse (bun.Output.panic("Parent loop not set - pointer is null")));
+            _ = &parent;
+            return (switch (self.parent_tag) {
+1 => bun.jsc.EventLoopHandle{ .js = (blk: {
+            break :blk @as(*bun.jsc.EventLoop, @ptrCast(@alignCast(parent)));
 
+}) },
+2 => bun.jsc.EventLoopHandle{ .mini = (blk: {
+            break :blk @as(*bun.jsc.MiniEventLoop, @ptrCast(@alignCast(parent)));
+
+}) },
+else => bun.Output.panic("Parent loop not set or corrupted"),
+});
     }
 };
 

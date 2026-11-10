@@ -210,7 +210,7 @@ pub fn Bun__HTTPMethod__from(str: [*]const u8, len: usize) i16 {
         var method: ?Method = Method{ .find = str[0..len] };
         _ = &method;
         if ((method == null)) {
-            return 0xffffffffffffffff;
+            return -1;
         }
         return (if (comptime @typeInfo(@TypeOf(@intFromEnum(method.?))) == .@"enum") cp_cast_int(i16, @intFromEnum(@intFromEnum(method.?))) else cp_cast_int(i16, @intFromEnum(method.?)));
 }

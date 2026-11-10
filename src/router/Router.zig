@@ -2,23 +2,6 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
 const Environment = bun.Environment;
@@ -42,9 +25,14 @@ const RouteModule = @import("./Route.zig");
 pub const RouteSorter = RouteModule.RouteSorter;
 pub const RouteIndexList = RouteModule.RouteIndexList;
 threadlocal var params_list: Param.List = undefined;
-fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
 fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
 
 pub const DirInfo = @import("../resolver/dir_info.zig");
 pub const Options = @import("../bundler/options.zig");
@@ -61,29 +49,6 @@ pub const Routes = struct {
     allocator: std.mem.Allocator,
     config: Options.RouteConfig,
     client_framework_enabled: bool = false,
-    
-pub fn _create(allocator: std.mem.Allocator) !*Routes { const self_ptr = try allocator.create(Routes); self_ptr.* = undefined; return self_ptr; }
-
-pub fn init(self: *Routes, list: RouteIndex.List, dynamic: []const *Route, dynamic_names: []const []const u8, dynamic_match_names: []const []const u8, static: bun.StringHashMap(RoutePtr), index: ?*Route, index_id: ?usize, allocator: std.mem.Allocator, config: Options.RouteConfig, client_framework_enabled: bool) void {
-        var __list_moved = false; _ = &__list_moved;
-        defer if (!__list_moved) { const T = @TypeOf(list); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = list.release() catch {}; } else { list.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = list; _drop_val.release(); } };
-        var __static_moved = false; _ = &__static_moved;
-        defer if (!__static_moved) { const T = @TypeOf(static); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = static.release() catch {}; } else { static.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = static; _drop_val.release(); } };
-        var __allocator_moved = false; _ = &__allocator_moved;
-        defer if (!__allocator_moved) { const T = @TypeOf(allocator); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = allocator.release() catch {}; } else { allocator.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = allocator; _drop_val.release(); } };
-        var __config_moved = false; _ = &__config_moved;
-        defer if (!__config_moved) { const T = @TypeOf(config); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = config.release() catch {}; } else { config.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = config; _drop_val.release(); } };
-            self.list = list;
-            self.dynamic = dynamic;
-            self.dynamic_names = dynamic_names;
-            self.dynamic_match_names = dynamic_match_names;
-            self.static = static;
-            self.index = index;
-            self.index_id = index_id;
-            self.allocator = allocator;
-            self.config = config;
-            self.client_framework_enabled = client_framework_enabled;
-    }
 
 pub fn release(self: *Routes) void {
             _ = self.static.deinit();
@@ -98,7 +63,7 @@ pub fn matchPageWithAllocator(self: *Routes, __: []const u8, url_path: URLPath, 
         _ = __;
             var path = url_path.path;
             var __path_moved = false; _ = &__path_moved;
-            defer if (!__path_moved) { const T = @TypeOf(path); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = path.release() catch {}; } else { path.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = path; _drop_val.release(); } };
+            defer if (!__path_moved) { const __T = @TypeOf(path); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = path.release() catch {}; } else { path.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = path; _drop_val.release(); } };
             var redirect = false;
             _ = &redirect;
             if (((path.len > 0) and (path[@as(usize, @intCast((path.len - 1)))] == 47))) {
@@ -124,7 +89,7 @@ pub fn matchPageWithAllocator(self: *Routes, __: []const u8, url_path: URLPath, 
             if ((path.len == 0)) {
                 if (self.index) |index| {
                     _ = &index;
-                    return Match{ .params = params, .name = index.name, .path = index.abs_path.slice(), .pathname = url_path.pathname, .basename = index.basename, .hash = index_route_hash, .file_path = index.abs_path.slice(), .query_string = url_path.query_string, .client_framework_enabled = self.client_framework_enabled };
+                    return Match{ .params = params, .name = (if (comptime @typeInfo(@TypeOf(index)) == .@"enum" or @typeInfo(@TypeOf(index)) == .@"union") @tagName(index) else index.name), .path = index.abs_path.slice(), .pathname = url_path.pathname, .basename = index.basename, .hash = index_route_hash, .file_path = index.abs_path.slice(), .query_string = url_path.query_string, .client_framework_enabled = self.client_framework_enabled };
                 }
                 return null;
             }
@@ -135,7 +100,7 @@ pub fn matchPageWithAllocator(self: *Routes, __: []const u8, url_path: URLPath, 
             }
             if (self.match(allocator, path, MatchContextType, (&matcher))) |route| {
                 _ = &route;
-                return Match{ .params = params, .name = route.name, .path = route.abs_path.slice(), .pathname = url_path.pathname, .basename = route.basename, .hash = route.full_hash, .file_path = route.abs_path.slice(), .query_string = url_path.query_string, .client_framework_enabled = self.client_framework_enabled };
+                return Match{ .params = params, .name = (if (comptime @typeInfo(@TypeOf(route)) == .@"enum" or @typeInfo(@TypeOf(route)) == .@"union") @tagName(route) else route.name), .path = route.abs_path.slice(), .pathname = url_path.pathname, .basename = route.basename, .hash = route.full_hash, .file_path = route.abs_path.slice(), .query_string = url_path.query_string, .client_framework_enabled = self.client_framework_enabled };
             }
             return null;
     }
@@ -145,16 +110,13 @@ pub fn matchPage(self: *Routes, __: []const u8, url_path: URLPath, params: *Para
             return self.matchPageWithAllocator("", url_path, params, self.allocator);
     }
 
-pub fn matchDynamic(self: *Routes, allocator: std.mem.Allocator, path: []const u8, comptime MatchContext: type, ctx: *MatchContext) ?*Route {
+pub fn matchDynamic(self: *Routes, allocator: std.mem.Allocator, path: []const u8, comptime MatchContext: type, ctx: MatchContext) ?*Route {
             var i: usize = 0;
             _ = &i;
             while ((i < self.dynamic.len)) {
                 const case_sensitive_name = self.dynamic_names[@as(usize, @intCast(i))];
-                _ = &case_sensitive_name;
                 const name = self.dynamic_match_names[@as(usize, @intCast(i))];
-                _ = &name;
                 const route = self.dynamic[@as(usize, @intCast(i))];
-                _ = &route;
                 if (Pattern.match(path, case_sensitive_name[1..], name, allocator, ParamList, (&ctx.params), true)) {
                     return route;
                 }
@@ -163,10 +125,10 @@ pub fn matchDynamic(self: *Routes, allocator: std.mem.Allocator, path: []const u
             return null;
     }
 
-pub fn match(self: *Routes, allocator: std.mem.Allocator, pathname_: []const u8, comptime MatchContext: type, ctx: *MatchContext) ?*Route {
+pub fn match(self: *Routes, allocator: std.mem.Allocator, pathname_: []const u8, comptime MatchContext: type, ctx: MatchContext) ?*Route {
             const pathname = std.mem.trimLeft(u8, pathname_, "/");
             var __pathname_moved = false; _ = &__pathname_moved;
-            defer if (!__pathname_moved) { const T = @TypeOf(pathname); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = pathname.release() catch {}; } else { pathname.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = pathname; _drop_val.release(); } };
+            defer if (!__pathname_moved) { const __T = @TypeOf(pathname); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = pathname.release() catch {}; } else { pathname.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = pathname; _drop_val.release(); } };
             if ((pathname.len == 0)) {
                 return self.index;
             }
@@ -184,36 +146,12 @@ pub const RouteLoader = struct {
     index: ?*Route = null,
     static_list: bun.StringHashMap(*Route),
     all_routes: std.ArrayListUnmanaged(*Route),
-    
-pub fn _create(allocator: std.mem.Allocator) !*RouteLoader { const self_ptr = try allocator.create(RouteLoader); self_ptr.* = undefined; return self_ptr; }
-
-pub fn init(self: *RouteLoader, allocator: std.mem.Allocator, fs: *FileSystem, config: Options.RouteConfig, route_dirname_len: u16, dedupe_dynamic: std.AutoArrayHashMap(u32,string), log: *Logger.Log, index: ?*Route, static_list: bun.StringHashMap(*Route), all_routes: std.ArrayListUnmanaged(*Route)) void {
-        var __allocator_moved = false; _ = &__allocator_moved;
-        defer if (!__allocator_moved) { const T = @TypeOf(allocator); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = allocator.release() catch {}; } else { allocator.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = allocator; _drop_val.release(); } };
-        var __config_moved = false; _ = &__config_moved;
-        defer if (!__config_moved) { const T = @TypeOf(config); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = config.release() catch {}; } else { config.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = config; _drop_val.release(); } };
-        var __dedupe_dynamic_moved = false; _ = &__dedupe_dynamic_moved;
-        defer if (!__dedupe_dynamic_moved) { const T = @TypeOf(dedupe_dynamic); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = dedupe_dynamic.release() catch {}; } else { dedupe_dynamic.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = dedupe_dynamic; _drop_val.release(); } };
-        var __static_list_moved = false; _ = &__static_list_moved;
-        defer if (!__static_list_moved) { const T = @TypeOf(static_list); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = static_list.release() catch {}; } else { static_list.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = static_list; _drop_val.release(); } };
-        var __all_routes_moved = false; _ = &__all_routes_moved;
-        defer if (!__all_routes_moved) { const T = @TypeOf(all_routes); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = all_routes.release() catch {}; } else { all_routes.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = all_routes; _drop_val.release(); } };
-            self.allocator = allocator;
-            self.fs = fs;
-            self.config = config;
-            self.route_dirname_len = route_dirname_len;
-            self.dedupe_dynamic = dedupe_dynamic;
-            self.log = log;
-            self.index = index;
-            self.static_list = static_list;
-            self.all_routes = all_routes;
-    }
 
 pub fn appendRoute(self: *RouteLoader, route: Route) void {
             if ((route.full_hash == index_route_hash)) {
                 var new_route = ((self.allocator.create(Route)) catch unreachable);
                 var __new_route_moved = false; _ = &__new_route_moved;
-                defer if (!__new_route_moved) { const T = @TypeOf(new_route); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = new_route.release() catch {}; } else { new_route.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = new_route; _drop_val.release(); } };
+                defer if (!__new_route_moved) { const __T = @TypeOf(new_route); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = new_route.release() catch {}; } else { new_route.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = new_route; _drop_val.release(); } };
                 self.index = new_route;
                 new_route.* = route;
                 _ = ((self.all_routes.append(self.allocator, new_route)) catch unreachable);
@@ -222,31 +160,29 @@ pub fn appendRoute(self: *RouteLoader, route: Route) void {
             if ((route.param_count == 0)) {
                 var entry = ((self.static_list.getOrPut(route.match_name.slice())) catch unreachable);
                 var __entry_moved = false; _ = &__entry_moved;
-                defer if (!__entry_moved) { const T = @TypeOf(entry); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = entry.release() catch {}; } else { entry.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = entry; _drop_val.release(); } };
+                defer if (!__entry_moved) { const __T = @TypeOf(entry); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = entry.release() catch {}; } else { entry.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = entry; _drop_val.release(); } };
                 if (entry.found_existing) {
                     const existing_route = entry.value_ptr.*;
                     var __existing_route_moved = false; _ = &__existing_route_moved;
-                    defer if (!__existing_route_moved) { const T = @TypeOf(existing_route); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = existing_route.release() catch {}; } else { existing_route.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = existing_route; _drop_val.release(); } };
+                    defer if (!__existing_route_moved) { const __T = @TypeOf(existing_route); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = existing_route.release() catch {}; } else { existing_route.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = existing_route; _drop_val.release(); } };
                     const source: Logger.Source = Logger.Source.initEmptyFile(route.abs_path.slice());
-                    _ = &source;
-                    _ = ((self.log.addErrorFmt((&source), Logger.Loc.Empty, self.allocator, "Route \"{s}\" is already defined by {s}", .{ route.name, existing_route.abs_path.slice() })) catch unreachable);
+                    _ = ((self.log.addErrorFmt((&source), Logger.Loc.Empty, self.allocator, "Route \"{s}\" is already defined by {s}", .{ (if (comptime @typeInfo(@TypeOf(route)) == .@"enum" or @typeInfo(@TypeOf(route)) == .@"union") @tagName(route) else route.name), existing_route.abs_path.slice() })) catch unreachable);
                     return;
                 }
                 var new_route = ((self.allocator.create(Route)) catch unreachable);
                 var __new_route_moved = false; _ = &__new_route_moved;
-                defer if (!__new_route_moved) { const T = @TypeOf(new_route); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = new_route.release() catch {}; } else { new_route.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = new_route; _drop_val.release(); } };
+                defer if (!__new_route_moved) { const __T = @TypeOf(new_route); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = new_route.release() catch {}; } else { new_route.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = new_route; _drop_val.release(); } };
                 new_route.* = route;
                 if (route.has_uppercase) {
-                    var static_entry = ((self.static_list.getOrPut(route.name[1..])) catch unreachable);
+                    var static_entry = ((self.static_list.getOrPut((if (comptime @typeInfo(@TypeOf(route)) == .@"enum" or @typeInfo(@TypeOf(route)) == .@"union") @tagName(route) else route.name)[1..])) catch unreachable);
                     var __static_entry_moved = false; _ = &__static_entry_moved;
-                    defer if (!__static_entry_moved) { const T = @TypeOf(static_entry); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = static_entry.release() catch {}; } else { static_entry.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = static_entry; _drop_val.release(); } };
+                    defer if (!__static_entry_moved) { const __T = @TypeOf(static_entry); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = static_entry.release() catch {}; } else { static_entry.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = static_entry; _drop_val.release(); } };
                     if (static_entry.found_existing) {
                         const existing_route = static_entry.value_ptr.*;
                         var __existing_route_moved = false; _ = &__existing_route_moved;
-                        defer if (!__existing_route_moved) { const T = @TypeOf(existing_route); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = existing_route.release() catch {}; } else { existing_route.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = existing_route; _drop_val.release(); } };
+                        defer if (!__existing_route_moved) { const __T = @TypeOf(existing_route); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = existing_route.release() catch {}; } else { existing_route.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = existing_route; _drop_val.release(); } };
                         const source: Logger.Source = Logger.Source.initEmptyFile(route.abs_path.slice());
-                        _ = &source;
-                        _ = ((self.log.addErrorFmt((&source), Logger.Loc.Empty, self.allocator, "Route \"{s}\" is already defined by {s}", .{ route.name, existing_route.abs_path.slice() })) catch unreachable);
+                        _ = ((self.log.addErrorFmt((&source), Logger.Loc.Empty, self.allocator, "Route \"{s}\" is already defined by {s}", .{ (if (comptime @typeInfo(@TypeOf(route)) == .@"enum" or @typeInfo(@TypeOf(route)) == .@"union") @tagName(route) else route.name), existing_route.abs_path.slice() })) catch unreachable);
                         return;
                     }
                     static_entry.value_ptr.* = new_route;
@@ -258,18 +194,17 @@ pub fn appendRoute(self: *RouteLoader, route: Route) void {
             {
                 var entry = ((self.dedupe_dynamic.getOrPutValue(route.full_hash, route.abs_path.slice())) catch unreachable);
                 var __entry_moved = false; _ = &__entry_moved;
-                defer if (!__entry_moved) { const T = @TypeOf(entry); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = entry.release() catch {}; } else { entry.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = entry; _drop_val.release(); } };
+                defer if (!__entry_moved) { const __T = @TypeOf(entry); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = entry.release() catch {}; } else { entry.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = entry; _drop_val.release(); } };
                 if (entry.found_existing) {
                     const source: Logger.Source = Logger.Source.initEmptyFile(route.abs_path.slice());
-                    _ = &source;
-                    _ = ((self.log.addErrorFmt((&source), Logger.Loc.Empty, self.allocator, "Route \"{s}\" is already defined by {s}", .{ route.name, entry.value_ptr.* })) catch unreachable);
+                    _ = ((self.log.addErrorFmt((&source), Logger.Loc.Empty, self.allocator, "Route \"{s}\" is already defined by {s}", .{ (if (comptime @typeInfo(@TypeOf(route)) == .@"enum" or @typeInfo(@TypeOf(route)) == .@"union") @tagName(route) else route.name), entry.value_ptr.* })) catch unreachable);
                     return;
                 }
             }
             {
                 var new_route = ((self.allocator.create(Route)) catch unreachable);
                 var __new_route_moved = false; _ = &__new_route_moved;
-                defer if (!__new_route_moved) { const T = @TypeOf(new_route); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = new_route.release() catch {}; } else { new_route.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = new_route; _drop_val.release(); } };
+                defer if (!__new_route_moved) { const __T = @TypeOf(new_route); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = new_route.release() catch {}; } else { new_route.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = new_route; _drop_val.release(); } };
                 new_route.* = route;
                 _ = ((self.all_routes.append(self.allocator, new_route)) catch unreachable);
             }
@@ -280,9 +215,9 @@ pub fn loadAll(allocator: std.mem.Allocator, config: Options.RouteConfig, log: *
             _ = &r_dirname_len;
             const relative_dir = FileSystem.instance.relative(base_dir, config.dir);
             var __relative_dir_moved = false; _ = &__relative_dir_moved;
-            defer if (!__relative_dir_moved) { const T = @TypeOf(relative_dir); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = relative_dir.release() catch {}; } else { relative_dir.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = relative_dir; _drop_val.release(); } };
+            defer if (!__relative_dir_moved) { const __T = @TypeOf(relative_dir); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = relative_dir.release() catch {}; } else { relative_dir.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = relative_dir; _drop_val.release(); } };
             if ((!strings.hasPrefixComptime(relative_dir, ".."))) {
-                r_dirname_len = cp_cast_int(u16, (relative_dir.len + cp_cast_int(usize, @intFromBool((config.dir[@as(usize, @intCast((config.dir.len - 1)))] != std.fs.path.sep)))));
+                r_dirname_len = (if (comptime @typeInfo(@TypeOf((relative_dir.len + (if (comptime @typeInfo(@TypeOf(@intFromBool((config.dir[@as(usize, @intCast((config.dir.len - 1)))] != std.fs.path.sep)))) == .@"enum") cp_cast_int(usize, @intFromEnum(@intFromBool((config.dir[@as(usize, @intCast((config.dir.len - 1)))] != std.fs.path.sep)))) else cp_cast_int(usize, @intFromBool((config.dir[@as(usize, @intCast((config.dir.len - 1)))] != std.fs.path.sep))))))) == .@"enum") cp_cast_int(u16, @intFromEnum((relative_dir.len + (if (comptime @typeInfo(@TypeOf(@intFromBool((config.dir[@as(usize, @intCast((config.dir.len - 1)))] != std.fs.path.sep)))) == .@"enum") cp_cast_int(usize, @intFromEnum(@intFromBool((config.dir[@as(usize, @intCast((config.dir.len - 1)))] != std.fs.path.sep)))) else cp_cast_int(usize, @intFromBool((config.dir[@as(usize, @intCast((config.dir.len - 1)))] != std.fs.path.sep))))))) else cp_cast_int(u16, (relative_dir.len + (if (comptime @typeInfo(@TypeOf(@intFromBool((config.dir[@as(usize, @intCast((config.dir.len - 1)))] != std.fs.path.sep)))) == .@"enum") cp_cast_int(usize, @intFromEnum(@intFromBool((config.dir[@as(usize, @intCast((config.dir.len - 1)))] != std.fs.path.sep)))) else cp_cast_int(usize, @intFromBool((config.dir[@as(usize, @intCast((config.dir.len - 1)))] != std.fs.path.sep)))))));
             }
             var loader = RouteLoader{ .allocator = allocator, .log = log, .fs = resolver.fs, .config = config, .static_list = bun.StringHashMap(RoutePtr).init(allocator), .dedupe_dynamic = std.AutoArrayHashMap(u32, string).init(allocator), .all_routes = .{}, .route_dirname_len = r_dirname_len };
             _ = &loader;
@@ -305,14 +240,13 @@ pub fn loadAll(allocator: std.mem.Allocator, config: Options.RouteConfig, log: *
             _ = &i;
             while ((i < loader.all_routes.items.len)) {
                 const route = loader.all_routes.items[@as(usize, @intCast(i))];
-                _ = &route;
                 if (((@intFromEnum(route.kind) > @intFromEnum(Pattern.Tag.static)) and (dynamic_start == null))) {
                     dynamic_start = i;
                 }
                 if ((route.full_hash == index_route_hash)) {
                     index_id = i;
                 }
-                _ = route_list.appendAssumeCapacity(.{ .name = route.name, .filepath = route.abs_path.slice(), .match_name = route.match_name.slice(), .public_path = route.public_path.slice(), .route = route, .hash = route.full_hash });
+                _ = route_list.appendAssumeCapacity(.{ .name = (if (comptime @typeInfo(@TypeOf(route)) == .@"enum" or @typeInfo(@TypeOf(route)) == .@"union") @tagName(route) else route.name), .filepath = route.abs_path.slice(), .match_name = route.match_name.slice(), .public_path = route.public_path.slice(), .route = route, .hash = route.full_hash });
                 i = (i + 1);
             }
             var dynamic: []const *Route = (&.{  });
@@ -345,17 +279,17 @@ pub fn load(self: *RouteLoader, comptime ResolverType: type, resolver: *Resolver
                 _ = &entries;
                 var iter = entries.data.iterator();
                 var __iter_moved = false; _ = &__iter_moved;
-                defer if (!__iter_moved) { const T = @TypeOf(iter); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = iter.release() catch {}; } else { iter.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = iter; _drop_val.release(); } };
+                defer if (!__iter_moved) { const __T = @TypeOf(iter); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = iter.release() catch {}; } else { iter.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = iter; _drop_val.release(); } };
                 while (iter.next()) |entry_ptr| {
                     var entry = entry_ptr.value_ptr.*;
                     var __entry_moved = false; _ = &__entry_moved;
-                    defer if (!__entry_moved) { const T = @TypeOf(entry); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = entry.release() catch {}; } else { entry.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = entry; _drop_val.release(); } };
+                    defer if (!__entry_moved) { const __T = @TypeOf(entry); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = entry.release() catch {}; } else { entry.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = entry; _drop_val.release(); } };
                     if ((entry.base()[0] == 46)) {
                         continue;
                     }
                     const entry_kind = entry.kind((&fs.fs), false);
                     var __entry_kind_moved = false; _ = &__entry_kind_moved;
-                    defer if (!__entry_kind_moved) { const T = @TypeOf(entry_kind); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = entry_kind.release() catch {}; } else { entry_kind.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = entry_kind; _drop_val.release(); } };
+                    defer if (!__entry_kind_moved) { const __T = @TypeOf(entry_kind); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = entry_kind.release() catch {}; } else { entry_kind.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = entry_kind; _drop_val.release(); } };
                     if ((entry_kind == .dir)) {
                         var is_banned = false;
                         _ = &is_banned;
@@ -369,19 +303,18 @@ pub fn load(self: *RouteLoader, comptime ResolverType: type, resolver: *Resolver
                         if (is_banned) {
                             continue;
                         }
-                        var abs_parts: [2][]const u8 = .{ entry.dir, entry.base() };
+                        var abs_parts: [2]string = .{ entry.dir, entry.base() };
                         _ = &abs_parts;
                         if (resolver.readDirInfoIgnoreError(fs.abs((&abs_parts)))) |_dir_info| {
                             _ = &_dir_info;
                             const dir_info: *const DirInfo = _dir_info;
-                            _ = &dir_info;
                             _ = self.load(ResolverType, resolver, dir_info, base_dir);
                         }
                     } else {
                         if ((entry_kind == .file)) {
                             const extname = std.fs.path.extension(entry.base());
                             var __extname_moved = false; _ = &__extname_moved;
-                            defer if (!__extname_moved) { const T = @TypeOf(extname); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = extname.release() catch {}; } else { extname.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = extname; _drop_val.release(); } };
+                            defer if (!__extname_moved) { const __T = @TypeOf(extname); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = extname.release() catch {}; } else { extname.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = extname; _drop_val.release(); } };
                             if ((extname.len < 2)) {
                                 continue;
                             }
@@ -392,7 +325,6 @@ pub fn load(self: *RouteLoader, comptime ResolverType: type, resolver: *Resolver
                                         _ = bun.assert(bun.path.isSepAny(entry.dir[@as(usize, @intCast((base_dir.len - 1)))]));
                                     }
                                     const public_dir = entry.dir.ptr[(base_dir.len - 1)..entry.dir.len];
-                                    _ = &public_dir;
                                     if (Route.parse(entry.base(), extname, entry, self.log, self.allocator, public_dir, self.route_dirname_len)) |route| {
                                         _ = &route;
                                         _ = self.appendRoute(route);
@@ -461,7 +393,7 @@ pub fn loadRoutes(self: *Router, log: *Logger.Log, root_dir_info: *const DirInfo
         self.loaded_routes = true;
 }
 
-pub fn match(self: *Router, comptime Server: type, server: *Server, comptime RequestContextType: type, ctx: *RequestContextType) !void {
+pub fn match(self: *Router, comptime Server: type, server: Server, comptime RequestContextType: type, ctx: *RequestContextType) !void {
         ctx.matched_route = null;
         switch (ctx.url.extname.len) {
 0 => {
@@ -489,7 +421,7 @@ _ = try ctx.handleRequest();
             _ = bun.assert((route.path.len > 0));
             if (comptime @hasField(std.meta.Child(Server), "watcher")) {
                 if ((server.watcher.watchloop_handle == null)) {
-                    _ = (blk_catch_16: { break :blk_catch_16 ((server.watcher.start()) catch |__ce_16| { _ = &__ce_16;  }); });
+                    _ = (blk_catch_13: { break :blk_catch_13 ((server.watcher.start()) catch |__ce_13| { _ = &__ce_13;  }); });
                 }
             }
         }

@@ -2746,3 +2746,24 @@ Level 2 (聚合根模块，依赖上述全部 3 个模块):
 
 ### 3. 方法体中 `for` 循环首部与借用安全
 - 在方法体内的 `for` 循环中，由于生成的 Zig 方法入参命名为 `self: *ServerConfig`，首部条件如 `for (self.static_routes.items)` 能确保直通生成合法 Zig 代码；同时显式通过 `*entry: T` 标注可变迭代指针，保证内存单写多读借用排他安全。
+
+
+---
+
+## 2026-11-11 开发日志：RequestContext 与 server.cp 泛型构造与 C ABI 闭环
+
+### 1. 泛型类型构造器（Generic Type Constructor Functions）解析原理
+- **背景**：在 Bun 服务端体系中，`NewRequestContext` 与 `NewServer` 均为高阶泛型类型构造器，接受 `comptime` 参数并返回动态特化的类型 `type`。
+- **Parser 溯源发现**：
+  - 在 CP 中，函数签名必须显式标注 `: type {`（冒号不可省略），否则解析器在遇到返回类型关键字 `type` 时会误认为遗漏 `{` 而报语法错误；
+  - 一旦正确解析为返回类型 `: type`，`cpc` 的 `Token::Struct` 表达式解析器会精准捕获 `return struct { ... };` 内部结构体定义，并配合 `cp_agy` 实现的 `struct-let-to-var` 机制自动完成变量与成员方法的降级与发射。
+
+### 2. 匿名枚举与参数类型具名化
+- **问题**：Zig 允许形参直接使用匿名枚举字面量类型 `comptime protocol_enum: enum { http, https }`。
+- **CP 现代化改进**：CP 类型系统推导更加严格与模块化，要求形参类型必须为具名类型标识符。通过在文件顶层提取 `pub const ProtocolEnum = enum { http, https };` 与 `pub const DevelopmentKind = enum { debug, production };`，消除类型内联歧义，同时使类型复用性大幅提升。
+
+### 3. C 外部函数声明规范化（`@c extern fn`）
+- **规范对齐**：根据 `cp_ref.md` 及用户指令指示，废弃带有字符串字面量的旧式 `extern "c" fn`，全面拥抱一等公民修饰符 `@c extern fn`。对于无形参名称的 C 原型（如 `extern fn Foo(bool, *anyopaque) void`），补全占位形参 `(_: bool, _: *anyopaque): void`，彻底达成 CP 现代语法合规。
+
+### 4. 服务端子系统闭环成果
+- `src/runtime/server/` 全目录共 14 个核心网络模块，总计 12,622 行生成代码，全部实现 0 报错通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。全目录代码相比原 Zig 净压缩 -0.93%，100% 杜绝 `zig {}` 逃逸舱与 `var` 变量！

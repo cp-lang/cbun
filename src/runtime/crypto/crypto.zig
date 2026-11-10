@@ -18,6 +18,10 @@ pub const SHA512 = @import("./CryptoHasher.zig").SHA512;
 pub const SHA512_256 = @import("./CryptoHasher.zig").SHA512_256;
 pub const HMAC = @import("./HMAC.zig");
 pub const EVP = @import("./EVP.zig");
+comptime {
+    _ = CryptoHasher.Extern.@"export"();
+
+}
 pub const bun = @import("bun");
 
 pub fn createCryptoError(globalThis: *jsc.JSGlobalObject, err_code: u32) jsc.JSValue {

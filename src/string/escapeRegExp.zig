@@ -2,10 +2,6 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type { if (@typeInfo(T) == .optional) return T; return ?T; }
-fn CpUnwrapOpt(comptime T: type) type { if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }
-fn cp_opt_is_null(v: anytype) bool { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) return v == null; return false; }
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
 const Environment = bun.Environment;
@@ -13,7 +9,12 @@ const strings = bun.strings;
 pub const jsEscapeRegExp = @import("../jsc/bun_string_jsc.zig").jsEscapeRegExp;
 pub const jsEscapeRegExpForPackageNameMatching = @import("../jsc/bun_string_jsc.zig").jsEscapeRegExpForPackageNameMatching;
 const special_characters: []const u8 = "|\\{}()[]^$+*?.-";
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
 
 
 pub fn escapeRegExp(input: []const u8, writer: *std.Io.Writer) !void {
@@ -25,7 +26,7 @@ pub fn escapeRegExp(input: []const u8, writer: *std.Io.Writer) !void {
             if ((i_opt == null)) {
                 break;
             }
-            var i = cp_cast_int(usize, ((i_opt) orelse (0)));
+            var i = (if (comptime @typeInfo(@TypeOf(((i_opt) orelse (0)))) == .@"enum") cp_cast_int(usize, @intFromEnum(((i_opt) orelse (0)))) else cp_cast_int(usize, ((i_opt) orelse (0))));
             _ = &i;
             _ = try writer.writeAll(remain[0..i]);
             var c = remain[@as(usize, @intCast(i))];
@@ -56,7 +57,7 @@ pub fn escapeRegExpForPackageNameMatching(input: []const u8, writer: *std.Io.Wri
             if ((i_opt == null)) {
                 break;
             }
-            var i = cp_cast_int(usize, ((i_opt) orelse (0)));
+            var i = (if (comptime @typeInfo(@TypeOf(((i_opt) orelse (0)))) == .@"enum") cp_cast_int(usize, @intFromEnum(((i_opt) orelse (0)))) else cp_cast_int(usize, ((i_opt) orelse (0))));
             _ = &i;
             _ = try writer.writeAll(remain[0..i]);
             var c = remain[@as(usize, @intCast(i))];

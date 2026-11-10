@@ -30,7 +30,7 @@ pub fn decode(self: *HPACK, src: []const u8) !DecodeResult {
             if ((header.name_len == 0)) {
                 return error.EmptyHeaderName;
             }
-            return DecodeResult{ .name = (if (comptime @typeInfo(@TypeOf(header)) == .@"enum" or @typeInfo(@TypeOf(header)) == .@"union") @tagName(header) else header.name).?[0..header.name_len], .value = (if (comptime @typeInfo(@TypeOf(header)) == .@"enum") @intFromEnum(header) else header.value).?[0..header.value_len], .next = offset, .never_index = header.never_index, .well_know = header.hpack_index };
+            return DecodeResult{ .name = header.name.?[0..header.name_len], .value = header.value.?[0..header.value_len], .next = offset, .never_index = header.never_index, .well_know = header.hpack_index };
     }
 
 pub fn encode(self: *HPACK, name: []const u8, value: []const u8, never_index: bool, dst_buffer: []u8, dst_buffer_offset: usize) !usize {

@@ -106,32 +106,24 @@ pub const SystemErrno = enum(u16) {
     ENOTRECOVERABLE = 95,
     EOWNERDEAD = 96,
     EINTEGRITY = 97,
-    pub fn get(s: []const u8) ?@This() {
-        return std.meta.stringToEnum(@This(), s);
-    }
-    pub fn has(s: []const u8) bool {
-        return std.meta.stringToEnum(@This(), s) != null;
-    }
-    pub fn fromName(s: []const u8) ?@This() {
-        return get(s);
-    }
-    pub fn name(self: @This()) []const u8 {
-        return @tagName(self);
-    }
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 
-    pub fn init(code: anytype) ?SystemErrno {
-        if ((code < 0)) {
-            if ((code <= (0 - MAX_ERRNO))) {
+pub fn init(code: anytype) ?SystemErrno {
+            if ((code < 0)) {
+                if ((code <= (0 - MAX_ERRNO))) {
+                    return null;
+                }
+                return @enumFromInt((0 - code));
+            }
+            if ((code >= MAX_ERRNO)) {
                 return null;
             }
-            return @enumFromInt((0 - code));
-        }
-        if ((code >= MAX_ERRNO)) {
-            return null;
-        }
-        return @enumFromInt(code);
+            return @enumFromInt(code);
     }
-
+    
     pub const max = MAX_ERRNO;
 };
 
@@ -207,17 +199,20 @@ pub const UV_E = struct {
     pub const NOEXEC: i32 = @intFromEnum(SystemErrno.ENOEXEC);
 };
 
+
 pub fn getErrno(rc: anytype) E {
-    const T = @TypeOf(rc);
-    const info = @typeInfo(T);
-    var is_neg1 = (if (((info == .int) and (info.int.signedness == .unsigned))) blk: {
+        const T = @TypeOf(rc);
+        const info = @typeInfo(T);
+        var is_neg1 = (if (((info == .int) and (info.int.signedness == .unsigned))) blk: {
         break :blk (rc == std.math.maxInt(T));
-    } else blk: {
+
+} else blk: {
         break :blk (rc == -1);
-    });
-    _ = &is_neg1;
-    if (is_neg1) {
-        return @enumFromInt((std.c._errno()).*);
-    }
-    return .SUCCESS;
+
+});
+        _ = &is_neg1;
+        if (is_neg1) {
+            return @enumFromInt((std.c._errno()).*);
+        }
+        return .SUCCESS;
 }

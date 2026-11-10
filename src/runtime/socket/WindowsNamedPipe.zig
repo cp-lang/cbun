@@ -1,614 +1,592 @@
-/// Wrapper that provides a socket-like API for Windows Named Pipes.
-///
-/// This allows us to use the same networking interface and event handling
-/// patterns across platforms, treating Named Pipes as if they were regular
-/// sockets. The wrapper translates between µWebSockets' socket-based API
-/// and Windows Named Pipe operations, enabling seamless cross-platform
-/// IPC without requiring separate code paths for Windows vs Unix domain sockets.
-///
-/// Integration with µWebSockets/uSockets:
-/// - Uses the same event loop and timer mechanisms as other socket types
-/// - Implements compatible handlers (onOpen, onData, onClose, etc.) that match uSockets callbacks
-/// - Supports SSL/TLS wrapping through the same BoringSSL integration used by TCP sockets
-/// - Provides streaming writer interface that mirrors uSockets' write operations
-/// - Maintains the same connection lifecycle and state management as network sockets
-/// - Enables transparent use of Named Pipes in contexts expecting standard socket APIs
-///
-/// Uses libuv for the underlying Named Pipe operations while maintaining compatibility
-/// with µWebSockets, bridging the gap between libuv's pipe handling and uSockets'
-/// unified socket interface.
-const WindowsNamedPipe = @This();
-
-wrapper: ?WrapperType,
-pipe: if (Environment.isWindows) ?*uv.Pipe else void, // any duplex
-vm: *bun.jsc.VirtualMachine, //TODO: create a timeout version that dont need the jsc VM
-
-writer: bun.io.StreamingWriter(WindowsNamedPipe, .{
-    .onClose = onClose,
-    .onWritable = onWritable,
-    .onError = onError,
-    .onWrite = onWrite,
-}) = .{},
-
-incoming: bun.ByteList = .{}, // Maybe we should use IPCBuffer here as well
-ssl_error: CertError = .{},
-handlers: Handlers,
-connect_req: uv.uv_connect_t = std.mem.zeroes(uv.uv_connect_t),
-
-event_loop_timer: EventLoopTimer = .{
-    .next = .epoch,
-    .tag = .WindowsNamedPipe,
-},
-current_timeout: u32 = 0,
-flags: Flags = .{},
-
-pub const Flags = packed struct(u8) {
-    disconnected: bool = true,
-    is_closed: bool = false,
-    is_client: bool = false,
-    is_ssl: bool = false,
-    _: u4 = 0,
-};
-pub const Handlers = struct {
-    ctx: *anyopaque,
-    ref_ctx: *const fn (*anyopaque) void,
-    deref_ctx: *const fn (*anyopaque) void,
-    onOpen: *const fn (*anyopaque) void,
-    onHandshake: *const fn (*anyopaque, bool, uws.us_bun_verify_error_t) void,
-    onData: *const fn (*anyopaque, []const u8) void,
-    onClose: *const fn (*anyopaque) void,
-    onEnd: *const fn (*anyopaque) void,
-    onWritable: *const fn (*anyopaque) void,
-    onError: *const fn (*anyopaque, bun.sys.Error) void,
-    onTimeout: *const fn (*anyopaque) void,
-};
-
-fn onWritable(
-    this: *WindowsNamedPipe,
-) void {
-    log("onWritable", .{});
-    // flush pending data
-    this.flush();
-    // call onWritable (will flush on demand)
-    this.handlers.onWritable(this.handlers.ctx);
-}
-
-fn onPipeClose(this: *WindowsNamedPipe) void {
-    log("onPipeClose", .{});
-    this.flags.disconnected = true;
-    this.pipe = null;
-    this.onClose();
-}
-
-fn onReadAlloc(this: *WindowsNamedPipe, suggested_size: usize) []u8 {
-    var available = this.incoming.unusedCapacitySlice();
-    if (available.len < suggested_size) {
-        bun.handleOom(this.incoming.ensureUnusedCapacity(bun.default_allocator, suggested_size));
-        available = this.incoming.unusedCapacitySlice();
-    }
-    return available.ptr[0..suggested_size];
-}
-
-fn onRead(this: *WindowsNamedPipe, buffer: []const u8) void {
-    log("onRead ({})", .{buffer.len});
-    this.incoming.len += @as(u32, @truncate(buffer.len));
-    bun.assert(this.incoming.len <= this.incoming.cap);
-    bun.assert(bun.isSliceInBuffer(buffer, this.incoming.allocatedSlice()));
-
-    const data = this.incoming.slice();
-
-    this.resetTimeout();
-
-    if (this.wrapper) |*wrapper| {
-        wrapper.receiveData(data);
-    } else {
-        this.handlers.onData(this.handlers.ctx, data);
-    }
-    this.incoming.len = 0;
-}
-
-fn onWrite(this: *WindowsNamedPipe, amount: usize, status: bun.io.WriteStatus) void {
-    log("onWrite {d} {}", .{ amount, status });
-
-    switch (status) {
-        .pending => {},
-        .drained => {
-            // unref after sending all data
-            if (this.writer.source) |source| {
-                source.pipe.unref();
-            }
-        },
-        .end_of_file => {
-            // we send FIN so we close after this
-            this.writer.close();
-        },
-    }
-}
-
-fn onReadError(this: *WindowsNamedPipe, err: bun.sys.E) void {
-    log("onReadError", .{});
-    if (err == .EOF) {
-        // we received FIN but we dont allow half-closed connections right now
-        this.handlers.onEnd(this.handlers.ctx);
-    } else {
-        this.onError(bun.sys.Error.fromCode(err, .read));
-    }
-    this.writer.close();
-}
-
-fn onError(this: *WindowsNamedPipe, err: bun.sys.Error) void {
-    log("onError", .{});
-    this.handlers.onError(this.handlers.ctx, err);
-    this.close();
-}
-
-fn onOpen(this: *WindowsNamedPipe) void {
-    log("onOpen", .{});
-    this.handlers.onOpen(this.handlers.ctx);
-}
-
-fn onData(this: *WindowsNamedPipe, decoded_data: []const u8) void {
-    log("onData ({})", .{decoded_data.len});
-    this.handlers.onData(this.handlers.ctx, decoded_data);
-}
-
-fn onHandshake(this: *WindowsNamedPipe, handshake_success: bool, ssl_error: uws.us_bun_verify_error_t) void {
-    log("onHandshake", .{});
-
-    this.ssl_error = .{
-        .error_no = ssl_error.error_no,
-        .code = if (ssl_error.code == null or ssl_error.error_no == 0) "" else bun.handleOom(bun.default_allocator.dupeZ(u8, ssl_error.code[0..bun.len(ssl_error.code) :0])),
-        .reason = if (ssl_error.reason == null or ssl_error.error_no == 0) "" else bun.handleOom(bun.default_allocator.dupeZ(u8, ssl_error.reason[0..bun.len(ssl_error.reason) :0])),
-    };
-    this.handlers.onHandshake(this.handlers.ctx, handshake_success, ssl_error);
-}
-
-fn onClose(this: *WindowsNamedPipe) void {
-    log("onClose", .{});
-    if (!this.flags.is_closed) {
-        this.flags.is_closed = true; // only call onClose once
-        this.handlers.onClose(this.handlers.ctx);
-        this.deinit();
-    }
-}
-
-fn callWriteOrEnd(this: *WindowsNamedPipe, data: ?[]const u8, msg_more: bool) void {
-    if (data) |bytes| {
-        if (bytes.len > 0) {
-            // ref because we have pending data
-            if (this.writer.source) |source| {
-                source.pipe.ref();
-            }
-            if (this.flags.disconnected) {
-                // enqueue to be sent after connecting
-                bun.handleOom(this.writer.outgoing.write(bytes));
-            } else {
-                // write will enqueue the data if it cannot be sent
-                _ = this.writer.write(bytes);
-            }
-        }
-    }
-
-    if (!msg_more) {
-        if (this.wrapper) |*wrapper| {
-            _ = wrapper.shutdown(false);
-        }
-        this.writer.end();
-    }
-}
-
-fn internalWrite(this: *WindowsNamedPipe, encoded_data: []const u8) void {
-    this.resetTimeout();
-
-    // Possible scenarios:
-    // Scenario 1: will not write if is not connected yet but will enqueue the data
-    // Scenario 2: will not write if a exception is thrown (will be handled by onError)
-    // Scenario 3: will be queued in memory and will be flushed later
-    // Scenario 4: no write/end function exists (will be handled by onError)
-    this.callWriteOrEnd(encoded_data, true);
-}
-
-pub fn resumeStream(this: *WindowsNamedPipe) bool {
-    const stream = this.writer.getStream() orelse {
-        return false;
-    };
-    const readStartResult = stream.readStart(this, onReadAlloc, onReadError, onRead);
-    if (readStartResult == .err) {
-        return false;
-    }
-    return true;
-}
-
-pub fn pauseStream(this: *WindowsNamedPipe) bool {
-    const pipe = this.pipe orelse {
-        return false;
-    };
-    pipe.readStop();
-    return true;
-}
-
-pub fn flush(this: *WindowsNamedPipe) void {
-    if (this.wrapper) |*wrapper| {
-        _ = wrapper.flush();
-    }
-    if (!this.flags.disconnected) {
-        _ = this.writer.flush();
-    }
-}
-
-fn onInternalReceiveData(this: *WindowsNamedPipe, data: []const u8) void {
-    if (this.wrapper) |*wrapper| {
-        this.resetTimeout();
-        wrapper.receiveData(data);
-    }
-}
-
-pub fn onTimeout(this: *WindowsNamedPipe) void {
-    log("onTimeout", .{});
-
-    const has_been_cleared = this.event_loop_timer.state == .CANCELLED or this.vm.scriptExecutionStatus() != .running;
-
-    this.event_loop_timer.state = .FIRED;
-    this.event_loop_timer.heap = .{};
-
-    if (has_been_cleared) {
-        return;
-    }
-
-    this.handlers.onTimeout(this.handlers.ctx);
-}
-
-pub fn from(
-    pipe: *uv.Pipe,
-    handlers: WindowsNamedPipe.Handlers,
-    vm: *jsc.VirtualMachine,
-) WindowsNamedPipe {
-    if (Environment.isPosix) {
-        @compileError("WindowsNamedPipe is not supported on POSIX systems");
-    }
-    return WindowsNamedPipe{
-        .vm = vm,
-        .pipe = pipe,
-        .wrapper = null,
-        .handlers = handlers,
-    };
-}
-pub fn ref(this: *WindowsNamedPipe) void {
-    this.handlers.ref_ctx(this.handlers.ctx);
-}
-
-pub fn deref(this: *WindowsNamedPipe) void {
-    this.handlers.deref_ctx(this.handlers.ctx);
-}
-
-fn onConnect(this: *WindowsNamedPipe, status: uv.ReturnCode) void {
-    defer this.deref();
-    if (this.pipe) |pipe| {
-        _ = pipe.unref();
-    }
-
-    if (status.toError(.connect)) |err| {
-        this.onError(err);
-        return;
-    }
-
-    this.flags.disconnected = false;
-    if (this.start(true)) {
-        if (this.isTLS()) {
-            if (this.wrapper) |*wrapper| {
-                // trigger onOpen and start the handshake
-                wrapper.start();
-            }
-        } else {
-            // trigger onOpen
-            this.onOpen();
-        }
-    }
-    this.flush();
-}
-
-pub fn getAcceptedBy(this: *WindowsNamedPipe, server: *uv.Pipe, ssl_ctx: ?*BoringSSL.SSL_CTX) bun.sys.Maybe(void) {
-    bun.assert(this.pipe != null);
-    this.flags.disconnected = true;
-
-    if (ssl_ctx) |tls| {
-        this.flags.is_ssl = true;
-        this.wrapper = WrapperType.initWithCTX(tls, false, .{
-            .ctx = this,
-            .onOpen = WindowsNamedPipe.onOpen,
-            .onHandshake = WindowsNamedPipe.onHandshake,
-            .onData = WindowsNamedPipe.onData,
-            .onClose = WindowsNamedPipe.onClose,
-            .write = WindowsNamedPipe.internalWrite,
-        }) catch {
-            return .{
-                .err = .{
-                    .errno = @intFromEnum(bun.sys.E.PIPE),
-                    .syscall = .connect,
-                },
-            };
-        };
-        // ref because we are accepting will unref when wrapper deinit
-        _ = BoringSSL.SSL_CTX_up_ref(tls);
-    }
-    const initResult = this.pipe.?.init(this.vm.uvLoop(), false);
-    if (initResult == .err) {
-        return initResult;
-    }
-
-    const openResult = server.accept(this.pipe.?);
-    if (openResult == .err) {
-        return openResult;
-    }
-
-    this.flags.disconnected = false;
-    if (this.start(false)) {
-        if (this.isTLS()) {
-            if (this.wrapper) |*wrapper| {
-                // trigger onOpen and start the handshake
-                wrapper.start();
-            }
-        } else {
-            // trigger onOpen
-            this.onOpen();
-        }
-    }
-    return .success;
-}
-pub fn open(this: *WindowsNamedPipe, fd: bun.FD, ssl_options: ?jsc.API.ServerConfig.SSLConfig, owned_ctx: ?*BoringSSL.SSL_CTX) bun.sys.Maybe(void) {
-    bun.assert(this.pipe != null);
-    this.flags.disconnected = true;
-
-    if (this.initTLSWrapper(ssl_options, owned_ctx)) |result| {
-        if (result == .err) return result;
-    }
-    const initResult = this.pipe.?.init(this.vm.uvLoop(), false);
-    if (initResult == .err) {
-        return initResult;
-    }
-
-    const openResult = this.pipe.?.open(fd);
-    if (openResult == .err) {
-        return openResult;
-    }
-
-    this.ref();
-    onConnect(this, uv.ReturnCode.zero);
-    return .success;
-}
-
-pub fn connect(this: *WindowsNamedPipe, path: []const u8, ssl_options: ?jsc.API.ServerConfig.SSLConfig, owned_ctx: ?*BoringSSL.SSL_CTX) bun.sys.Maybe(void) {
-    bun.assert(this.pipe != null);
-    this.flags.disconnected = true;
-    // ref because we are connecting
-    _ = this.pipe.?.ref();
-
-    if (this.initTLSWrapper(ssl_options, owned_ctx)) |result| {
-        if (result == .err) return result;
-    }
-    const initResult = this.pipe.?.init(this.vm.uvLoop(), false);
-    if (initResult == .err) {
-        return initResult;
-    }
-
-    this.connect_req.data = this;
-    const result = this.pipe.?.connect(&this.connect_req, path, this, onConnect);
-    if (result.asErr() != null) {
-        return result;
-    }
-    this.ref();
-    return result;
-}
-
-/// Set up the in-process SSL wrapper for `connect`/`open`. Prefers a prebuilt
-/// `SSL_CTX` (one ref ADOPTED — held by `wrapper` on success, freed here on
-/// failure) so a memoised `tls.createSecureContext` reaches this path with its
-/// CA bundle intact; on this branch `[buntls]` returns `{secureContext}` and no
-/// longer spreads `{ca,cert,key}`, so the `SSLConfig` fallback alone would build
-/// a CTX with an empty trust store and fail `DEPTH_ZERO_SELF_SIGNED_CERT`.
-/// Returns null when neither input requested TLS.
-fn initTLSWrapper(this: *WindowsNamedPipe, ssl_options: ?jsc.API.ServerConfig.SSLConfig, owned_ctx: ?*BoringSSL.SSL_CTX) ?bun.sys.Maybe(void) {
-    const handlers: WrapperType.Handlers = .{
-        .ctx = this,
-        .onOpen = WindowsNamedPipe.onOpen,
-        .onHandshake = WindowsNamedPipe.onHandshake,
-        .onData = WindowsNamedPipe.onData,
-        .onClose = WindowsNamedPipe.onClose,
-        .write = WindowsNamedPipe.internalWrite,
-    };
-    if (owned_ctx) |ctx| {
-        this.flags.is_ssl = true;
-        this.wrapper = WrapperType.initWithCTX(ctx, true, handlers) catch {
-            BoringSSL.SSL_CTX_free(ctx);
-            return .{ .err = .{ .errno = @intFromEnum(bun.sys.E.PIPE), .syscall = .connect } };
-        };
-        return .success;
-    }
-    if (ssl_options) |tls| {
-        this.flags.is_ssl = true;
-        this.wrapper = WrapperType.init(tls, true, handlers) catch {
-            return .{ .err = .{ .errno = @intFromEnum(bun.sys.E.PIPE), .syscall = .connect } };
-        };
-        return .success;
-    }
-    return null;
-}
-
-pub fn startTLS(this: *WindowsNamedPipe, ssl_options: jsc.API.ServerConfig.SSLConfig, is_client: bool) !void {
-    this.flags.is_ssl = true;
-    if (this.start(is_client)) {
-        this.wrapper = try WrapperType.init(ssl_options, is_client, .{
-            .ctx = this,
-            .onOpen = WindowsNamedPipe.onOpen,
-            .onHandshake = WindowsNamedPipe.onHandshake,
-            .onData = WindowsNamedPipe.onData,
-            .onClose = WindowsNamedPipe.onClose,
-            .write = WindowsNamedPipe.internalWrite,
-        });
-
-        this.wrapper.?.start();
-    }
-}
-
-pub fn start(this: *WindowsNamedPipe, is_client: bool) bool {
-    this.flags.is_client = is_client;
-    if (this.pipe == null) {
-        return false;
-    }
-    _ = this.pipe.?.unref();
-    this.writer.setParent(this);
-    const startPipeResult = this.writer.startWithPipe(this.pipe.?);
-    if (startPipeResult == .err) {
-        this.onError(startPipeResult.err);
-        return false;
-    }
-    const stream = this.writer.getStream() orelse {
-        this.onError(bun.sys.Error.fromCode(bun.sys.E.PIPE, .read));
-        return false;
-    };
-
-    const readStartResult = stream.readStart(this, onReadAlloc, onReadError, onRead);
-    if (readStartResult == .err) {
-        this.onError(readStartResult.err);
-        return false;
-    }
-    return true;
-}
-
-pub fn isTLS(this: *WindowsNamedPipe) bool {
-    return this.flags.is_ssl;
-}
-
-pub fn loop(this: *WindowsNamedPipe) *bun.Async.Loop {
-    return this.vm.uvLoop();
-}
-
-pub fn encodeAndWrite(this: *WindowsNamedPipe, data: []const u8) i32 {
-    log("encodeAndWrite (len: {})", .{data.len});
-    if (this.wrapper) |*wrapper| {
-        return @as(i32, @intCast(wrapper.writeData(data) catch 0));
-    } else {
-        this.internalWrite(data);
-    }
-    return @intCast(data.len);
-}
-
-pub fn rawWrite(this: *WindowsNamedPipe, encoded_data: []const u8) i32 {
-    this.internalWrite(encoded_data);
-    return @intCast(encoded_data.len);
-}
-
-pub fn close(this: *WindowsNamedPipe) void {
-    if (this.wrapper) |*wrapper| {
-        _ = wrapper.shutdown(false);
-    }
-    this.writer.end();
-}
-
-pub fn shutdown(this: *WindowsNamedPipe) void {
-    if (this.wrapper) |*wrapper| {
-        _ = wrapper.shutdown(false);
-    }
-}
-
-pub fn shutdownRead(this: *WindowsNamedPipe) void {
-    if (this.wrapper) |*wrapper| {
-        _ = wrapper.shutdownRead();
-    } else {
-        if (this.writer.getStream()) |stream| {
-            _ = stream.readStop();
-        }
-    }
-}
-
-pub fn isShutdown(this: *WindowsNamedPipe) bool {
-    if (this.wrapper) |wrapper| {
-        return wrapper.isShutdown();
-    }
-
-    return this.flags.disconnected or this.writer.is_done;
-}
-
-pub fn isClosed(this: *WindowsNamedPipe) bool {
-    if (this.wrapper) |wrapper| {
-        return wrapper.isClosed();
-    }
-    return this.flags.disconnected;
-}
-
-pub fn isEstablished(this: *WindowsNamedPipe) bool {
-    return !this.isClosed();
-}
-
-pub fn ssl(this: *WindowsNamedPipe) ?*BoringSSL.SSL {
-    if (this.wrapper) |wrapper| {
-        return wrapper.ssl;
-    }
-    return null;
-}
-
-pub fn sslError(this: *WindowsNamedPipe) us_bun_verify_error_t {
-    return .{
-        .error_no = this.ssl_error.error_no,
-        .code = @ptrCast(this.ssl_error.code.ptr),
-        .reason = @ptrCast(this.ssl_error.reason.ptr),
-    };
-}
-
-pub fn resetTimeout(this: *WindowsNamedPipe) void {
-    this.setTimeoutInMilliseconds(this.current_timeout);
-}
-pub fn setTimeoutInMilliseconds(this: *WindowsNamedPipe, ms: c_uint) void {
-    if (this.event_loop_timer.state == .ACTIVE) {
-        this.vm.timer.remove(&this.event_loop_timer);
-    }
-    this.current_timeout = ms;
-
-    // if the interval is 0 means that we stop the timer
-    if (ms == 0) {
-        return;
-    }
-
-    // reschedule the timer
-    this.event_loop_timer.next = bun.timespec.msFromNow(.allow_mocked_time, ms);
-    this.vm.timer.insert(&this.event_loop_timer);
-}
-pub fn setTimeout(this: *WindowsNamedPipe, seconds: c_uint) void {
-    log("setTimeout({d})", .{seconds});
-    this.setTimeoutInMilliseconds(seconds * 1000);
-}
-/// Free internal resources, it can be called multiple times
-pub fn deinit(this: *WindowsNamedPipe) void {
-    log("deinit", .{});
-    // clear the timer
-    this.setTimeout(0);
-    if (this.writer.getStream()) |stream| {
-        _ = stream.readStop();
-    }
-    this.writer.deinit();
-    if (this.wrapper) |*wrapper| {
-        wrapper.deinit();
-        this.wrapper = null;
-    }
-    var ssl_error = this.ssl_error;
-    ssl_error.deinit();
-    this.ssl_error = .{};
-}
-
-pub const CertError = UpgradedDuplex.CertError;
-const WrapperType = SSLWrapper(*WindowsNamedPipe);
-const log = bun.Output.scoped(.WindowsNamedPipe, .visible);
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
-const SSLWrapper = @import("./ssl_wrapper.zig").SSLWrapper;
+const string = []const u8;
 
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const Environment = bun.Environment;
 const jsc = bun.jsc;
 const BoringSSL = bun.BoringSSL.c;
 const uv = bun.windows.libuv;
 const EventLoopTimer = bun.api.Timer.EventLoopTimer;
-
 const uws = bun.uws;
 const UpgradedDuplex = uws.UpgradedDuplex;
 const us_bun_verify_error_t = uws.us_bun_verify_error_t;
+const SSLWrapper = @import("./ssl_wrapper.zig").SSLWrapper;
+const log = bun.Output.scoped(.WindowsNamedPipe, .visible);
+pub const CertError = UpgradedDuplex.CertError;
+const WrapperType = SSLWrapper(*WindowsNamedPipe);
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const WindowsNamedPipe = struct {
+    wrapper: ?WrapperType = null,
+    pipe: if (Environment.isWindows) ?*uv.Pipe else void = null,
+    vm: *bun.jsc.VirtualMachine,
+    writer: bun.io.StreamingWriter(WindowsNamedPipe,.{.onClose=onClose,.onWritable=onWritable,.onError=onError,.onWrite=onWrite,}) = .{},
+    incoming: bun.ByteList = .{},
+    ssl_error: CertError = .{},
+    handlers: Handlers,
+    connect_req: uv.uv_connect_t = std.mem.zeroes(uv.uv_connect_t),
+    event_loop_timer: EventLoopTimer = .{ .next = .epoch, .tag = .WindowsNamedPipe },
+    current_timeout: u32 = 0,
+    flags: Flags = .{},
+    
+pub fn _create(allocator: std.mem.Allocator) !*WindowsNamedPipe { const self_ptr = try allocator.create(WindowsNamedPipe); self_ptr.* = undefined; return self_ptr; }
+
+pub fn init(self: *WindowsNamedPipe, wrapper: ?WrapperType, pipe: if (Environment.isWindows) ?*uv.Pipe else void, vm: *bun.jsc.VirtualMachine, writer: bun.io.StreamingWriter(WindowsNamedPipe,.{.onClose=onClose,.onWritable=onWritable,.onError=onError,.onWrite=onWrite,}), incoming: bun.ByteList, ssl_error: CertError, handlers: Handlers, connect_req: uv.uv_connect_t, event_loop_timer: EventLoopTimer, current_timeout: u32, flags: Flags) void {
+        var __writer_moved = false; _ = &__writer_moved;
+        defer if (!__writer_moved) { const __T = @TypeOf(writer); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = writer.release() catch {}; } else { writer.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = writer; _drop_val.release(); } };
+        var __incoming_moved = false; _ = &__incoming_moved;
+        defer if (!__incoming_moved) { const __T = @TypeOf(incoming); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = incoming.release() catch {}; } else { incoming.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = incoming; _drop_val.release(); } };
+        var __ssl_error_moved = false; _ = &__ssl_error_moved;
+        defer if (!__ssl_error_moved) { const __T = @TypeOf(ssl_error); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = ssl_error.release() catch {}; } else { ssl_error.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = ssl_error; _drop_val.release(); } };
+        var __handlers_moved = false; _ = &__handlers_moved;
+        defer if (!__handlers_moved) { const __T = @TypeOf(handlers); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = handlers.release() catch {}; } else { handlers.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = handlers; _drop_val.release(); } };
+        var __connect_req_moved = false; _ = &__connect_req_moved;
+        defer if (!__connect_req_moved) { const __T = @TypeOf(connect_req); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = connect_req.release() catch {}; } else { connect_req.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = connect_req; _drop_val.release(); } };
+        var __event_loop_timer_moved = false; _ = &__event_loop_timer_moved;
+        defer if (!__event_loop_timer_moved) { const __T = @TypeOf(event_loop_timer); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = event_loop_timer.release() catch {}; } else { event_loop_timer.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = event_loop_timer; _drop_val.release(); } };
+        var __flags_moved = false; _ = &__flags_moved;
+        defer if (!__flags_moved) { const __T = @TypeOf(flags); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = flags.release() catch {}; } else { flags.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = flags; _drop_val.release(); } };
+            self.wrapper = wrapper;
+            self.pipe = pipe;
+            self.vm = vm;
+            self.writer = writer;
+            self.incoming = incoming;
+            self.ssl_error = ssl_error;
+            self.handlers = handlers;
+            self.connect_req = connect_req;
+            self.event_loop_timer = event_loop_timer;
+            self.current_timeout = current_timeout;
+            self.flags = flags;
+    }
+
+pub fn onWritable(self: *WindowsNamedPipe) void {
+            _ = log("onWritable", .{});
+            _ = self.flush();
+            _ = self.handlers.onWritable(self.handlers.ctx);
+    }
+
+pub fn onPipeClose(self: *WindowsNamedPipe) void {
+            _ = log("onPipeClose", .{});
+            self.flags.disconnected = true;
+            self.pipe = null;
+            _ = self.onClose();
+    }
+
+pub fn onReadAlloc(self: *WindowsNamedPipe, suggested_size: usize) []const u8 {
+            var available = self.incoming.unusedCapacitySlice();
+            var __available_moved = false; _ = &__available_moved;
+            defer if (!__available_moved) { const __T = @TypeOf(available); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = available.release() catch {}; } else { available.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = available; _drop_val.release(); } };
+            if ((available.len < suggested_size)) {
+                _ = bun.handleOom(self.incoming.ensureUnusedCapacity(bun.default_allocator, suggested_size));
+                available = self.incoming.unusedCapacitySlice();
+            }
+            return available.ptr[0..suggested_size];
+    }
+
+pub fn onRead(self: *WindowsNamedPipe, buffer: []const u8) void {
+            _ = log("onRead ({})", .{ buffer.len });
+            self.incoming.len = (self.incoming.len + @as(u32, @truncate(buffer.len)));
+            _ = bun.assert((self.incoming.len <= self.incoming.cap));
+            _ = bun.assert(bun.isSliceInBuffer(buffer, self.incoming.allocatedSlice()));
+            const data = self.incoming.slice();
+            var __data_moved = false; _ = &__data_moved;
+            defer if (!__data_moved) { const __T = @TypeOf(data); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = data.release() catch {}; } else { data.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = data; _drop_val.release(); } };
+            _ = self.resetTimeout();
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                _ = (wrapper.*).receiveData(data);
+            } else {
+                _ = self.handlers.onData(self.handlers.ctx, data);
+            }
+            self.incoming.len = 0;
+    }
+
+pub fn onWrite(self: *WindowsNamedPipe, amount: usize, status: bun.io.WriteStatus) void {
+            _ = log("onWrite {d} {}", .{ amount, status });
+            switch (status) {
+.pending => {
+
+},
+.drained => {
+if (self.writer.source) |source| {
+                _ = &source;
+                _ = source.pipe.unref();
+            }
+},
+.end_of_file => {
+_ = self.writer.close();
+},
+}
+    }
+
+pub fn onReadError(self: *WindowsNamedPipe, err: bun.sys.E) void {
+            _ = log("onReadError", .{});
+            if ((err == .EOF)) {
+                _ = self.handlers.onEnd(self.handlers.ctx);
+            } else {
+                _ = self.onError(bun.sys.Error.fromCode(err, .read));
+            }
+            _ = self.writer.close();
+    }
+
+pub fn onError(self: *WindowsNamedPipe, err: bun.sys.Error) void {
+            _ = log("onError", .{});
+            _ = self.handlers.onError(self.handlers.ctx, err);
+            _ = self.close();
+    }
+
+pub fn onOpen(self: *WindowsNamedPipe) void {
+            _ = log("onOpen", .{});
+            _ = self.handlers.onOpen(self.handlers.ctx);
+    }
+
+pub fn onData(self: *WindowsNamedPipe, decoded_data: []const u8) void {
+            _ = log("onData ({})", .{ decoded_data.len });
+            _ = self.handlers.onData(self.handlers.ctx, decoded_data);
+    }
+
+pub fn onHandshake(self: *WindowsNamedPipe, handshake_success: bool, ssl_error: uws.us_bun_verify_error_t) void {
+            _ = log("onHandshake", .{});
+            self.ssl_error = .{ .error_no = ssl_error.error_no, .code = (if (((ssl_error.code == null) or (ssl_error.error_no == 0))) "" else bun.handleOom(bun.default_allocator.dupeZ(u8, ssl_error.code[0..bun.len(ssl_error.code) :0]))), .reason = (if (((ssl_error.reason == null) or (ssl_error.error_no == 0))) "" else bun.handleOom(bun.default_allocator.dupeZ(u8, ssl_error.reason[0..bun.len(ssl_error.reason) :0]))) };
+            _ = self.handlers.onHandshake(self.handlers.ctx, handshake_success, ssl_error);
+    }
+
+pub fn onClose(self: *WindowsNamedPipe) void {
+            _ = log("onClose", .{});
+            if ((!self.flags.is_closed)) {
+                self.flags.is_closed = true;
+                _ = self.handlers.onClose(self.handlers.ctx);
+                _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
+            }
+    }
+
+pub fn callWriteOrEnd(self: *WindowsNamedPipe, data: ?[]const u8, msg_more: bool) void {
+            if (data) |bytes| {
+                _ = &bytes;
+                if ((bytes.len > 0)) {
+                    if (self.writer.source) |source| {
+                        _ = &source;
+                        _ = source.pipe.ref();
+                    }
+                    if (self.flags.disconnected) {
+                        _ = bun.handleOom(self.writer.outgoing.write(bytes));
+                    } else {
+                        _ = self.writer.write(bytes);
+                    }
+                }
+            }
+            if ((!msg_more)) {
+                if (self.wrapper) |*wrapper| {
+                    _ = &wrapper;
+                    _ = (wrapper.*).shutdown(false);
+                }
+                _ = self.writer.end();
+            }
+    }
+
+pub fn internalWrite(self: *WindowsNamedPipe, encoded_data: []const u8) void {
+            _ = self.resetTimeout();
+            _ = self.callWriteOrEnd(encoded_data, true);
+    }
+
+pub fn resumeStream(self: *WindowsNamedPipe) bool {
+            const stream = ((self.writer.getStream()) orelse (({
+            return false;
+})));
+            var __stream_moved = false; _ = &__stream_moved;
+            defer if (!__stream_moved) { const __T = @TypeOf(stream); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = stream.release() catch {}; } else { stream.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = stream; _drop_val.release(); } };
+            const readStartResult = stream.readStart(self, onReadAlloc, onReadError, onRead);
+            var __readStartResult_moved = false; _ = &__readStartResult_moved;
+            defer if (!__readStartResult_moved) { const __T = @TypeOf(readStartResult); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = readStartResult.release() catch {}; } else { readStartResult.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = readStartResult; _drop_val.release(); } };
+            if ((readStartResult == .err)) {
+                return false;
+            }
+            return true;
+    }
+
+pub fn pauseStream(self: *WindowsNamedPipe) bool {
+            const pipe = ((self.pipe) orelse (({
+            return false;
+})));
+            _ = pipe.readStop();
+            return true;
+    }
+
+pub fn flush(self: *WindowsNamedPipe) void {
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                _ = (wrapper.*).flush();
+            }
+            if ((!self.flags.disconnected)) {
+                _ = self.writer.flush();
+            }
+    }
+
+pub fn onInternalReceiveData(self: *WindowsNamedPipe, data: []const u8) void {
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                _ = self.resetTimeout();
+                _ = (wrapper.*).receiveData(data);
+            }
+    }
+
+pub fn onTimeout(self: *WindowsNamedPipe) void {
+            _ = log("onTimeout", .{});
+            const has_been_cleared = ((self.event_loop_timer.state == .CANCELLED) or (self.vm.scriptExecutionStatus() != .running));
+            self.event_loop_timer.state = .FIRED;
+            self.event_loop_timer.heap = .{};
+            if (has_been_cleared) {
+                return;
+            }
+            _ = self.handlers.onTimeout(self.handlers.ctx);
+    }
+
+pub fn from(self: *const WindowsNamedPipe, pipe: *uv.Pipe, handlers: WindowsNamedPipe.Handlers, vm: *jsc.VirtualMachine) WindowsNamedPipe {
+        _ = &self;
+            if (Environment.isPosix) {
+                _ = @compileError("WindowsNamedPipe is not supported on POSIX systems");
+            }
+            return WindowsNamedPipe{ .vm = vm, .pipe = pipe, .wrapper = null, .handlers = handlers };
+    }
+
+pub fn ref(self: *WindowsNamedPipe) void {
+            _ = self.handlers.ref_ctx(self.handlers.ctx);
+    }
+
+pub fn deref(self: *WindowsNamedPipe) void {
+            _ = self.handlers.deref_ctx(self.handlers.ctx);
+    }
+
+pub fn onConnect(self: *WindowsNamedPipe, status: uv.ReturnCode) void {
+            defer {
+            _ = self.deref();
+            }
+            if (self.pipe) |pipe| {
+                _ = &pipe;
+                _ = pipe.unref();
+            }
+            if (status.toError(.connect)) |err| {
+                _ = &err;
+                _ = self.onError(err);
+                return;
+            }
+            self.flags.disconnected = false;
+            if (self.start(true)) {
+                if (self.isTLS()) {
+                    if (self.wrapper) |*wrapper| {
+                        _ = &wrapper;
+                        _ = (wrapper.*).start();
+                    }
+                } else {
+                    _ = self.onOpen();
+                }
+            }
+            _ = self.flush();
+    }
+
+pub fn getAcceptedBy(self: *WindowsNamedPipe, server: *uv.Pipe, ssl_ctx: ?*BoringSSL.SSL_CTX) bun.sys.Maybe(void) {
+            _ = bun.assert((self.pipe != null));
+            self.flags.disconnected = true;
+            if (ssl_ctx) |tls| {
+                _ = &tls;
+                self.flags.is_ssl = true;
+                self.wrapper = (blk_catch_0: { break :blk_catch_0 ((WrapperType.initWithCTX(tls, false, .{ .ctx = self, .onOpen = WindowsNamedPipe.onOpen, .onHandshake = WindowsNamedPipe.onHandshake, .onData = WindowsNamedPipe.onData, .onClose = WindowsNamedPipe.onClose, .write = WindowsNamedPipe.internalWrite })) catch |__ce_0| { _ = &__ce_0; return .{ .err = .{ .errno = @intFromEnum(bun.sys.E.PIPE), .syscall = .connect } }; }); });
+                _ = BoringSSL.SSL_CTX_up_ref(tls);
+            }
+            const initResult = self.pipe.?.init(self.vm.uvLoop(), false);
+            var __initResult_moved = false; _ = &__initResult_moved;
+            defer if (!__initResult_moved) { const __T = @TypeOf(initResult); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = initResult.release() catch {}; } else { initResult.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = initResult; _drop_val.release(); } };
+            if ((initResult == .err)) {
+                __initResult_moved = true;
+                return initResult;
+            }
+            const openResult = server.accept(self.pipe.?);
+            var __openResult_moved = false; _ = &__openResult_moved;
+            defer if (!__openResult_moved) { const __T = @TypeOf(openResult); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = openResult.release() catch {}; } else { openResult.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = openResult; _drop_val.release(); } };
+            if ((openResult == .err)) {
+                __openResult_moved = true;
+                return openResult;
+            }
+            self.flags.disconnected = false;
+            if (self.start(false)) {
+                if (self.isTLS()) {
+                    if (self.wrapper) |*wrapper| {
+                        _ = &wrapper;
+                        _ = (wrapper.*).start();
+                    }
+                } else {
+                    _ = self.onOpen();
+                }
+            }
+            return .success;
+    }
+
+pub fn open(self: *WindowsNamedPipe, fd: bun.FD, ssl_options: ?jsc.API.ServerConfig.SSLConfig, owned_ctx: ?*BoringSSL.SSL_CTX) bun.sys.Maybe(void) {
+            _ = bun.assert((self.pipe != null));
+            self.flags.disconnected = true;
+            if (self.initTLSWrapper(ssl_options, owned_ctx)) |result| {
+                _ = &result;
+                if ((result == .err)) {
+                    return result;
+                }
+            }
+            const initResult = self.pipe.?.init(self.vm.uvLoop(), false);
+            var __initResult_moved = false; _ = &__initResult_moved;
+            defer if (!__initResult_moved) { const __T = @TypeOf(initResult); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = initResult.release() catch {}; } else { initResult.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = initResult; _drop_val.release(); } };
+            if ((initResult == .err)) {
+                __initResult_moved = true;
+                return initResult;
+            }
+            const openResult = self.pipe.?.open(fd);
+            var __openResult_moved = false; _ = &__openResult_moved;
+            defer if (!__openResult_moved) { const __T = @TypeOf(openResult); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = openResult.release() catch {}; } else { openResult.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = openResult; _drop_val.release(); } };
+            if ((openResult == .err)) {
+                __openResult_moved = true;
+                return openResult;
+            }
+            _ = self.ref();
+            _ = self.onConnect(self, uv.ReturnCode.zero);
+            return .success;
+    }
+
+pub fn connect(self: *WindowsNamedPipe, path: []const u8, ssl_options: ?jsc.API.ServerConfig.SSLConfig, owned_ctx: ?*BoringSSL.SSL_CTX) bun.sys.Maybe(void) {
+            _ = bun.assert((self.pipe != null));
+            self.flags.disconnected = true;
+            _ = self.pipe.?.ref();
+            if (self.initTLSWrapper(ssl_options, owned_ctx)) |result| {
+                _ = &result;
+                if ((result == .err)) {
+                    return result;
+                }
+            }
+            const initResult = self.pipe.?.init(self.vm.uvLoop(), false);
+            var __initResult_moved = false; _ = &__initResult_moved;
+            defer if (!__initResult_moved) { const __T = @TypeOf(initResult); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = initResult.release() catch {}; } else { initResult.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = initResult; _drop_val.release(); } };
+            if ((initResult == .err)) {
+                __initResult_moved = true;
+                return initResult;
+            }
+            self.connect_req.data = self;
+            const result = self.pipe.?.connect((&self.connect_req), path, self, onConnect);
+            var __result_moved = false; _ = &__result_moved;
+            defer if (!__result_moved) { const __T = @TypeOf(result); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = result.release() catch {}; } else { result.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = result; _drop_val.release(); } };
+            if ((result.asErr() != null)) {
+                __result_moved = true;
+                return result;
+            }
+            _ = self.ref();
+            __result_moved = true;
+            return result;
+    }
+
+pub fn initTLSWrapper(self: *WindowsNamedPipe, ssl_options: ?jsc.API.ServerConfig.SSLConfig, owned_ctx: ?*BoringSSL.SSL_CTX) ?bun.sys.Maybe(void) {
+            const handlers: WrapperType.Handlers = .{ .ctx = self, .onOpen = WindowsNamedPipe.onOpen, .onHandshake = WindowsNamedPipe.onHandshake, .onData = WindowsNamedPipe.onData, .onClose = WindowsNamedPipe.onClose, .write = WindowsNamedPipe.internalWrite };
+            if (owned_ctx) |ctx| {
+                _ = &ctx;
+                self.flags.is_ssl = true;
+                self.wrapper = (blk_catch_1: { break :blk_catch_1 ((WrapperType.initWithCTX(ctx, true, handlers)) catch |__ce_1| { _ = &__ce_1; _ = BoringSSL.SSL_CTX_free(ctx);
+                return .{ .err = .{ .errno = @intFromEnum(bun.sys.E.PIPE), .syscall = .connect } }; }); });
+                return .success;
+            }
+            if (ssl_options) |tls| {
+                _ = &tls;
+                self.flags.is_ssl = true;
+                self.wrapper = (blk_catch_2: { break :blk_catch_2 ((WrapperType.init(tls, true, handlers)) catch |__ce_2| { _ = &__ce_2; return .{ .err = .{ .errno = @intFromEnum(bun.sys.E.PIPE), .syscall = .connect } }; }); });
+                return .success;
+            }
+            return null;
+    }
+
+pub fn startTLS(self: *WindowsNamedPipe, ssl_options: jsc.API.ServerConfig.SSLConfig, is_client: bool) !void {
+            self.flags.is_ssl = true;
+            if (self.start(is_client)) {
+                self.wrapper = try WrapperType.init(ssl_options, is_client, .{ .ctx = self, .onOpen = WindowsNamedPipe.onOpen, .onHandshake = WindowsNamedPipe.onHandshake, .onData = WindowsNamedPipe.onData, .onClose = WindowsNamedPipe.onClose, .write = WindowsNamedPipe.internalWrite });
+                _ = self.wrapper.?.start();
+            }
+    }
+
+pub fn start(self: *WindowsNamedPipe, is_client: bool) bool {
+            self.flags.is_client = is_client;
+            if ((self.pipe == null)) {
+                return false;
+            }
+            _ = self.pipe.?.unref();
+            _ = self.writer.setParent(self);
+            const startPipeResult = self.writer.startWithPipe(self.pipe.?);
+            var __startPipeResult_moved = false; _ = &__startPipeResult_moved;
+            defer if (!__startPipeResult_moved) { const __T = @TypeOf(startPipeResult); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = startPipeResult.release() catch {}; } else { startPipeResult.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = startPipeResult; _drop_val.release(); } };
+            if ((startPipeResult == .err)) {
+                _ = self.onError(startPipeResult.err);
+                return false;
+            }
+            const stream = ((self.writer.getStream()) orelse (({
+            _ = self.onError(bun.sys.Error.fromCode(bun.sys.E.PIPE, .read));
+            return false;
+})));
+            var __stream_moved = false; _ = &__stream_moved;
+            defer if (!__stream_moved) { const __T = @TypeOf(stream); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = stream.release() catch {}; } else { stream.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = stream; _drop_val.release(); } };
+            const readStartResult = stream.readStart(self, onReadAlloc, onReadError, onRead);
+            var __readStartResult_moved = false; _ = &__readStartResult_moved;
+            defer if (!__readStartResult_moved) { const __T = @TypeOf(readStartResult); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = readStartResult.release() catch {}; } else { readStartResult.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = readStartResult; _drop_val.release(); } };
+            if ((readStartResult == .err)) {
+                _ = self.onError(readStartResult.err);
+                return false;
+            }
+            return true;
+    }
+
+pub fn isTLS(self: *const WindowsNamedPipe) bool {
+            return self.flags.is_ssl;
+    }
+
+pub fn loop(self: *WindowsNamedPipe) *bun.Async.Loop {
+            return self.vm.uvLoop();
+    }
+
+pub fn encodeAndWrite(self: *WindowsNamedPipe, data: []const u8) i32 {
+            _ = log("encodeAndWrite (len: {})", .{ data.len });
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                return @as(i32, @intCast((blk_catch_3: { break :blk_catch_3 (((wrapper.*).writeData(data)) catch |__ce_3| { _ = &__ce_3; break :blk_catch_3 0; }); })));
+            } else {
+                _ = self.internalWrite(data);
+            }
+            return @intCast(data.len);
+    }
+
+pub fn rawWrite(self: *WindowsNamedPipe, encoded_data: []const u8) i32 {
+            _ = self.internalWrite(encoded_data);
+            return @intCast(encoded_data.len);
+    }
+
+pub fn close(self: *WindowsNamedPipe) void {
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                _ = (wrapper.*).shutdown(false);
+            }
+            _ = self.writer.end();
+    }
+
+pub fn shutdown(self: *WindowsNamedPipe) void {
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                _ = (wrapper.*).shutdown(false);
+            }
+    }
+
+pub fn shutdownRead(self: *WindowsNamedPipe) void {
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                _ = (wrapper.*).shutdownRead();
+            } else {
+                if (self.writer.getStream()) |stream| {
+                    _ = &stream;
+                    _ = stream.readStop();
+                }
+            }
+    }
+
+pub fn isShutdown(self: *const WindowsNamedPipe) bool {
+            if (self.wrapper) |wrapper| {
+                _ = &wrapper;
+                return wrapper.isShutdown();
+            }
+            return (self.flags.disconnected or self.writer.is_done);
+    }
+
+pub fn isClosed(self: *const WindowsNamedPipe) bool {
+            if (self.wrapper) |wrapper| {
+                _ = &wrapper;
+                return wrapper.isClosed();
+            }
+            return self.flags.disconnected;
+    }
+
+pub fn isEstablished(self: *const WindowsNamedPipe) bool {
+            return (!self.isClosed());
+    }
+
+pub fn ssl(self: *const WindowsNamedPipe) ?*BoringSSL.SSL {
+            if (self.wrapper) |wrapper| {
+                _ = &wrapper;
+                return wrapper.ssl;
+            }
+            return null;
+    }
+
+pub fn sslError(self: *const WindowsNamedPipe) us_bun_verify_error_t {
+            return .{ .error_no = self.ssl_error.error_no, .code = @ptrCast(self.ssl_error.code.ptr), .reason = @ptrCast(self.ssl_error.reason.ptr) };
+    }
+
+pub fn resetTimeout(self: *WindowsNamedPipe) void {
+            _ = self.setTimeoutInMilliseconds(self.current_timeout);
+    }
+
+pub fn setTimeoutInMilliseconds(self: *WindowsNamedPipe, ms: c_uint) void {
+            if ((self.event_loop_timer.state == .ACTIVE)) {
+                _ = self.vm.timer.remove((&self.event_loop_timer));
+            }
+            self.current_timeout = ms;
+            if ((ms == 0)) {
+                return;
+            }
+            self.event_loop_timer.next = bun.timespec.msFromNow(.allow_mocked_time, ms);
+            _ = self.vm.timer.insert((&self.event_loop_timer));
+    }
+
+pub fn setTimeout(self: *WindowsNamedPipe, seconds: c_uint) void {
+            _ = log("setTimeout({d})", .{ seconds });
+            _ = self.setTimeoutInMilliseconds((seconds * 1000));
+    }
+
+pub fn release(self: *WindowsNamedPipe) void {
+            _ = log("release", .{});
+            _ = self.setTimeout(0);
+            if (self.writer.getStream()) |stream| {
+                _ = &stream;
+                _ = stream.readStop();
+            }
+            _ = self.writer.deinit();
+            if (self.wrapper) |*wrapper| {
+                _ = &wrapper;
+                _ = (wrapper.*).deinit();
+                self.wrapper = null;
+            }
+            var ssl_error = self.ssl_error;
+            _ = &ssl_error;
+            _ = ssl_error.deinit();
+            self.ssl_error = .{};
+    }
+
+pub fn deinit(self: *WindowsNamedPipe) void {
+            _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
+    }
+    pub const Flags = packed struct(u8) {
+            disconnected: bool = true,
+            is_closed: bool = false,
+            is_client: bool = false,
+            is_ssl: bool = false,
+            _: u4 = 0,
+        };
+    pub const Handlers = struct {
+            ctx: *anyopaque,
+            ref_ctx: *const fn (*anyopaque) void,
+            deref_ctx: *const fn (*anyopaque) void,
+            onOpen: *const fn (*anyopaque) void,
+            onHandshake: *const fn (*anyopaque, bool, uws.us_bun_verify_error_t) void,
+            onData: *const fn (*anyopaque, []const u8) void,
+            onClose: *const fn (*anyopaque) void,
+            onEnd: *const fn (*anyopaque) void,
+            onWritable: *const fn (*anyopaque) void,
+            onError: *const fn (*anyopaque, bun.sys.Error) void,
+            onTimeout: *const fn (*anyopaque) void,
+        };
+};
+

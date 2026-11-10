@@ -2,89 +2,71 @@
 const std = @import("std");
 const string = []const u8;
 
-fn cp_cast_int(comptime Dest: type, val: anytype) Dest {
-    const Src = @TypeOf(val);
-    if (comptime Src == Dest) return val;
-    if (comptime Src == comptime_int) {
-        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val));
-    }
-    const src_bits = @typeInfo(Src).int.bits;
-    const dest_bits = @typeInfo(Dest).int.bits;
-    if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {
-        if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val);
-    }
-    if (comptime @typeInfo(Src).int.signedness == .signed) {
-        const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val);
-        const u: u128 = @bitCast(s);
-        if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u);
-    } else {
-        const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val);
-        const s: i128 = @bitCast(u);
-        if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s);
-    }
-}
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 pub const SocketGroup = @import("./SocketGroup.zig").SocketGroup;
 pub const SocketKind = @import("./SocketKind.zig").SocketKind;
 pub const Loop = @import("./Loop.zig").Loop;
 pub const ConnectingSocket = opaque {
-    pub fn close(self: *ConnectingSocket) void {
-        _ = us_connecting_socket_close(self);
+
+pub fn close(self: *ConnectingSocket) void {
+            _ = us_connecting_socket_close(self);
     }
 
-    pub fn group(self: *ConnectingSocket) *SocketGroup {
-        return us_connecting_socket_group(self);
+pub fn group(self: *ConnectingSocket) *SocketGroup {
+            return us_connecting_socket_group(self);
     }
 
-    pub fn rawGroup(self: *ConnectingSocket) *SocketGroup {
-        return self.group();
+pub fn rawGroup(self: *ConnectingSocket) *SocketGroup {
+            return self.group();
     }
 
-    pub fn kind(self: *ConnectingSocket) SocketKind {
-        return (if (comptime @typeInfo(SocketKind) == .@"enum") @as(SocketKind, @enumFromInt(us_connecting_socket_kind(self))) else @as(SocketKind, us_connecting_socket_kind(self)));
+pub fn kind(self: *ConnectingSocket) SocketKind {
+            return (if (comptime @typeInfo(SocketKind) == .@"enum") @as(SocketKind, @enumFromInt(us_connecting_socket_kind(self))) else @as(SocketKind, us_connecting_socket_kind(self)));
     }
 
-    pub fn loop(self: *ConnectingSocket) *Loop {
-        return us_connecting_socket_get_loop(self);
+pub fn loop(self: *ConnectingSocket) *Loop {
+            return us_connecting_socket_get_loop(self);
     }
 
-    pub fn ext(self: *ConnectingSocket, comptime T: type) *T {
-        {
-            return @as(*T, @ptrCast(@alignCast(us_connecting_socket_ext(self))));
-        }
+pub fn ext(self: *ConnectingSocket, comptime T: type) *T {
+            {
+                return @as(*T, @ptrCast(@alignCast(us_connecting_socket_ext(self))));
+            }
     }
 
-    pub fn getError(self: *ConnectingSocket) i32 {
-        return us_connecting_socket_get_error(self);
+pub fn getError(self: *ConnectingSocket) i32 {
+            return us_connecting_socket_get_error(self);
     }
 
-    pub fn getNativeHandle(self: *ConnectingSocket) ?*anyopaque {
-        return us_connecting_socket_get_native_handle(self);
+pub fn getNativeHandle(self: *ConnectingSocket) ?*anyopaque {
+            return us_connecting_socket_get_native_handle(self);
     }
 
-    pub fn isClosed(self: *ConnectingSocket) bool {
-        return (us_connecting_socket_is_closed(self) == 1);
+pub fn isClosed(self: *ConnectingSocket) bool {
+            return (us_connecting_socket_is_closed(self) == 1);
     }
 
-    pub fn isShutdown(self: *ConnectingSocket) bool {
-        return (us_connecting_socket_is_shut_down(self) == 1);
+pub fn isShutdown(self: *ConnectingSocket) bool {
+            return (us_connecting_socket_is_shut_down(self) == 1);
     }
 
-    pub fn longTimeout(self: *ConnectingSocket, seconds: u32) void {
-        _ = us_connecting_socket_long_timeout(self, seconds);
+pub fn longTimeout(self: *ConnectingSocket, seconds: u32) void {
+            _ = us_connecting_socket_long_timeout(self, seconds);
     }
 
-    pub fn shutdown(self: *ConnectingSocket) void {
-        _ = us_connecting_socket_shutdown(self);
+pub fn shutdown(self: *ConnectingSocket) void {
+            _ = us_connecting_socket_shutdown(self);
     }
 
-    pub fn shutdownRead(self: *ConnectingSocket) void {
-        _ = us_connecting_socket_shutdown_read(self);
+pub fn shutdownRead(self: *ConnectingSocket) void {
+            _ = us_connecting_socket_shutdown_read(self);
     }
 
-    pub fn timeout(self: *ConnectingSocket, seconds: u32) void {
-        _ = us_connecting_socket_timeout(self, seconds);
+pub fn timeout(self: *ConnectingSocket, seconds: u32) void {
+            _ = us_connecting_socket_timeout(self, seconds);
     }
 };
+
 
 pub extern "c" fn us_connecting_socket_close(s: *ConnectingSocket) callconv(.c) void;
 

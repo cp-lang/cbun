@@ -2,47 +2,26 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }
-}
 const bun = @import("bun");
 const strings = bun.strings;
 pub const ParamList = Param.List;
 pub threadlocal var params_list: Param.List = undefined;
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
 
 pub const Param = struct {
     name: []const u8,
     value: []const u8,
-    
-pub fn _create(allocator: std.mem.Allocator) !*Param { const self_ptr = try allocator.create(Param); self_ptr.* = undefined; return self_ptr; }
-
-pub fn init(self: *Param, name: []const u8, value: []const u8) void {
-            self.name = name;
-            self.value = value;
-    }
     pub const List = std.MultiArrayList(Param);
 };
 
 pub const ParamMap = struct {
     allocator: std.mem.Allocator,
     list: Param.List = Param.List.empty,
-    
-pub fn _create(allocator: std.mem.Allocator) !*ParamMap { const self_ptr = try allocator.create(ParamMap); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *ParamMap, allocator: std.mem.Allocator) ParamMap {
         _ = &self;
@@ -57,11 +36,11 @@ pub fn deinit(self: *ParamMap) void {
             _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
     }
 
-pub fn count(self: *const ParamMap) usize {
+pub fn count(self: ParamMap) usize {
             return self.list.len;
     }
 
-pub fn isEmpty(self: *const ParamMap) bool {
+pub fn isEmpty(self: ParamMap) bool {
             return (self.list.len == 0);
     }
 
@@ -69,15 +48,15 @@ pub fn append(self: *ParamMap, name: []const u8, value: []const u8) !void {
             _ = (blk_catch_0: { break :blk_catch_0 ((self.list.append(self.allocator, .{ .name = name, .value = value })) catch |err| { _ = &err; return err; }); });
     }
 
-pub fn find(self: *const ParamMap, name: []const u8) ?[]const u8 {
+pub fn find(self: ParamMap, name: []const u8) ?[]const u8 {
             var i: usize = 0;
             _ = &i;
             const names = self.list.items(.name);
             var __names_moved = false; _ = &__names_moved;
-            defer if (!__names_moved) { const T = @TypeOf(names); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = names.release() catch {}; } else { names.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = names; _drop_val.release(); } };
+            defer if (!__names_moved) { const __T = @TypeOf(names); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = names.release() catch {}; } else { names.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = names; _drop_val.release(); } };
             const values = self.list.items(.value);
             var __values_moved = false; _ = &__values_moved;
-            defer if (!__values_moved) { const T = @TypeOf(values); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = values.release() catch {}; } else { values.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = values; _drop_val.release(); } };
+            defer if (!__values_moved) { const __T = @TypeOf(values); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = values.release() catch {}; } else { values.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = values; _drop_val.release(); } };
             while ((i < names.len)) {
                 if (strings.eql(names[@as(usize, @intCast(i))], name)) {
                     return values[@as(usize, @intCast(i))];
@@ -87,7 +66,7 @@ pub fn find(self: *const ParamMap, name: []const u8) ?[]const u8 {
             return null;
     }
 
-pub fn get(self: *const ParamMap, index: usize) ?Param {
+pub fn get(self: ParamMap, index: usize) ?Param {
             if ((index >= self.list.len)) {
                 return null;
             }

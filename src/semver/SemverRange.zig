@@ -6,6 +6,13 @@ const Environment = bun.Environment;
 const assert = bun.assert;
 const Query = bun.Semver.Query;
 const Version = bun.Semver.Version;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
 pub const bun = @import("bun");
 pub const Op = enum(u8) {
     unset = 0,
@@ -14,70 +21,62 @@ pub const Op = enum(u8) {
     lte = 4,
     gt = 5,
     gte = 6,
-    pub fn get(s: []const u8) ?@This() {
-        return std.meta.stringToEnum(@This(), s);
-    }
-    pub fn has(s: []const u8) bool {
-        return std.meta.stringToEnum(@This(), s) != null;
-    }
-    pub fn fromName(s: []const u8) ?@This() {
-        return get(s);
-    }
-    pub fn name(self: @This()) []const u8 {
-        return @tagName(self);
-    }
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 };
 
 pub const Comparator = struct {
     op: Op = .unset,
     version: Version = .{},
 
-    pub fn eql(lhs: Comparator, rhs: Comparator) bool {
-        return ((lhs.op == rhs.op) and lhs.version.eql(rhs.version));
+pub fn eql(lhs: Comparator, rhs: Comparator) bool {
+            return ((lhs.op == rhs.op) and lhs.version.eql(rhs.version));
     }
 
-    pub fn fmt(self: *const Comparator, buf: []const u8) @This().Formatter {
-        return .{ .buffer = buf, .comparator = self };
+pub fn fmt(self: *const Comparator, buf: []const u8) @This().Formatter {
+            return .{ .buffer = buf, .comparator = self };
     }
 
-    pub fn satisfies(comparator: Comparator, version: Version, comparator_buf: []const u8, version_buf: []const u8) bool {
-        const order = version.orderWithoutBuild(comparator.version, version_buf, comparator_buf);
-        return (switch (order) {
-            .eq => (switch (comparator.op) {
-                .lte, .gte, .eql => true,
-                else => false,
-            }),
-            .gt => (switch (comparator.op) {
-                .gt, .gte => true,
-                else => false,
-            }),
-            .lt => (switch (comparator.op) {
-                .lt, .lte => true,
-                else => false,
-            }),
-        });
+pub fn satisfies(comparator: Comparator, version: Version, comparator_buf: []const u8, version_buf: []const u8) bool {
+            const order = version.orderWithoutBuild(comparator.version, version_buf, comparator_buf);
+            return (switch (order) {
+.eq => (switch (comparator.op) {
+.lte, .gte, .eql => true,
+else => false,
+}),
+.gt => (switch (comparator.op) {
+.gt, .gte => true,
+else => false,
+}),
+.lt => (switch (comparator.op) {
+.lt, .lte => true,
+else => false,
+}),
+});
     }
     pub const Formatter = struct {
-        buffer: []const u8,
-        comparator: *const Comparator,
-
-        pub fn format(this: @This(), writer: *std.Io.Writer) !void {
-            if (this.comparator.op == Op.unset) {
-                return;
+            buffer: []const u8,
+            comparator: *const Comparator,
+    
+            pub fn format(this: @This(), writer: *std.Io.Writer) !void {
+                if (this.comparator.op == Op.unset) {
+                    return;
+                }
+    
+                switch (this.comparator.op) {
+                    .unset => unreachable,
+                    .eql => try writer.writeAll("=="),
+                    .lt => try writer.writeAll("<"),
+                    .lte => try writer.writeAll("<="),
+                    .gt => try writer.writeAll(">"),
+                    .gte => try writer.writeAll(">="),
+                }
+    
+                try writer.print("{f}", .{this.comparator.version.fmt(this.buffer)});
             }
-
-            switch (this.comparator.op) {
-                .unset => unreachable,
-                .eql => try writer.writeAll("=="),
-                .lt => try writer.writeAll("<"),
-                .lte => try writer.writeAll("<="),
-                .gt => try writer.writeAll(">"),
-                .gte => try writer.writeAll(">="),
-            }
-
-            try writer.print("{f}", .{this.comparator.version.fmt(this.buffer)});
-        }
-    };
+        };
 };
 
 pub const Range = @This();
@@ -86,103 +85,103 @@ left: Comparator = .{},
 right: Comparator = .{},
 
 pub fn format(self: Range, writer: *std.Io.Writer) !void {
-    if (((self.left.op == .unset) and (self.right.op == .unset))) {
-        return;
-    }
-    if ((self.right.op == .unset)) {
-        _ = try writer.print("{}", .{self.left});
-    } else {
-        _ = try writer.print("{} {}", .{ self.left, self.right });
-    }
+        if (((self.left.op == .unset) and (self.right.op == .unset))) {
+            return;
+        }
+        if ((self.right.op == .unset)) {
+            _ = try writer.print("{}", .{ self.left });
+        } else {
+            _ = try writer.print("{} {}", .{ self.left, self.right });
+        }
 }
 
 pub fn anyRangeSatisfies(self: *const Range) bool {
-    return ((self.left.op == .gte) and self.left.version.eql(.{}));
+        return ((self.left.op == .gte) and self.left.version.eql(.{}));
 }
 
 pub fn initWildcard(version: Version, wildcard: Query.Token.Wildcard) Range {
-    switch (wildcard) {
-        .none => {
-            return .{ .left = .{ .op = Op.eql, .version = version } };
-        },
-        .major => {
-            return .{ .left = .{ .op = Op.gte, .version = .{} } };
-        },
-        .minor => {
-            const lhs = Version{ .major = (version.major +| 1) };
-            const rhs = Version{ .major = version.major };
-            return .{ .left = .{ .op = Op.lt, .version = lhs }, .right = .{ .op = Op.gte, .version = rhs } };
-        },
-        .patch => {
-            const lhs = Version{ .major = version.major, .minor = (version.minor +| 1) };
-            const rhs = Version{ .major = version.major, .minor = version.minor };
-            return Range{ .left = .{ .op = Op.lt, .version = lhs }, .right = .{ .op = Op.gte, .version = rhs } };
-        },
-    }
+        switch (wildcard) {
+.none => {
+return .{ .left = .{ .op = Op.eql, .version = version } };
+},
+.major => {
+return .{ .left = .{ .op = Op.gte, .version = .{} } };
+},
+.minor => {
+const lhs = Version{ .major = (version.major +| 1) };
+        const rhs = Version{ .major = version.major };
+        return .{ .left = .{ .op = Op.lt, .version = lhs }, .right = .{ .op = Op.gte, .version = rhs } };
+},
+.patch => {
+const lhs = Version{ .major = version.major, .minor = (version.minor +| 1) };
+        const rhs = Version{ .major = version.major, .minor = version.minor };
+        return Range{ .left = .{ .op = Op.lt, .version = lhs }, .right = .{ .op = Op.gte, .version = rhs } };
+},
+}
 }
 
 pub fn hasLeft(self: Range) bool {
-    return (self.left.op != Op.unset);
+        return (self.left.op != Op.unset);
 }
 
 pub fn hasRight(self: Range) bool {
-    return (self.right.op != Op.unset);
+        return (self.right.op != Op.unset);
 }
 
 pub fn eql(lhs: Range, rhs: Range) bool {
-    return (lhs.left.eql(rhs.left) and lhs.right.eql(rhs.right));
+        return (lhs.left.eql(rhs.left) and lhs.right.eql(rhs.right));
 }
 
 pub fn fmt(self: *const Range, buf: []const u8) @This().Formatter {
-    return .{ .buffer = buf, .range = self };
+        return .{ .buffer = buf, .range = self };
 }
 
 pub fn satisfies(range: Range, version: Version, range_buf: []const u8, version_buf: []const u8) bool {
-    const has_left = range.hasLeft();
-    const has_right = range.hasRight();
-    if ((!has_left)) {
+        const has_left = range.hasLeft();
+        const has_right = range.hasRight();
+        if ((!has_left)) {
+            return true;
+        }
+        if ((!range.left.satisfies(version, range_buf, version_buf))) {
+            return false;
+        }
+        if ((has_right and (!range.right.satisfies(version, range_buf, version_buf)))) {
+            return false;
+        }
         return true;
-    }
-    if ((!range.left.satisfies(version, range_buf, version_buf))) {
-        return false;
-    }
-    if ((has_right and (!range.right.satisfies(version, range_buf, version_buf)))) {
-        return false;
-    }
-    return true;
 }
 
 pub fn satisfiesPre(range: Range, version: Version, range_buf: []const u8, version_buf: []const u8, pre_matched: *bool) bool {
-    if (comptime Environment.allow_assert) {
-        _ = assert(version.tag.hasPre());
-    }
-    const has_left = range.hasLeft();
-    const has_right = range.hasRight();
-    if ((!has_left)) {
+        if (comptime Environment.allow_assert) {
+            _ = assert(version.tag.hasPre());
+        }
+        const has_left = range.hasLeft();
+        const has_right = range.hasRight();
+        if ((!has_left)) {
+            return true;
+        }
+        pre_matched.* = ((pre_matched.* or (((range.left.version.tag.hasPre() and (version.patch == range.left.version.patch)) and (version.minor == range.left.version.minor)) and (version.major == range.left.version.major))) or ((((has_right and range.right.version.tag.hasPre()) and (version.patch == range.right.version.patch)) and (version.minor == range.right.version.minor)) and (version.major == range.right.version.major)));
+        if ((!range.left.satisfies(version, range_buf, version_buf))) {
+            return false;
+        }
+        if ((has_right and (!range.right.satisfies(version, range_buf, version_buf)))) {
+            return false;
+        }
         return true;
-    }
-    pre_matched.* = ((pre_matched.* or (((range.left.version.tag.hasPre() and (version.patch == range.left.version.patch)) and (version.minor == range.left.version.minor)) and (version.major == range.left.version.major))) or ((((has_right and range.right.version.tag.hasPre()) and (version.patch == range.right.version.patch)) and (version.minor == range.right.version.minor)) and (version.major == range.right.version.major)));
-    if ((!range.left.satisfies(version, range_buf, version_buf))) {
-        return false;
-    }
-    if ((has_right and (!range.right.satisfies(version, range_buf, version_buf)))) {
-        return false;
-    }
-    return true;
 }
 pub const Formatter = struct {
-    buffer: []const u8,
-    range: *const Range,
+        buffer: []const u8,
+        range: *const Range,
 
-    pub fn format(this: @This(), writer: *std.Io.Writer) !void {
-        if (this.range.left.op == Op.unset and this.range.right.op == Op.unset) {
-            return;
-        }
+        pub fn format(this: @This(), writer: *std.Io.Writer) !void {
+            if (this.range.left.op == Op.unset and this.range.right.op == Op.unset) {
+                return;
+            }
 
-        if (this.range.right.op == .unset) {
-            try writer.print("{f}", .{this.range.left.fmt(this.buffer)});
-        } else {
-            try writer.print("{f} {f}", .{ this.range.left.fmt(this.buffer), this.range.right.fmt(this.buffer) });
+            if (this.range.right.op == .unset) {
+                try writer.print("{f}", .{this.range.left.fmt(this.buffer)});
+            } else {
+                try writer.print("{f} {f}", .{ this.range.left.fmt(this.buffer), this.range.right.fmt(this.buffer) });
+            }
         }
-    }
-};
+    };

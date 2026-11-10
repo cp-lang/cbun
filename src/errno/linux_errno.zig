@@ -142,32 +142,24 @@ pub const SystemErrno = enum(u16) {
     ENOTRECOVERABLE = 131,
     ERFKILL = 132,
     EHWPOISON = 133,
-    pub fn get(s: []const u8) ?@This() {
-        return std.meta.stringToEnum(@This(), s);
-    }
-    pub fn has(s: []const u8) bool {
-        return std.meta.stringToEnum(@This(), s) != null;
-    }
-    pub fn fromName(s: []const u8) ?@This() {
-        return get(s);
-    }
-    pub fn name(self: @This()) []const u8 {
-        return @tagName(self);
-    }
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 
-    pub fn init(code: anytype) ?SystemErrno {
-        if ((code < 0)) {
-            if ((code <= (0 - MAX_ERRNO))) {
+pub fn init(code: anytype) ?SystemErrno {
+            if ((code < 0)) {
+                if ((code <= (0 - MAX_ERRNO))) {
+                    return null;
+                }
+                return @enumFromInt((0 - code));
+            }
+            if ((code >= MAX_ERRNO)) {
                 return null;
             }
-            return @enumFromInt((0 - code));
-        }
-        if ((code >= MAX_ERRNO)) {
-            return null;
-        }
-        return @enumFromInt(code);
+            return @enumFromInt(code);
     }
-
+    
     pub const max = MAX_ERRNO;
 };
 
@@ -243,19 +235,20 @@ pub const UV_E = struct {
     pub const NOEXEC: i32 = @intFromEnum(SystemErrno.ENOEXEC);
 };
 
+
 pub fn getErrno(rc: anytype) E {
-    const Type = @TypeOf(rc);
-    if ((Type == usize)) {
-        var signed: isize = @bitCast(rc);
-        _ = &signed;
-        var int = (if (((signed > -4096) and (signed < 0))) (0 - signed) else 0);
-        _ = &int;
-        return @enumFromInt(int);
-    } else {
-        if ((rc == -1)) {
-            return @enumFromInt((std.c._errno()).*);
+        const Type = @TypeOf(rc);
+        if ((Type == usize)) {
+            var signed: isize = @bitCast(rc);
+            _ = &signed;
+            var int = (if (((signed > -4096) and (signed < 0))) (0 - signed) else 0);
+            _ = &int;
+            return @enumFromInt(int);
         } else {
-            return .SUCCESS;
+            if ((rc == -1)) {
+                return @enumFromInt((std.c._errno()).*);
+            } else {
+                return .SUCCESS;
+            }
         }
-    }
 }

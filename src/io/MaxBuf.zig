@@ -2,52 +2,13 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) {
-        return v.?;
-    } else {
-        return v;
-    }
-}
 const Subprocess = bun.jsc.Subprocess;
-pub fn cp_string_from(val: anytype) []const u8 {
-    const T = @TypeOf(val);
-    if (comptime T == []const u8) {
-        return val;
-    } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) {
-        return std.mem.span(val);
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) {
-        return val;
-    } else if (comptime (@typeInfo(T) == .@"enum")) {
-        return @tagName(val);
-    } else if (comptime T == bool) {
-        return if (val) "true" else "false";
-    } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0";
-    } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0";
-    } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) {
-        return val.toString();
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) {
-        return val.toString();
-    } else {
-        return @typeName(T);
-    }
-}
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
 
 pub const bun = @import("bun");
 pub const MaxBuf = @This();
@@ -57,95 +18,90 @@ owned_by_reader: bool = false,
 remaining_bytes: i64 = 0,
 
 pub fn createForSubprocess(owner: *Subprocess, ptr: *?*MaxBuf, initial: ?i64) void {
-    if ((initial == null)) {
-        ptr.* = null;
-        return;
-    }
-    var maxbuf = bun.handleOom(bun.default_allocator.create(MaxBuf));
-    _ = &maxbuf;
-    maxbuf.* = MaxBuf{ .owned_by_subprocess = owner, .owned_by_reader = false, .remaining_bytes = initial.? };
-    ptr.* = maxbuf;
+        if ((initial == null)) {
+            ptr.* = null;
+            return;
+        }
+        var maxbuf = bun.handleOom(bun.default_allocator.create(MaxBuf));
+        _ = &maxbuf;
+        maxbuf.* = MaxBuf{ .owned_by_subprocess = owner, .owned_by_reader = false, .remaining_bytes = initial.? };
+        ptr.* = maxbuf;
 }
 
 pub fn disowned(self: *MaxBuf) bool {
-    return ((self.owned_by_subprocess == null) and (!self.owned_by_reader));
+        return ((self.owned_by_subprocess == null) and (!self.owned_by_reader));
 }
 
 pub fn destroy(self: *MaxBuf) void {
-    _ = bun.assert(self.disowned());
-    _ = bun.default_allocator.destroy(self);
+        _ = bun.assert(self.disowned());
+        _ = bun.default_allocator.destroy(self);
 }
 
 pub fn removeFromSubprocess(ptr: *?*MaxBuf) void {
-    if ((ptr.* == null)) {
-        return;
-    }
-    var this = ptr.*.?;
-    _ = &this;
-    _ = bun.assert((this.owned_by_subprocess != null));
-    this.owned_by_subprocess = null;
-    ptr.* = null;
-    if (this.disowned()) {
-        _ = this.destroy();
-    }
+        if ((ptr.* == null)) {
+            return;
+        }
+        var this = ptr.*.?;
+        _ = &this;
+        _ = bun.assert((this.owned_by_subprocess != null));
+        this.owned_by_subprocess = null;
+        ptr.* = null;
+        if (this.disowned()) {
+            _ = this.destroy();
+        }
 }
 
 pub fn addToPipereader(value: ?*MaxBuf, ptr: *?*MaxBuf) void {
-    if (value) |*val| {
-        _ = &val;
-        _ = bun.assert((ptr.* == null));
-        _ = bun.assert((!(val.*).owned_by_reader));
-        (val.*).owned_by_reader = true;
-        ptr.* = value;
-    }
+        if (value) |*val| {
+            _ = &val;
+            _ = bun.assert((ptr.* == null));
+            _ = bun.assert((!(val.*).owned_by_reader));
+            (val.*).owned_by_reader = true;
+            ptr.* = value;
+        }
 }
 
 pub fn removeFromPipereader(ptr: *?*MaxBuf) void {
-    if ((ptr.* == null)) {
-        return;
-    }
-    var this = ptr.*.?;
-    _ = &this;
-    _ = bun.assert(this.owned_by_reader);
-    this.owned_by_reader = false;
-    ptr.* = null;
-    if (this.disowned()) {
-        _ = this.destroy();
-    }
+        if ((ptr.* == null)) {
+            return;
+        }
+        var this = ptr.*.?;
+        _ = &this;
+        _ = bun.assert(this.owned_by_reader);
+        this.owned_by_reader = false;
+        ptr.* = null;
+        if (this.disowned()) {
+            _ = this.destroy();
+        }
 }
 
 pub fn transferToPipereader(prev: *?*MaxBuf, next: *?*MaxBuf) void {
-    if ((prev.* == null)) {
-        return;
-    }
-    next.* = prev.*;
-    prev.* = null;
+        if ((prev.* == null)) {
+            return;
+        }
+        next.* = prev.*;
+        prev.* = null;
 }
 
 pub fn onReadBytes(self: *MaxBuf, bytes: u64) void {
-    self.remaining_bytes = (blk_catch_0: {
-        break :blk_catch_0 ((std.math.sub(i64, self.remaining_bytes, ((std.math.cast(i64, bytes)) orelse (0)))) catch |__ce_0| {
-            _ = &__ce_0;
-            break :blk_catch_0 -1;
-        });
-    });
-    if (((self.remaining_bytes < 0) and (self.owned_by_subprocess != null))) {
-        var owned_by = self.owned_by_subprocess.?;
-        _ = &owned_by;
-        if ((owned_by.stderr_maxbuf == self)) {
-            _ = MaxBuf.removeFromSubprocess((&owned_by.stderr_maxbuf));
-            _ = owned_by.onMaxBuffer(Kind.stderr);
-        } else {
-            if ((owned_by.stdout_maxbuf == self)) {
-                _ = MaxBuf.removeFromSubprocess((&owned_by.stdout_maxbuf));
-                _ = owned_by.onMaxBuffer(Kind.stdout);
+        self.remaining_bytes = (blk_catch_0: { break :blk_catch_0 ((std.math.sub(i64, self.remaining_bytes, ((std.math.cast(i64, bytes)) orelse (0)))) catch |__ce_0| { _ = &__ce_0; break :blk_catch_0 -1; }); });
+        if (((self.remaining_bytes < 0) and (self.owned_by_subprocess != null))) {
+            var owned_by = self.owned_by_subprocess.?;
+            _ = &owned_by;
+            if ((owned_by.stderr_maxbuf == self)) {
+                _ = MaxBuf.removeFromSubprocess((&owned_by.stderr_maxbuf));
+                _ = owned_by.onMaxBuffer(Kind.stderr);
             } else {
-                _ = bun.assert(false);
+                if ((owned_by.stdout_maxbuf == self)) {
+                    _ = MaxBuf.removeFromSubprocess((&owned_by.stdout_maxbuf));
+                    _ = owned_by.onMaxBuffer(Kind.stdout);
+                } else {
+                    _ = bun.assert(false);
+                }
             }
         }
-    }
 }
 pub const Kind = enum {
-    stdout,
-    stderr,
-};
+        stdout,
+        stderr,
+    };

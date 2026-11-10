@@ -13,20 +13,20 @@ pub const ClientSession = @import("./h2_client/ClientSession.zig");
 pub const PendingConnect = @import("./h2_client/PendingConnect.zig");
 pub const TestingAPIs = @import("../http_jsc/headers_jsc.zig").H2TestingAPIs;
 fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
-    const T = @TypeOf(val);
-    if (comptime @typeInfo(T) == .comptime_int) return val << shift;
-    if (comptime @typeInfo(T) == .int) {
-        const ShiftType = std.math.Log2Int(T);
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val << shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
         const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
         return val << @as(ShiftType, @truncate(u_shift));
     }
     return val << shift;
 }
 fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
-    const T = @TypeOf(val);
-    if (comptime @typeInfo(T) == .comptime_int) return val >> shift;
-    if (comptime @typeInfo(T) == .int) {
-        const ShiftType = std.math.Log2Int(T);
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val >> shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
         const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
         return val >> @as(ShiftType, @truncate(u_shift));
     }

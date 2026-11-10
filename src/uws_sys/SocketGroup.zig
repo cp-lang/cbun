@@ -2,36 +2,55 @@
 const std = @import("std");
 const string = []const u8;
 
-const uws = bun.uws;
-    const SocketKind = uws.SocketKind;
-    const SslCtx = uws.SslCtx;
-    const us_socket_t = uws.us_socket_t;
-const c = struct {
-        extern fn us_socket_group_init(*SocketGroup, *Loop, ?*const SocketGroup.VTable, ?*anyopaque) void;
-        extern fn us_socket_group_deinit(*SocketGroup) void;
-        extern fn us_socket_group_close_all(*SocketGroup) void;
-        extern fn us_socket_group_timestamp(*SocketGroup) c_ushort;
-        extern fn us_socket_group_loop(*SocketGroup) *Loop;
-        extern fn us_socket_group_next(*SocketGroup) ?*SocketGroup;
-        extern fn us_socket_group_listen(*SocketGroup, u8, ?*SslCtx, ?[*:0]const u8, c_int, c_int, c_int, *c_int) ?*uws.ListenSocket;
-        extern fn us_socket_group_listen_unix(*SocketGroup, u8, ?*SslCtx, [*]const u8, usize, c_int, c_int, *c_int) ?*uws.ListenSocket;
-        extern fn us_socket_group_connect(*SocketGroup, u8, ?*SslCtx, [*:0]const u8, c_int, c_int, c_int, *c_int) ?*anyopaque;
-        extern fn us_socket_group_connect_unix(*SocketGroup, u8, ?*SslCtx, [*]const u8, usize, c_int, c_int) ?*us_socket_t;
-        extern fn us_socket_from_fd(*SocketGroup, u8, ?*SslCtx, c_int, uws.LIBUS_SOCKET_DESCRIPTOR, c_int) ?*us_socket_t;
-        extern fn us_socket_pair(*SocketGroup, u8, c_int, *[2]uws.LIBUS_SOCKET_DESCRIPTOR) ?*us_socket_t;
-    };
-
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+pub const ConnectResult = union(enum) {
+    socket: *us_socket_t,
+    connecting: *ConnectingSocket,
+    failed: void,
+};
 pub const bun = @import("bun");
 pub const ConnectingSocket = @import("./ConnectingSocket.zig").ConnectingSocket;
 pub const ListenSocket = @import("./ListenSocket.zig").ListenSocket;
 pub const Loop = @import("./Loop.zig").Loop;
+pub const SocketKind = @import("./SocketKind.zig").SocketKind;
+pub const us_socket_t = @import("./us_socket_t.zig").us_socket_t;
+pub const VTable = struct {
+    on_open: ?*const fn (*us_socket_t, i32, [*]u8, i32) callconv(.c) ?*us_socket_t = null,
+    on_data: ?*const fn (*us_socket_t, [*]u8, i32) callconv(.c) ?*us_socket_t = null,
+    on_fd: ?*const fn (*us_socket_t, i32) callconv(.c) ?*us_socket_t = null,
+    on_writable: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t = null,
+    on_close: ?*const fn (*us_socket_t, i32, ?*anyopaque) callconv(.c) ?*us_socket_t = null,
+    on_timeout: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t = null,
+    on_long_timeout: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t = null,
+    on_end: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t = null,
+    on_connect_error: ?*const fn (*us_socket_t, i32) callconv(.c) ?*us_socket_t = null,
+    on_connecting_error: ?*const fn (*ConnectingSocket, i32) callconv(.c) ?*ConnectingSocket = null,
+    on_handshake: ?*const fn (*us_socket_t, i32, bun.uws.us_bun_verify_error_t, ?*anyopaque) callconv(.c) void = null,
+    
+pub fn _create(allocator: std.mem.Allocator) !*VTable { const self_ptr = try allocator.create(VTable); self_ptr.* = undefined; return self_ptr; }
+
+pub fn init(self: *VTable, on_open: ?*const fn (*us_socket_t, i32, [*]u8, i32) callconv(.c) ?*us_socket_t, on_data: ?*const fn (*us_socket_t, [*]u8, i32) callconv(.c) ?*us_socket_t, on_fd: ?*const fn (*us_socket_t, i32) callconv(.c) ?*us_socket_t, on_writable: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t, on_close: ?*const fn (*us_socket_t, i32, ?*anyopaque) callconv(.c) ?*us_socket_t, on_timeout: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t, on_long_timeout: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t, on_end: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t, on_connect_error: ?*const fn (*us_socket_t, i32) callconv(.c) ?*us_socket_t, on_connecting_error: ?*const fn (*ConnectingSocket, i32) callconv(.c) ?*ConnectingSocket, on_handshake: ?*const fn (*us_socket_t, i32, bun.uws.us_bun_verify_error_t, ?*anyopaque) callconv(.c) void) void {
+            self.on_open = on_open;
+            self.on_data = on_data;
+            self.on_fd = on_fd;
+            self.on_writable = on_writable;
+            self.on_close = on_close;
+            self.on_timeout = on_timeout;
+            self.on_long_timeout = on_long_timeout;
+            self.on_end = on_end;
+            self.on_connect_error = on_connect_error;
+            self.on_connecting_error = on_connecting_error;
+            self.on_handshake = on_handshake;
+    }
+};
+
 pub const SocketGroup = extern struct {
     loop: ?*Loop = null,
     vtable: ?*const VTable = null,
     #ext: ?*anyopaque = null,
     head_sockets: ?*us_socket_t = null,
     head_connecting_sockets: ?*ConnectingSocket = null,
-    head_listen_sockets: ?*uws.ListenSocket = null,
+    head_listen_sockets: ?*ListenSocket = null,
     iterator: ?*us_socket_t = null,
     prev: ?*SocketGroup = null,
     next: ?*SocketGroup = null,
@@ -41,14 +60,8 @@ pub const SocketGroup = extern struct {
     long_timestamp: u8 = 0,
     linked: u8 = 0,
 
-pub fn init(self: *SocketGroup, loop_: *Loop, vt: ?*const VTable, owner_ptr: anytype) void {
-            const P = @TypeOf(owner_ptr);
-            const erased: ?*anyopaque = if (P == @TypeOf(null)) null else switch (@typeInfo(P)) {
-                .pointer => |p| if (p.size == .one) @ptrCast(@constCast(owner_ptr)) else @compileError("SocketGroup.init owner must be a single-item pointer"),
-                .optional => if (owner_ptr) |o| @ptrCast(@constCast(o)) else null,
-                else => @compileError("SocketGroup.init owner must be a pointer or null"),
-            };
-            c.us_socket_group_init(self, loop_, vt, erased);
+pub fn init(self: *SocketGroup, loop_: *Loop, vt: ?*const VTable, owner_ptr: ?*anyopaque) void {
+            _ = us_socket_group_init(self, loop_, vt, owner_ptr);
     }
 
 pub fn release(self: *SocketGroup) void {
@@ -56,11 +69,11 @@ pub fn release(self: *SocketGroup) void {
     }
 
 pub fn deinit(self: *SocketGroup) void {
-            c.us_socket_group_deinit(self);
+            _ = us_socket_group_deinit(self);
     }
 
 pub fn closeAll(self: *SocketGroup) void {
-            c.us_socket_group_close_all(self);
+            _ = us_socket_group_close_all(self);
     }
 
 pub fn getLoop(self: *const SocketGroup) *Loop {
@@ -68,73 +81,81 @@ pub fn getLoop(self: *const SocketGroup) *Loop {
     }
 
 pub fn owner(self: *const SocketGroup, comptime T: type) *T {
-            return @ptrCast(@alignCast(self.#ext.?));
+            {
+                return @as(*T, @ptrCast(@alignCast(self.#ext.?)));
+            }
     }
 
 pub fn isEmpty(self: *const SocketGroup) bool {
-            return self.head_sockets == null and
-                self.head_connecting_sockets == null and
-                self.head_listen_sockets == null and
-                self.low_prio_count == 0;
+            return ((((self.head_sockets == null) and (self.head_connecting_sockets == null)) and (self.head_listen_sockets == null)) and (self.low_prio_count == 0));
     }
 
-pub fn listen(self: *SocketGroup, kind: SocketKind, ssl_ctx: ?*SslCtx, host: anytype, port: c_int, options: c_int, socket_ext_size: c_int, err: *c_int) ?*uws.ListenSocket {
-            return c.us_socket_group_listen(self, @intFromEnum(kind), ssl_ctx, host, port, options, socket_ext_size, err);
+pub fn listen(self: *SocketGroup, kind: SocketKind, ssl_ctx: ?*bun.uws.SslCtx, host: ?[*:0]const u8, port: i32, options: i32, socket_ext_size: i32, err: *i32) ?*ListenSocket {
+            return us_socket_group_listen(self, (if (comptime @typeInfo(@TypeOf(kind)) == .@"enum") cp_cast_int(u8, @intFromEnum(kind)) else cp_cast_int(u8, kind)), ssl_ctx, host, port, options, socket_ext_size, err);
     }
 
-pub fn listenUnix(self: *SocketGroup, kind: SocketKind, ssl_ctx: ?*SslCtx, path: anytype, pathlen: usize, options: c_int, socket_ext_size: c_int, err: *c_int) ?*uws.ListenSocket {
-            return c.us_socket_group_listen_unix(self, @intFromEnum(kind), ssl_ctx, path, pathlen, options, socket_ext_size, err);
+pub fn listenUnix(self: *SocketGroup, kind: SocketKind, ssl_ctx: ?*bun.uws.SslCtx, path: []const u8, options: i32, socket_ext_size: i32, err: *i32) ?*ListenSocket {
+            return us_socket_group_listen_unix(self, (if (comptime @typeInfo(@TypeOf(kind)) == .@"enum") cp_cast_int(u8, @intFromEnum(kind)) else cp_cast_int(u8, kind)), ssl_ctx, path.ptr, path.len, options, socket_ext_size, err);
     }
 
-pub fn connect(self: *SocketGroup, kind: SocketKind, ssl_ctx: ?*SslCtx, host: anytype, port: c_int, options: c_int, socket_ext_size: c_int) ConnectResult {
-            var has_dns_resolved: c_int = 0;
-            const ptr = c.us_socket_group_connect(self, @intFromEnum(kind), ssl_ctx, host, port, options, socket_ext_size, &has_dns_resolved) orelse return .failed;
-            return if (has_dns_resolved != 0)
-                .{ .socket = @ptrCast(@alignCast(ptr)) }
-            else
-                .{ .connecting = @ptrCast(@alignCast(ptr)) };
+pub fn connect(self: *SocketGroup, kind: SocketKind, ssl_ctx: ?*bun.uws.SslCtx, host: [*:0]const u8, port: i32, options: i32, socket_ext_size: i32) ConnectResult {
+            var has_dns_resolved: i32 = 0;
+            _ = &has_dns_resolved;
+            var ptr = us_socket_group_connect(self, (if (comptime @typeInfo(@TypeOf(kind)) == .@"enum") cp_cast_int(u8, @intFromEnum(kind)) else cp_cast_int(u8, kind)), ssl_ctx, host, port, options, socket_ext_size, (&has_dns_resolved));
+            _ = &ptr;
+            if ((ptr == null)) {
+                return .{ .failed = .{} };
+            }
+            if ((has_dns_resolved != 0)) {
+                return .{ .socket = @ptrCast(ptr.?) };
+            } else {
+                return .{ .connecting = @ptrCast(ptr.?) };
+            }
     }
 
-pub fn connectUnix(self: *SocketGroup, kind: SocketKind, ssl_ctx: ?*SslCtx, path: anytype, pathlen: usize, options: c_int, socket_ext_size: c_int) ?*us_socket_t {
-            return c.us_socket_group_connect_unix(self, @intFromEnum(kind), ssl_ctx, path, pathlen, options, socket_ext_size);
+pub fn connectUnix(self: *SocketGroup, kind: SocketKind, ssl_ctx: ?*bun.uws.SslCtx, path: []const u8, options: i32, socket_ext_size: i32) ?*us_socket_t {
+            return us_socket_group_connect_unix(self, (if (comptime @typeInfo(@TypeOf(kind)) == .@"enum") cp_cast_int(u8, @intFromEnum(kind)) else cp_cast_int(u8, kind)), ssl_ctx, path.ptr, path.len, options, socket_ext_size);
     }
 
-pub fn fromFd(self: *SocketGroup, kind: SocketKind, ssl_ctx: ?*SslCtx, socket_ext_size: c_int, fd: uws.LIBUS_SOCKET_DESCRIPTOR, ipc: bool) ?*us_socket_t {
-            return c.us_socket_from_fd(self, @intFromEnum(kind), ssl_ctx, socket_ext_size, fd, @intFromBool(ipc));
+pub fn fromFd(self: *SocketGroup, kind: SocketKind, ssl_ctx: ?*bun.uws.SslCtx, socket_ext_size: i32, fd: bun.FD, ipc: bool) ?*us_socket_t {
+            var ipc_int: i32 = 0;
+            _ = &ipc_int;
+            if (ipc) {
+                ipc_int = 1;
+            }
+            return us_socket_from_fd(self, (if (comptime @typeInfo(@TypeOf(kind)) == .@"enum") cp_cast_int(u8, @intFromEnum(kind)) else cp_cast_int(u8, kind)), ssl_ctx, socket_ext_size, fd.native(), ipc_int);
     }
 
-pub fn pair(self: *SocketGroup, kind: SocketKind, ext_size: c_int, fds: anytype) ?*us_socket_t {
-            return c.us_socket_pair(self, @intFromEnum(kind), ext_size, fds);
+pub fn pair(self: *SocketGroup, kind: SocketKind, ext_size: i32, fds: *[2]i32) ?*us_socket_t {
+            return us_socket_pair(self, (if (comptime @typeInfo(@TypeOf(kind)) == .@"enum") cp_cast_int(u8, @intFromEnum(kind)) else cp_cast_int(u8, kind)), ext_size, fds);
     }
 
 pub fn nextInLoop(self: *SocketGroup) ?*SocketGroup {
-            return c.us_socket_group_next(self);
+            return us_socket_group_next(self);
     }
-    pub const VTable = extern struct {
-                on_open: ?*const fn (*us_socket_t, c_int, [*c]u8, c_int) callconv(.c) ?*us_socket_t = null,
-                on_data: ?*const fn (*us_socket_t, [*c]u8, c_int) callconv(.c) ?*us_socket_t = null,
-                on_fd: ?*const fn (*us_socket_t, c_int) callconv(.c) ?*us_socket_t = null,
-                on_writable: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t = null,
-                on_close: ?*const fn (*us_socket_t, c_int, ?*anyopaque) callconv(.c) ?*us_socket_t = null,
-                on_timeout: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t = null,
-                on_long_timeout: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t = null,
-                on_end: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t = null,
-                on_connect_error: ?*const fn (*us_socket_t, c_int) callconv(.c) ?*us_socket_t = null,
-                on_connecting_error: ?*const fn (*ConnectingSocket, c_int) callconv(.c) ?*ConnectingSocket = null,
-                on_handshake: ?*const fn (*us_socket_t, c_int, uws.us_bun_verify_error_t, ?*anyopaque) callconv(.c) void = null,
-            };
-    
-            comptime {
-                if (@sizeOf(SocketGroup) != 9 * @sizeOf(*anyopaque) + 16)
-                    @compileError("SocketGroup layout drifted from us_socket_group_t");
-                if (@sizeOf(VTable) != 11 * @sizeOf(*anyopaque))
-                    @compileError("VTable layout drifted from us_socket_vtable_t");
-            }
-    
-            pub const ConnectResult = union(enum) {
-                socket: *us_socket_t,
-                connecting: *ConnectingSocket,
-                failed,
-            };
 };
 
+
+pub extern "c" fn us_socket_group_init(g: *SocketGroup, loop: *Loop, vt: ?*const VTable, owner: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn us_socket_group_deinit(g: *SocketGroup) callconv(.c) void;
+
+pub extern "c" fn us_socket_group_close_all(g: *SocketGroup) callconv(.c) void;
+
+pub extern "c" fn us_socket_group_timestamp(g: *SocketGroup) callconv(.c) u16;
+
+pub extern "c" fn us_socket_group_loop(g: *SocketGroup) callconv(.c) *Loop;
+
+pub extern "c" fn us_socket_group_next(g: *SocketGroup) callconv(.c) ?*SocketGroup;
+
+pub extern "c" fn us_socket_group_listen(g: *SocketGroup, kind: u8, ssl_ctx: ?*bun.uws.SslCtx, host: ?[*:0]const u8, port: i32, options: i32, ext_size: i32, err: *i32) callconv(.c) ?*ListenSocket;
+
+pub extern "c" fn us_socket_group_listen_unix(g: *SocketGroup, kind: u8, ssl_ctx: ?*bun.uws.SslCtx, path: [*]const u8, pathlen: usize, options: i32, ext_size: i32, err: *i32) callconv(.c) ?*ListenSocket;
+
+pub extern "c" fn us_socket_group_connect(g: *SocketGroup, kind: u8, ssl_ctx: ?*bun.uws.SslCtx, host: [*:0]const u8, port: i32, options: i32, ext_size: i32, dns_resolved: *i32) callconv(.c) ?*anyopaque;
+
+pub extern "c" fn us_socket_group_connect_unix(g: *SocketGroup, kind: u8, ssl_ctx: ?*bun.uws.SslCtx, path: [*]const u8, pathlen: usize, options: i32, ext_size: i32) callconv(.c) ?*us_socket_t;
+
+pub extern "c" fn us_socket_from_fd(g: *SocketGroup, kind: u8, ssl_ctx: ?*bun.uws.SslCtx, ext_size: i32, fd: i32, ipc: i32) callconv(.c) ?*us_socket_t;
+
+pub extern "c" fn us_socket_pair(g: *SocketGroup, kind: u8, ext_size: i32, fds: *[2]i32) callconv(.c) ?*us_socket_t;

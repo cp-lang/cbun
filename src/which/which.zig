@@ -2,259 +2,185 @@
 const std = @import("std");
 const string = []const u8;
 
-fn cp_cast_int(comptime Dest: type, val: anytype) Dest {
-    const Src = @TypeOf(val);
-    if (comptime Src == Dest) return val;
-    if (comptime Src == comptime_int) {
-        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val));
-    }
-    const src_bits = @typeInfo(Src).int.bits;
-    const dest_bits = @typeInfo(Dest).int.bits;
-    if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {
-        if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val);
-    }
-    if (comptime @typeInfo(Src).int.signedness == .signed) {
-        const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val);
-        const u: u128 = @bitCast(s);
-        if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u);
-    } else {
-        const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val);
-        const s: i128 = @bitCast(u);
-        if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s);
-    }
-}
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const PosixToWinNormalizer = bun.path.PosixToWinNormalizer;
 const win_extensionsW = .{ bun.strings.w("exe"), bun.strings.w("cmd"), bun.strings.w("bat") };
 const win_extensions = .{ "exe", "cmd", "bat" };
-fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) {
-    .pointer => |p| switch (p.size) {
-        .slice => @TypeOf(val),
-        .one => switch (@typeInfo(p.child)) {
-            .array => []const @typeInfo(p.child).array.child,
-            .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val),
-            else => @TypeOf(val),
-        },
-        else => @TypeOf(val),
-    },
-    .array => []const @typeInfo(@TypeOf(val)).array.child,
-    else => @TypeOf(val),
-} {
-    const T = @TypeOf(val);
-    switch (@typeInfo(T)) {
-        .pointer => |p| switch (p.size) {
-            .slice => return val,
-            .one => switch (@typeInfo(p.child)) {
-                .array => return val[0..],
-                .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val,
-                else => return val,
-            },
-            else => return val,
-        },
-        .array => return val[0..],
-        else => return val,
-    }
-}
-fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) {
-    .array => []@typeInfo(@TypeOf(ptr.*)).array.child,
-    .pointer => |p| switch (p.size) {
-        .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child,
-        .one => switch (@typeInfo(p.child)) {
-            .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"),
-            else => @compileError("Cannot mutably iterate over non-collection"),
-        },
-        else => @compileError("Cannot mutably iterate over non-collection"),
-    },
-    else => @compileError("Cannot mutably iterate over non-collection"),
-} {
-    const ValT = @TypeOf(ptr.*);
-    switch (@typeInfo(ValT)) {
-        .array => return ptr[0..],
-        .pointer => |p| switch (p.size) {
-            .slice => return @constCast(ptr.*),
-            .one => return @constCast(ptr.*.*),
-            else => unreachable,
-        },
-        else => unreachable,
-    }
-}
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
 pub const bun = @import("bun");
 
 pub fn isValid(buf: *bun.PathBuffer, segment: []const u8, bin: []const u8) ?u16 {
-    var prefix_len = (segment.len + 1);
-    _ = &prefix_len;
-    var len = (prefix_len + bin.len);
-    _ = &len;
-    var len_z = (len + 1);
-    _ = &len_z;
-    if ((len_z > bun.MAX_PATH_BYTES)) {
-        return null;
-    }
-    _ = bun.copy(u8, buf, segment);
-    buf[cp_cast_int(usize, segment.len)] = std.fs.path.sep;
-    _ = bun.copy(u8, buf[prefix_len..], bin);
-    buf[cp_cast_int(usize, len)] = 0;
-    var filepath = buf[0..len :0];
-    _ = &filepath;
-    if ((!bun.sys.isExecutableFilePath(filepath))) {
-        return null;
-    }
-    return @intCast(filepath.len);
+        var prefix_len = (segment.len + 1);
+        _ = &prefix_len;
+        var len = (prefix_len + bin.len);
+        _ = &len;
+        var len_z = (len + 1);
+        _ = &len_z;
+        if ((len_z > bun.MAX_PATH_BYTES)) {
+            return null;
+        }
+        _ = bun.copy(u8, buf, segment);
+        buf[cp_cast_int(usize, segment.len)] = std.fs.path.sep;
+        _ = bun.copy(u8, buf[prefix_len..], bin);
+        buf[cp_cast_int(usize, len)] = 0;
+        var filepath = buf[0..len :0];
+        _ = &filepath;
+        if ((!bun.sys.isExecutableFilePath(filepath))) {
+            return null;
+        }
+        return @intCast(filepath.len);
 }
 
 pub fn which(buf: *bun.PathBuffer, path: []const u8, cwd: []const u8, bin: []const u8) ?[:0]const u8 {
-    if ((bin.len > bun.MAX_PATH_BYTES)) {
-        return null;
-    }
-    _ = bun.Output.scoped(.which, .hidden)("path={s} cwd={s} bin={s}", .{ .path = path, .cwd = cwd, .bin = bin });
-    if ((bun.Environment.os == .windows)) {
-        var convert_buf = bun.w_path_buffer_pool.get();
-        _ = &convert_buf;
-        defer {
-            _ = bun.w_path_buffer_pool.put(convert_buf);
-        }
-        var result = ((whichWin(convert_buf, path, cwd, bin)) orelse {
+        if ((bin.len > bun.MAX_PATH_BYTES)) {
             return null;
-        });
-        _ = &result;
-        var result_converted = ((bun.strings.convertUTF16toUTF8InBuffer(buf, result)) catch unreachable);
-        _ = &result_converted;
-        buf[cp_cast_int(usize, result_converted.len)] = 0;
-        _ = bun.assert((result_converted.ptr == buf.ptr));
-        return buf[0..result_converted.len :0];
-    }
-    if ((bin.len == 0)) {
-        return null;
-    }
-    if (std.fs.path.isAbsolute(bin)) {
-        _ = bun.copy(u8, buf, bin);
-        buf[cp_cast_int(usize, bin.len)] = 0;
-        var binZ: [:0]u8 = buf[0..bin.len :0];
-        _ = &binZ;
-        if (bun.sys.isExecutableFilePath(binZ)) {
-            return binZ;
         }
-        return null;
-    }
-    if (bun.strings.containsChar(bin, 47)) {
-        if ((cwd.len > 0)) {
-            if (isValid(buf, std.mem.trimRight(u8, cwd, std.fs.path.sep_str), bun.strings.withoutPrefixComptime(bin, "./"))) |len| {
+        _ = bun.Output.scoped(.which, .hidden)("path={s} cwd={s} bin={s}", .{ path, cwd, bin });
+        if ((bun.Environment.os == .windows)) {
+            var convert_buf = bun.w_path_buffer_pool.get();
+            _ = &convert_buf;
+            defer {
+            _ = bun.w_path_buffer_pool.put(convert_buf);
+            }
+            var result = ((whichWin(convert_buf, path, cwd, bin)) orelse { return null; });
+            _ = &result;
+            var result_converted = ((bun.strings.convertUTF16toUTF8InBuffer(buf, result)) catch unreachable);
+            _ = &result_converted;
+            buf[cp_cast_int(usize, result_converted.len)] = 0;
+            _ = bun.assert((result_converted.ptr == buf.ptr));
+            return buf[0..result_converted.len :0];
+        }
+        if ((bin.len == 0)) {
+            return null;
+        }
+        if (std.fs.path.isAbsolute(bin)) {
+            _ = bun.copy(u8, buf, bin);
+            buf[cp_cast_int(usize, bin.len)] = 0;
+            var binZ: [:0]u8 = buf[0..bin.len :0];
+            _ = &binZ;
+            if (bun.sys.isExecutableFilePath(binZ)) {
+                return binZ;
+            }
+            return null;
+        }
+        if (bun.strings.containsChar(bin, 47)) {
+            if ((cwd.len > 0)) {
+                if (isValid(buf, std.mem.trimRight(u8, cwd, std.fs.path.sep_str), bun.strings.withoutPrefixComptime(bin, "./"))) |len| {
+                    _ = &len;
+                    return buf[0..len :0];
+                }
+            }
+            return null;
+        }
+        var path_iter = std.mem.tokenizeScalar(u8, path, std.fs.path.delimiter);
+        _ = &path_iter;
+        while (path_iter.next()) |segment| {
+            if (isValid(buf, segment, bin)) |len| {
                 _ = &len;
                 return buf[0..len :0];
             }
         }
         return null;
-    }
-    var path_iter = std.mem.tokenizeScalar(u8, path, std.fs.path.delimiter);
-    _ = &path_iter;
-    while (path_iter.next()) |segment| {
-        if (isValid(buf, segment, bin)) |len| {
-            _ = &len;
-            return buf[0..len :0];
-        }
-    }
-    return null;
 }
 
 pub fn endsWithExtension(str: []const u8) bool {
-    if ((str.len < 4)) {
-        return false;
-    }
-    if ((str[@as(usize, @intCast((str.len - 4)))] != 46)) {
-        return false;
-    }
-    var file_ext = str[(str.len - 3)..];
-    _ = &file_ext;
-    for (cp_iter_slice(win_extensions)) |ext| {
-        _ = &ext;
-        _ = comptime (bun.assert((ext.len == 3)));
-        if (bun.strings.eqlCaseInsensitiveASCIIICheckLength(file_ext, ext)) {
-            return true;
+        if ((str.len < 4)) {
+            return false;
         }
-    }
-    return false;
+        if ((str[@as(usize, @intCast((str.len - 4)))] != 46)) {
+            return false;
+        }
+        var file_ext = str[(str.len - 3)..];
+        _ = &file_ext;
+        for (cp_iter_slice(win_extensions)) |ext| {
+            _ = &ext;
+            _ = comptime (bun.assert((ext.len == 3)));
+            if (bun.strings.eqlCaseInsensitiveASCIIICheckLength(file_ext, ext)) {
+                return true;
+            }
+        }
+        return false;
 }
 
 pub fn searchBin(buf: *bun.WPathBuffer, path_size: usize, check_windows_extensions: bool) ?[:0]u16 {
-    if ((!check_windows_extensions)) {
-        if (bun.sys.existsOSPath(buf[0..path_size :0], true)) {
-            return buf[0..path_size :0];
-        }
-    }
-    if (check_windows_extensions) {
-        buf[cp_cast_int(usize, path_size)] = 46;
-        buf[cp_cast_int(usize, ((path_size + 1) + 3))] = 0;
-        for (cp_iter_slice(win_extensionsW)) |ext| {
-            _ = &ext;
-            _ = @memcpy(buf[(path_size + 1)..((path_size + 1) + 3)], ext);
-            if (bun.sys.existsOSPath(buf[0..((path_size + 1) + ext.len) :0], true)) {
-                return buf[0..((path_size + 1) + ext.len) :0];
+        if ((!check_windows_extensions)) {
+            if (bun.sys.existsOSPath(buf[0..path_size :0], true)) {
+                return buf[0..path_size :0];
             }
         }
-    }
-    return null;
+        if (check_windows_extensions) {
+            buf[cp_cast_int(usize, path_size)] = 46;
+            buf[cp_cast_int(usize, ((path_size + 1) + 3))] = 0;
+            for (cp_iter_slice(win_extensionsW)) |ext| {
+                _ = &ext;
+                _ = @memcpy(buf[(path_size + 1)..((path_size + 1) + 3)], ext);
+                if (bun.sys.existsOSPath(buf[0..((path_size + 1) + ext.len) :0], true)) {
+                    return buf[0..((path_size + 1) + ext.len) :0];
+                }
+            }
+        }
+        return null;
 }
 
 pub fn searchBinInPath(buf: *bun.WPathBuffer, path_buf: *bun.PathBuffer, path: []const u8, bin: []const u8, check_windows_extensions: bool) ?[:0]u16 {
-    if ((path.len == 0)) {
-        return null;
-    }
-    var segment = (if (std.fs.path.isAbsolute(path)) (blk_catch_1: {
-        break :blk_catch_1 ((PosixToWinNormalizer.resolveCWDWithExternalBuf(path_buf, path)) catch |__ce_1| {
-            _ = &__ce_1;
+        if ((path.len == 0)) {
             return null;
-        });
-    }) else path);
-    _ = &segment;
-    var segment_utf16 = bun.strings.convertUTF8toUTF16InBuffer(buf, bun.strings.withoutTrailingSlash(segment));
-    _ = &segment_utf16;
-    buf[cp_cast_int(usize, segment_utf16.len)] = std.fs.path.sep;
-    var bin_utf16 = bun.strings.convertUTF8toUTF16InBuffer(buf[(segment_utf16.len + 1)..], bin);
-    _ = &bin_utf16;
-    var path_size = ((segment_utf16.len + 1) + bin_utf16.len);
-    _ = &path_size;
-    buf[cp_cast_int(usize, path_size)] = 0;
-    return searchBin(buf, path_size, check_windows_extensions);
+        }
+        var segment = (if (std.fs.path.isAbsolute(path)) (blk_catch_1: { break :blk_catch_1 ((PosixToWinNormalizer.resolveCWDWithExternalBuf(path_buf, path)) catch |__ce_1| { _ = &__ce_1; return null; }); }) else path);
+        _ = &segment;
+        var segment_utf16 = bun.strings.convertUTF8toUTF16InBuffer(buf, bun.strings.withoutTrailingSlash(segment));
+        _ = &segment_utf16;
+        buf[cp_cast_int(usize, segment_utf16.len)] = std.fs.path.sep;
+        var bin_utf16 = bun.strings.convertUTF8toUTF16InBuffer(buf[(segment_utf16.len + 1)..], bin);
+        _ = &bin_utf16;
+        var path_size = ((segment_utf16.len + 1) + bin_utf16.len);
+        _ = &path_size;
+        buf[cp_cast_int(usize, path_size)] = 0;
+        return searchBin(buf, path_size, check_windows_extensions);
 }
 
 pub fn whichWin(buf: *bun.WPathBuffer, path: []const u8, cwd: []const u8, bin: []const u8) ?[:0]const u16 {
-    if ((bin.len == 0)) {
-        return null;
-    }
-    var path_buf = bun.path_buffer_pool.get();
-    _ = &path_buf;
-    defer {
+        if ((bin.len == 0)) {
+            return null;
+        }
+        var path_buf = bun.path_buffer_pool.get();
+        _ = &path_buf;
+        defer {
         _ = bun.path_buffer_pool.put(path_buf);
-    }
-    var check_windows_extensions = (!endsWithExtension(bin));
-    _ = &check_windows_extensions;
-    if (std.fs.path.isAbsolute(bin)) {
-        var normalized_bin = (blk_catch_2: {
-            break :blk_catch_2 ((PosixToWinNormalizer.resolveCWDWithExternalBuf(path_buf, bin)) catch |__ce_2| {
-                _ = &__ce_2;
-                return null;
-            });
-        });
-        _ = &normalized_bin;
-        var bin_utf16 = bun.strings.convertUTF8toUTF16InBuffer(buf, normalized_bin);
-        _ = &bin_utf16;
-        buf[cp_cast_int(usize, bin_utf16.len)] = 0;
-        return searchBin(buf, bin_utf16.len, check_windows_extensions);
-    }
-    if ((bun.strings.containsChar(bin, 47) or bun.strings.containsChar(bin, 92))) {
-        if (searchBinInPath(buf, path_buf, cwd, bun.strings.withoutPrefixComptime(bin, "./"), check_windows_extensions)) |bin_path| {
-            _ = &bin_path;
-            _ = bun.path.posixToPlatformInPlace(u16, bin_path);
-            return bin_path;
+        }
+        var check_windows_extensions = (!endsWithExtension(bin));
+        _ = &check_windows_extensions;
+        if (std.fs.path.isAbsolute(bin)) {
+            var normalized_bin = (blk_catch_2: { break :blk_catch_2 ((PosixToWinNormalizer.resolveCWDWithExternalBuf(path_buf, bin)) catch |__ce_2| { _ = &__ce_2; return null; }); });
+            _ = &normalized_bin;
+            var bin_utf16 = bun.strings.convertUTF8toUTF16InBuffer(buf, normalized_bin);
+            _ = &bin_utf16;
+            buf[cp_cast_int(usize, bin_utf16.len)] = 0;
+            return searchBin(buf, bin_utf16.len, check_windows_extensions);
+        }
+        if ((bun.strings.containsChar(bin, 47) or bun.strings.containsChar(bin, 92))) {
+            if (searchBinInPath(buf, path_buf, cwd, bun.strings.withoutPrefixComptime(bin, "./"), check_windows_extensions)) |bin_path| {
+                _ = &bin_path;
+                _ = bun.path.posixToPlatformInPlace(u16, bin_path);
+                return bin_path;
+            }
+            return null;
+        }
+        var path_iter = std.mem.tokenizeScalar(u8, path, 59);
+        _ = &path_iter;
+        while (path_iter.next()) |segment_part| {
+            if (searchBinInPath(buf, path_buf, segment_part, bin, check_windows_extensions)) |bin_path| {
+                _ = &bin_path;
+                return bin_path;
+            }
         }
         return null;
-    }
-    var path_iter = std.mem.tokenizeScalar(u8, path, 59);
-    _ = &path_iter;
-    while (path_iter.next()) |segment_part| {
-        if (searchBinInPath(buf, path_buf, segment_part, bin, check_windows_extensions)) |bin_path| {
-            _ = &bin_path;
-            return bin_path;
-        }
-    }
-    return null;
 }

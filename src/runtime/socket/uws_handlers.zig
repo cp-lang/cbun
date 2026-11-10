@@ -2,10 +2,6 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type { if (@typeInfo(T) == .optional) return T; return ?T; }
-fn CpUnwrapOpt(comptime T: type) type { if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }
-fn cp_opt_is_null(v: anytype) bool { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) return v == null; return false; }
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }
 const IPC = @import("../../jsc/ipc.zig");
 const js_valkey = @import("../valkey_jsc/js_valkey.zig");
 const mysql = @import("../../sql_jsc/mysql.zig");
@@ -16,7 +12,12 @@ const api = bun.jsc.API;
 const uws = bun.uws;
 const ConnectingSocket = uws.ConnectingSocket;
 const us_socket_t = uws.us_socket_t;
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
 
 pub const SpawnIPC = struct {
 
@@ -25,37 +26,31 @@ pub fn onOpen(_: *?*IPC.SendQueue, _: *us_socket_t, _: bool, _: []const u8) void
 
 pub fn onData(ext: *?*IPC.SendQueue, s: *us_socket_t, data: []const u8) void {
             const this = ((ext.*) orelse { return; });
-            _ = &this;
             _ = H.onData(this, S.from(s), data);
     }
 
 pub fn onFd(ext: *?*IPC.SendQueue, s: *us_socket_t, fd: i32) void {
             const this = ((ext.*) orelse { return; });
-            _ = &this;
             _ = H.onFd(this, S.from(s), fd);
     }
 
 pub fn onWritable(ext: *?*IPC.SendQueue, s: *us_socket_t) void {
             const this = ((ext.*) orelse { return; });
-            _ = &this;
             _ = H.onWritable(this, S.from(s));
     }
 
 pub fn onClose(ext: *?*IPC.SendQueue, s: *us_socket_t, code: i32, reason: ?*anyopaque) void {
             const this = ((ext.*) orelse { return; });
-            _ = &this;
             _ = H.onClose(this, S.from(s), code, reason);
     }
 
 pub fn onTimeout(ext: *?*IPC.SendQueue, s: *us_socket_t) void {
             const this = ((ext.*) orelse { return; });
-            _ = &this;
             _ = H.onTimeout(this, S.from(s));
     }
 
 pub fn onEnd(ext: *?*IPC.SendQueue, s: *us_socket_t) void {
             const this = ((ext.*) orelse { return; });
-            _ = &this;
             _ = H.onEnd(this, S.from(s));
     }
     const H = IPC.IPCHandlers.PosixSocket;
@@ -72,7 +67,6 @@ pub inline fn swallow(result: anytype) void {
 
 pub fn PtrHandler(comptime T: type, comptime ssl: bool) type {
         const S = uws.NewSocketHandler(ssl);
-        _ = &S;
         return struct {
         pub const Ext = *?*T;
         inline fn wrap(s: *us_socket_t) S {
@@ -156,9 +150,7 @@ pub fn BunSocket(comptime ssl: bool) type {
 
 pub fn BunListener(comptime ssl: bool) type {
         const S = uws.NewSocketHandler(ssl);
-        _ = &S;
         const NS = api.NewSocket(ssl);
-        _ = &NS;
         return struct {
         pub fn onOpen(s: *us_socket_t, _: bool, _: string) void {
             const listener = s.group().owner(api.Listener);
@@ -200,7 +192,6 @@ pub fn BunListener(comptime ssl: bool) type {
 
 pub fn NsHandler(comptime Owner: type, comptime H: type, comptime ssl: bool) type {
         const S = uws.NewSocketHandler(ssl);
-        _ = &S;
         return struct {
         pub const Ext = *?*Owner;
         inline fn wrap(s: *us_socket_t) S {
@@ -274,9 +265,7 @@ pub fn NsHandler(comptime Owner: type, comptime H: type, comptime ssl: bool) typ
 
 pub fn HTTPClient(comptime ssl: bool) type {
         const H = bun.http.NewHTTPContext(ssl).Handler;
-        _ = &H;
         const S = uws.NewSocketHandler(ssl);
-        _ = &S;
         return struct {
         pub const Ext = *?*anyopaque;
         inline fn wrap(s: *us_socket_t) S {
@@ -336,7 +325,6 @@ pub fn WSClient(comptime ssl: bool) type {
 
 pub fn Postgres(comptime ssl: bool) type {
         const C = bun.api.Postgres.PostgresSQLConnection;
-        _ = &C;
         return NsHandler(C, C.SocketHandler(ssl), ssl);
 }
 

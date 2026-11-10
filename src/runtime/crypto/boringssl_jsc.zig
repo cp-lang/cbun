@@ -2,30 +2,21 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type { if (@typeInfo(T) == .optional) return T; return ?T; }
-fn CpUnwrapOpt(comptime T: type) type { if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }
-fn cp_opt_is_null(v: anytype) bool { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) return v == null; return false; }
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }
 const jsc = bun.jsc;
 const boring = bun.BoringSSL.c;
-pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@"enum")) { return @tagName(val); } else if (comptime T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(T); } }
-
 pub const bun = @import("bun");
 
 pub fn ERR_toJS(globalThis: *jsc.JSGlobalObject, err_code: u32) jsc.JSValue {
         const prefix: []const u8 = "BoringSSL ";
-        _ = &prefix;
         var outbuf: [139]u8 = undefined;
         _ = &outbuf;
         _ = @memset((&outbuf), 0);
         _ = @memcpy(outbuf[0..prefix.len], prefix);
         const message_buf = outbuf[prefix.len..];
-        _ = &message_buf;
         _ = boring.ERR_error_string_n(err_code, message_buf, message_buf.len);
         const error_message: []const u8 = bun.sliceTo(outbuf[0..], 0);
-        _ = &error_message;
         if ((error_message.len == prefix.len)) {
-            return globalThis.ERR(.BORINGSSL, "An unknown BoringSSL error occurred: {d}", .{ .err_code = err_code }).toJS();
+            return globalThis.ERR(.BORINGSSL, "An unknown BoringSSL error occurred: {d}", .{ err_code }).toJS();
         }
-        return globalThis.ERR(.BORINGSSL, "{s}", .{ .error_message = error_message }).toJS();
+        return globalThis.ERR(.BORINGSSL, "{s}", .{ error_message }).toJS();
 }

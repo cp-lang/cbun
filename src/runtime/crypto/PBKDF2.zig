@@ -1,255 +1,12 @@
-const PBKDF2 = @This();
-
-password: jsc.Node.StringOrBuffer = jsc.Node.StringOrBuffer.empty,
-salt: jsc.Node.StringOrBuffer = jsc.Node.StringOrBuffer.empty,
-iteration_count: u32 = 1,
-length: i32 = 0,
-algorithm: EVP.Algorithm,
-
-pub fn run(this: *PBKDF2, output: []u8) bool {
-    const password = this.password.slice();
-    const salt = this.salt.slice();
-    const algorithm = this.algorithm;
-    const iteration_count = this.iteration_count;
-    const length = this.length;
-
-    @memset(output, 0);
-    assert(this.length <= @as(i32, @intCast(output.len)));
-    BoringSSL.ERR_clear_error();
-    const rc = BoringSSL.PKCS5_PBKDF2_HMAC(
-        if (password.len > 0) password.ptr else null,
-        @intCast(password.len),
-        salt.ptr,
-        @intCast(salt.len),
-        @intCast(iteration_count),
-        algorithm.md().?,
-        @intCast(length),
-        output.ptr,
-    );
-
-    if (rc <= 0) {
-        return false;
-    }
-
-    return true;
-}
-
-pub const Job = struct {
-    pbkdf2: PBKDF2,
-    output: []u8 = &[_]u8{},
-    task: jsc.WorkPoolTask = .{ .callback = &runTask },
-    promise: jsc.JSPromise.Strong = .{},
-    vm: *jsc.VirtualMachine,
-    err: ?u32 = null,
-    any_task: jsc.AnyTask = undefined,
-    poll: Async.KeepAlive = .{},
-
-    pub const new = bun.TrivialNew(@This());
-
-    pub fn runTask(task: *jsc.WorkPoolTask) void {
-        const job: *PBKDF2.Job = @fieldParentPtr("task", task);
-        defer job.vm.enqueueTaskConcurrent(jsc.ConcurrentTask.create(job.any_task.task()));
-        job.output = bun.default_allocator.alloc(u8, @as(usize, @intCast(job.pbkdf2.length))) catch {
-            job.err = BoringSSL.EVP_R_MEMORY_LIMIT_EXCEEDED;
-            return;
-        };
-        if (!job.pbkdf2.run(job.output)) {
-            job.err = BoringSSL.ERR_get_error();
-            BoringSSL.ERR_clear_error();
-
-            bun.default_allocator.free(job.output);
-            job.output = &[_]u8{};
-        }
-    }
-
-    pub fn runFromJS(this: *Job) bun.JSTerminated!void {
-        defer this.deinit();
-        if (this.vm.isShuttingDown()) {
-            return;
-        }
-
-        const globalThis = this.vm.global;
-        const promise = this.promise.swap();
-        if (this.err) |err| {
-            try promise.rejectWithAsyncStack(globalThis, createCryptoError(globalThis, err));
-            return;
-        }
-
-        const output_slice = this.output;
-        assert(output_slice.len == @as(usize, @intCast(this.pbkdf2.length)));
-        const buffer_value = jsc.JSValue.createBuffer(globalThis, output_slice);
-        this.output = &[_]u8{};
-        try promise.resolve(globalThis, buffer_value);
-    }
-
-    pub fn deinit(this: *Job) void {
-        this.poll.unref(this.vm);
-        this.pbkdf2.deinitAndUnprotect();
-        this.promise.deinit();
-        bun.default_allocator.free(this.output);
-        bun.destroy(this);
-    }
-
-    pub fn create(vm: *jsc.VirtualMachine, globalThis: *jsc.JSGlobalObject, data: *const PBKDF2) *Job {
-        var job = Job.new(.{
-            .pbkdf2 = data.*,
-            .vm = vm,
-            .any_task = undefined,
-        });
-
-        job.promise = jsc.JSPromise.Strong.init(globalThis);
-        job.any_task = jsc.AnyTask.New(@This(), &runFromJS).init(job);
-        job.poll.ref(vm);
-        jsc.WorkPool.schedule(&job.task);
-
-        return job;
-    }
-};
-
-pub fn deinitAndUnprotect(this: *PBKDF2) void {
-    this.password.deinitAndUnprotect();
-    this.salt.deinitAndUnprotect();
-}
-
-pub fn deinit(this: *PBKDF2) void {
-    this.password.deinit();
-    this.salt.deinit();
-}
-
-pub fn fromJS(globalThis: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame, is_async: bool) bun.JSError!PBKDF2 {
-    const arg0, const arg1, const arg2, const arg3, const arg4, const arg5 = callFrame.argumentsAsArray(6);
-
-    if (!arg3.isNumber()) {
-        return globalThis.throwInvalidArgumentTypeValue("keylen", "number", arg3);
-    }
-
-    const keylen_num = arg3.asNumber();
-
-    if (std.math.isInf(keylen_num) or std.math.isNan(keylen_num)) {
-        return globalThis.throwRangeError(keylen_num, .{
-            .field_name = "keylen",
-            .msg = "an integer",
-        });
-    }
-
-    if (keylen_num < 0 or keylen_num > std.math.maxInt(i32)) {
-        return globalThis.throwRangeError(keylen_num, .{ .field_name = "keylen", .min = 0, .max = std.math.maxInt(i32) });
-    }
-
-    const keylen: i32 = @intFromFloat(keylen_num);
-
-    if (globalThis.hasException()) {
-        return error.JSError;
-    }
-
-    if (!arg2.isAnyInt()) {
-        return globalThis.throwInvalidArgumentTypeValue("iterations", "number", arg2);
-    }
-
-    const iteration_count = try arg2.coerce(i64, globalThis);
-
-    if (!globalThis.hasException() and (iteration_count < 1 or iteration_count > std.math.maxInt(i32))) {
-        return globalThis.throwRangeError(iteration_count, .{ .field_name = "iterations", .min = 1, .max = std.math.maxInt(i32) + 1 });
-    }
-
-    if (globalThis.hasException()) {
-        return error.JSError;
-    }
-
-    const algorithm = brk: {
-        if (!arg4.isString()) {
-            return globalThis.throwInvalidArgumentTypeValue("digest", "string", arg4);
-        }
-
-        invalid: {
-            switch (try EVP.Algorithm.map.fromJSCaseInsensitive(globalThis, arg4) orelse break :invalid) {
-                .shake128, .shake256 => break :invalid,
-                else => |alg| break :brk alg,
-            }
-        }
-
-        if (!globalThis.hasException()) {
-            const slice = try arg4.toSlice(globalThis, bun.default_allocator);
-            defer slice.deinit();
-            const name = slice.slice();
-            return globalThis.ERR(.CRYPTO_INVALID_DIGEST, "Invalid digest: {s}", .{name}).throw();
-        }
-        return error.JSError;
-    };
-
-    var out = PBKDF2{
-        .iteration_count = @intCast(iteration_count),
-        .length = keylen,
-        .algorithm = algorithm,
-    };
-    defer {
-        if (globalThis.hasException()) {
-            if (is_async)
-                out.deinitAndUnprotect()
-            else
-                out.deinit();
-        }
-    }
-
-    const allow_string_object = true;
-    out.salt = try jsc.Node.StringOrBuffer.fromJSMaybeAsync(globalThis, bun.default_allocator, arg1, is_async, allow_string_object) orelse {
-        return globalThis.throwInvalidArgumentTypeValue("salt", "string or buffer", arg1);
-    };
-
-    if (out.salt.slice().len > std.math.maxInt(i32)) {
-        return globalThis.throwInvalidArguments("salt is too long", .{});
-    }
-
-    out.password = try jsc.Node.StringOrBuffer.fromJSMaybeAsync(globalThis, bun.default_allocator, arg0, is_async, allow_string_object) orelse {
-        return globalThis.throwInvalidArgumentTypeValue("password", "string or buffer", arg0);
-    };
-
-    if (out.password.slice().len > std.math.maxInt(i32)) {
-        return globalThis.throwInvalidArguments("password is too long", .{});
-    }
-
-    if (is_async) {
-        if (!arg5.isFunction()) {
-            return globalThis.throwInvalidArgumentTypeValue("callback", "function", arg5);
-        }
-    }
-
-    return out;
-}
-
-/// For usage in Zig
-pub fn pbkdf2(
-    output: []u8,
-    password: []const u8,
-    salt: []const u8,
-    iteration_count: u32,
-    algorithm: Algorithm,
-) ?[]const u8 {
-    var pbk = PBKDF2{
-        .algorithm = algorithm,
-        .password = jsc.Node.StringOrBuffer{ .encoded_slice = jsc.ZigString.Slice.fromUTF8NeverFree(password) },
-        .salt = jsc.Node.StringOrBuffer{ .encoded_slice = jsc.ZigString.Slice.fromUTF8NeverFree(salt) },
-        .iteration_count = iteration_count,
-        .length = @intCast(output.len),
-    };
-
-    if (!pbk.run(output)) {
-        return null;
-    }
-
-    return output;
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
+const std = @import("std");
 const string = []const u8;
 
-const std = @import("std");
-
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const Async = bun.Async;
 const assert = bun.assert;
 const default_allocator = bun.default_allocator;
 const BoringSSL = bun.BoringSSL.c;
-
 const jsc = bun.jsc;
 const CallFrame = jsc.CallFrame;
 const JSGlobalObject = jsc.JSGlobalObject;
@@ -257,6 +14,295 @@ const JSValue = jsc.JSValue;
 const VirtualMachine = jsc.VirtualMachine;
 const ZigString = jsc.ZigString;
 const createCryptoError = jsc.API.Bun.Crypto.createCryptoError;
-
 const EVP = jsc.API.Bun.Crypto.EVP;
 const Algorithm = EVP.Algorithm;
+pub const Job = Job_;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const Job_ = struct {
+    pbkdf2: *PBKDF2,
+    output: []const u8 = (&.{}),
+    task: jsc.WorkPoolTask = .{ .callback = (&runTask) },
+    promise: jsc.JSPromise.Strong = .{},
+    vm: *jsc.VirtualMachine,
+    err: ?u32 = null,
+    any_task: jsc.AnyTask = undefined,
+    poll: Async.KeepAlive = .{},
+
+pub fn init(self: *Job_) void {
+        _ = &self;
+    }
+
+pub fn runTask(task: *jsc.WorkPoolTask) void {
+            var job: *Job_ = @fieldParentPtr("task", task);
+            _ = &job;
+            defer {
+            _ = job.vm.enqueueTaskConcurrent(jsc.ConcurrentTask.create(job.any_task.task()));
+            }
+            job.output = (blk_catch_0: { break :blk_catch_0 ((bun.default_allocator.alloc(u8, @as(usize, @intCast(job.pbkdf2.length)))) catch |__ce_0| { _ = &__ce_0; job.err = @intCast(BoringSSL.EVP_R_MEMORY_LIMIT_EXCEEDED);
+            return; }); });
+            if ((!job.pbkdf2.run(job.output))) {
+                job.err = @intCast(BoringSSL.ERR_get_error);
+                _ = BoringSSL.ERR_clear_error;
+                _ = bun.default_allocator.free(job.output);
+                job.output = job.output[0..0];
+            }
+    }
+
+pub fn runFromJS(self: *Job_) anyerror!void {
+            defer {
+            _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
+            }
+            if (self.vm.isShuttingDown()) {
+                return;
+            }
+            const globalThis = self.vm.global;
+            var __globalThis_moved = false; _ = &__globalThis_moved;
+            defer if (!__globalThis_moved) { const __T = @TypeOf(globalThis); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = globalThis.release() catch {}; } else { globalThis.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = globalThis; _drop_val.release(); } };
+            const promise = self.promise.swap();
+            var __promise_moved = false; _ = &__promise_moved;
+            defer if (!__promise_moved) { const __T = @TypeOf(promise); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = promise.release() catch {}; } else { promise.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = promise; _drop_val.release(); } };
+            if (self.err) |err| {
+                _ = &err;
+                _ = try promise.rejectWithAsyncStack(globalThis, createCryptoError(globalThis, err));
+                return;
+            }
+            const output_slice = self.output;
+            _ = assert((output_slice.len == @as(usize, @intCast(self.pbkdf2.length))));
+            const buffer_value = jsc.JSValue.createBuffer(globalThis, output_slice);
+            var __buffer_value_moved = false; _ = &__buffer_value_moved;
+            defer if (!__buffer_value_moved) { const __T = @TypeOf(buffer_value); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = buffer_value.release() catch {}; } else { buffer_value.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = buffer_value; _drop_val.release(); } };
+            self.output = self.output[0..0];
+            _ = try promise.resolve(globalThis, buffer_value);
+    }
+
+pub fn release(self: *Job_) void {
+            _ = self.poll.unref(self.vm);
+            _ = self.pbkdf2.deinitAndUnprotect();
+            _ = self.promise.deinit();
+            _ = bun.default_allocator.free(self.output);
+            _ = bun.destroy(self);
+    }
+
+pub fn deinit(self: *Job_) void {
+            _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
+    }
+
+pub fn create(vm: *jsc.VirtualMachine, globalThis: *jsc.JSGlobalObject, data: *const PBKDF2) *Job_ {
+            var job = Job_.new(.{ .pbkdf2 = data.*, .vm = vm, .any_task = undefined });
+            var __job_moved = false; _ = &__job_moved;
+            defer if (!__job_moved) { const __T = @TypeOf(job); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = job.release() catch {}; } else { job.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = job; _drop_val.release(); } };
+            job.promise = jsc.JSPromise.Strong.init(globalThis);
+            job.any_task = jsc.AnyTask.New(@This(), (&runFromJS)).init(job);
+            _ = job.poll.ref(vm);
+            _ = jsc.WorkPool.schedule((&job.task));
+            __job_moved = true;
+            return job;
+    }
+    pub const new = bun.TrivialNew(@This());
+};
+
+pub const PBKDF2 = struct {
+    password: jsc.Node.StringOrBuffer = jsc.Node.StringOrBuffer.empty,
+    salt: jsc.Node.StringOrBuffer = jsc.Node.StringOrBuffer.empty,
+    iteration_count: u32 = 1,
+    length: i32 = 0,
+    algorithm: EVP.Algorithm,
+    
+pub fn _create(allocator: std.mem.Allocator) !*PBKDF2 { const self_ptr = try allocator.create(PBKDF2); self_ptr.* = undefined; return self_ptr; }
+
+pub fn init(self: *PBKDF2, password: jsc.Node.StringOrBuffer, salt: jsc.Node.StringOrBuffer, iteration_count: u32, length: i32, algorithm: EVP.Algorithm) void {
+        var __password_moved = false; _ = &__password_moved;
+        defer if (!__password_moved) { const __T = @TypeOf(password); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = password.release() catch {}; } else { password.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = password; _drop_val.release(); } };
+        var __salt_moved = false; _ = &__salt_moved;
+        defer if (!__salt_moved) { const __T = @TypeOf(salt); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = salt.release() catch {}; } else { salt.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = salt; _drop_val.release(); } };
+        var __algorithm_moved = false; _ = &__algorithm_moved;
+        defer if (!__algorithm_moved) { const __T = @TypeOf(algorithm); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = algorithm.release() catch {}; } else { algorithm.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = algorithm; _drop_val.release(); } };
+            self.password = password;
+            self.salt = salt;
+            self.iteration_count = iteration_count;
+            self.length = length;
+            self.algorithm = algorithm;
+    }
+
+pub fn run(self: *PBKDF2, output: []const u8) bool {
+            const password = self.password.slice();
+            var __password_moved = false; _ = &__password_moved;
+            defer if (!__password_moved) { const __T = @TypeOf(password); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = password.release() catch {}; } else { password.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = password; _drop_val.release(); } };
+            const salt = self.salt.slice();
+            var __salt_moved = false; _ = &__salt_moved;
+            defer if (!__salt_moved) { const __T = @TypeOf(salt); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = salt.release() catch {}; } else { salt.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = salt; _drop_val.release(); } };
+            const algorithm = self.algorithm;
+            const iteration_count = self.iteration_count;
+            const length = self.length;
+            _ = @memset(output, 0);
+            _ = assert((self.length <= @as(i32, @intCast(output.len))));
+            _ = BoringSSL.ERR_clear_error;
+            const rc = BoringSSL.PKCS5_PBKDF2_HMAC((if ((password.len > 0)) password.ptr else null), @intCast(password.len), salt.ptr, @intCast(salt.len), @intCast(iteration_count), (algorithm.md()).?, @intCast(length), output.ptr);
+            if ((rc <= 0)) {
+                return false;
+            }
+            return true;
+    }
+
+pub fn deinitAndUnprotect(self: *PBKDF2) void {
+            _ = self.password.deinitAndUnprotect();
+            _ = self.salt.deinitAndUnprotect();
+    }
+
+pub fn release(self: *PBKDF2) void {
+            _ = self.password.deinit();
+            _ = self.salt.deinit();
+    }
+
+pub fn deinit(self: *PBKDF2) void {
+            _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
+    }
+    pub const Job = Job_;
+};
+
+
+pub fn fromJS(globalThis: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame, is_async: bool) anyerror!*PBKDF2 {
+        const args = callFrame.argumentsAsArray(6);
+        var __args_moved = false; _ = &__args_moved;
+        defer if (!__args_moved) { const __T = @TypeOf(args); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = args.release() catch {}; } else { args.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = args; _drop_val.release(); } };
+        const arg0 = args[0];
+        const arg1 = args[1];
+        const arg2 = args[2];
+        const arg3 = args[3];
+        const arg4 = args[4];
+        const arg5 = args[5];
+        if ((!arg3.isNumber())) {
+            return globalThis.throwInvalidArgumentTypeValue("keylen", "number", arg3);
+        }
+        const keylen_num = arg3.asNumber();
+        var __keylen_num_moved = false; _ = &__keylen_num_moved;
+        defer if (!__keylen_num_moved) { const __T = @TypeOf(keylen_num); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = keylen_num.release() catch {}; } else { keylen_num.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = keylen_num; _drop_val.release(); } };
+        if ((std.math.isInf(keylen_num) or std.math.isNan(keylen_num))) {
+            return globalThis.throwRangeError(keylen_num, .{ .field_name = "keylen", .msg = "an integer" });
+        }
+        if (((keylen_num < 0) or (keylen_num > std.math.maxInt(i32)))) {
+            return globalThis.throwRangeError(keylen_num, .{ .field_name = "keylen", .min = 0, .max = std.math.maxInt(i32) });
+        }
+        const keylen: i32 = @intFromFloat(keylen_num);
+        if (globalThis.hasException()) {
+            return error.JSError;
+        }
+        if ((!arg2.isAnyInt())) {
+            return globalThis.throwInvalidArgumentTypeValue("iterations", "number", arg2);
+        }
+        const iteration_count = try arg2.coerce(i64, globalThis);
+        var __iteration_count_moved = false; _ = &__iteration_count_moved;
+        defer if (!__iteration_count_moved) { const __T = @TypeOf(iteration_count); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = iteration_count.release() catch {}; } else { iteration_count.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = iteration_count; _drop_val.release(); } };
+        if (((!globalThis.hasException()) and ((iteration_count < 1) or (iteration_count > std.math.maxInt(i32))))) {
+            return globalThis.throwRangeError(iteration_count, .{ .field_name = "iterations", .min = 1, .max = (std.math.maxInt(i32) + 1) });
+        }
+        if (globalThis.hasException()) {
+            return error.JSError;
+        }
+        const algorithm = blk: {
+        if ((!arg4.isString())) {
+            return globalThis.throwInvalidArgumentTypeValue("digest", "string", arg4);
+        }
+        const maybe_alg = try EVP.Algorithm.map.fromJSCaseInsensitive(globalThis, arg4);
+        var __maybe_alg_moved = false; _ = &__maybe_alg_moved;
+        defer if (!__maybe_alg_moved) { const __T = @TypeOf(maybe_alg); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = maybe_alg.release() catch {}; } else { maybe_alg.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = maybe_alg; _drop_val.release(); } };
+        if ((maybe_alg == null)) {
+            if ((!globalThis.hasException())) {
+                const slice = try arg4.toSlice(globalThis, bun.default_allocator);
+                var __slice_moved = false; _ = &__slice_moved;
+                defer if (!__slice_moved) { const __T = @TypeOf(slice); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = slice.release() catch {}; } else { slice.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = slice; _drop_val.release(); } };
+                defer {
+                _ = slice.deinit();
+                }
+                const name = slice.slice();
+                var __name_moved = false; _ = &__name_moved;
+                defer if (!__name_moved) { const __T = @TypeOf(name); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = name.release() catch {}; } else { name.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = name; _drop_val.release(); } };
+                return globalThis.ERR(.CRYPTO_INVALID_DIGEST, "Invalid digest: {s}", .{ name }).throw();
+            }
+            return error.JSError;
+        }
+        const alg = maybe_alg.?;
+        var __alg_moved = false; _ = &__alg_moved;
+        defer if (!__alg_moved) { const __T = @TypeOf(alg); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = alg.release() catch {}; } else { alg.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = alg; _drop_val.release(); } };
+        break :blk (switch (alg) {
+.shake128, .shake256 => {
+{
+            if ((!globalThis.hasException())) {
+                const slice = try arg4.toSlice(globalThis, bun.default_allocator);
+                var __slice_moved = false; _ = &__slice_moved;
+                defer if (!__slice_moved) { const __T = @TypeOf(slice); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = slice.release() catch {}; } else { slice.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = slice; _drop_val.release(); } };
+                defer {
+                _ = slice.deinit();
+                }
+                const name = slice.slice();
+                var __name_moved = false; _ = &__name_moved;
+                defer if (!__name_moved) { const __T = @TypeOf(name); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = name.release() catch {}; } else { name.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = name; _drop_val.release(); } };
+                return globalThis.ERR(.CRYPTO_INVALID_DIGEST, "Invalid digest: {s}", .{ name }).throw();
+            }
+            return error.JSError;
+        }
+},
+else => alg,
+});
+
+};
+        var __algorithm_moved = false; _ = &__algorithm_moved;
+        defer if (!__algorithm_moved) { const __T = @TypeOf(algorithm); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = algorithm.release() catch {}; } else { algorithm.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = algorithm; _drop_val.release(); } };
+        var out = PBKDF2{ .iteration_count = @intCast(iteration_count), .length = keylen, .algorithm = algorithm };
+        var __out_moved = false; _ = &__out_moved;
+        defer if (!__out_moved) { const __T = @TypeOf(out); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = out.release() catch {}; } else { out.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = out; _drop_val.release(); } };
+        defer {
+        {
+            if (globalThis.hasException()) {
+                if (is_async) {
+                    _ = out.deinitAndUnprotect();
+                } else {
+                    _ = (if (comptime @typeInfo(@TypeOf(out)) == .pointer) (out) else &(out)).release();
+                }
+            }
+        }
+        }
+        const allow_string_object = true;
+        const maybe_salt = try jsc.Node.StringOrBuffer.fromJSMaybeAsync(globalThis, bun.default_allocator, arg1, is_async, allow_string_object);
+        var __maybe_salt_moved = false; _ = &__maybe_salt_moved;
+        defer if (!__maybe_salt_moved) { const __T = @TypeOf(maybe_salt); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = maybe_salt.release() catch {}; } else { maybe_salt.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = maybe_salt; _drop_val.release(); } };
+        if ((maybe_salt == null)) {
+            return globalThis.throwInvalidArgumentTypeValue("salt", "string or buffer", arg1);
+        }
+        out.salt = maybe_salt.?;
+        if ((out.salt.slice().len > std.math.maxInt(i32))) {
+            return globalThis.throwInvalidArguments("salt is too long", .{});
+        }
+        const maybe_password = try jsc.Node.StringOrBuffer.fromJSMaybeAsync(globalThis, bun.default_allocator, arg0, is_async, allow_string_object);
+        var __maybe_password_moved = false; _ = &__maybe_password_moved;
+        defer if (!__maybe_password_moved) { const __T = @TypeOf(maybe_password); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = maybe_password.release() catch {}; } else { maybe_password.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = maybe_password; _drop_val.release(); } };
+        if ((maybe_password == null)) {
+            return globalThis.throwInvalidArgumentTypeValue("password", "string or buffer", arg0);
+        }
+        out.password = maybe_password.?;
+        if ((out.password.slice().len > std.math.maxInt(i32))) {
+            return globalThis.throwInvalidArguments("password is too long", .{});
+        }
+        if ((is_async and (!arg5.isFunction()))) {
+            return globalThis.throwInvalidArgumentTypeValue("callback", "function", arg5);
+        }
+        __out_moved = true;
+        return out;
+}
+
+pub fn pbkdf2(output: []const u8, password: []const u8, salt: []const u8, iteration_count: u32, algorithm: Algorithm) ?[]const u8 {
+        var pbk = PBKDF2{ .algorithm = algorithm, .password = jsc.Node.StringOrBuffer{ .encoded_slice = jsc.ZigString.Slice.fromUTF8NeverFree(password) }, .salt = jsc.Node.StringOrBuffer{ .encoded_slice = jsc.ZigString.Slice.fromUTF8NeverFree(salt) }, .iteration_count = iteration_count, .length = @intCast(output.len) };
+        var __pbk_moved = false; _ = &__pbk_moved;
+        defer if (!__pbk_moved) { const __T = @TypeOf(pbk); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = pbk.release() catch {}; } else { pbk.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = pbk; _drop_val.release(); } };
+        if ((!pbk.run(output))) {
+            return null;
+        }
+        return output;
+}

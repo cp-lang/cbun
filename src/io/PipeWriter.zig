@@ -2,27 +2,6 @@
 const std = @import("std");
 const string = []const u8;
 
-fn CpOptType(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return T;
-    return ?T;
-}
-fn CpUnwrapOpt(comptime T: type) type {
-    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;
-    return T;
-}
-fn cp_opt_is_null(v: anytype) bool {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) return v == null;
-    return false;
-}
-fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {
-    const T = @TypeOf(v);
-    if (comptime @typeInfo(T) == .optional) {
-        return v.?;
-    } else {
-        return v;
-    }
-}
 const Source = @import("./source.zig").Source;
 const FileType = @import("./pipes.zig").FileType;
 const PollOrFd = @import("./pipes.zig").PollOrFd;
@@ -153,36 +132,15 @@ pub const StreamBuffer = struct {
 };
 pub const BufferedWriter = (if (bun.Environment.isPosix) PosixBufferedWriter else WindowsBufferedWriter);
 pub const StreamingWriter = (if (bun.Environment.isPosix) PosixStreamingWriter else WindowsStreamingWriter);
-pub fn cp_string_from(val: anytype) []const u8 {
-    const T = @TypeOf(val);
-    if (comptime T == []const u8) {
-        return val;
-    } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) {
-        return std.mem.span(val);
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) {
-        return val;
-    } else if (comptime (@typeInfo(T) == .@"enum")) {
-        return @tagName(val);
-    } else if (comptime T == bool) {
-        return if (val) "true" else "false";
-    } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0";
-    } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) {
-        return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0";
-    } else if (comptime (@typeInfo(T) == .@"struct" and @hasDecl(T, "toString"))) {
-        return val.toString();
-    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(T).pointer.child, "toString"))) {
-        return val.toString();
-    } else {
-        return @typeName(T);
-    }
-}
-
 pub const bun = @import("bun");
 pub const WriteStatus = enum {
     end_of_file,
     drained,
     pending,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 };
 
 pub const WriteResult = union(enum) {
@@ -192,8 +150,9 @@ pub const WriteResult = union(enum) {
     err: bun.sys.Error,
 };
 
+
 pub fn PosixPipeWriter(comptime This: type, comptime getFd: *const fn (*This) bun.FD, comptime getBuffer: *const fn (*This) []const u8, comptime onWrite: *const fn (*This, usize, WriteStatus) void, comptime registerPoll: ?*const fn (*This) void, comptime onError: *const fn (*This, bun.sys.Error) void, comptime _: *const fn (*This) void, comptime getFileType: *const fn (*This) FileType) type {
-    return struct {
+        return struct {
         fn tryWrite(this: *This, force_sync: bool, buf_: []const u8) WriteResult {
             return switch (if (!force_sync) getFileType(this) else .file) {
                 inline else => |ft| return tryWriteWithWriteFn(this, buf_, comptime writeToFileType(ft)),
@@ -323,7 +282,7 @@ pub fn PosixPipeWriter(comptime This: type, comptime getFd: *const fn (*This) bu
 }
 
 pub fn PosixBufferedWriter(comptime Parent: type, comptime function_table: anytype) type {
-    return struct {
+        return struct {
         const PosixWriter = @This();
         const onWrite: *const fn (*Parent, amount: usize, status: WriteStatus) void = function_table.onWrite;
         const onError: *const fn (*Parent, bun.sys.Error) void = function_table.onError;
@@ -526,7 +485,7 @@ pub fn PosixBufferedWriter(comptime Parent: type, comptime function_table: anyty
 }
 
 pub fn PosixStreamingWriter(comptime Parent: type, comptime function_table: anytype) type {
-    return struct {
+        return struct {
         const onWrite: fn (*Parent, amount: usize, status: WriteStatus) void = function_table.onWrite;
         const onError: fn (*Parent, bun.sys.Error) void = function_table.onError;
         const onReady: ?fn (*Parent) void = if (@hasDecl(function_table, "onReady")) function_table.onReady else null;
@@ -908,7 +867,7 @@ pub fn PosixStreamingWriter(comptime Parent: type, comptime function_table: anyt
 }
 
 pub fn BaseWindowsPipeWriter(comptime WindowsPipeWriter: type, comptime Parent: type) type {
-    return struct {
+        return struct {
         pub fn getFd(this: *const WindowsPipeWriter) bun.FD {
             const pipe = this.source orelse return bun.invalid_fd;
             return pipe.getFd();
@@ -991,7 +950,8 @@ pub fn BaseWindowsPipeWriter(comptime WindowsPipeWriter: type, comptime Parent: 
             }
         }
 
-        pub fn watch(_: *WindowsPipeWriter) void {}
+        pub fn watch(_: *WindowsPipeWriter) void {
+        }
 
         pub fn startWithPipe(this: *WindowsPipeWriter, pipe: *uv.Pipe) bun.sys.Maybe(void) {
             bun.assert(this.source == null);
@@ -1059,7 +1019,7 @@ pub fn BaseWindowsPipeWriter(comptime WindowsPipeWriter: type, comptime Parent: 
 }
 
 pub fn WindowsBufferedWriter(comptime Parent: type, comptime function_table: anytype) type {
-    return struct {
+        return struct {
         source: ?Source = null,
         owns_fd: bool = true,
         parent: *Parent = undefined,
@@ -1213,7 +1173,7 @@ pub fn WindowsBufferedWriter(comptime Parent: type, comptime function_table: any
 }
 
 pub fn WindowsStreamingWriter(comptime Parent: type, comptime function_table: anytype) type {
-    return struct {
+        return struct {
         const onWrite: fn (*Parent, amount: usize, status: WriteStatus) void = function_table.onWrite;
         const onError: fn (*Parent, bun.sys.Error) void = function_table.onError;
         const onWritable: ?fn (*Parent) void = function_table.onWritable;
