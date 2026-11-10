@@ -5,21 +5,13 @@ const string = []const u8;
 const bun = @import("bun");
 const boring = bun.BoringSSL.c;
 pub const Algorithm = bun.jsc.API.Bun.Crypto.EVP.Algorithm;
-pub const OutputBuffer = *[boring.EVP_MAX_MD_SIZE]u8;
+pub const OutputBuffer = *[boring . EVP_MAX_MD_SIZE]u8;
 
 pub fn generate(key: []const u8, data: []const u8, algorithm: Algorithm, out: OutputBuffer) ?[]const u8 {
-    var outlen: c_uint = boring.EVP_MAX_MD_SIZE;
-    if (boring.HMAC(
-        algorithm.md() orelse bun.Output.panic("Expected BoringSSL algorithm for HMAC", .{}),
-        key.ptr,
-        key.len,
-        data.ptr,
-        data.len,
-        out,
-        &outlen,
-    ) == null) {
-        return null;
-    }
-
-    return out[0..outlen];
+        var outlen: c_uint = boring.EVP_MAX_MD_SIZE;
+        _ = &outlen;
+        if ((boring.HMAC(((algorithm.md()) orelse (bun.Output.panic("Expected BoringSSL algorithm for HMAC", .{}))), key.ptr, key.len, data.ptr, data.len, out, (&outlen)) == null)) {
+            return null;
+        }
+        return out[0..outlen];
 }

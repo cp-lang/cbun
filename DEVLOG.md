@@ -2767,3 +2767,42 @@ Level 2 (聚合根模块，依赖上述全部 3 个模块):
 
 ### 4. 服务端子系统闭环成果
 - `src/runtime/server/` 全目录共 14 个核心网络模块，总计 12,622 行生成代码，全部实现 0 报错通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。全目录代码相比原 Zig 净压缩 -0.93%，100% 杜绝 `zig {}` 逃逸舱与 `var` 变量！
+
+---
+
+## 2026-11-11 开发日志：sha_hmac 与 threading 子系统 100% 纯正 CP 重构与双重验证大闭环
+
+### 1. sha_hmac 模块密码学哈希泛型解耦
+- **泛型类型参数调用边界**：
+  - 在 Zig 中可以通过 `Full(type, ...)` 直接调用泛型参数，而在 CP 面向对象体系中，类模板不能直接被当做函数调用；
+  - 解决方案：采用标准泛型类型构造器模式 `pub fn NewHasher(...): type { return struct { ... }; }` 与 `pub fn NewEVP(...): type { return struct { ... }; }`，完美保留了泛型静态派发机制；
+- **类型别名与定长数组语法**：
+  - `OutputBuffer` 采用纯正 CP 数组指针别名 `pub type OutputBuffer = *[u8; boring.EVP_MAX_MD_SIZE];`；
+  - 数组字面量直接采用纯 CP `[...]` 语法；
+- **成果**：
+  - `hmac.cp`（生成 17 行 vs 原始 19 行，-10.5% 压缩）；
+  - `sha.cp`（生成 160 行 vs 原始 199 行，-19.6% 压缩）；
+  - 全子系统代码行数净缩减 -18.8%，100% 通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
+
+### 2. threading 模块千行高并发线程池攻坚实录
+- **`*this` 独占可变借用与方法接收者自动路由**：
+  - 在 CP 的 `export @root struct` 中，对于修改成员字段的方法，首个参数必须显式声明为 `*this`（如 `pub fn warm(*this, count: u14): void`）；
+  - 在内部方法互相调用时，调用 `this.scheduleImpl(batch, false)` 与 `this.forceSpawn()` 会被 `cpc` 自动发射为合法、地道的 Zig 方法调用 `self.scheduleImpl(batch, false)` 与 `self.forceSpawn()`，避免重复传递 `self`。
+- **CAS `orelse` 块早期返回导致的 `unused block label` 解决**：
+  - 在原版 Zig 中使用 `sync = self.sync.cmpxchgWeak(...) orelse { ... return; };`，`cpc` 会将其发射为带标号的代码块 `(blk: { ... return; })`。因提前 `return`，标号 `:blk` 未被跳出，Zig 报错 `unused block label`；
+  - 解决方案：优雅重构为条件判断与海象操作符：
+    ```cp
+    if (this.sync.cmpxchgWeak(sync, new_sync, .release, .monotonic)) |current| {
+        sync = current;
+        continue;
+    }
+    // 成功分支后续逻辑
+    ```
+    既消除了多余的控制流标号，又使代码执行路径一目了然。
+- **同名成员字段与局部变量歧义消解**：
+  - 在 `notify` 中，`this.sync` 是成员字段，原代码 `const sync = ...; if (sync.notified)` 中，编译器将未限定的 `sync` 优先解析为 `self.sync` 字段；
+  - 解决方案：将局部变量明确具名为 `const prev_sync = this.sync.fetchOr(.{}, .release);`，消除了与成员字段的冲突。
+- **成果**：
+  - `WaitGroup.cp`（生成 58 行 vs 原始 67 行，-13.4% 压缩）；
+  - `ThreadPool.cp`（生成 934 行 vs 原始 1055 行，-11.5% 压缩）；
+  - 全子系统代码行数净缩减 -11.6%，100% 杜绝 `zig {}` 与 `var`，双重编译与语法验证 100% 通过！

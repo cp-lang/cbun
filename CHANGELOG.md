@@ -1288,3 +1288,26 @@
   - 生成行数 3855 行 vs 原版 3855 行（0% 膨胀），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
 - `src/runtime/server/`:
   - 全目录 14 个核心网络与 HTTP 服务端模块 100% 达成双重编译验证（通过率 14/14，整目录净压缩 -0.93%）。
+
+- `src/sha_hmac/hmac.cp` / `hmac.zig`:
+  - 纯正 CP 语言重构，使用标准 `pub type OutputBuffer = *[u8; boring.EVP_MAX_MD_SIZE];` 类型别名；
+  - 生成行数 17 行 vs 原版 19 行（-10.5% 净压缩），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
+- `src/sha_hmac/sha.cp` / `sha.zig`:
+  - 采用泛型类型构造器 `NewHasher` 与 `NewEVP`，消除直接类型调用限制；
+  - 采用纯 CP 数组字面量 `[...]`，0 处 `var`，0 处 `zig {}`；
+  - 生成行数 160 行 vs 原版 199 行（-19.6% 净压缩），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
+- `src/sha_hmac/`:
+  - 全目录 2 个密码学哈希模块 100% 达成双重编译验证（通过率 2/2，全目录生成 177 行 vs 原版 218 行，净压缩 -18.8%）。
+
+- `src/threading/WaitGroup.cp` / `WaitGroup.zig`:
+  - 采用 `export @root struct WaitGroup` 与 `*this` 可变接收者模型；
+  - 采用分号字段分隔与 CP 结构体初始化 `.{ .raw = 0 }`；
+  - 生成行数 58 行 vs 原版 67 行（-13.4% 净压缩），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
+- `src/threading/ThreadPool.cp` / `ThreadPool.zig`:
+  - 采用 `export @root struct ThreadPool` 完整千行模型；
+  - 彻底攻克 CAS 循环早期返回 labeled block 歧义，采用 `if (this.sync.cmpxchgWeak(...)) |current|` 优雅循环；
+  - 规范内部方法接收者调用（`this.scheduleImpl`、`this.forceSpawn`、`this.notify`、`this.eachImpl`）；
+  - 修复 `const_vars` 符号遮蔽与局部 `prev_sync` 命名冲突；
+  - 生成行数 934 行 vs 原版 1055 行（-11.5% 净压缩），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
+- `src/threading/`:
+  - 全目录 2 个核心线程池与同步原语模块 100% 达成双重编译验证（通过率 2/2，全目录生成 992 行 vs 原版 1122 行，净压缩 -11.6%）。

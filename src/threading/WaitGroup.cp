@@ -3,16 +3,16 @@ import bun from "bun";
 const std = @import("std");
 
 export @root struct WaitGroup {
-    raw_count: std.atomic.Value(usize) = .{ raw: 0 },
-    mutex: bun.threading.Mutex = .{},
-    cond: bun.threading.Condition = .{},
+    raw_count: std.atomic.Value(usize) = .{ .raw = 0 };
+    mutex: bun.threading.Mutex = .{};
+    cond: bun.threading.Condition = .{};
 
     pub static fn init(): WaitGroup {
         return .{};
     }
 
     pub static fn initWithCount(count: usize): WaitGroup {
-        return .{ raw_count: .{ raw: count } };
+        return .{ .raw_count = .{ .raw = count } };
     }
 
     pub fn addUnsynchronized(*this, n: usize) {

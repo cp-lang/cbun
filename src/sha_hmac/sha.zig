@@ -4,81 +4,6 @@ const string = []const u8;
 
 const BoringSSL = bun.BoringSSL.c;
 pub const bun = @import("bun");
-
-fn NewHasher(comptime digest_size: comptime_int, comptime ContextType: type, comptime Full: anytype, comptime Init: anytype, comptime Update: anytype, comptime Final: anytype) type {
-    return struct {
-        hasher: ContextType = undefined,
-
-        pub const Digest = [digest_size]u8;
-        pub const digest: comptime_int = digest_size;
-
-        pub fn init() @This() {
-            bun.BoringSSL.load();
-            var this: @This() = .{
-                .hasher = undefined,
-            };
-
-            bun.assert(Init(&this.hasher) == 1);
-            return this;
-        }
-
-        pub fn hash(bytes: []const u8, out: *Digest) void {
-            @setRuntimeSafety(false);
-            _ = Full(bytes.ptr, bytes.len, out);
-        }
-
-        pub fn update(this: *@This(), data: []const u8) void {
-            @setRuntimeSafety(false);
-            bun.assert(Update(&this.hasher, data.ptr, data.len) == 1);
-        }
-
-        pub fn final(this: *@This(), out: *Digest) void {
-            @setRuntimeSafety(false);
-            bun.assert(Final(out, &this.hasher) == 1);
-        }
-    };
-}
-
-fn NewEVP(comptime digest_size: comptime_int, comptime MDName: []const u8) type {
-    return struct {
-        ctx: BoringSSL.EVP_MD_CTX = undefined,
-
-        pub const Digest = [digest_size]u8;
-        pub const digest: comptime_int = digest_size;
-
-        pub fn init() @This() {
-            bun.BoringSSL.load();
-
-            const md = @field(BoringSSL, MDName)();
-            var this = @This(){};
-
-            BoringSSL.EVP_MD_CTX_init(&this.ctx);
-
-            bun.assert(BoringSSL.EVP_DigestInit(&this.ctx, md) == 1);
-
-            return this;
-        }
-
-        pub fn hash(bytes: []const u8, out: *Digest, engine: ?*BoringSSL.ENGINE) void {
-            const md = @field(BoringSSL, MDName)();
-
-            bun.assert(BoringSSL.EVP_Digest(bytes.ptr, bytes.len, out, null, md, engine) == 1);
-        }
-
-        pub fn update(this: *@This(), data: []const u8) void {
-            bun.assert(BoringSSL.EVP_DigestUpdate(&this.ctx, data.ptr, data.len) == 1);
-        }
-
-        pub fn final(this: *@This(), out: *Digest) void {
-            bun.assert(BoringSSL.EVP_DigestFinal(&this.ctx, out, null) == 1);
-        }
-
-        pub fn deinit(this: *@This()) void {
-            _ = BoringSSL.EVP_MD_CTX_cleanup(&this.ctx);
-        }
-    };
-}
-
 pub const EVP = struct {
     pub const SHA1 = NewEVP(std.crypto.hash.Sha1.digest_length, "EVP_sha1");
     pub const MD5 = NewEVP(16, "EVP_md5");
@@ -91,7 +16,6 @@ pub const EVP = struct {
     pub const MD5_SHA1 = NewEVP(std.crypto.hash.Sha1.digest_length, "EVP_md5_sha1");
     pub const Blake2 = NewEVP(256 / 8, "EVP_blake2b256");
 };
-
 pub const SHA1 = EVP.SHA1;
 pub const MD5 = EVP.MD5;
 pub const MD4 = EVP.MD4;
@@ -101,8 +25,6 @@ pub const SHA384 = EVP.SHA384;
 pub const SHA256 = EVP.SHA256;
 pub const SHA512_256 = EVP.SHA512_256;
 pub const MD5_SHA1 = EVP.MD5_SHA1;
-
-/// API that OpenSSL 3 deprecated
 pub const Hashers = struct {
     pub const SHA1 = NewHasher(
         std.crypto.hash.Sha1.digest_length,
@@ -158,44 +80,81 @@ pub const Hashers = struct {
         BoringSSL.RIPEMD160_Final,
     );
 };
+const boring = .{ Hashers.SHA1, Hashers.SHA512, Hashers.SHA384, Hashers.SHA256, Hashers.SHA512_256, void, void };
+const zig = .{ std.crypto.hash.Sha1, std.crypto.hash.sha2.Sha512, std.crypto.hash.sha2.Sha384, std.crypto.hash.sha2.Sha256, std.crypto.hash.sha2.Sha512T256, std.crypto.hash.blake2.Blake2b256, std.crypto.hash.Blake3 };
+const evp = .{ EVP.SHA1, EVP.SHA512, EVP.SHA384, EVP.SHA256, EVP.SHA512_256, EVP.Blake2, void };
+const labels = .{ "SHA1", "SHA512", "SHA384", "SHA256", "SHA512_256", "Blake2", "Blake3" };
 
-const boring = [_]type{
-    Hashers.SHA1,
-    Hashers.SHA512,
-    Hashers.SHA384,
-    Hashers.SHA256,
-    // Hashers.SHA512_224,
-    Hashers.SHA512_256,
-    void,
-    void,
-};
+pub fn NewHasher(comptime digest_size: comptime_int, comptime ContextType: type, comptime Full: anytype, comptime Init: anytype, comptime Update: anytype, comptime Final: anytype) type {
+        return struct {
+        hasher: ContextType = undefined,
 
-const zig = [_]type{
-    std.crypto.hash.Sha1,
-    std.crypto.hash.sha2.Sha512,
-    std.crypto.hash.sha2.Sha384,
-    std.crypto.hash.sha2.Sha256,
-    std.crypto.hash.sha2.Sha512T256,
-    std.crypto.hash.blake2.Blake2b256,
-    std.crypto.hash.Blake3,
-};
+        pub const Digest = [digest_size]u8;
+        pub const digest: comptime_int = digest_size;
 
-const evp = [_]type{
-    EVP.SHA1,
-    EVP.SHA512,
-    EVP.SHA384,
-    EVP.SHA256,
-    EVP.SHA512_256,
-    EVP.Blake2,
-    void,
-};
+        pub fn init() @This() {
+            bun.BoringSSL.load();
+            var this: @This() = .{
+                .hasher = undefined,
+            };
 
-const labels = [_][]const u8{
-    "SHA1",
-    "SHA512",
-    "SHA384",
-    "SHA256",
-    "SHA512_256",
-    "Blake2",
-    "Blake3",
-};
+            bun.assert(Init(&this.hasher) == 1);
+            return this;
+        }
+
+        pub fn hash(bytes: []const u8, out: *Digest) void {
+            @setRuntimeSafety(false);
+            _ = Full(bytes.ptr, bytes.len, out);
+        }
+
+        pub fn update(this: *@This(), data: []const u8) void {
+            @setRuntimeSafety(false);
+            bun.assert(Update(&this.hasher, data.ptr, data.len) == 1);
+        }
+
+        pub fn final(this: *@This(), out: *Digest) void {
+            @setRuntimeSafety(false);
+            bun.assert(Final(out, &this.hasher) == 1);
+        }
+    };
+}
+
+pub fn NewEVP(comptime digest_size: comptime_int, comptime MDName: []const u8) type {
+        return struct {
+        ctx: BoringSSL.EVP_MD_CTX = undefined,
+
+        pub const Digest = [digest_size]u8;
+        pub const digest: comptime_int = digest_size;
+
+        pub fn init() @This() {
+            bun.BoringSSL.load();
+
+            const md = @field(BoringSSL, MDName)();
+            var this = @This(){};
+
+            BoringSSL.EVP_MD_CTX_init(&this.ctx);
+
+            bun.assert(BoringSSL.EVP_DigestInit(&this.ctx, md) == 1);
+
+            return this;
+        }
+
+        pub fn hash(bytes: []const u8, out: *Digest, engine: ?*BoringSSL.ENGINE) void {
+            const md = @field(BoringSSL, MDName)();
+
+            bun.assert(BoringSSL.EVP_Digest(bytes.ptr, bytes.len, out, null, md, engine) == 1);
+        }
+
+        pub fn update(this: *@This(), data: []const u8) void {
+            bun.assert(BoringSSL.EVP_DigestUpdate(&this.ctx, data.ptr, data.len) == 1);
+        }
+
+        pub fn final(this: *@This(), out: *Digest) void {
+            bun.assert(BoringSSL.EVP_DigestFinal(&this.ctx, out, null) == 1);
+        }
+
+        pub fn deinit(this: *@This()) void {
+            _ = BoringSSL.EVP_MD_CTX_cleanup(&this.ctx);
+        }
+    };
+}

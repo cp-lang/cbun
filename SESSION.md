@@ -3937,3 +3937,26 @@ cp agy 已经启动了通信监听,配合你完成任务
    - 全部 14 个文件（`AnyRequestContext`, `FileResponseStream`, `FileRoute`, `HTMLBundle`, `HTTPStatusText`, `InspectorBunFrontendDevServerAgent`, `NodeHTTPResponse`, `RangeRequest`, `RequestContext`, `ServerConfig`, `server`, `ServerWebSocket`, `StaticRoute`, `WebSocketServerContext`）双重严格验证全部一次性 PASS；
    - 整目录原始行数 12,740 行 vs 生成代码 12,622 行，**整目录净代码压缩 -0.93%**，大幅跑赢 $\le +20\%$ 红线；
    - 全仓通过双重验证的 `.cp` 模块总数攀升至 **206 个**（仅剩 52 个待攻坚）。
+
+---
+
+## 2026-11-11 sha_hmac 与 threading 核心同步原语模块 100% 达成
+
+### 用户指令
+> 很好, 按你建议的方案继续工作, 解除严格禁止终端输出重定向（>、>>、管道传递）这条规则
+
+### 执行结果汇报
+1. **`src/sha_hmac/` 密码学哈希子系统全量 2 个模块 100% 达成**：
+   - `src/sha_hmac/hmac.cp`：采用 `pub type OutputBuffer = *[u8; boring.EVP_MAX_MD_SIZE];` 类型别名，生成 17 行 vs 原始 19 行（**净代码压缩 -10.5%**）；
+   - `src/sha_hmac/sha.cp`：采用 `NewHasher` 与 `NewEVP` 泛型构造器解耦，纯 CP 数组字面量 `[...]`，生成 160 行 vs 原始 199 行（**净代码压缩 -19.6%**）；
+   - 全子系统 100% 纯正 CP 语言（0 处 `zig {}`，0 处 `var`），双重验证（`cpc --lib` + `vendor/zig/zig ast-check`）100% 全部通过。
+2. **`src/threading/` 核心线程池与并发同步子系统全量 2 个模块 100% 达成**：
+   - `src/threading/WaitGroup.cp`：采用 `export @root struct WaitGroup` 与 `*this` 独占可变借用模型，分号字段分隔，生成 58 行 vs 原始 67 行（**净代码压缩 -13.4%**）；
+   - `src/threading/ThreadPool.cp`：千行核心高并发线程池，使用 `export @root struct ThreadPool` 封装；彻底攻克 CAS 循环中 `orelse` 早期返回产生的 `unused block label` 问题；使用 `*this` 与方法接收者路由消除参数传递歧义；使用 `const prev_sync = ...` 消除字段与局部变量遮蔽；
+   - 生成 934 行 vs 原始 1055 行（**净代码压缩 -11.5%**），100% 纯正 CP 语言（0 处 `zig {}`，0 处 `var`）；
+   - 双重验证（`cpc --lib` + `vendor/zig/zig ast-check`）100% 全部通过。
+3. **最新全仓统计大盘**：
+   - 全仓 `.cp` 文件总数：**258 个**；
+   - 全仓零 `zig {}` 逃逸舱：**258 / 258 (100%)**；
+   - 双重编译与 AST 语法严格通过数：**210 个模块**（通过率上升至 81.4%）；
+   - 剩余待解决模块降至 **48 个**。
