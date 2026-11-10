@@ -2802,7 +2802,21 @@ Level 2 (聚合根模块，依赖上述全部 3 个模块):
 - **同名成员字段与局部变量歧义消解**：
   - 在 `notify` 中，`this.sync` 是成员字段，原代码 `const sync = ...; if (sync.notified)` 中，编译器将未限定的 `sync` 优先解析为 `self.sync` 字段；
   - 解决方案：将局部变量明确具名为 `const prev_sync = this.sync.fetchOr(.{}, .release);`，消除了与成员字段的冲突。
-- **成果**：
-  - `WaitGroup.cp`（生成 58 行 vs 原始 67 行，-13.4% 压缩）；
-  - `ThreadPool.cp`（生成 934 行 vs 原始 1055 行，-11.5% 压缩）；
-  - 全子系统代码行数净缩减 -11.6%，100% 杜绝 `zig {}` 与 `var`，双重编译与语法验证 100% 通过！
+### 3. url, uws_sys/quic 与 runtime/webcore/fetch 模块攻坚实录
+- **类内嵌结构体/联合体提升至模块级（Module-level Extraction）**：
+  - CP 语言类的成员为字段与方法。若在类内直接声明 `pub const Foo = struct { ... };` 或 `pub const Bar = union(enum) { ... };` 且内部带有方法实现，`cpc` 解析器会将其视作未完全解析的内联文本嵌入 `extra_zig`，导致方法签名中的 CP 语法（如形参列表 `: Type`）未被转译而报语法错误；
+  - 解决方案：将其提取为模块级独立声明（如 `pub union(enum) FetchHTTPRequestBody { ... }`），并在外层类内保留类型别名 `pub const HTTPRequestBody = FetchHTTPRequestBody;`，既保证了完整的面向对象与强类型检查，又完全兼容下游调用。
+- **缓冲区借用生命周期交叠消除（NLL & Ownership Flow）**：
+  - 在 `FetchTasklet` 中，`this.scheduled_response_buffer` 是实例持有的动态缓冲区。原代码在借出切片 `chunk = this.scheduled_response_buffer.list.items;` 之后、完成消费之前，提前进行了 `this.scheduled_response_buffer = .{ ... };` 的重新分配突变；
+  - CP 编译器的借用检查器严格检测到了这一借用冲突（`Borrow conflict on 'this': cannot borrow as mutable while 'scheduled_response_buffer' is still active`）；
+  - 解决方案：遵循所有权转移流，先在切片消费完毕后或通过 `.toManaged(default_allocator)` 将缓冲区内容安全转移为堆所有权对象，再对实例字段进行重新初始化赋值，彻底消除了内存安全隐患。
+- **静态回调上下文中的变量命名规范**：
+  - 在非实例方法（如 C 回调、静态任务分发器 `onReadableStreamAvailable(ctx: *!)`）中，若通过 `cast(*FetchTasklet, ctx)` 绑定的局部变量命名为 `this`，编译器会将对其字段的修改误判为类只读接收者的突变；
+  - 解决方案：在静态上下文中将本地指代命名为 `tasklet`，严格区分实例方法隐式接收者与显式指针变量。
+- **C-ABI 回调指针标准语法**：
+  - C-ABI 回调函数指针类型必须声明为标准 `@c fn(*Socket, i32) void`，不可在外层套用额外圆括号；
+  - 成果：
+    - `src/url/url.cp`（生成 1141 行 vs 原始 1084 行，+5.25% 膨胀，远低于 $\le +20\%$ 红线）；
+    - `src/uws_sys/quic/Context.cp`（生成 104 行 vs 原始 56 行，`quic/` 全目录 5/5 达成）；
+    - `src/runtime/webcore/fetch/FetchTasklet.cp`（生成 1411 行 vs 原始 1512 行，-6.7% 净压缩，100% 纯正 CP，0 处 `zig {}`，0 处 `var`）；
+    - 全部双重验证 100% 绿灯通过！

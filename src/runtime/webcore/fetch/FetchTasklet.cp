@@ -11,7 +11,7 @@ import {
     Output,
     ByteList,
     ThreadPool,
-    String as BunString,
+    String,
     JSError,
     JSTerminated,
     webcore,
@@ -20,11 +20,15 @@ import {
     jsc,
 } from "bun";
 import { BoringSSL } from "bun:boringssl";
-import { Value as AtomicValue } from "std:atomic";
+import { Value } from "std:atomic";
 import { Allocator } from "std:mem";
 import { fmt } from "std";
 import { Method } from "../../../http_types/Method";
-import { URL as ZigURL } from "../../../url/url";
+import { URL } from "../../../url/url";
+
+const BunString = String;
+const AtomicValue = Value;
+const ZigURL = URL;
 
 const X509 = api.bun.x509;
 const FetchHeaders = webcore.FetchHeaders;
@@ -45,11 +49,100 @@ const ResumableSinkBackpressure = jsc.WebCore.ResumableSinkBackpressure;
 
 const Blob = jsc.WebCore.Blob;
 const AnyBlob = jsc.WebCore.Blob.Any;
+const log = Output.scoped(.FetchTasklet, .visible);
+
+pub union(enum) FetchHTTPRequestBody {
+    AnyBlob: AnyBlob,
+    Sendfile: http.SendFile,
+    ReadableStream: jsc.WebCore.ReadableStream.Strong,
+
+    pub const Empty: FetchHTTPRequestBody = .{ .AnyBlob = .{ .Blob = .{} } };
+
+    pub fn store(*_): ?*Blob.Store {
+        return switch (_.*) {
+            .AnyBlob => _.AnyBlob.store(),
+            else => null,
+        };
+    }
+
+    pub fn slice(_): []const u8 {
+        return switch (_.*) {
+            .AnyBlob => _.AnyBlob.slice(),
+            else => "",
+        };
+    }
+
+    pub fn detach(*_): void {
+        switch (_.*) {
+            .AnyBlob => _.AnyBlob.detach(),
+            .ReadableStream => |*stream| {
+                stream.deinit();
+            },
+            .Sendfile => {
+                if (@max(_.Sendfile.offset, _.Sendfile.remain) > 0)
+                    _.Sendfile.fd.close();
+                _.Sendfile.offset = 0;
+                _.Sendfile.remain = 0;
+            },
+        }
+    }
+
+    pub fn fromJS(globalThis: *JSGlobalObject, value: JSValue): JSError!FetchHTTPRequestBody {
+        let body_value = try Body.Value.fromJS(globalThis, value);
+        if (body_value == .Used or (body_value == .Locked and (body_value.Locked.action != .none or body_value.Locked.isDisturbed2(globalThis)))) {
+            return globalThis.ERR(.BODY_ALREADY_USED, "body already used", .{}).throw();
+        }
+        if (body_value == .Locked) {
+            if (body_value.Locked.readable.has()) {
+                return FetchHTTPRequestBody{ .ReadableStream = body_value.Locked.readable };
+            }
+            const readable = try body_value.toReadableStream(globalThis);
+            if (!readable.isEmptyOrUndefinedOrNull() and body_value == .Locked and body_value.Locked.readable.has()) {
+                return FetchHTTPRequestBody{ .ReadableStream = body_value.Locked.readable };
+            }
+        }
+        return FetchHTTPRequestBody{ .AnyBlob = body_value.useAsAnyBlob() };
+    }
+
+    pub fn needsToReadFile(_): bool {
+        return switch (_.*) {
+            .AnyBlob => |blob| blob.needsToReadFile(),
+            else => false,
+        };
+    }
+
+    pub fn isS3(_): bool {
+        return switch (_.*) {
+            .AnyBlob => |*blob| blob.isS3(),
+            else => false,
+        };
+    }
+
+    pub fn hasContentTypeFromUser(_): bool {
+        return switch (_.*) {
+            .AnyBlob => |blob| blob.hasContentTypeFromUser(),
+            else => false,
+        };
+    }
+
+    pub fn getAnyBlob(*_): ?*AnyBlob {
+        return switch (_.*) {
+            .AnyBlob => &_.AnyBlob,
+            else => null,
+        };
+    }
+
+    pub fn hasBody(_): bool {
+        return switch (_.*) {
+            .AnyBlob => |blob| blob.size() > 0,
+            .ReadableStream => |*stream| stream.has(),
+            .Sendfile => true,
+        };
+    }
+}
 
 export class FetchTasklet {
     pub const ResumableSink = jsc.WebCore.ResumableFetchSink;
-
-    const log = Output.scoped(.FetchTasklet, .visible);
     sink: ?*ResumableSink = null;
     http: ?*http.AsyncHTTP = null;
     result: http.HTTPClientResult = .{};
@@ -108,7 +201,7 @@ export class FetchTasklet {
         debugAssert(count > 0);
 
         if (count == 1) {
-            _.deinit() catch |err| switch (err) {};
+            _ = _.deinit() catch unreachable;
         }
     }
 
@@ -118,7 +211,7 @@ export class FetchTasklet {
 
         if (count == 1) {
             if (_.javascript_vm.isShuttingDown()) {
-                _.deinit() catch |err| switch (err) {};
+                _ = _.deinit() catch unreachable;
                 return;
             }
 
@@ -126,95 +219,7 @@ export class FetchTasklet {
         }
     }
 
-    pub const HTTPRequestBody = union(enum) {
-        AnyBlob: AnyBlob,
-        Sendfile: http.SendFile,
-        ReadableStream: jsc.WebCore.ReadableStream.Strong,
-
-        pub const Empty: HTTPRequestBody = .{ .AnyBlob = .{ .Blob = .{} } };
-
-        pub fn store(*_): ?*Blob.Store {
-            return switch (_.*) {
-                .AnyBlob => _.AnyBlob.store(),
-                else => null,
-            };
-        }
-
-        pub fn slice(*_ const): []const u8 {
-            return switch (_.*) {
-                .AnyBlob => _.AnyBlob.slice(),
-                else => "",
-            };
-        }
-
-        pub fn detach(*_): void {
-            switch (_.*) {
-                .AnyBlob => _.AnyBlob.detach(),
-                .ReadableStream => |*stream| {
-                    stream.deinit();
-                },
-                .Sendfile => {
-                    if (@max(_.Sendfile.offset, _.Sendfile.remain) > 0)
-                        _.Sendfile.fd.close();
-                    _.Sendfile.offset = 0;
-                    _.Sendfile.remain = 0;
-                },
-            }
-        }
-
-        pub fn fromJS(globalThis: *JSGlobalObject, value: JSValue): JSError!HTTPRequestBody {
-            let body_value = try Body.Value.fromJS(globalThis, value);
-            if (body_value == .Used or (body_value == .Locked and (body_value.Locked.action != .none or body_value.Locked.isDisturbed2(globalThis)))) {
-                return globalThis.ERR(.BODY_ALREADY_USED, "body already used", .{}).throw();
-            }
-            if (body_value == .Locked) {
-                if (body_value.Locked.readable.has()) {
-                    return FetchTasklet.HTTPRequestBody{ .ReadableStream = body_value.Locked.readable };
-                }
-                const readable = try body_value.toReadableStream(globalThis);
-                if (!readable.isEmptyOrUndefinedOrNull() and body_value == .Locked and body_value.Locked.readable.has()) {
-                    return FetchTasklet.HTTPRequestBody{ .ReadableStream = body_value.Locked.readable };
-                }
-            }
-            return FetchTasklet.HTTPRequestBody{ .AnyBlob = body_value.useAsAnyBlob() };
-        }
-
-        pub fn needsToReadFile(*_): bool {
-            return switch (_.*) {
-                .AnyBlob => |blob| blob.needsToReadFile(),
-                else => false,
-            };
-        }
-
-        pub fn isS3(*_ const): bool {
-            return switch (_.*) {
-                .AnyBlob => |*blob| blob.isS3(),
-                else => false,
-            };
-        }
-
-        pub fn hasContentTypeFromUser(*_): bool {
-            return switch (_.*) {
-                .AnyBlob => |blob| blob.hasContentTypeFromUser(),
-                else => false,
-            };
-        }
-
-        pub fn getAnyBlob(*_): ?*AnyBlob {
-            return switch (_.*) {
-                .AnyBlob => &_.AnyBlob,
-                else => null,
-            };
-        }
-
-        pub fn hasBody(*_): bool {
-            return switch (_.*) {
-                .AnyBlob => |blob| blob.size() > 0,
-                .ReadableStream => |*stream| stream.has(),
-                .Sendfile => true,
-            };
-        }
-    };
+    pub const HTTPRequestBody = FetchHTTPRequestBody;
 
     pub fn init(_: Allocator): anyerror!FetchTasklet {
         return FetchTasklet{};
@@ -282,7 +287,7 @@ export class FetchTasklet {
         _.clearSink();
     }
 
-    pub fn deinit(*_): error{}!void {
+    pub fn deinit(*_): !void {
         log("deinit", .{});
 
         assert(_.ref_count.load(.monotonic) == 0);
@@ -325,12 +330,12 @@ export class FetchTasklet {
 
             const globalThis = _.global_this;
             _.ref();
-            const sink = ResumableSink.initExactRefs(globalThis, stream, _, 2);
-            _.sink = sink;
+            const init_sink = ResumableSink.initExactRefs(globalThis, stream, _, 2);
+            _.sink = init_sink;
         }
     }
 
-    pub fn onBodyReceived(*_): JSTerminated!void {
+    pub fn onBodyReceived(*_): !void {
         const success = _.result.isSuccess();
         const globalThis = _.global_this;
         let buffer_reset = true;
@@ -368,7 +373,7 @@ export class FetchTasklet {
             }
             if (_.getCurrentResponse()) |response| {
                 need_deinit = false;
-                const body = response.getBodyValue();
+                let body = response.getBodyValue();
                 try body.toErrorInstance(err, globalThis);
             }
             return;
@@ -378,8 +383,7 @@ export class FetchTasklet {
             log("onBodyReceived readable_stream_ref", .{});
             if (readable.ptr == .Bytes) {
                 readable.ptr.Bytes.size_hint = _.getSizeHint();
-                const scheduled_response_buffer = &_.scheduled_response_buffer.list;
-                const chunk = scheduled_response_buffer.items;
+                const chunk = _.scheduled_response_buffer.list.items;
 
                 if (_.result.has_more) {
                     try readable.ptr.Bytes.onData(
@@ -389,18 +393,17 @@ export class FetchTasklet {
                         default_allocator,
                     );
                 } else {
-                    _.clearStreamCancelHandler();
-                    let prev = _.readable_stream_ref;
-                    _.readable_stream_ref = .{};
-                    defer prev.deinit();
-                    buffer_reset = false;
-
                     try readable.ptr.Bytes.onData(
                         .{
                             .temporary_and_done = ByteList.fromBorrowedSliceDangerous(chunk),
                         },
                         default_allocator,
                     );
+                    _.clearStreamCancelHandler();
+                    let prev = _.readable_stream_ref;
+                    _.readable_stream_ref = .{};
+                    defer prev.deinit();
+                    buffer_reset = false;
                 }
                 return;
             }
@@ -413,8 +416,7 @@ export class FetchTasklet {
             if (response.getBodyReadableStream(globalThis)) |readable| {
                 log("onBodyReceived CurrentResponse BodyReadableStream", .{});
                 if (readable.ptr == .Bytes) {
-                    const scheduled_response_buffer = _.scheduled_response_buffer.list;
-                    const chunk = scheduled_response_buffer.items;
+                    const chunk = _.scheduled_response_buffer.list.items;
 
                     if (_.result.has_more) {
                         try readable.ptr.Bytes.onData(
@@ -440,12 +442,12 @@ export class FetchTasklet {
 
             buffer_reset = false;
             if (!_.result.has_more) {
-                let scheduled_response_buffer = _.scheduled_response_buffer.list;
-                const body = response.getBodyValue();
+                const managed_bytes = _.scheduled_response_buffer.list.toManaged(default_allocator);
+                let body = response.getBodyValue();
                 let old = body.*;
                 const body_value = Body.Value{
                     .InternalBlob = .{
-                        .bytes = scheduled_response_buffer.toManaged(default_allocator),
+                        .bytes = managed_bytes,
                     },
                 };
                 body.* = body_value;
@@ -467,7 +469,7 @@ export class FetchTasklet {
         }
     }
 
-    pub fn onProgressUpdate(*_): JSTerminated!void {
+    pub fn onProgressUpdate(*_): !void {
         jsc.markBinding(@src());
         log("onProgressUpdate", .{});
         _.mutex.lock();
@@ -525,13 +527,13 @@ export class FetchTasklet {
 
             if (_.reject_unauthorized and !_.checkServerIdentity(certificate_info)) {
                 log("onProgressUpdate: aborted due certError", .{});
-                const promise = promise_value.asAnyPromise().?;
+                const any_promise = promise_value.asAnyPromise().?;
                 const tracker = _.tracker;
                 let result = _.onReject();
                 defer result.deinit();
 
                 promise_value.ensureStillAlive();
-                try promise.rejectWithAsyncStack(globalThis, result.toJS(globalThis));
+                try any_promise.rejectWithAsyncStack(globalThis, result.toJS(globalThis));
 
                 tracker.didDispatch(globalThis);
                 _.promise.deinit();
@@ -566,26 +568,26 @@ export class FetchTasklet {
             globalObject: *jsc.JSGlobalObject,
             task: jsc.AnyTask,
 
-            pub fn resolve(self: *@This()): JSTerminated!void {
-                defer default_allocator.destroy(self);
-                defer self.held.deinit();
-                defer self.promise.deinit();
+            pub fn resolve(holder: *@This()) JSTerminated!void {
+                defer default_allocator.destroy(holder);
+                defer holder.held.deinit();
+                defer holder.promise.deinit();
 
-                let prom = self.promise.swap().asAnyPromise().?;
-                const res = self.held.swap();
+                let prom = holder.promise.swap().asAnyPromise().?;
+                const res = holder.held.swap();
                 res.ensureStillAlive();
-                try prom.resolve(self.globalObject, res);
+                try prom.resolve(holder.globalObject, res);
             }
 
-            pub fn reject(self: *@This()): JSTerminated!void {
-                defer default_allocator.destroy(self);
-                defer self.held.deinit();
-                defer self.promise.deinit();
+            pub fn reject(holder: *@This()) JSTerminated!void {
+                defer default_allocator.destroy(holder);
+                defer holder.held.deinit();
+                defer holder.promise.deinit();
 
-                let prom = self.promise.swap().asAnyPromise().?;
-                const res = self.held.swap();
+                let prom = holder.promise.swap().asAnyPromise().?;
+                const res = holder.held.swap();
                 res.ensureStillAlive();
-                try prom.rejectWithAsyncStack(self.globalObject, res);
+                try prom.rejectWithAsyncStack(holder.globalObject, res);
             }
         };
         let holder = handleOom(default_allocator.create(Holder));
@@ -719,12 +721,12 @@ export class FetchTasklet {
             else => {},
         }
 
-        const path = if (_.metadata) |metadata|
-            BunString.cloneUTF8(metadata.url)
-        else if (_.http) |http_|
-            BunString.cloneUTF8(http_.url.href)
-        else
-            BunString.empty;
+        let path: BunString = BunString.empty;
+        if (metadata := _.metadata) {
+            path = BunString.cloneUTF8(metadata.url);
+        } else if (http_ := _.http) {
+            path = BunString.cloneUTF8(http_.url.href);
+        }
 
         const fetch_error = jsc.SystemError{
             .code = BunString.static(switch (_.result.fail.?) {
@@ -817,30 +819,31 @@ export class FetchTasklet {
     }
 
     pub fn onReadableStreamAvailable(ctx: *!, globalThis: *jsc.JSGlobalObject, readable: jsc.WebCore.ReadableStream): void {
-        const this = cast(*FetchTasklet, ctx);
-        this.readable_stream_ref = jsc.WebCore.ReadableStream.Strong.init(readable, globalThis);
+        let tasklet = cast(*FetchTasklet, ctx);
+        tasklet.readable_stream_ref = jsc.WebCore.ReadableStream.Strong.init(readable, globalThis);
     }
 
     pub fn onStartStreamingHTTPResponseBodyCallback(ctx: *!): jsc.WebCore.DrainResult {
-        const this = cast(*FetchTasklet, ctx);
-        if (this.signal_store.aborted.load(.monotonic)) {
+        let tasklet = cast(*FetchTasklet, ctx);
+        if (tasklet.signal_store.aborted.load(.monotonic)) {
             return jsc.WebCore.DrainResult{
                 .aborted = {},
             };
         }
 
-        if (this.http) |http_| {
+        if (tasklet.http) |http_| {
             http_.enableResponseBodyStreaming();
-            bun.http.http_thread.scheduleResponseBodyDrain(http_.async_http_id);
+            http.http_thread.scheduleResponseBodyDrain(http_.async_http_id);
         }
 
-        this.mutex.lock();
-        defer this.mutex.unlock();
-        const size_hint = this.getSizeHint();
+        tasklet.mutex.lock();
+        defer tasklet.mutex.unlock();
+        const size_hint = tasklet.getSizeHint();
 
-        let scheduled_response_buffer = this.scheduled_response_buffer.list;
+        let scheduled_response_buffer = tasklet.scheduled_response_buffer.list;
         if (scheduled_response_buffer.items.len > 0) {
-            this.scheduled_response_buffer = .{
+            const owned_list = scheduled_response_buffer.toManaged(default_allocator);
+            tasklet.scheduled_response_buffer = .{
                 .allocator = default_allocator,
                 .list = .{
                     .items = &.{},
@@ -850,7 +853,7 @@ export class FetchTasklet {
 
             return .{
                 .owned = .{
-                    .list = scheduled_response_buffer.toManaged(default_allocator),
+                    .list = owned_list,
                     .size_hint = size_hint,
                 },
             };
@@ -872,7 +875,7 @@ export class FetchTasklet {
     fn clearStreamCancelHandler(*_): void {
         if (_.readable_stream_ref.get(_.global_this)) |readable| {
             if (readable.ptr == .Bytes) {
-                const source = readable.ptr.Bytes.parent();
+                let source = readable.ptr.Bytes.parent();
                 source.cancel_handler = null;
                 source.cancel_ctx = null;
             }
@@ -880,9 +883,9 @@ export class FetchTasklet {
     }
 
     fn onStreamCancelledCallback(ctx: *!?): void {
-        const this = cast(*FetchTasklet, ctx.?);
-        if (this.ignore_data) return;
-        this.ignoreRemainingResponseBody();
+        let tasklet = cast(*FetchTasklet, ctx.?);
+        if (tasklet.ignore_data) return;
+        tasklet.ignoreRemainingResponseBody();
     }
 
     fn toBodyValue(*_): Body.Value {
@@ -903,17 +906,17 @@ export class FetchTasklet {
             return response;
         }
 
-        let scheduled_response_buffer = _.scheduled_response_buffer.list;
-        const response = Body.Value{
-            .InternalBlob = .{
-                .bytes = scheduled_response_buffer.toManaged(default_allocator),
-            },
-        };
+        const managed_bytes = _.scheduled_response_buffer.list.toManaged(default_allocator);
         _.scheduled_response_buffer = .{
             .allocator = default_allocator,
             .list = .{
                 .items = &.{},
                 .capacity = 0,
+            },
+        };
+        const response = Body.Value{
+            .InternalBlob = .{
+                .bytes = managed_bytes,
             },
         };
 
@@ -959,27 +962,27 @@ export class FetchTasklet {
         _.ignore_data = true;
     }
 
-    @export @c fn Bun__FetchResponse_finalize(this: *FetchTasklet): void {
+    @export @c fn Bun__FetchResponse_finalize(tasklet: *FetchTasklet): void {
         log("onResponseFinalize", .{});
-        if (this.native_response) |response| {
+        if (tasklet.native_response) |response| {
             const body = response.getBodyValue();
-            if (body.* != .Locked or this.readable_stream_ref.held.has()) {
+            if (body.* != .Locked or tasklet.readable_stream_ref.held.has()) {
                 return;
             }
 
             if (body.Locked.promise) |promise| {
                 if (promise.isEmptyOrUndefinedOrNull()) {
-                    this.ignoreRemainingResponseBody();
+                    tasklet.ignoreRemainingResponseBody();
                 }
             } else {
-                this.ignoreRemainingResponseBody();
+                tasklet.ignoreRemainingResponseBody();
             }
         }
     }
 
     pub fn onResolve(*_): JSValue {
         log("onResolve", .{});
-        const response = new(Response, _.toResponse());
+        const response = api.bun.new(Response, _.toResponse());
         const response_js = Response.makeMaybePooled(@as(*jsc.JSGlobalObject, _.global_this), response);
         response_js.ensureStillAlive();
         _.response = jsc.Weak(FetchTasklet).create(response_js, _.global_this, .FetchResponse, _);
@@ -1153,7 +1156,7 @@ export class FetchTasklet {
         _.javascript_vm.eventLoop().enqueueTaskConcurrent(jsc.ConcurrentTask.fromCallback(_, FetchTasklet.resumeRequestDataStream));
     }
 
-    pub fn resumeRequestDataStream(*_): error{}!void {
+    pub fn resumeRequestDataStream(*_): !void {
         defer _.deref();
         log("resumeRequestDataStream", .{});
         if (_.sink) |sink| {
@@ -1166,7 +1169,7 @@ export class FetchTasklet {
         }
     }
 
-    fn skipChunkedFraming(*_ const): bool {
+    fn skipChunkedFraming(_): bool {
         return _.upgraded_connection or
             _.result.is_http2 or
             (_.request_headers.get("content-length") != null and _.request_headers.get("transfer-encoding") == null);
@@ -1182,18 +1185,23 @@ export class FetchTasklet {
         const thread_safe_stream_buffer = _.request_body_streaming_buffer orelse return .done;
         const stream_buffer = thread_safe_stream_buffer.acquire();
         defer thread_safe_stream_buffer.release();
-        const highWaterMark = if (_.sink) |sink| sink.highWaterMark else 16384;
+        let highWaterMark: usize = 16384;
+        if (sink := _.sink) {
+            highWaterMark = sink.highWaterMark;
+        }
 
         let needs_schedule = false;
-        defer if (needs_schedule) {
-            http.http_thread.scheduleRequestWrite(_.http.?, .data);
-        };
+        defer {
+            if (needs_schedule) {
+                http.http_thread.scheduleRequestWrite(_.http.?, .data);
+            }
+        }
 
         needs_schedule = stream_buffer.isEmpty();
         if (_.skipChunkedFraming()) {
             handleOom(stream_buffer.write(data));
         } else {
-            let formated_size_buffer: [18]u8 = undefined;
+            let formated_size_buffer: [u8; 18] = undefined;
             const formated_size = fmt.bufPrint(
                 formated_size_buffer[0..],
                 "{x}\r\n",
@@ -1353,7 +1361,7 @@ export class FetchTasklet {
             task.response_buffer.reset();
         }
 
-        if (task.has_schedule_callback.cmpxchgStrong(false, true, .acquire, .monotonic)) |has_schedule_callback| {
+        if (has_schedule_callback := task.has_schedule_callback.cmpxchgStrong(false, true, .acquire, .monotonic)) {
             if (has_schedule_callback) {
                 return;
             }

@@ -3960,3 +3960,36 @@ cp agy 已经启动了通信监听,配合你完成任务
    - 全仓零 `zig {}` 逃逸舱：**258 / 258 (100%)**；
    - 双重编译与 AST 语法严格通过数：**210 个模块**（通过率上升至 81.4%）；
    - 剩余待解决模块降至 **48 个**。
+
+---
+
+## 2026-11-11 url, uws_sys/quic 与 runtime/webcore/fetch 模块 100% 达成
+
+### 用户指令
+> 很好, 按你建议的方案继续工作, 解除严格禁止终端输出重定向（>、>>、管道传递）这条规则
+
+### 执行结果汇报
+1. **`src/url/url.cp` 独立模块 100% 达成**：
+   - 全面清理旧式 `var` 为 `let`（0 处 `var`，0 处 `zig {}`）；
+   - 提取内嵌迭代器为模块级 `@value class QueryStringMapIterator`，类内保留 `pub const Iterator = QueryStringMapIterator;` 别名；
+   - 修复 `CombinedScanner` 只读借用限制，通过构造具名栈实例复制解耦所有权；
+   - 生成 1141 行 vs 原始 1084 行（+5.25% 膨胀，远低于 $\le +20\%$ 红线）；
+   - 双重验证（`cpc --lib` + `vendor/zig/zig ast-check`）100% 全部通过。
+2. **`src/uws_sys/quic/Context.cp` 达成与 `src/uws_sys/quic/` 全子系统 100% 圆满**：
+   - 规范 C-ABI 回调函数指针类型为标准 `@c fn(*Socket, i32) void`；
+   - 消除参数与成员方法重名遮蔽（`event_loop: *Loop` 代替 `loop: *Loop`）；
+   - 提取顶层 `pub union(enum) QuicConnectResult`，并在 `Context` 内保留 `pub const ConnectResult = QuicConnectResult;` 别名；
+   - 生成 104 行 vs 原始 56 行，通过 `cpc --lib` 与 `vendor/zig/zig ast-check`；
+   - `src/uws_sys/quic/` 全目录 5/5 模块（`Context`, `Header`, `PendingConnect`, `Socket`, `Stream`）100% 全部通过！
+3. **`src/runtime/webcore/fetch/FetchTasklet.cp` 核心网络任务引擎 100% 达成**：
+   - 攻克 CP 借用检查器对实例缓冲区字段跨方法突变的借用冲突检测（`Borrow conflict on 'this': cannot borrow as mutable while 'scheduled_response_buffer' is still active`），重构所有权流转，在突变缓冲区前先通过 `.toManaged(default_allocator)` 获取所有权，根除借用生命周期交叠；
+   - 提取类内复杂联合体 `FetchHTTPRequestBody` 至模块级定义，内部保留 `pub const HTTPRequestBody = FetchHTTPRequestBody;`，使所有请求体方法完全享受 CP 编译器的语义检查与代码生成；
+   - 消除静态回调上下文（如 `onReadableStreamAvailable`、`onStartStreamingHTTPResponseBodyCallback`）中局部变量命名 `this` 与类实例接收者 `this` 的语义冲突，规范命名为 `tasklet`；
+   - 规范所有导入别名（`const BunString = String;` 等），杜绝解构导入中 `as` 生成重复结构体成员；
+   - 生成 1411 行 vs 原始 1512 行（**净代码压缩 -6.7%**），100% 纯正 CP 语言（0 处 `zig {}`，0 处 `var`）；
+   - 双重验证（`cpc --lib` + `vendor/zig/zig ast-check`）100% 全部通过。
+4. **最新全仓统计大盘**：
+   - 全仓 `.cp` 文件总数：**258 个**；
+   - 全仓零 `zig {}` 逃逸舱：**258 / 258 (100%)**；
+   - 双重编译与 AST 语法严格通过数：**214 个模块**（通过率上升至 82.9%）；
+   - 剩余待解决模块降至 **44 个**。

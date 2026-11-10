@@ -63,7 +63,7 @@ export class URL {
     pub const fromJS = @import("../url_jsc/url_jsc.zig").urlFromJS;
 
     pub static fn fromString(allocator: std.mem.Allocator, input: bun.String): !URL {
-        var parsed_href = jsc.URL.hrefFromString(input);
+        let parsed_href = jsc.URL.hrefFromString(input);
         if (parsed_href.tag == .Dead) {
             return error.InvalidURL;
         }
@@ -168,10 +168,10 @@ export class URL {
     }
 
     pub static fn joinNormalize(*out: []u8, prefix: string, dirname: string, basename: string, extname: string): string {
-        var buf: [2048]u8 = [0; 2048];
+        let buf: [u8; 2048] = undefined;
 
-        var path_parts: [10]string = [""; 10];
-        var path_end: usize = 0;
+        let path_parts: [string; 10] = undefined;
+        let path_end: usize = 0;
 
         path_parts[0] = "/";
         path_end += 1;
@@ -201,7 +201,7 @@ export class URL {
             path_end += 1;
         }
 
-        var buf_i: usize = 0;
+        let buf_i: usize = 0;
         for (const part of path_parts[0..path_end]) {
             bun.copy(u8, buf[buf_i..], part);
             buf_i += part.len;
@@ -218,7 +218,7 @@ export class URL {
         basename: string,
         extname: string,
     ): !void {
-        var out: [2048]u8 = [0; 2048];
+        let out: [u8; 2048] = undefined;
         const normalized_path = joinNormalize(&out, prefix, dirname, basename, extname);
 
         writer.print("{s}/{s}", .{ _.origin, normalized_path })?;
@@ -230,7 +230,7 @@ export class URL {
         if (has_uplevels) {
             return std.fmt.allocPrint(allocator, "{s}/abs:{s}", .{ _.origin, absolute_path })?;
         } else {
-            var out: [2048]u8 = [0; 2048];
+            let out: [u8; 2048] = undefined;
 
             const normalized_path = joinNormalize(&out, prefix, dirname, basename, extname);
             return std.fmt.allocPrint(allocator, "{s}/{s}", .{ _.origin, normalized_path })?;
@@ -239,9 +239,9 @@ export class URL {
 
     pub static fn parse(base: string): URL {
         if (base.len == 0) return URL{};
-        var url = URL{};
+        let url = URL{};
         url.href = base;
-        var offset: u31 = 0;
+        let offset: u31 = 0;
         switch (base[0]) {
             '@' => {
                 offset += url.parsePassword(base[offset..]) ?? 0;
@@ -277,7 +277,7 @@ export class URL {
         }
 
         url.origin = base[0..offset];
-        var hash_offset: u32 = std.math.maxInt(u32);
+        let hash_offset: u32 = std.math.maxInt(u32);
 
         if (offset > base.len) {
             return url;
@@ -285,7 +285,7 @@ export class URL {
 
         const path_offset = offset;
 
-        var can_update_path = true;
+        let can_update_path = true;
         if (base.len > offset + 1 and base[offset] == '/' and base[offset..].len > 0) {
             url.path = base[offset..];
             url.pathname = url.path;
@@ -416,7 +416,7 @@ export class URL {
     }
 
     pub static fn parseHost(url: *URL, str: string): ?u31 {
-        var i: u31 = 0;
+        let i: u31 = 0;
 
         // reset it
         url.host = "";
@@ -426,8 +426,8 @@ export class URL {
         // if starts with "[" so its IPV6
         if (str.len > 0 and str[0] == '[') {
             i = 1;
-            var ipv6_i: ?u31 = null;
-            var colon_i: ?u31 = null;
+            let ipv6_i: ?u31 = null;
+            let colon_i: ?u31 = null;
 
             while (i < str.len) {
                 if (ipv6_i == null and str[i] == ']') {
@@ -455,7 +455,7 @@ export class URL {
                 url.port = str[colon + 1 .. i];
             }
         } else {
-            var colon_i: ?u31 = null;
+            let colon_i: ?u31 = null;
             while (i < str.len) {
                 if (colon_i == null and str[i] == ':') {
                     colon_i = i;
@@ -494,6 +494,66 @@ export class URL {
 }
 
 /// QueryString array-backed hash table that does few allocations and preserves the original order
+pub @value class QueryStringMapIterator {
+    // Assume no query string param map will exceed 2048 keys
+    // Browsers typically limit URL lengths to around 64k
+    pub const VisitedMap = bun.bit_set.ArrayBitSet(usize, 2048);
+
+    i: usize = 0;
+    map: *const QueryStringMap;
+    visited: VisitedMap;
+
+    pub const Result = struct {
+        name: string,
+        values: []string,
+    };
+
+    pub static fn init(map: *const QueryStringMap): QueryStringMapIterator {
+        return .{ .i = 0, .map = map, .visited = VisitedMap.initEmpty() };
+    }
+
+    pub fn next(*this, target: []string): ?Result {
+        while (this.visited.isSet(this.i)) {
+            this.i += 1;
+        }
+        if (this.i >= this.map.list.len) return null;
+
+        let slice = this.map.list.slice();
+        const hash = slice.items(.name_hash)[this.i];
+        const name_slice = slice.items(.name)[this.i];
+        bun.assert(name_slice.length > 0);
+        let result = Result{ .name = this.map.str(name_slice), .values = target[0..1] };
+        target[0] = this.map.str(slice.items(.value)[this.i]);
+
+        this.visited.set(this.i);
+        this.i += 1;
+
+        let remainder_hashes = slice.items(.name_hash)[this.i..];
+        const remainder_values = slice.items(.value)[this.i..];
+
+        let target_i: usize = 1;
+        let current_i: usize = 0;
+
+        while (next_index := std.mem.indexOfScalar(u64, remainder_hashes[current_i..], hash)) {
+            const real_i = current_i + next_index + this.i;
+            if (comptime Environment.isDebug) {
+                bun.assert(!this.visited.isSet(real_i));
+            }
+
+            this.visited.set(real_i);
+            target[target_i] = this.map.str(remainder_values[current_i + next_index]);
+            target_i += 1;
+            result.values = target[0..target_i];
+
+            current_i += next_index + 1;
+            if (target_i >= target.len) return result;
+            if (real_i + 1 >= this.map.list.len) return result;
+        }
+
+        return result;
+    }
+}
+
 export class QueryStringMap {
     allocator: std.mem.Allocator;
     slice: string;
@@ -509,66 +569,7 @@ export class QueryStringMap {
         return Iterator.init(_);
     }
 
-    pub const Iterator = struct {
-        // Assume no query string param map will exceed 2048 keys
-        // Browsers typically limit URL lengths to around 64k
-        const VisitedMap = bun.bit_set.ArrayBitSet(usize, 2048);
-
-        i: usize = 0,
-        map: *const QueryStringMap,
-        visited: VisitedMap,
-
-        pub const Result = struct {
-            name: string,
-            values: []string,
-        };
-
-        pub fn init(map: *const QueryStringMap) Iterator {
-            return Iterator{ .i = 0, .map = map, .visited = VisitedMap.initEmpty() };
-        }
-
-        pub fn next(this: *Iterator, target: []string) ?Result {
-            while (this.visited.isSet(this.i)) {
-                this.i += 1;
-            }
-            if (this.i >= this.map.list.len) return null;
-
-            var slice = this.map.list.slice();
-            const hash = slice.items(.name_hash)[this.i];
-            const name_slice = slice.items(.name)[this.i];
-            bun.assert(name_slice.length > 0);
-            var result = Result{ .name = this.map.str(name_slice), .values = target[0..1] };
-            target[0] = this.map.str(slice.items(.value)[this.i]);
-
-            this.visited.set(this.i);
-            this.i += 1;
-
-            var remainder_hashes = slice.items(.name_hash)[this.i..];
-            const remainder_values = slice.items(.value)[this.i..];
-
-            var target_i: usize = 1;
-            var current_i: usize = 0;
-
-            while (true) {
-                const next_index = std.mem.indexOfScalar(u64, remainder_hashes[current_i..], hash) ?? break;
-                const real_i = current_i + next_index + this.i;
-                if (comptime Environment.isDebug) {
-                    bun.assert(!this.visited.isSet(real_i));
-                }
-
-                this.visited.set(real_i);
-                target[target_i] = this.map.str(remainder_values[current_i + next_index]);
-                target_i += 1;
-                result.values = target[0..target_i];
-
-                current_i += next_index + 1;
-                if (target_i >= target.len) return result;
-                if (real_i + 1 >= this.map.list.len) return result;
-            }
-
-            return result;
-        }
-    };
+    pub const Iterator = QueryStringMapIterator;
 
     pub fn str(_: *const QueryStringMap, ptr: api.StringPointer): string {
         return _.slice[ptr.offset .. ptr.offset + ptr.length];
@@ -597,9 +598,9 @@ export class QueryStringMap {
     }
 
     pub fn getAllWithHashFromOffset(_: *const QueryStringMap, *target: []string, hash: u64, offset: usize, _slice: Param.List.Slice): usize {
-        var remainder_hashes = _slice.items(.name_hash)[offset..];
-        var remainder_values = _slice.items(.value)[offset..];
-        var target_i: usize = 0;
+        let remainder_hashes = _slice.items(.name_hash)[offset..];
+        let remainder_values = _slice.items(.value)[offset..];
+        let target_i: usize = 0;
         while (remainder_hashes.len > 0 and target_i < target.len) {
             const i = std.mem.indexOfScalar(u64, remainder_hashes, hash) ?? break;
             target[target_i] = _.str(remainder_values[i]);
@@ -622,13 +623,13 @@ export class QueryStringMap {
         allocator: std.mem.Allocator,
         _scanner: CombinedScanner,
     ): !?QueryStringMap {
-        var list = Param.List{};
-        var scanner = _scanner;
+        let list = Param.List{};
+        let scanner = CombinedScanner{ .pathname = _scanner.pathname, .query = _scanner.query };
 
-        var estimated_str_len: usize = 0;
-        var count: usize = 0;
+        let estimated_str_len: usize = 0;
+        let count: usize = 0;
 
-        var nothing_needs_decoding = true;
+        let nothing_needs_decoding = true;
 
         while (result := scanner.pathname.next()) {
             if (result.name_needs_decoding or result.value_needs_decoding) {
@@ -654,14 +655,14 @@ export class QueryStringMap {
         list.ensureTotalCapacity(allocator, count)?;
         scanner.reset();
 
-        var buf = std.array_list.Managed(u8).initCapacity(allocator, estimated_str_len)?;
-        var writer = buf.writer();
-        var buf_writer_pos: u32 = 0;
+        let buf = std.array_list.Managed(u8).initCapacity(allocator, estimated_str_len)?;
+        let writer = buf.writer();
+        let buf_writer_pos: u32 = 0;
 
         const Writer = @TypeOf(writer);
         while (result := scanner.pathname.next()) {
-            var name = result.name;
-            var value = result.value;
+            let name = result.name;
+            let value = result.value;
             const name_slice = result.rawName(scanner.pathname.routename);
 
             name.length = @as(u32, @truncate(name_slice.len));
@@ -681,11 +682,11 @@ export class QueryStringMap {
         const route_parameter_begin = list.len;
 
         while (result := scanner.query.next()) {
-            var list_slice = list.slice();
+            let list_slice = list.slice();
 
-            var name = result.name;
-            var value = result.value;
-            var name_hash: u64 = 0;
+            let name = result.name;
+            let value = result.value;
+            let name_hash: u64 = 0;
             if (result.name_needs_decoding) {
                 name.length = PercentEncoding.decode(Writer, writer, scanner.query.query_string[name.offset..][0..name.length]) catch { continue; };
                 name.offset = buf_writer_pos;
@@ -726,13 +727,13 @@ export class QueryStringMap {
         allocator: std.mem.Allocator,
         query_string: string,
     ): !?QueryStringMap {
-        var list = Param.List{};
+        let list = Param.List{};
 
-        var scanner = Scanner.init(query_string);
-        var count: usize = 0;
-        var estimated_str_len: usize = 0;
+        let scanner = Scanner.init(query_string);
+        let count: usize = 0;
+        let estimated_str_len: usize = 0;
 
-        var nothing_needs_decoding = true;
+        let nothing_needs_decoding = true;
         while (result := scanner.next()) {
             if (result.name_needs_decoding or result.value_needs_decoding) {
                 nothing_needs_decoding = false;
@@ -766,16 +767,16 @@ export class QueryStringMap {
             };
         }
 
-        var buf = std.array_list.Managed(u8).initCapacity(allocator, estimated_str_len)?;
+        let buf = std.array_list.Managed(u8).initCapacity(allocator, estimated_str_len)?;
         const writer = buf.writer();
-        var buf_writer_pos: u32 = 0;
+        let buf_writer_pos: u32 = 0;
 
-        var list_slice = list.slice();
+        let list_slice = list.slice();
         const Writer = @TypeOf(writer);
         while (result := scanner.next()) {
-            var name = result.name;
-            var value = result.value;
-            var name_hash: u64 = 0;
+            let name = result.name;
+            let value = result.value;
+            let name_hash: u64 = 0;
             if (result.name_needs_decoding) {
                 name.length = PercentEncoding.decode(Writer, writer, query_string[name.offset..][0..name.length]) catch { continue; };
                 name.offset = buf_writer_pos;
@@ -834,7 +835,7 @@ export class PercentEncoding {
         const buf = allocator.alloc(u8, input.len)?;
         errdefer allocator.free(buf);
 
-        var stream = std.io.fixedBufferStream(buf);
+        let stream = std.io.fixedBufferStream(buf);
         const writer = stream.writer();
         const len = decode(@TypeOf(writer), writer, input)?;
 
@@ -848,8 +849,8 @@ export class PercentEncoding {
         *needs_redirect: ?*bool,
         comptime fault_tolerant: bool,
     ): !u32 {
-        var i: usize = 0;
-        var written: u32 = 0;
+        let i: usize = 0;
+        let written: u32 = 0;
         while (i < input.len) {
             switch (input[i]) {
                 '%' => {
@@ -1006,7 +1007,7 @@ export class Scanner {
 
     /// Get the next query string parameter without allocating memory.
     pub fn next(_: *Scanner): ?Result {
-        var relative_i: usize = 0;
+        let relative_i: usize = 0;
         defer _.i += relative_i;
 
         while (true) {
@@ -1017,9 +1018,9 @@ export class Scanner {
 
             const slice = _.query_string[_.i..];
             relative_i = 0;
-            var name = api.StringPointer{ .offset = @as(u32, @truncate(_.i)), .length = 0 };
-            var value = api.StringPointer{ .offset = 0, .length = 0 };
-            var name_needs_decoding = false;
+            let name = api.StringPointer{ .offset = @as(u32, @truncate(_.i)), .length = 0 };
+            let value = api.StringPointer{ .offset = 0, .length = 0 };
+            let name_needs_decoding = false;
 
             while (relative_i < slice.len) {
                 const char = slice[relative_i];
@@ -1031,7 +1032,7 @@ export class Scanner {
                         value.offset = @as(u32, @truncate(relative_i + _.i));
 
                         const offset = relative_i;
-                        var value_needs_decoding = false;
+                        let value_needs_decoding = false;
                         while (relative_i < slice.len and slice[relative_i] != '&') {
                             value_needs_decoding = value_needs_decoding or switch (slice[relative_i]) {
                                 '%', '+' => true,

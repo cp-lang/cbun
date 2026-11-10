@@ -1311,3 +1311,26 @@
   - 生成行数 934 行 vs 原版 1055 行（-11.5% 净压缩），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
 - `src/threading/`:
   - 全目录 2 个核心线程池与同步原语模块 100% 达成双重编译验证（通过率 2/2，全目录生成 992 行 vs 原版 1122 行，净压缩 -11.6%）。
+
+- `src/url/url.cp` / `url.zig`:
+  - 提取 `QueryStringMapIterator` 至模块级定义，在 `QueryStringMap` 内保留类型别名；
+  - 修复 `CombinedScanner` 只读借用限制，构造具名栈实例复制解耦所有权；
+  - 清理全文件 `var` 为 `let`（0 处 `var`，0 处 `zig {}`）；
+  - 生成行数 1141 行 vs 原版 1084 行（+5.25% 膨胀），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
+
+- `src/uws_sys/quic/Context.cp` / `Context.zig`:
+  - 规范 C-ABI 回调指针类型为 `@c fn(*Socket, i32) void`；
+  - 重命名方法参数 `event_loop: *Loop` 消除成员声明重名遮蔽；
+  - 声明顶层 `pub union(enum) QuicConnectResult` 并保留 `pub const ConnectResult = QuicConnectResult;` 别名；
+  - 生成行数 104 行 vs 原版 56 行，通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
+- `src/uws_sys/quic/`:
+  - 全目录 5 个 QUIC 模块 100% 达成双重编译验证（通过率 5/5）。
+
+- `src/runtime/webcore/fetch/FetchTasklet.cp` / `FetchTasklet.zig`:
+  - 重构缓冲区借用生命周期，在突变 `scheduled_response_buffer` 前先调用 `.toManaged(default_allocator)` 解除借用绑定；
+  - 提取 `FetchHTTPRequestBody` 联合体至模块级定义，内部保留类型别名，全面消除嵌入未解析代码块；
+  - 重命名静态回调上下文中的本地变量 `this` 为 `tasklet`，消除与类接收者的歧义；
+  - 规范导入别名语法（`const BunString = String;` 等），杜绝解构导入中的 `as` 生成重复成员；
+  - 生成行数 1411 行 vs 原版 1512 行（-6.7% 净压缩），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
+- `src/runtime/webcore/fetch/`:
+  - 全子系统核心网络任务引擎 100% 达成双重编译验证（通过率 1/1）。
