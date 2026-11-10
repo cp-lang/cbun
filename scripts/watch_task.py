@@ -36,18 +36,28 @@ def check_pending_directory(task_id_filter=None):
         pass
     return None
 
-def check_resolved_directory(task_id_filter):
-    if not os.path.exists(RESOLVED_DIR) or not task_id_filter:
+def check_resolved_directory(task_id_filter, initial_resolved=None):
+    if not os.path.exists(RESOLVED_DIR):
         return None
-    fpath = os.path.join(RESOLVED_DIR, f"{task_id_filter}.json")
-    if os.path.exists(fpath):
-        try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                task = json.load(f)
-            if task.get("status") == "resolved":
-                return task
-        except (json.JSONDecodeError, OSError):
-            pass
+    try:
+        files = sorted([f for f in os.listdir(RESOLVED_DIR) if f.endswith(".json") and not f.startswith(".")])
+        for fname in files:
+            tid = fname[:-5]
+            if task_id_filter:
+                if tid != task_id_filter:
+                    continue
+            elif initial_resolved is not None and tid in initial_resolved:
+                continue
+            fpath = os.path.join(RESOLVED_DIR, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    task = json.load(f)
+                if task.get("status") == "resolved":
+                    return task
+            except (json.JSONDecodeError, OSError):
+                continue
+    except Exception:
+        pass
     return None
 
 def main():
@@ -60,13 +70,16 @@ def main():
 
     print(f"[WATCHER] Listening for tasks (status={args.status}, id={args.id or 'ANY'})...", flush=True)
 
+    initial_resolved = set()
+    if args.status == "resolved" and not args.id and os.path.exists(RESOLVED_DIR):
+        initial_resolved = set([f[:-5] for f in os.listdir(RESOLVED_DIR) if f.endswith(".json") and not f.startswith(".")])
+
     start_time = time.time()
     while True:
-        # 首轮零延迟即时检测：启动时若已有任务，立即退出唤醒，绝不空等
         if args.status == "pending":
             task = check_pending_directory(args.id)
         else:
-            task = check_resolved_directory(args.id)
+            task = check_resolved_directory(args.id, initial_resolved)
 
         if task:
             task_id = task.get("id", "unknown")

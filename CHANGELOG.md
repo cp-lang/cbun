@@ -1182,6 +1182,40 @@
 - `.gitignore`:
   - 忽略 `*.zig.map` 调试映射文件与 `temp/` 临时测试区，保持工作树干净。
 
+### 2026-11-11 语法纪律重构（@c / 无 var 铁律）与跨智能体后台监听
+
+#### 跨智能体协同体系加固
+- `scripts/watch_task.py`:
+  - 增强 `check_resolved_directory`，支持监听并捕获任意由 `cp_agy` 解决的新任务；
+  - 以后台任务常驻启动，建立毫秒级双向事件驱动链路。
+- `scripts/task_queue.py`:
+  - 提交 `task-atfield-redundant-comptime` 与 `temp/repro_field_comptime.cp`；
+  - 提交 `task-std-mem-endswith-codegen` 与 `temp/repro_endswith.cp`。
+
+#### 核心源码模块重构与语法规范强化
+- `src/jsc/GarbageCollectionController.cp`:
+  - 采用 `@c pub static fn` 声明 C-ABI 静态回调；
+  - 彻底消灭 `var`，统一转为 `let`。
+- `src/jsc/PosixSignalHandle.cp`:
+  - 彻底消灭 `var`，修复为 `let el = vm.eventLoop()`。
+- `src/jsc/Task.cp`:
+  - 彻底消灭 `var`；修复 Result 联合类型为 `void!bun.JSTerminated`；
+  - 将多行转义符统一转为标准换行转义；重命名 `any` 避免与 CP 关键字冲突；
+  - 100% 通过 `cpc --lib` 与 `zig ast-check` 校验（653 行 vs 679 行，-3.8%）。
+- `src/jsc/event_loop.cp`:
+  - 提升 `EventLoopDebug` 至顶层作用域，消除声明依赖死锁；
+  - 消除 receiver 生命周期借用冲突，替换 `this_val` 命名；
+  - 100% 通过语法与 AST 严格校验（753 行 vs 748 行，+0.67% $\le +20\%$）。
+- `src/runtime/crypto/CryptoHasher.cp`:
+  - 修复标签块返回 `brk: { ... break :brk ... }`；
+  - 彻底消除 `var`；通过 `cpc --lib` 与 `zig ast-check`（885 行 vs 894 行，-1.0%）。
+- `src/runtime/dns_jsc/cares_jsc.cp`:
+  - 消除保留关键字 `arena` 命名冲突，重命名为 `arena_allocator`；
+  - 替换 `std.mem.endsWith` 为 `bun.strings.hasSuffix`。
+- `/data/dev/cp/cp_ref.md`:
+  - 补充 3.3.0 `@c` 推荐规范、无 `var` 铁律、嵌套结构体表达式定义及 Result 类型顺序。
+
+
 
 
 

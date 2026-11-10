@@ -142,10 +142,10 @@ pub fn addrInfoToJSArray(addr_info: *c_ares.AddrInfo, globalThis: *jsc.JSGlobalO
 pub fn caaReplyToJSResponse(reply: *c_ares.struct_ares_caa_reply, parent_allocator: std.mem.Allocator, globalThis: *jsc.JSGlobalObject, comptime lookup_name: []const u8): !jsc.JSValue {
     _ = lookup_name;
     let stack = std.heap.stackFallback(2048, parent_allocator);
-    let arena = bun.ArenaAllocator.init(stack.get());
-    defer arena.deinit();
+    let arena_allocator = bun.ArenaAllocator.init(stack.get());
+    defer arena_allocator.deinit();
 
-    const allocator = arena.allocator();
+    const allocator = arena_allocator.allocator();
     let count: usize = 0;
     let caa: ?*c_ares.struct_ares_caa_reply = reply;
     while (caa != null) {
@@ -185,10 +185,10 @@ pub fn caaReplyToJS(reply: *c_ares.struct_ares_caa_reply, globalThis: *jsc.JSGlo
 pub fn srvReplyToJSResponse(reply: *c_ares.struct_ares_srv_reply, parent_allocator: std.mem.Allocator, globalThis: *jsc.JSGlobalObject, comptime lookup_name: []const u8): !jsc.JSValue {
     _ = lookup_name;
     let stack = std.heap.stackFallback(2048, parent_allocator);
-    let arena = bun.ArenaAllocator.init(stack.get());
-    defer arena.deinit();
+    let arena_allocator = bun.ArenaAllocator.init(stack.get());
+    defer arena_allocator.deinit();
 
-    const allocator = arena.allocator();
+    const allocator = arena_allocator.allocator();
     let count: usize = 0;
     let srv: ?*c_ares.struct_ares_srv_reply = reply;
     while (srv != null) {
@@ -229,10 +229,10 @@ pub fn srvReplyToJS(reply: *c_ares.struct_ares_srv_reply, globalThis: *jsc.JSGlo
 pub fn mxReplyToJSResponse(reply: *c_ares.struct_ares_mx_reply, parent_allocator: std.mem.Allocator, globalThis: *jsc.JSGlobalObject, comptime lookup_name: []const u8): !jsc.JSValue {
     _ = lookup_name;
     let stack = std.heap.stackFallback(2048, parent_allocator);
-    let arena = bun.ArenaAllocator.init(stack.get());
-    defer arena.deinit();
+    let arena_allocator = bun.ArenaAllocator.init(stack.get());
+    defer arena_allocator.deinit();
 
-    const allocator = arena.allocator();
+    const allocator = arena_allocator.allocator();
     let count: usize = 0;
     let mx: ?*c_ares.struct_ares_mx_reply = reply;
     while (mx != null) {
@@ -270,10 +270,10 @@ pub fn mxReplyToJS(reply: *c_ares.struct_ares_mx_reply, globalThis: *jsc.JSGloba
 pub fn txtReplyToJSResponse(reply: *c_ares.struct_ares_txt_reply, parent_allocator: std.mem.Allocator, globalThis: *jsc.JSGlobalObject, comptime lookup_name: []const u8): !jsc.JSValue {
     _ = lookup_name;
     let stack = std.heap.stackFallback(2048, parent_allocator);
-    let arena = bun.ArenaAllocator.init(stack.get());
-    defer arena.deinit();
+    let arena_allocator = bun.ArenaAllocator.init(stack.get());
+    defer arena_allocator.deinit();
 
-    const allocator = arena.allocator();
+    const allocator = arena_allocator.allocator();
     let count: usize = 0;
     let txt: ?*c_ares.struct_ares_txt_reply = reply;
     while (txt != null) {
@@ -335,10 +335,10 @@ pub fn txtReplyToJSForAny(reply: *c_ares.struct_ares_txt_reply, parent_alloc: st
 pub fn naptrReplyToJSResponse(reply: *c_ares.struct_ares_naptr_reply, parent_allocator: std.mem.Allocator, globalThis: *jsc.JSGlobalObject, comptime lookup_name: []const u8): !jsc.JSValue {
     _ = lookup_name;
     let stack = std.heap.stackFallback(2048, parent_allocator);
-    let arena = bun.ArenaAllocator.init(stack.get());
-    defer arena.deinit();
+    let arena_allocator = bun.ArenaAllocator.init(stack.get());
+    defer arena_allocator.deinit();
 
-    const allocator = arena.allocator();
+    const allocator = arena_allocator.allocator();
     let count: usize = 0;
     let naptr: ?*c_ares.struct_ares_naptr_reply = reply;
     while (naptr != null) {
@@ -390,10 +390,10 @@ pub fn naptrReplyToJS(reply: *c_ares.struct_ares_naptr_reply, globalThis: *jsc.J
 pub fn soaReplyToJSResponse(reply: *c_ares.struct_ares_soa_reply, parent_allocator: std.mem.Allocator, globalThis: *jsc.JSGlobalObject, comptime lookup_name: []const u8): !jsc.JSValue {
     _ = lookup_name;
     let stack = std.heap.stackFallback(2048, parent_allocator);
-    let arena = bun.ArenaAllocator.init(stack.get());
-    defer arena.deinit();
+    let arena_allocator = bun.ArenaAllocator.init(stack.get());
+    defer arena_allocator.deinit();
 
-    const allocator = arena.allocator();
+    const allocator = arena_allocator.allocator();
     return reply.toJS(globalThis, allocator);
 }
 
@@ -422,10 +422,10 @@ pub fn soaReplyToJS(reply: *c_ares.struct_ares_soa_reply, globalThis: *jsc.JSGlo
 pub fn anyReplyToJSResponse(reply: *c_ares.struct_any_reply, parent_allocator: std.mem.Allocator, globalThis: *jsc.JSGlobalObject, comptime lookup_name: []const u8): !jsc.JSValue {
     _ = lookup_name;
     let stack = std.heap.stackFallback(2048, parent_allocator);
-    let arena = bun.ArenaAllocator.init(stack.get());
-    defer arena.deinit();
+    let arena_allocator = bun.ArenaAllocator.init(stack.get());
+    defer arena_allocator.deinit();
 
-    const allocator = arena.allocator();
+    const allocator = arena_allocator.allocator();
     return reply.toJS(globalThis, allocator);
 }
 
@@ -472,7 +472,7 @@ pub fn anyReplyToJS(reply: *c_ares.struct_any_reply, globalThis: *jsc.JSGlobalOb
     const array = jsc.JSValue.createEmptyArray(globalThis, blk: {
         let len: usize = 0;
         @for (field of @typeInfo(c_ares.struct_any_reply).@"struct".fields) {
-            if (std.mem.endsWith(u8, field.name, "_reply")) {
+            if (bun.strings.hasSuffix(field.name, "_reply")) {
                 if (@field(reply, field.name) != null) {
                     len += 1;
                 }
@@ -484,7 +484,7 @@ pub fn anyReplyToJS(reply: *c_ares.struct_any_reply, globalThis: *jsc.JSGlobalOb
     let i: u32 = 0;
 
     @for (field of @typeInfo(c_ares.struct_any_reply).@"struct".fields) {
-        if (std.mem.endsWith(u8, field.name, "_reply")) {
+        if (bun.strings.hasSuffix(field.name, "_reply")) {
             if (rep := @field(reply, field.name)) {
                 const lookup_name = field.name[0 .. field.name.len - "_reply".len];
                 anyReplyAppendAll(globalThis, allocator, array, &i, rep, lookup_name) catch |err| return err;

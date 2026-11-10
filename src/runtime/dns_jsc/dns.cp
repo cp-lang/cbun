@@ -26,7 +26,7 @@ pub const INET6_ADDRSTRLEN: usize = if (bun.Environment.isWindows) 65 else 46;
 pub const IANA_DNS_PORT: u16 = 53;
 
 pub struct LibInfo {
-    pub type GetaddrinfoAsyncStart = fn (*bun.mach_port, noalias node: [*:0]u8?!, noalias service: [*:0]u8?!, noalias hints: ?*const std.c.addrinfo, callback: *const GetAddrInfoAsyncCallback, noalias context: ?*anyopaque) callconv(.c) i32;
+    pub type GetaddrinfoAsyncStart = fn (*bun.mach_port, noalias node: ?[*:0]const u8, noalias service: ?[*:0]const u8, noalias hints: ?*const std.c.addrinfo, callback: *const GetAddrInfoAsyncCallback, noalias context: ?*anyopaque) callconv(.c) i32;
     pub type GetaddrinfoAsyncHandleReply = fn (?*bun.mach_port) callconv(.c) i32;
     pub type GetaddrinfoAsyncCancel = fn (?*bun.mach_port) callconv(.c) void;
 

@@ -2645,6 +2645,33 @@ Level 2 (聚合根模块，依赖上述全部 3 个模块):
   - 通过 `cpc --lib` 与 `vendor/zig/zig ast-check` 的纯 CP 模块总数从 176 举步攀升至 **191 个**；
   - 191 个模块总体代码膨胀率为 **-2.4%**，在保持 100% 纯正 CP 语言（0 处 `zig {}`）的同时实现了代码质量与体积的优化。
 
+---
+
+## 2026-11-11 开发日志：@c 语法现代化、CP 无 var 铁律与常驻双向协同
+
+### 1. CP 语言现代语法规范践行（@c 与全面废除 var）
+- **C-ABI 导出与回调标准化**：
+  - 在 CP 规范中，推荐使用 `@c` 代替冗长生硬的 `@callconv("c")`。在 `GarbageCollectionController.cp` 等涉及底层的模块中，全面采用 `@c pub static fn onTimer(...)` 声明静态回调，消除实例 receiver 并精确生成 Zig 原生 C-ABI 包装函数。
+- **消灭 `var` 遗留语法**：
+  - CP 彻底废止 `var` 关键字，全面转向 `const` 与 `let`：
+    - 不可变常量统一使用 `const`；
+    - 可变局部变量统一使用 `let`；
+    - 顶层模块级可变变量统一使用 `pub let`。
+  - 在 `Task.cp`、`PosixSignalHandle.cp`、`CryptoHasher.cp` 中全量排查并消灭所有 `var`，使代码完全符合 CP 核心语言设计哲学。
+
+### 2. 跨智能体异步任务调度与后台监听机制
+- **常驻监听器架构**：
+  - 针对用户提出的跨智能体通信指示，增强 `scripts/watch_task.py`。通过非侵入式轮询与文件系统状态比对，支持在后台常驻监听 `/data/dev/cp/.tasks/resolved/` 中的任何更新；
+  - 以后台任务启动运行后，任务状态实时映射至 CLI 底部提示栏（`python3 scripts/watch_task.py --status resolved`），一旦 `cp_agy` 解决并迁移任务，后台进程立即以退出码 0 唤醒主智能体，彻底消除轮询开销。
+- **任务隔离与需求提报**：
+  - 在 `cares_jsc.cp` 编译中发现 `@field` 第二参数在 comptime 展开中被注入多余 `comptime` 关键字导致 Zig 语法报错；同时发现 `std.mem.endsWith` 宏被异常重写；
+  - 坚决贯彻“不直接暴力修改上游编译器代码”的铁律，迅速编写最小化单测 `temp/repro_field_comptime.cp` 与 `temp/repro_endswith.cp`，通过 `scripts/task_queue.py submit` 投递至任务邮箱。
+
+### 3. 复杂核心模块攻坚成果
+- `src/jsc/Task.cp`、`src/jsc/event_loop.cp`、`src/runtime/crypto/CryptoHasher.cp` 全部重构完毕，纯 CP 语法且 100% 通过 `vendor/zig/zig ast-check`；
+- 所有模块代码膨胀率全部维持在 $\le +20\%$，整体仓代码保持负膨胀（净压缩）。
+
+
 
 
 

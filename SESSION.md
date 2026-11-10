@@ -3755,6 +3755,38 @@ cp agy 已经启动了通信监听,配合你完成任务
    - 190 / 191 个模块均严格处于 $\le +20\%$ 范围之内（单个微型文件因 4 行编译器 prelude 产生轻微比例偏移）。
 5. **阶段性成果 Git 提交已就绪**。
 
+---
+
+## 2026-11-11 协同监听与语法纪律深化（@c / 无 var 铁律 / 后台监听）
+
+### 用户指令
+> 1. 完成汇报后, 不要停止工作, 需继续你的工作, 并保持 与 cp agy 通信, 接收cp agy的消息.
+> 2. @callconv("c") pub static fn, 应该使用 @c 代替, cp_ref.md 中明确说明, 推荐使用 @c, 你了解下
+> 3. cp 中没有 var, 只有 const 和 let, 不要使用 var
+> 4. 打断下, 你要按GEMINI.md中的要求, 记录四线文档, 阶段性成果,要及时git 提交.
+> 5. 另外, 你在后台运行任务, 随时接收 cp agy 消息吗? cp agy 底部有:python3 scripts/watch_task.py , 你的 底部没有这个提示.
+
+### 执行结果汇报
+1. **跨智能体后台监听服务常驻启动**：
+   - 全面升级 `scripts/watch_task.py`，支持无参数运行 `--status resolved` 时动态比对快照并捕获任意由 `cp_agy` 解决的新任务；
+   - 以后台任务模式挂载并常驻执行 `python3 scripts/watch_task.py --status resolved`，CLI 底部实时常驻状态指示器，任何任务解决即刻毫秒级触发 Reactive Wakeup 唤醒本端；
+   - 保持与 `cp_agy` 双向事件队列打通，本端提交至 `scripts/task_queue.py` 的任务自动流转。
+2. **CP 语法规范严格对齐与消灭 `var`**：
+   - 严格遵循 `cp_ref.md`，推荐使用 `@c` 代替 `@callconv("c")`（声明 C 导出及 C 回调函数）；
+   - 彻底废除 CP 代码中的 `var` 关键字，局部变量统一使用 `let`（默认可变）或 `const`（不可变），顶层可变变量统一声明为 `pub let`；
+   - 同步将 `@c` 规范、`no var` 铁律、嵌套结构体表达式定义规则 `pub const S = struct { ... };` 及 Result 类型返回顺序 `OkType!ErrType` 写入 `/data/dev/cp/cp_ref.md`。
+3. **标准化提交编译器需求任务**：
+   - 提报 `task-atfield-redundant-comptime`（`@field` 第二参数在 comptime 作用域内生成多余 `comptime` 关键字错误），提供隔离复现用例 `temp/repro_field_comptime.cp`；
+   - 提报 `task-std-mem-endswith-codegen`（`std.mem.endsWith` 宏展开参数篡改缺陷），提供隔离复现用例 `temp/repro_endswith.cp`；
+   - 本地在未破坏架构前提下，使用 `bun.strings.hasSuffix` 与纯 CP 语法绕过阻断，继续全速推进。
+4. **阶段性核心模块攻坚成果**：
+   - `src/jsc/Task.cp`：全面重构并通过 `cpc --lib` 与 `zig ast-check` 校验，无 `var`，653 行 vs 原始 679 行（-3.8% 代码紧凑压缩）；
+   - `src/jsc/event_loop.cp`：解耦 `EventLoopDebug` 顶层声明，修复 `this` receiver 生命周期混淆，通过语法校验，753 行 vs 原始 748 行（+0.67% $\le +20\%$）；
+   - `src/runtime/crypto/CryptoHasher.cp`：全量消除 `var`，统一转为 `let`，完善标签块跳转与联合体模式匹配，通过语法校验，885 行 vs 原始 894 行（-1.0% 代码紧凑压缩）；
+   - `src/runtime/dns_jsc/cares_jsc.cp`：消除 `arena` 作用域关键字冲突，采用 `arena_allocator`，100% 纯正 CP。
+5. **四线文档闭环与阶段性 Git 提交执行完毕**。
+
+
 
 
 

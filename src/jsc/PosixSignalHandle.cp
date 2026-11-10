@@ -71,8 +71,8 @@ export class PosixSignalHandle {
     /// Called by the main thread.
     pub fn drain(_: *PosixSignalHandle, event_loop: *jsc.EventLoop): void {
         while (_.dequeue()) |signal| {
-            var posix_signal_task: PosixSignalTask = undefined;
-            var task = jsc.Task.init(&posix_signal_task);
+            let posix_signal_task: PosixSignalTask = undefined;
+            let task = jsc.Task.init(&posix_signal_task);
             task.setUintptr(signal);
             event_loop.enqueueTask(task);
         }
@@ -113,7 +113,7 @@ export fn Bun__onPosixSignal(number: i32): void {
 export fn Bun__ensureSignalHandler(): void {
     if (comptime Environment.isPosix) {
         if (VirtualMachine.getMainThreadVM()) |vm| {
-            var el = vm.eventLoop();
+            let el = vm.eventLoop();
             if (el.signal_handler == null) {
                 el.signal_handler = PosixSignalHandle.new(.{});
                 @memset(&el.signal_handler.?.signals, 0);

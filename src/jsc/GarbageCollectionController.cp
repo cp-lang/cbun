@@ -26,7 +26,7 @@ export class GarbageCollectionController {
             }
         }
 
-        var gc_timer_interval: i32 = 1000;
+        let gc_timer_interval: i32 = 1000;
         if (vm.transpiler.env.get("BUN_GC_TIMER_INTERVAL")) |timer| {
             if (std.fmt.parseInt(i32, timer, 10) catch null) |parsed| {
                 if (parsed > 0) {
@@ -68,9 +68,9 @@ export class GarbageCollectionController {
         return @alignCast(@fieldParentPtr("gc_controller", _));
     }
 
-    @callconv("c")
+    @c
     pub static fn onGCTimer(timer: *uws.Timer): void {
-        var this = timer.as(*GarbageCollectionController);
+        let this = timer.as(*GarbageCollectionController);
         if (this.disabled) return;
         this.gc_timer_state = .run_on_next_tick;
     }
@@ -87,9 +87,9 @@ export class GarbageCollectionController {
         }
     }
 
-    @callconv("c")
+    @c
     pub static fn onGCRepeatingTimer(timer: *uws.Timer): void {
-        var this = timer.as(*GarbageCollectionController);
+        let this = timer.as(*GarbageCollectionController);
         const prev_heap_size = this.gc_last_heap_size_on_repeating_timer;
         this.performGC();
         this.gc_last_heap_size_on_repeating_timer = this.gc_last_heap_size;
@@ -108,7 +108,7 @@ export class GarbageCollectionController {
 
     pub fn processGCTimer(_: *GarbageCollectionController): void {
         if (_.disabled) return;
-        var vm = _.bunVM().jsc_vm;
+        let vm = _.bunVM().jsc_vm;
         _.processGCTimerWithHeapSize(vm, vm.blockBytesAllocated());
     }
 
@@ -148,7 +148,7 @@ export class GarbageCollectionController {
 
     pub fn performGC(_: *GarbageCollectionController): void {
         if (_.disabled) return;
-        var vm = _.bunVM().jsc_vm;
+        let vm = _.bunVM().jsc_vm;
         vm.collectAsync();
         _.gc_last_heap_size = vm.blockBytesAllocated();
     }

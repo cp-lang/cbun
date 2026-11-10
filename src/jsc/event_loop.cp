@@ -5,6 +5,35 @@ const bun = @import("bun");
 
 const tickQueueWithCount = @import("./Task.zig").tickQueueWithCount;
 const Waker = bun.Async.Waker;
+const log = Output.scoped(.EventLoop, .hidden);
+
+pub const EventLoopDebug = if (Environment.isDebug) struct {
+    is_inside_tick_queue: bool = false,
+    js_call_count_outside_tick_queue: usize = 0,
+    drain_microtasks_count_outside_tick_queue: usize = 0,
+    _prev_is_inside_tick_queue: bool = false,
+    last_fn_name: bun.String = bun.String.empty,
+    track_last_fn_name: bool = false,
+
+    pub fn enter(self: *EventLoopDebug) void {
+        self._prev_is_inside_tick_queue = self.is_inside_tick_queue;
+        self.is_inside_tick_queue = true;
+        self.js_call_count_outside_tick_queue = 0;
+        self.drain_microtasks_count_outside_tick_queue = 0;
+    }
+
+    pub fn exit(self: *EventLoopDebug) void {
+        self.is_inside_tick_queue = self._prev_is_inside_tick_queue;
+        self._prev_is_inside_tick_queue = false;
+        self.js_call_count_outside_tick_queue = 0;
+        self.drain_microtasks_count_outside_tick_queue = 0;
+        self.last_fn_name.deref();
+        self.last_fn_name = bun.String.empty;
+    }
+} else struct {
+    pub inline fn enter(_: EventLoopDebug) void {}
+    pub inline fn exit(_: EventLoopDebug) void {}
+};
 
 export class EventLoop {
     tasks: Queue = undefined;
@@ -21,40 +50,14 @@ export class EventLoop {
     deferred_tasks: DeferredTaskQueue = .{};
     uws_loop: if (Environment.isWindows) ?*uws.Loop else void = if (Environment.isWindows) null;
 
-    debug: Debug = .{};
+    debug: EventLoopDebug = .{};
     entered_event_loop_count: isize = 0;
     concurrent_ref: std.atomic.Value(i32) = std.atomic.Value(i32).init(0);
     imminent_gc_timer: std.atomic.Value(?*Timer.WTFTimer) = .{ .raw = null };
 
     signal_handler: if (Environment.isPosix) ?*PosixSignalHandle else void = if (Environment.isPosix) null;
 
-    pub const Debug = if (Environment.isDebug) struct {
-        is_inside_tick_queue: bool = false,
-        js_call_count_outside_tick_queue: usize = 0,
-        drain_microtasks_count_outside_tick_queue: usize = 0,
-        _prev_is_inside_tick_queue: bool = false,
-        last_fn_name: bun.String = bun.String.empty,
-        track_last_fn_name: bool = false,
-
-        pub fn enter(_: *Debug): void {
-            _._prev_is_inside_tick_queue = _.is_inside_tick_queue;
-            _.is_inside_tick_queue = true;
-            _.js_call_count_outside_tick_queue = 0;
-            _.drain_microtasks_count_outside_tick_queue = 0;
-        }
-
-        pub fn exit(_: *Debug): void {
-            _.is_inside_tick_queue = _._prev_is_inside_tick_queue;
-            _._prev_is_inside_tick_queue = false;
-            _.js_call_count_outside_tick_queue = 0;
-            _.drain_microtasks_count_outside_tick_queue = 0;
-            _.last_fn_name.deref();
-            _.last_fn_name = bun.String.empty;
-        }
-    } else struct {
-        pub inline fn enter(_: Debug): void {}
-        pub inline fn exit(_: Debug): void {}
-    };
+    pub const Debug = EventLoopDebug;
 
     pub fn enter(_: *EventLoop): void {
         log("enter() = {d}", .{_.entered_event_loop_count});
@@ -75,7 +78,7 @@ export class EventLoop {
         _.entered_event_loop_count -= 1;
     }
 
-    pub fn exitMaybeDrainMicrotasks(_: *EventLoop, allow_drain_microtask: bool): bun.JSTerminated!void {
+    pub fn exitMaybeDrainMicrotasks(_: *EventLoop, allow_drain_microtask: bool): void!bun.JSTerminated {
         const count = _.entered_event_loop_count;
         log("exit() = {d}", .{count - 1});
 
@@ -97,7 +100,6 @@ export class EventLoop {
     }
 
     pub const Queue = bun.LinearFifo(Task, .Dynamic);
-    const log = Output.scoped(.EventLoop, .hidden);
 
     pub fn tickWhilePaused(_: *EventLoop, done: *bool): void {
         while (!done.*) {
@@ -109,9 +111,9 @@ export class EventLoop {
         success = 0,
         JSTerminated = 1,
     };
-    extern fn JSC__JSGlobalObject__drainMicrotasks(*jsc.JSGlobalObject): DrainMicrotasksResult;
+    extern fn JSC__JSGlobalObject__drainMicrotasks(global: *jsc.JSGlobalObject): DrainMicrotasksResult;
 
-    pub fn drainMicrotasksWithGlobal(_: *EventLoop, globalObject: *jsc.JSGlobalObject, jsc_vm: *jsc.VM): bun.JSTerminated!void {
+    pub fn drainMicrotasksWithGlobal(_: *EventLoop, globalObject: *jsc.JSGlobalObject, jsc_vm: *jsc.VM): void!bun.JSTerminated {
         if (_.virtual_machine.suppress_microtask_drain) return;
 
         jsc.markBinding(@src());
@@ -135,7 +137,7 @@ export class EventLoop {
         }
     }
 
-    pub fn drainMicrotasks(_: *EventLoop): bun.JSTerminated!void {
+    pub fn drainMicrotasks(_: *EventLoop): void!bun.JSTerminated {
         try _.drainMicrotasksWithGlobal(_.global, _.virtual_machine.jsc_vm);
     }
 
@@ -145,25 +147,25 @@ export class EventLoop {
         }
     }
 
-    pub fn runCallback(_: *EventLoop, callback: jsc.JSValue, globalObject: *jsc.JSGlobalObject, thisValue: jsc.JSValue, arguments: []const jsc.JSValue): void {
+    pub fn runCallback(_: *EventLoop, callback: jsc.JSValue, globalObject: *jsc.JSGlobalObject, recv: jsc.JSValue, arguments: []const jsc.JSValue): void {
         _.enter();
         defer _.exit();
-        _ = callback.call(globalObject, thisValue, arguments) catch |err|
+        _ = callback.call(globalObject, recv, arguments) catch |err|
             globalObject.reportActiveExceptionAsUnhandled(err);
     }
 
-    pub fn runCallbackWithResultAndForcefullyDrainMicrotasks(_: *EventLoop, callback: jsc.JSValue, globalObject: *jsc.JSGlobalObject, thisValue: jsc.JSValue, arguments: []const jsc.JSValue): !jsc.JSValue {
-        const result = try callback.call(globalObject, thisValue, arguments);
+    pub fn runCallbackWithResultAndForcefullyDrainMicrotasks(_: *EventLoop, callback: jsc.JSValue, globalObject: *jsc.JSGlobalObject, recv: jsc.JSValue, arguments: []const jsc.JSValue): !jsc.JSValue {
+        const result = try callback.call(globalObject, recv, arguments);
         result.ensureStillAlive();
         try _.drainMicrotasksWithGlobal(globalObject, globalObject.bunVM().jsc_vm);
         return result;
     }
 
-    pub fn runCallbackWithResult(_: *EventLoop, callback: jsc.JSValue, globalObject: *jsc.JSGlobalObject, thisValue: jsc.JSValue, arguments: []const jsc.JSValue): jsc.JSValue {
+    pub fn runCallbackWithResult(_: *EventLoop, callback: jsc.JSValue, globalObject: *jsc.JSGlobalObject, recv: jsc.JSValue, arguments: []const jsc.JSValue): jsc.JSValue {
         _.enter();
         defer _.exit();
 
-        const result = callback.call(globalObject, thisValue, arguments) catch |err| {
+        const result = callback.call(globalObject, recv, arguments) catch |err| {
             globalObject.reportActiveExceptionAsUnhandled(err);
             return .zero;
         };
@@ -171,18 +173,18 @@ export class EventLoop {
     }
 
     fn tickWithCount(_: *EventLoop, virtual_machine: *VirtualMachine): u32 {
-        var counter: u32 = 0;
+        let counter: u32 = 0;
         _.tickQueueWithCount(virtual_machine, &counter) catch {};
         return counter;
     }
 
     pub fn tickImmediateTasks(_: *EventLoop, virtual_machine: *VirtualMachine): void {
-        var to_run_now = _.immediate_tasks;
+        let to_run_now = _.immediate_tasks;
 
         _.immediate_tasks = _.next_immediate_tasks;
         _.next_immediate_tasks = .{};
 
-        var exception_thrown = false;
+        let exception_thrown = false;
         for (to_run_now.items) |task| {
             exception_thrown = task.runImmediateTask(virtual_machine);
         }
@@ -216,7 +218,7 @@ export class EventLoop {
 
     fn updateCounts(_: *EventLoop): void {
         const delta = _.concurrent_ref.swap(0, .seq_cst);
-        const loop = _.virtual_machine.event_loop_handle.?;
+        let loop = _.virtual_machine.event_loop_handle.?;
         if (comptime Environment.isWindows) {
             if (delta > 0) {
                 loop.addActive(@intCast(delta));
@@ -225,11 +227,13 @@ export class EventLoop {
             }
         } else {
             if (delta > 0) {
-                loop.num_polls += @intCast(delta);
-                loop.active +|= @as(u32, @intCast(delta));
+                const d: u32 = @intCast(delta);
+                loop.num_polls += d;
+                loop.active = std.math.add(u32, loop.active, d) catch std.math.maxInt(u32);
             } else {
-                loop.num_polls -= @intCast(-delta);
-                loop.active -|= @as(u32, @intCast(-delta));
+                const d: u32 = @intCast(-delta);
+                loop.num_polls -= d;
+                loop.active = std.math.sub(u32, loop.active, d) catch 0;
             }
         }
     }
@@ -251,21 +255,21 @@ export class EventLoop {
 
         _.runImminentGCTimer();
 
-        var concurrent = _.concurrent_tasks.popBatch();
+        let concurrent = _.concurrent_tasks.popBatch();
         const count = concurrent.count;
         if (count == 0)
             return 0;
 
-        var iter = concurrent.iterator();
+        let iter = concurrent.iterator();
         const start_count = _.tasks.count;
         if (start_count == 0) {
             _.tasks.head = 0;
         }
 
         _.tasks.ensureUnusedCapacity(count) catch unreachable;
-        var writable = _.tasks.writableSlice(0);
+        let writable = _.tasks.writableSlice(0);
 
-        var to_destroy: ?*ConcurrentTask = null;
+        let to_destroy: ?*ConcurrentTask = null;
 
         while (iter.next()) |task| {
             if (to_destroy) |dest| {
@@ -299,8 +303,8 @@ export class EventLoop {
     }
 
     pub fn autoTick(_: *EventLoop): void {
-        const loop = _.usocketsLoop();
-        const ctx = _.virtual_machine;
+        const loop = (if (comptime Environment.isWindows) _.uws_loop.? else _.virtual_machine.event_loop_handle.?);
+        let ctx = _.virtual_machine;
 
         _.tickImmediateTasks(ctx);
         if (comptime Environment.isWindows) {
@@ -323,8 +327,8 @@ export class EventLoop {
 
         if (loop.isActive()) {
             _.processGCTimer();
-            var event_loop_sleep_timer = if (comptime Environment.isDebug) std.time.Timer.start() catch unreachable;
-            var timespec: bun.timespec = if (Environment.isDebug) .{ .sec = 0, .nsec = 0 } else undefined;
+            let event_loop_sleep_timer = if (comptime Environment.isDebug) std.time.Timer.start() catch unreachable;
+            let timespec: bun.timespec = if (Environment.isDebug) .{ .sec = 0, .nsec = 0 } else undefined;
             loop.tickWithTimeout(if (ctx.timer.getTimeout(&timespec, ctx)) &timespec else null);
 
             if (comptime Environment.isDebug) {
@@ -346,8 +350,8 @@ export class EventLoop {
     }
 
     pub fn tickPossiblyForever(_: *EventLoop): void {
-        const ctx = _.virtual_machine;
-        const loop = _.usocketsLoop();
+        let ctx = _.virtual_machine;
+        const loop = (if (comptime Environment.isWindows) _.uws_loop.? else _.virtual_machine.event_loop_handle.?);
 
         if (comptime Environment.isPosix) {
             const pending_unref = ctx.pending_unref_counter;
@@ -359,9 +363,12 @@ export class EventLoop {
 
         if (!loop.isActive()) {
             if (_.forever_timer == null) {
-                var t = uws.Timer.create(loop, _);
-                t.set(_, &noopForeverTimer, 1000 * 60 * 4, 1000 * 60 * 4);
-                _.forever_timer = t;
+                unsafe {
+                    const self_ptr: *any! = @ptrCast(_);
+                    let t = uws.Timer.create(loop, self_ptr);
+                    t.set(self_ptr, &noopForeverTimer, 1000 * 60 * 4, 1000 * 60 * 4);
+                    _.forever_timer = t;
+                }
             }
         }
 
@@ -375,8 +382,8 @@ export class EventLoop {
     }
 
     pub fn autoTickActive(_: *EventLoop): void {
-        var loop = _.usocketsLoop();
-        var ctx = _.virtual_machine;
+        let loop = (if (comptime Environment.isWindows) _.uws_loop.? else _.virtual_machine.event_loop_handle.?);
+        let ctx = _.virtual_machine;
 
         _.tickImmediateTasks(ctx);
         if (comptime Environment.isWindows) {
@@ -397,7 +404,7 @@ export class EventLoop {
 
         if (loop.isActive()) {
             _.processGCTimer();
-            var timespec: bun.timespec = undefined;
+            let timespec: bun.timespec = undefined;
 
             loop.tickWithTimeout(if (ctx.timer.getTimeout(&timespec, ctx)) &timespec else null);
         } else {
@@ -417,7 +424,7 @@ export class EventLoop {
 
     pub fn tick(_: *EventLoop): void {
         jsc.markBinding(@src());
-        var scope: jsc.TopExceptionScope = undefined;
+        let scope: jsc.TopExceptionScope = undefined;
         scope.init(_.global, @src());
         defer scope.deinit();
         _.entered_event_loop_count += 1;
@@ -427,7 +434,7 @@ export class EventLoop {
             _.debug.exit();
         }
 
-        const ctx = _.virtual_machine;
+        let ctx = _.virtual_machine;
         _.tickConcurrent();
         _.processGCTimer();
 
@@ -435,14 +442,14 @@ export class EventLoop {
         const global_vm = ctx.jsc_vm;
 
         while (true) {
-            while (_.tickWithCount(ctx) > 0) : (_.global.handleRejectedPromises()) {
+            while (_.tickWithCount(ctx) > 0) {
                 _.tickConcurrent();
-            } else {
-                _.drainMicrotasksWithGlobal(global, global_vm) catch return;
-                if (scope.hasException()) return;
-                _.tickConcurrent();
-                if (_.tasks.count > 0) continue;
+                _.global.handleRejectedPromises();
             }
+            _.drainMicrotasksWithGlobal(global, global_vm) catch return;
+            if (scope.hasException()) return;
+            _.tickConcurrent();
+            if (_.tasks.count > 0) continue;
             break;
         }
 
@@ -456,7 +463,7 @@ export class EventLoop {
     pub fn tickTasksOnly(_: *EventLoop): void {
         _.tickConcurrent();
 
-        const vm = _.virtual_machine;
+        let vm = _.virtual_machine;
         const prev = vm.suppress_microtask_drain;
         vm.suppress_microtask_drain = true;
         defer vm.suppress_microtask_drain = prev;
@@ -597,31 +604,25 @@ export class EventLoop {
     }
 }
 
-fn noopForeverTimer(_: *uws.Timer) callconv(.c): void {}
+@c fn noopForeverTimer(_: *uws.Timer): void {}
 
-fn externRunCallback1(global: *jsc.JSGlobalObject, callback: jsc.JSValue, thisValue: jsc.JSValue, arg0: jsc.JSValue) callconv(.c): void {
-    const vm = global.bunVM();
-    var loop = vm.eventLoop();
-    loop.runCallback(callback, global, thisValue, &.{arg0});
+@c fn externRunCallback1(global: *jsc.JSGlobalObject, callback: jsc.JSValue, recv: jsc.JSValue, arg0: jsc.JSValue): void {
+    global.bunVM().eventLoop().runCallback(callback, global, recv, &.{arg0});
 }
 
-fn externRunCallback2(global: *jsc.JSGlobalObject, callback: jsc.JSValue, thisValue: jsc.JSValue, arg0: jsc.JSValue, arg1: jsc.JSValue) callconv(.c): void {
-    const vm = global.bunVM();
-    var loop = vm.eventLoop();
-    loop.runCallback(callback, global, thisValue, &.{ arg0, arg1 });
+@c fn externRunCallback2(global: *jsc.JSGlobalObject, callback: jsc.JSValue, recv: jsc.JSValue, arg0: jsc.JSValue, arg1: jsc.JSValue): void {
+    global.bunVM().eventLoop().runCallback(callback, global, recv, &.{ arg0, arg1 });
 }
 
-fn externRunCallback3(global: *jsc.JSGlobalObject, callback: jsc.JSValue, thisValue: jsc.JSValue, arg0: jsc.JSValue, arg1: jsc.JSValue, arg2: jsc.JSValue) callconv(.c): void {
-    const vm = global.bunVM();
-    var loop = vm.eventLoop();
-    loop.runCallback(callback, global, thisValue, &.{ arg0, arg1, arg2 });
+@c fn externRunCallback3(global: *jsc.JSGlobalObject, callback: jsc.JSValue, recv: jsc.JSValue, arg0: jsc.JSValue, arg1: jsc.JSValue, arg2: jsc.JSValue): void {
+    global.bunVM().eventLoop().runCallback(callback, global, recv, &.{ arg0, arg1, arg2 });
 }
 
-fn externEnter(global: *jsc.JSGlobalObject) callconv(.c): void {
+@c fn externEnter(global: *jsc.JSGlobalObject): void {
     global.bunVM().eventLoop().enter();
 }
 
-fn externExit(global: *jsc.JSGlobalObject) callconv(.c): void {
+@c fn externExit(global: *jsc.JSGlobalObject): void {
     global.bunVM().eventLoop().exit();
 }
 
