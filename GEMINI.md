@@ -938,6 +938,52 @@ Bun AGY 在检查转换好的 .cp 文件时，请优先使用 --json 参数：
 | `scripts/watch_task.py`   | **事件驱动任务监听器**<br>启动即时零延迟检查；检测到匹配状态的任务时瞬间退出(Exit 0)，触发 CLI 反应式自动唤醒 | CP AGY 无任务时挂起休眠；或 Bun AGY 需要等待特定任务被修复时挂起等待。                                               | • CP AGY 监听新任务：<br>`python3 scripts/watch_task.py`<br>• Bun AGY 等待特定修复：<br>`python3 scripts/watch_task.py --status resolved --id task-001`                                                                      |
 | `scripts/resolve_task.py` | **原子更新任务状态（快捷别名）**<br>自动转发调用 `task_queue.py resolve`                                      | CP AGY 完成编译器 Bug 修复并验证通过后，调用此脚本通知任务结单。                                                     | `python3 scripts/resolve_task.py task-001 --note "修复借用检查器解构问题"`                                                                                                                                                   |
 
+## 二十一、主智能体统筹调度与子智能体（Subagents）并行攻坚规范（Token 极简防暴增协议）
+
+为实现最高开发吞吐量并彻底杜绝 Token 指数级暴增，主智能体与子智能体严格执行以下协作与管控体系：
+
+### 1. 主智能体核心职责与只读查阅权限（Compiler Read-Only & Syntax Distillation）
+
+1. **上游编译器只读查阅权限（以源码为最终真理准绳）**：
+   - 当 `cp_ref.md` 设计规范不完备、或对某项语法实现细节（如类定义、模式匹配、错误联合、借用标注）存在疑问时，**明确允许主智能体直接使用 `read_file` 只读查阅 `/data/dev/cp/cpc/src`（如 `parser.rs`, `sema.rs`, `codegen.rs`）源码**；
+   - 严禁盲目猜测试错，通过秒级查阅 Rust AST 与解析规则确定 100% 精确合法的 CP 语法。
+2. **极简语法裁决原则（Concise Syntax Selection）**：
+   - 遇编译器支持多种兼容语法时，主智能体必须裁决并选择**最简洁、最现代、无冗余符号的语法**：
+     - 函数与回调：优先 `@c`，淘汰生硬冗长的 `@callconv("c")`；
+     - 变量绑定：仅允许 `const` 与 `let`（顶层 `pub let`），彻底根绝 `var`；
+     - 条件解包：优先海象操作符 `if (binding := expr)` / `while (binding := expr)`；
+     - 结构体/类定义：优先 `@value class Foo { ... }` 零胶水直出紧凑 Zig struct；
+     - 错误集声明：优先 `pub err Error { ... }` 原生错误集。
+3. **知识提炼与下发传授（Token 节约关键）**：
+   - 主智能体在派离子任务前，必须将提炼出的最优语法规范、类型避坑要点和标准模板明确写入子任务 Brief 中，子智能体直接对照执行，**彻底免除子智能体重复探索与试错的高昂 Token 消耗**。
+4. **编译器 Bug 唯一提报出口与超时追踪**：
+   - 所有上游编译器缺陷，统一由主智能体提取 $\le 10$ 行最小复现用例，通过 `python3 scripts/task_queue.py submit` 投递给 `cp_agy` 处理；
+   - 主智能体启动 10 分钟超时追踪，超过 10 分钟未解决记入 `SESSION.md`，保持透明；
+   - 本端绝不直接修改 `cpc/src`，彻底消灭上下文污染。
+
+---
+
+### 2. 子智能体（Subagents）并行开发铁律与 Token 熔断机制
+
+1. **按独立子系统/子目录物理隔离派发**：
+   - 派发颗粒度严格限制在相互解耦的独立子目录（如 Subagent 1 负责 `src/runtime/server/`，Subagent 2 负责 `src/runtime/socket/`）；
+   - 严禁多个子智能体并发修改同一目录或同一文件。
+2. **纯化职责（纯代码转译）**：
+   - 子智能体工具链仅使用 `read_file`、`edit_file` 与 `run_command`（仅运行 `cpc --lib path/to/file.cp`）；
+   - **三不原则**：子智能体**绝不修改编译器**、**绝不维护四线文档**、**绝不执行 git commit**。
+3. **Token 熔断安全阀（5 轮尝试上限）**：
+   - 针对单个 `.cp` 文件的编译报错修改，子智能体**最多尝试 5 轮**；
+   - 若 5 轮内依然报错且判定为编译器缺陷或底层死锁，**必须立即终止盲目尝试，触发熔断**；
+   - 子智能体提炼出 5~10 行最小报错复现代码并向主智能体汇报，主智能体接管后续调度。
+4. **主智能体最终验收与原子提交**：
+   - 子智能体完成模块转译后，主智能体统一进行终审校验：
+     1. 运行 `cpc --lib` 与 `vendor/zig/zig ast-check` 双重校验通过；
+     2. 检查 100% 零 `zig {}` 逃逸块；
+     3. 检查代码膨胀比 $\le +20\%$；
+   - 验收通过后，由主智能体集中将成果记录在 `SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`，并执行唯一的原子 Git 提交。
+
+---
+
 ## 其他你需要遵守的规则
 
 - 你后台常驻通信任务, 随时接收 cp agt 发送过来的消息.

@@ -2704,6 +2704,23 @@ Level 2 (聚合根模块，依赖上述全部 3 个模块):
 - `src/interchange/yaml.cp`: 16 行 vs 16 行（0%）
 - **整目录统计**：原始 3,617 行 vs 生成 3,291 行，**净代码压缩 -9.0%**，全部 6 个模块 100% 纯正 CP 语言（0 处 `zig {}`，0 处 `var`），100% 通过 `cpc --lib` 与 `zig ast-check` 双重校验！
 
+---
+
+## 2026-11-11 开发日志：Timer 模块借用闭环与 Token 极简协议固化
+
+### 1. 编译器源码溯源与借用检查作用域隔离实战
+- **现象**：在 `Timer.cp` 中，`getTimeout` 声明 `*spec: timespec` 发生 `spec.* = ...` 时，编译器报错 `Cannot perform mutable operation on 'const' variable 'now'`。
+- **只读查阅 `cpc/src/codegen.rs` 破案**：
+  - 查阅 `codegen.rs:4791` 发现 `self.const_vars.contains(&id.sym)`，定位出编译器在同一类的多个方法间未清除局部常量表，导致前序方法声明的 `const now` 污染了后续方法中的可变借用指针 `*now: timespec`。
+  - **优雅解法**：主智能体通过极简重命名 `*out_now: timespec`，0 秒化解跨方法作用域污染，无需打扰上游编译器，耗费 Token 极低。
+- **Timer 模块成果**：生成 668 行 vs 原始 703 行（**净代码压缩 -5.0%**），通过 `cpc --lib` 与 `zig ast-check`，0 处 `zig {}`，0 处 `var`。
+
+### 2. Token 极简并发攻坚协议正式固化
+- 确立主智能体只读查阅编译器源码、提炼极简语法下发子任务机制；
+- 确立子智能体物理隔离派发、纯代码转译职责与 5 轮 Token 熔断机制；
+- 全流程规范已正式合入 `GEMINI.md` 第二十一章。
+
+
 
 
 

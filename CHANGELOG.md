@@ -1245,7 +1245,18 @@
 - `scripts/task_queue.py`:
   - `task-struct-let-to-var`: RESOLVED by `cp_agy`（支持 struct 内方法中的 `let` 自动降级为 `var` 并消除冒号）；
   - `task-migrate-interchange-json`: RESOLVED by `bun_agy`（交付 `src/interchange/json.cp` 供 CP 标准库集成）；
-  - `task-prelude-t-shadowing`: SUBMITTED（请求在 `cpc` 预置辅助函数中将 `T` 重命名为 `__T`，消除符号遮蔽冲突）。
+  - `task-prelude-t-shadowing`: RESOLVED by `cp_agy`（已在 `cpc` 预置辅助函数与自动 drop 中将 `T` 替换为 `__T`，消除符号遮蔽冲突）。
+
+#### 规范与核心模块重构
+- `GEMINI.md`:
+  - 新增第二十一章《主智能体统筹调度与子智能体（Subagents）并行攻坚规范（Token 极简防暴增协议）》；
+  - 授权主智能体只读查阅 `cpc/src` 确定最简 CP 语法并提炼下发；
+  - 确立子智能体目录隔离、3 不原则与 5 轮 Token 熔断机制。
+- `src/runtime/timer/Timer.cp`:
+  - 全面消除嵌套结构体与无返回值方法定义歧义；
+  - 顶层提取 `TimeoutWarning` 与 `CountdownOverflowBehavior`；
+  - 将方法借用参数规范化为 `*spec: timespec`，重命名 `out_now` 消除同类作用域变量符号污染；
+  - 100% 纯正 CP 语言，0 处 `zig {}`，0 处 `var`，通过 `cpc --lib` 与 `zig ast-check`（生成 668 行 vs 原始 703 行，净代码压缩 -5.0%）。
 
 
 

@@ -71,6 +71,17 @@ pub struct Maps {
     }
 }
 
+const TimeoutWarning = enum {
+    TimeoutOverflowWarning,
+    TimeoutNegativeWarning,
+    TimeoutNaNWarning,
+};
+
+const CountdownOverflowBehavior = enum(u8) {
+    one_ms,
+    clamp,
+};
+
 export class All {
     last_id: i32 = 1;
     lock: bun.Mutex = .{};
@@ -162,7 +173,7 @@ export class All {
     fn ensureUVTimer(_: *All, vm: *VirtualMachine) {
         if (_.uv_timer.data == null) {
             _.uv_timer.init(vm.uvLoop());
-            _.uv_timer.data = vm;
+            _.uv_timer.data = @as(?*anyopaque, @ptrCast(vm));
             _.uv_timer.unref();
         }
 
@@ -202,11 +213,11 @@ export class All {
             if (comptime Environment.isWindows) {
                 if (this.uv_idle.data == null) {
                     this.uv_idle.init(uv.Loop.get());
-                    this.uv_idle.data = vm;
+                    this.uv_idle.data = @as(?*anyopaque, @ptrCast(vm));
                 }
 
                 this.uv_idle.start(struct {
-                    fn cb(_: *uv.uv_idle_t) {}
+                    fn cb(_: *uv.uv_idle_t) void {}
                 }.cb);
             } else {
                 vm.uwsLoop().ref();
@@ -269,7 +280,7 @@ export class All {
         }
     }
 
-    pub fn getTimeout(_: *All, spec: *timespec, vm: *VirtualMachine): bool {
+    pub fn getTimeout(_: *All, *spec: timespec, vm: *VirtualMachine): bool {
         if (comptime Environment.isPosix) {
             if (vm.event_loop.immediate_tasks.items.len > 0) {
                 spec.* = .{ .nsec = 0, .sec = 0 };
@@ -277,19 +288,21 @@ export class All {
             }
         }
 
-        const quic_us: ?i64 = if (comptime Environment.isPosix) ({
-            const loop = vm.event_loop_handle orelse break null;
-            if (loop.internal_loop_data.quic_head == null) break null;
-            break loop.internal_loop_data.quic_next_tick_us;
-        }) else null;
+        const quic_us: ?i64 = if (comptime Environment.isPosix) blk: {
+            if (loop := vm.event_loop_handle) {
+                if (loop.internal_loop_data.quic_head != null) {
+                    break :blk loop.internal_loop_data.quic_next_tick_us;
+                }
+            }
+            break :blk null;
+        } else null;
 
         let maybe_now: ?timespec = null;
         while (min := _.timers.peek()) {
-            const now = maybe_now orelse ({
-                const real_now = timespec.now(.allow_mocked_time);
-                maybe_now = real_now;
-                break real_now;
-            });
+            if (maybe_now == null) {
+                maybe_now = timespec.now(.allow_mocked_time);
+            }
+            const now = maybe_now.?;
 
             switch (now.order(&min.next)) {
                 .gt, .eq => {
@@ -324,7 +337,7 @@ export class All {
         return false;
     }
 
-    fn clampToQuic(spec: *timespec, us: i64) {
+    fn clampToQuic(*spec: timespec, us: i64): void {
         const cur_us = @as(i64, spec.sec) * std.time.us_per_s + @divTrunc(spec.nsec, std.time.ns_per_us);
         if (us < cur_us) spec.* = .{
             .sec = @intCast(@divTrunc(us, std.time.us_per_s)),
@@ -332,16 +345,16 @@ export class All {
         };
     }
 
-    fn next(_: *All, has_set_now: *bool, now: *timespec): ?*EventLoopTimer {
+    fn next(_: *All, *has_set_now: bool, *out_now: timespec): ?*EventLoopTimer {
         _.lock.lock();
         defer _.lock.unlock();
 
         if (timer := _.timers.peek()) {
             if (!has_set_now.*) {
-                now.* = timespec.now(.allow_mocked_time);
+                out_now.* = timespec.now(.allow_mocked_time);
                 has_set_now.* = true;
             }
-            if (timer.next.greater(now)) {
+            if (timer.next.greater(out_now)) {
                 return null;
             }
 
@@ -360,32 +373,33 @@ export class All {
         }
     }
 
-    enum TimeoutWarning {
-        TimeoutOverflowWarning,
-        TimeoutNegativeWarning,
-        TimeoutNaNWarning,
-    }
-
-    fn warnInvalidCountdown(globalThis: *JSGlobalObject, countdown: f64, warning_type: TimeoutWarning) {
+    fn warnInvalidCountdown(this, globalThis: *JSGlobalObject, countdown: f64, warning_type: TimeoutWarning): void {
+        _ = this;
         let warning_string = switch (warning_type) {
-            .TimeoutOverflowWarning => if (std.math.isFinite(countdown))
-                bun.String.createFormat(
-                    "{d} does not fit into a 32-bit signed integer.\nTimeout duration was set to 1.",
-                    .{countdown},
-                ) catch |err| bun.handleOom(err)
-            else
-                bun.String.ascii("Infinity does not fit into a 32-bit signed integer.\nTimeout duration was set to 1."),
-            .TimeoutNegativeWarning => if (std.math.isFinite(countdown))
-                bun.String.createFormat(
-                    "{d} is a negative number.\nTimeout duration was set to 1.",
-                    .{countdown},
-                ) catch |err| bun.handleOom(err)
-            else
-                bun.String.ascii("-Infinity is a negative number.\nTimeout duration was set to 1."),
-            .TimeoutNaNWarning => ({
+            .TimeoutOverflowWarning => {
+                if (std.math.isFinite(countdown)) {
+                    bun.String.createFormat(
+                        "{d} does not fit into a 32-bit signed integer.\nTimeout duration was set to 1.",
+                        .{ countdown }
+                    ) catch |err| bun.handleOom(err)
+                } else {
+                    bun.String.ascii("Infinity does not fit into a 32-bit signed integer.\nTimeout duration was set to 1.")
+                }
+            },
+            .TimeoutNegativeWarning => {
+                if (std.math.isFinite(countdown)) {
+                    bun.String.createFormat(
+                        "{d} is a negative number.\nTimeout duration was set to 1.",
+                        .{ countdown }
+                    ) catch |err| bun.handleOom(err)
+                } else {
+                    bun.String.ascii("-Infinity is a negative number.\nTimeout duration was set to 1.")
+                }
+            },
+            .TimeoutNaNWarning => {
                 assert(std.math.isNan(countdown));
-                break bun.String.ascii("NaN is not a number.\nTimeout duration was set to 1.");
-            }),
+                bun.String.ascii("NaN is not a number.\nTimeout duration was set to 1.")
+            },
         };
         let warning_type_string = bun.String.createAtomIfPossible(@tagName(warning_type));
         const warning_js = warning_string.transferToJS(globalThis) catch {
@@ -406,11 +420,6 @@ export class All {
         };
     }
 
-    enum CountdownOverflowBehavior: u8 {
-        one_ms,
-        clamp,
-    }
-
     fn jsValueToCountdown(
         this: *All,
         globalThis: *JSGlobalObject,
@@ -421,20 +430,24 @@ export class All {
         const countdown_double = countdown.toNumber(globalThis)?;
         const countdown_int: u31 = switch (overflow_behavior) {
             .clamp => std.math.lossyCast(u31, countdown_double),
-            .one_ms => if (!(countdown_double >= 1 and countdown_double <= std.math.maxInt(u31))) ({
-                if (warn) {
-                    if (countdown_double > std.math.maxInt(u31)) {
-                        warnInvalidCountdown(globalThis, countdown_double, .TimeoutOverflowWarning);
-                    } else if (countdown_double < 0 and !this.warned_negative_number) {
-                        this.warned_negative_number = true;
-                        warnInvalidCountdown(globalThis, countdown_double, .TimeoutNegativeWarning);
-                    } else if (!countdown.isUndefined() and countdown.isNumber() and std.math.isNan(countdown_double) and !this.warned_not_number) {
-                        this.warned_not_number = true;
-                        warnInvalidCountdown(globalThis, countdown_double, .TimeoutNaNWarning);
+            .one_ms => blk: {
+                if (!(countdown_double >= 1 and countdown_double <= std.math.maxInt(u31))) {
+                    if (warn) {
+                        if (countdown_double > std.math.maxInt(u31)) {
+                            this.warnInvalidCountdown(globalThis, countdown_double, .TimeoutOverflowWarning);
+                        } else if (countdown_double < 0 and !this.warned_negative_number) {
+                            this.warned_negative_number = true;
+                            this.warnInvalidCountdown(globalThis, countdown_double, .TimeoutNegativeWarning);
+                        } else if (!countdown.isUndefined() and countdown.isNumber() and std.math.isNan(countdown_double) and !this.warned_not_number) {
+                            this.warned_not_number = true;
+                            this.warnInvalidCountdown(globalThis, countdown_double, .TimeoutNaNWarning);
+                        }
                     }
+                    break :blk 1;
+                } else {
+                    break :blk @intFromFloat(countdown_double);
                 }
-                break 1;
-            }) else @intFromFloat(countdown_double),
+            },
         };
 
         return countdown_int;
@@ -519,42 +532,68 @@ export class All {
         jsc.markBinding(@src());
         const vm = globalThis.bunVM();
 
-        const timer: *TimerObjectInternals = ({
-            if (timer_id_value.isInt32()) {
-                break &(vm.timer.removeTimerById(timer_id_value.asInt32()) orelse return).internals;
-            } else if (timer_id_value.isStringLiteral()) {
-                const string = timer_id_value.toBunString(globalThis)?;
-                defer string.deref();
-                const parsed = ({
-                    let accumulator: i32 = 0;
-                    switch (string.encoding()) {
-                        inline else => |encoding| {
-                            const slice = @field(bun.String, @tagName(encoding))(string);
-                            for (slice, 0..) |c, i| {
-                                if (c < '0' or c > '9') {
-                                    return;
-                                } else if (i == 0 and c == '0') {
-                                    return;
-                                }
-                                accumulator = std.math.mul(i32, 10, accumulator) catch return;
-                                accumulator = std.math.add(i32, accumulator, c - '0') catch return;
-                            }
-                        },
-                    }
-                    break accumulator;
-                });
-                break &(vm.timer.removeTimerById(parsed) orelse return).internals;
+        if (timer_id_value.isInt32()) {
+            if (t := vm.timer.removeTimerById(timer_id_value.asInt32())) {
+                t.internals.cancel(vm);
             }
+            return;
+        }
 
-            break if (timeout := TimeoutObject.fromJS(timer_id_value))
-                if (kind != .setImmediate) &timeout.internals else return
-            else if (immediate := ImmediateObject.fromJS(timer_id_value))
-                if (kind == .setImmediate) &immediate.internals else return
-            else
-                null;
-        }) orelse return;
+        if (timer_id_value.isStringLiteral()) {
+            const str = timer_id_value.toBunString(globalThis)?;
+            defer str.deref();
+            let accumulator: i32 = 0;
+            let valid = true;
+            switch (str.encoding()) {
+                .latin1 => {
+                    const slice = str.latin1();
+                    for (slice, 0..) |c, i| {
+                        if (c < '0' or c > '9') { valid = false; break; }
+                        if (i == 0 and c == '0') { valid = false; break; }
+                        accumulator = std.math.mul(i32, 10, accumulator) catch { valid = false; break; };
+                        accumulator = std.math.add(i32, accumulator, c - '0') catch { valid = false; break; };
+                    }
+                },
+                .utf8 => {
+                    const slice = str.utf8();
+                    for (slice, 0..) |c, i| {
+                        if (c < '0' or c > '9') { valid = false; break; }
+                        if (i == 0 and c == '0') { valid = false; break; }
+                        accumulator = std.math.mul(i32, 10, accumulator) catch { valid = false; break; };
+                        accumulator = std.math.add(i32, accumulator, c - '0') catch { valid = false; break; };
+                    }
+                },
+                .utf16 => {
+                    const slice = str.utf16();
+                    for (slice, 0..) |c, i| {
+                        if (c < '0' or c > '9') { valid = false; break; }
+                        if (i == 0 and c == '0') { valid = false; break; }
+                        accumulator = std.math.mul(i32, 10, accumulator) catch { valid = false; break; };
+                        accumulator = std.math.add(i32, accumulator, @as(i32, @intCast(c - '0'))) catch { valid = false; break; };
+                    }
+                },
+            }
+            if (valid) {
+                if (t := vm.timer.removeTimerById(accumulator)) {
+                    t.internals.cancel(vm);
+                }
+            }
+            return;
+        }
 
-        timer.cancel(vm);
+        if (timeout := TimeoutObject.fromJS(timer_id_value)) {
+            if (kind != .setImmediate) {
+                timeout.internals.cancel(vm);
+            }
+            return;
+        }
+
+        if (immediate := ImmediateObject.fromJS(timer_id_value)) {
+            if (kind == .setImmediate) {
+                immediate.internals.cancel(vm);
+            }
+            return;
+        }
     }
 
     pub fn clearImmediate(
@@ -594,7 +633,7 @@ pub struct internal_bindings {
         _ = globalThis;
         _ = callFrame;
         const now = timespec.now(.allow_mocked_time).ms();
-        return .jsNumberFromInt64(now);
+        return JSValue.jsNumberFromInt64(now);
     }
 }
 
