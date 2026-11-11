@@ -126,7 +126,7 @@ pub const All = struct {
     maps: Maps = .{},
     date_header_timer: DateHeaderTimer = .{},
     
-pub fn _create(allocator: std.mem.Allocator) !*All { const self_ptr = try allocator.create(All); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *All) *All {
         _ = &self;

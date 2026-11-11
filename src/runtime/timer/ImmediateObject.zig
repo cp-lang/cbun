@@ -23,7 +23,7 @@ pub const ImmediateObject = struct {
     event_loop_timer: EventLoopTimer = .{ .next = .epoch, .tag = .ImmediateObject },
     internals: TimerObjectInternals = undefined,
     
-pub fn _create(allocator: std.mem.Allocator) !*ImmediateObject { const self_ptr = try allocator.create(ImmediateObject); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(globalThis: *JSGlobalObject, id: i32, callback: JSValue, arguments: JSValue) JSValue {
             const immediate = bun.new(ImmediateObject, .{ .ref_count = .init, .internals = undefined });

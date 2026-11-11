@@ -32,7 +32,7 @@ pub const TimerObjectInternals = struct {
     flags: Flags = .{},
     generation: u32 = 0,
     
-pub fn _create(allocator: std.mem.Allocator) !*TimerObjectInternals { const self_ptr = try allocator.create(TimerObjectInternals); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn eventLoopTimer(self: *TimerObjectInternals) *EventLoopTimer {
             switch (self.flags.kind) {

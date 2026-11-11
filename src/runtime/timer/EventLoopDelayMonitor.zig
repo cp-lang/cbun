@@ -13,7 +13,7 @@ pub const EventLoopDelayMonitor = struct {
     last_fire_ns: u64 = 0,
     enabled: bool = false,
     
-pub fn _create(allocator: std.mem.Allocator) !*EventLoopDelayMonitor { const self_ptr = try allocator.create(EventLoopDelayMonitor); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *EventLoopDelayMonitor, js_histogram: jsc.JSValue, event_loop_timer: jsc.API.Timer.EventLoopTimer, resolution_ms: i32, last_fire_ns: u64, enabled: bool) void {
         var __js_histogram_moved = false; _ = &__js_histogram_moved;

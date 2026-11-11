@@ -6,7 +6,7 @@ pub const bun = @import("bun");
 pub const DeferredTaskQueue = struct {
     map: std.AutoArrayHashMapUnmanaged(?*anyopaque,DeferredRepeatingTask) = .{},
     
-pub fn _create(allocator: std.mem.Allocator) !*DeferredTaskQueue { const self_ptr = try allocator.create(DeferredTaskQueue); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *DeferredTaskQueue, map: std.AutoArrayHashMapUnmanaged(?*anyopaque,DeferredRepeatingTask)) void {
         var __map_moved = false; _ = &__map_moved;

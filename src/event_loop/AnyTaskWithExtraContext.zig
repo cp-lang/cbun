@@ -10,7 +10,7 @@ pub const AnyTaskWithExtraContext = struct {
     callback: *const fn (*anyopaque, *anyopaque) void = undefined,
     next: ?*AnyTaskWithExtraContext = null,
     
-pub fn _create(allocator: std.mem.Allocator) !*AnyTaskWithExtraContext { const self_ptr = try allocator.create(AnyTaskWithExtraContext); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *AnyTaskWithExtraContext, ctx: ?*anyopaque, callback: *const fn (*anyopaque, *anyopaque) void, next: ?*AnyTaskWithExtraContext) void {
             self.ctx = ctx;

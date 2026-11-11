@@ -11,7 +11,7 @@ pub const ConcurrentTask = struct {
     task: Task = undefined,
     next: PackedNextPtr = .none,
     
-pub fn _create(allocator: std.mem.Allocator) !*ConcurrentTask { const self_ptr = try allocator.create(ConcurrentTask); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *ConcurrentTask, task: Task, next: PackedNextPtr) void {
         var __task_moved = false; _ = &__task_moved;

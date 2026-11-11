@@ -34,7 +34,7 @@ pub const fs = @import("std").fs;
 pub const heap = @import("std").heap;
 pub const prompt = struct {
     
-pub fn _create(allocator: std.mem.Allocator) !*prompt { const self_ptr = try allocator.create(prompt); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn readUntilDelimiterArrayListAppendAssumeCapacity(reader: anytype, array_list: *ManagedList(u8), delimiter: u8, max_size: usize) !void {
             while (true) {

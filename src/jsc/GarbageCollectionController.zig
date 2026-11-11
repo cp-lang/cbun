@@ -30,7 +30,7 @@ pub const GarbageCollectionController = struct {
     gc_repeating_timer_fast: bool = true,
     disabled: bool = false,
     
-pub fn _create(allocator: std.mem.Allocator) !*GarbageCollectionController { const self_ptr = try allocator.create(GarbageCollectionController); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *GarbageCollectionController, vm: *VirtualMachine) void {
             const actual = uws.Loop.get();

@@ -39,7 +39,7 @@ pub const ByteBlobLoader = struct {
     content_type: []const u8 = "",
     content_type_allocated: bool = false,
     
-pub fn _create(allocator: std.mem.Allocator) !*ByteBlobLoader { const self_ptr = try allocator.create(ByteBlobLoader); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *ByteBlobLoader, offset: Blob.SizeType, store: ?*Blob.Store, chunk_size: Blob.SizeType, remain: Blob.SizeType, done: bool, pulled: bool, content_type: []const u8, content_type_allocated: bool) void {
         var __offset_moved = false; _ = &__offset_moved;

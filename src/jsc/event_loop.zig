@@ -107,7 +107,7 @@ pub const EventLoop = struct {
     imminent_gc_timer: std.atomic.Value(?*Timer.WTFTimer) = .{ .raw = null },
     signal_handler: if (Environment.isPosix) ?*PosixSignalHandle else void = (if (Environment.isPosix) null else null),
     
-pub fn _create(allocator: std.mem.Allocator) !*EventLoop { const self_ptr = try allocator.create(EventLoop); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *EventLoop, tasks: Queue, immediate_tasks: std.ArrayListUnmanaged(*Timer.ImmediateObject), next_immediate_tasks: std.ArrayListUnmanaged(*Timer.ImmediateObject), concurrent_tasks: ConcurrentTask.Queue, global: *jsc.JSGlobalObject, virtual_machine: *VirtualMachine, waker: ?Waker, forever_timer: ?*uws.Timer, deferred_tasks: DeferredTaskQueue, uws_loop: if (Environment.isWindows) ?*uws.Loop else void, debug: EventLoopDebug, entered_event_loop_count: isize, concurrent_ref: std.atomic.Value(i32), imminent_gc_timer: std.atomic.Value(?*Timer.WTFTimer), signal_handler: if (Environment.isPosix) ?*PosixSignalHandle else void) void {
         var __tasks_moved = false; _ = &__tasks_moved;

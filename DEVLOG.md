@@ -42,14 +42,35 @@
 
 ---
 
-## 3. 下一阶段攻坚规划：`src/runtime/webcore/`（27个未闭环模块）
+## 3. runtime/webcore/blob 核心存储子系统攻坚与技术总结
+
+### 3.1 CP 借用检查可变方法接收器（`*this: *Type`）
+- **问题机理**：
+  在 CP 语言定义与编译实现中（`cpc/src/parser.rs:1357` & `cpc/src/codegen/actor.rs:8`），方法的首个参数若为 `this: *Type`，不带有 `*` 前缀，其 `is_mut` 为 `false`，接收器模式被判定为只读 `ReceiverMode::ReadOnly`。方法体内任何对 `this.field` 的赋值或可变借用都会触发 `E0201: cannot perform mutable operation in a read-only method`。
+- **消解手段**：
+  所有需要修改实例字段的方法，接收器统一声明为 `*this: *ClassName`（或 `*this`），使编译期将方法标记为 `ReceiverMode::Mut`，精准匹配单写多读借用检查契约。
+
+### 3.2 类内 C 回调静态化声明（`@c static fn`）
+- **问题机理**：
+  类内部用于事件驱动或 libuv/POSIX 的回调函数（如 `@c fn onRead(req: *libuv.fs_t): void`），若未带有 `static` 修饰符，CPC 默认将其视作类实例方法并赋予只读接收器。当回调内部通过 `@fieldParentPtr` 还原出父指针并对其字段赋值时，由于字段名与当前类字段重名，编译器借用检查触发虚假报警。
+- **消解手段**：
+  所有非接收器成员回调函数统一加上 `@c static fn`，将其编译期上下文从实例方法中完全剥离，消除误报。
+
+### 3.3 顶层类型别名与函数指针调用（`export type Name = ...`）
+- **问题机理**：
+  若使用 `const Name = *const fn (...) void;` 定义函数指针类型，该标识符被注册为运行时变量而非类型定义。在调用其实例变量（如 `cb(ctx, data)`）时，语义检查因无法推断函数签名而报 `E0216: expression is not a callable function`。
+- **消解手段**：
+  在顶层使用纯正 CP 类型别名语法：`export type Name = *const fn (...) void;`。CPC 将其正确注册进 `type_aliases` 符号表，同时生成 Zig 标准 `pub const Name = ...;`，完美解决回调变量的语义推断与调用。
+
+---
+
+## 4. 下一阶段攻坚规划：`src/runtime/webcore/s3/`（5个模块）与根目录（18个模块）
 
 1. **子模块分类**：
-   - `src/runtime/webcore/blob/` (4 个模块：`BlobPart.cp`, `BlobPool.cp`, `Blob.cp`, `File.cp`)
-   - `src/runtime/webcore/s3/` (5 个模块：`s3.cp`, `Signer.cp`, `Credentials.cp`, 等)
-   - `src/runtime/webcore/` (18 个根目录模块：`Body.cp`, `Request.cp`, `Response.cp`, `Headers.cp`, `Fetch.cp`, 等)
+   - `src/runtime/webcore/s3/` (5 个模块：`client.cp`, `download_stream.cp`, `list_objects.cp`, `multipart.cp`, `simple_request.cp`)
+   - `src/runtime/webcore/` (18 个根目录模块：`Blob.cp`, `Body.cp`, `CookieMap.cp`, `Crypto.cp`, `FileReader.cp`, `FormData.cp`, `ReadableStream.cp`, `Request.cp`, `Response.cp`, `S3Client.cp`, `S3File.cp`, `Sink.cp`, `TextDecoder.cp`, `TextEncoder.cp`, `TextEncoderStreamEncoder.cp`, `encoding.cp`, `fetch.cp`, `streams.cp`)
 2. **攻坚推进策略**：
-   - 优先攻克 `blob/` 与 `s3/` 独立子目录；
+   - 立即集中攻坚 `src/runtime/webcore/s3/` 全部 5 个模块；
    - 保持 100% 纯正 CP 语言（0 处 `zig {}`，0 处 `var`）；
    - 双重验证（`cpc --lib` + `vendor/zig/zig ast-check`）；
    - 行数膨胀率严守 $\le +20\%$；

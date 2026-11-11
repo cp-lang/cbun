@@ -47,7 +47,7 @@ pub const uv = @import("windows").uv;
 pub const FlushPendingTask = struct {
     has: bool = false,
     
-pub fn _create(allocator: std.mem.Allocator) !*FlushPendingTask { const self_ptr = try allocator.create(FlushPendingTask); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *FlushPendingTask, has: bool) void {
             self.has = has;
@@ -76,7 +76,7 @@ pub const Options = struct {
     close: bool = false,
     mode: Mode = 436,
     
-pub fn _create(allocator: std.mem.Allocator) !*Options { const self_ptr = try allocator.create(Options); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *Options, chunk_size: Blob.SizeType, input_path: PathOrFileDescriptor, truncate: bool, close: bool, mode: Mode) void {
         var __chunk_size_moved = false; _ = &__chunk_size_moved;
@@ -100,7 +100,7 @@ pub fn flags(self: *const Options) i32 {
 
 pub const TestingAPIs = struct {
     
-pub fn _create(allocator: std.mem.Allocator) !*TestingAPIs { const self_ptr = try allocator.create(TestingAPIs); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn fileSinkLiveCount(self: *TestingAPIs) JSError!JSValue {
         _ = &self;
@@ -128,7 +128,7 @@ pub const FileSink = struct {
     readable_stream: WebCore.ReadableStream.Strong = .{},
     js_sink_ref: Strong.Optional = .empty,
     
-pub fn _create(allocator: std.mem.Allocator) !*FileSink { const self_ptr = try allocator.create(FileSink); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn memoryCost(self: *const FileSink) usize {
             return self.writer.memoryCost();

@@ -7,7 +7,7 @@ pub const MultiPartUploadOptions = struct {
     partSize: u64 = DefaultPartSize,
     retry: u8 = 3,
     
-pub fn _create(allocator: std.mem.Allocator) !*MultiPartUploadOptions { const self_ptr = try allocator.create(MultiPartUploadOptions); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *MultiPartUploadOptions, queueSize: u8, partSize: u64, retry: u8) void {
             self.queueSize = queueSize;

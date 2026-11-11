@@ -23,7 +23,7 @@ pub const TimeoutObject = struct {
     event_loop_timer: EventLoopTimer = .{ .next = .epoch, .tag = .TimeoutObject },
     internals: TimerObjectInternals = undefined,
     
-pub fn _create(allocator: std.mem.Allocator) !*TimeoutObject { const self_ptr = try allocator.create(TimeoutObject); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(globalThis: *JSGlobalObject, id: i32, kind: Kind, interval: u31, callback: JSValue, arguments: JSValue) JSValue {
             const timeout = bun.new(TimeoutObject, .{ .ref_count = .init, .internals = undefined });

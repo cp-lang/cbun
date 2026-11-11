@@ -115,7 +115,7 @@ pub const PBKDF2 = struct {
     length: i32 = 0,
     algorithm: EVP.Algorithm,
     
-pub fn _create(allocator: std.mem.Allocator) !*PBKDF2 { const self_ptr = try allocator.create(PBKDF2); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *PBKDF2, password: jsc.Node.StringOrBuffer, salt: jsc.Node.StringOrBuffer, iteration_count: u32, length: i32, algorithm: EVP.Algorithm) void {
         var __password_moved = false; _ = &__password_moved;

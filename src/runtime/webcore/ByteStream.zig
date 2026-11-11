@@ -53,7 +53,7 @@ pub const ByteStream = struct {
     size_hint: Blob.SizeType = 0,
     buffer_action: ?BufferAction = null,
     
-pub fn _create(allocator: std.mem.Allocator) !*ByteStream { const self_ptr = try allocator.create(ByteStream); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *ByteStream, buffer: ManagedList(u8), has_received_last_chunk: bool, pending: streams.Result.Pending, done: bool, pending_buffer: []const u8, pending_value: jsc.Strong.Optional, offset: usize, highWaterMark: Blob.SizeType, pipe: Pipe, size_hint: Blob.SizeType, buffer_action: ?BufferAction) void {
         var __buffer_moved = false; _ = &__buffer_moved;

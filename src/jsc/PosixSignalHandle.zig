@@ -21,7 +21,7 @@ pub const PosixSignalHandle = struct {
     tail: std.atomic.Value(u16) = std.atomic.Value(u16).init(0),
     head: std.atomic.Value(u16) = std.atomic.Value(u16).init(0),
     
-pub fn _create(allocator: std.mem.Allocator) !*PosixSignalHandle { const self_ptr = try allocator.create(PosixSignalHandle); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *PosixSignalHandle, signals: [buffer_size]u8, tail: std.atomic.Value(u16), head: std.atomic.Value(u16)) void {
         var __signals_moved = false; _ = &__signals_moved;
@@ -100,7 +100,7 @@ pub fn deinit(self: *PosixSignalHandle) void {
 pub const PosixSignalTask = struct {
     number: u8,
     
-pub fn _create(allocator: std.mem.Allocator) !*PosixSignalTask { const self_ptr = try allocator.create(PosixSignalTask); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *PosixSignalTask, number: u8) void {
             self.number = number;

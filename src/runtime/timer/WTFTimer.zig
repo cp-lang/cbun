@@ -23,7 +23,7 @@ pub const WTFTimer = struct {
     lock: bun.Mutex = .{},
     script_execution_context_id: bun.webcore.ScriptExecutionContext.Identifier,
     
-pub fn _create(allocator: std.mem.Allocator) !*WTFTimer { const self_ptr = try allocator.create(WTFTimer); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *WTFTimer, vm: *VirtualMachine, run_loop_timer: *RunLoopTimer, event_loop_timer: EventLoopTimer, imminent: *std.atomic.Value(?*WTFTimer), repeat: bool, lock: bun.Mutex, script_execution_context_id: bun.webcore.ScriptExecutionContext.Identifier) void {
         var __event_loop_timer_moved = false; _ = &__event_loop_timer_moved;

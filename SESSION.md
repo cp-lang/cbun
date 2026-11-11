@@ -83,3 +83,30 @@
    - 剩余未验证模块仅剩 **27 个**（全部集中在 `src/runtime/webcore/`）。
 4. **本次原子提交范围**：
    - `src/uws_sys/` 目录下全部 24 个纯 CP 模块及其生成的 `.zig` 产物。
+
+## 05:20 runtime/webcore/blob 核心存储子系统（全量子模块 4/4，共 2,824 行）100% 纯 CP 迁移达成并双重编译通过
+
+### 用户指令
+> 继续你的工作，按次序选择目录/文件，不断完成 zig 向 cp 迁移，保持四线文档与阶段性成果原子 git 提交。
+
+### 执行结果汇报
+1. **`src/runtime/webcore/blob/` 子系统 4 个核心底层二进制与文件存储模块 100% 纯 CP 迁移达成**：
+   - `Store.cp` (572 行 vs 原版 577 行, -0.9%): `cpc --lib` PASS, `zig ast-check` PASS, 0 处 `zig {}`, 0 处 `var`
+   - `copy_file.cp` (817 行 vs 原版 1,286 行, -36.5% 净压缩): `cpc --lib` PASS, `zig ast-check` PASS, 0 处 `zig {}`, 0 处 `var`
+   - `read_file.cp` (751 行 vs 原版 829 行, -9.4% 净压缩): `cpc --lib` PASS, `zig ast-check` PASS, 0 处 `zig {}`, 0 处 `var`
+   - `write_file.cp` (684 行 vs 原版 757 行, -9.6% 净压缩): `cpc --lib` PASS, `zig ast-check` PASS, 0 处 `zig {}`, 0 处 `var`
+   - **子系统总计行数**：原版 Zig 共 3,449 行，转译后 `.zig` 共 3,062 行（**净减少 387 行，膨胀率 -11.2%**，远优于 $\le +20\%$ 指标要求）。
+2. **核心编译攻坚与架构突破**：
+   - **CP 借用检查可变接收器契约**：严格厘清在 CP 中修改字段的实例方法必须显式声明 `*this: *ClassName`（或 `*this`），从而赋予接收器 `ReceiverMode::Mut` 权限，根除只读方法中修改字段引发的 `E0201` 编译器 panic；
+   - **类内辅助回调静态化**：类中被 C-ABI 捕获的回调函数（如 `@c fn onRead`, `@c fn onWrite`, `@c fn onChmod`）必须显式标记为 `@c static fn`，避免编译器将其当作实例只读方法并在字段赋值时误判类成员只读冲突；
+   - **顶层类型别名语义（`type X = ...`）**：在 CP 模块顶层声明函数指针类型时使用 `type Name = *const fn (...) void;`，CPC 正确注册到语义类型别名表并降级为 Zig 的 `const Name = ...;`，完美解决回调变量调用时的 `E0216` 误报；
+   - **关键字命名转义**：针对枚举标签为 Zig 关键字的情况（如 `.@"continue"`），在 CP 中统一使用 `.@"continue"` 语法，确保转译为合法 Zig 标识符。
+3. **全仓统计大盘（最新实测数据）**：
+   - 全仓 `.cp` 模块总数：**258 个**；
+   - 100% 纯正 CP 语言（0 处 `zig {}`）：**258 / 258 (100%)**；
+   - 双重验证通过数（`cpc --lib` + `vendor/zig/zig ast-check`）：**235 / 258 (91.1%)**；
+   - 剩余未验证模块仅剩 **23 个**（`src/runtime/webcore/s3/` 5 个，`src/runtime/webcore/` 根目录 18 个）。
+4. **后台常驻通信任务状态**：
+   - `task-51103` (`python3 scripts/watch_task.py --status resolved`) 常驻运行正常，持续监听 cp_agy 异步处理结果。
+5. **本次原子提交范围**：
+   - `src/runtime/webcore/blob/` 目录下全部 4 个纯 CP 模块及其生成的 `.zig` 产物。

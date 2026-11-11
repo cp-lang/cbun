@@ -17,7 +17,7 @@ pub const S3Stat = struct {
     contentType: bun.String,
     lastModified: f64,
     
-pub fn _create(allocator: std.mem.Allocator) !*S3Stat { const self_ptr = try allocator.create(S3Stat); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn constructor(self: *const S3Stat, globalThis: *jsc.JSGlobalObject) bun.JSError!*S3Stat {
         _ = &self;

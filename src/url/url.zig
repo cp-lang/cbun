@@ -60,7 +60,7 @@ pub const URL = struct {
     username: []const u8 = "",
     port_was_automatically_set: bool = false,
     
-pub fn _create(allocator: std.mem.Allocator) !*URL { const self_ptr = try allocator.create(URL); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *URL, hash: []const u8, host: []const u8, hostname: []const u8, href: []const u8, origin: []const u8, password: []const u8, pathname: []const u8, path: []const u8, port: []const u8, protocol: []const u8, search: []const u8, searchParams: ?*QueryStringMap, username: []const u8, port_was_automatically_set: bool) void {
             self.hash = hash;
@@ -616,7 +616,7 @@ pub const QueryStringMap = struct {
     list: Param.List,
     name_count: ?usize = null,
     
-pub fn _create(allocator: std.mem.Allocator) !*QueryStringMap { const self_ptr = try allocator.create(QueryStringMap); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn getNameCount(self: *QueryStringMap) usize {
             return self.list.len;
@@ -903,7 +903,7 @@ pub fn deinit(self: *QueryStringMap) void {
 
 pub const PercentEncoding = struct {
     
-pub fn _create(allocator: std.mem.Allocator) !*PercentEncoding { const self_ptr = try allocator.create(PercentEncoding); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn decode(comptime Writer: type, writer: Writer, input: []const u8) !u32 {
             return decodeFaultTolerant(Writer, writer, input, null, false);
@@ -972,7 +972,7 @@ pub const CombinedScanner = struct {
     query: *Scanner,
     pathname: PathnameScanner,
     
-pub fn _create(allocator: std.mem.Allocator) !*CombinedScanner { const self_ptr = try allocator.create(CombinedScanner); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(query_string: []const u8, pathname: []const u8, routename: []const u8, url_params: *ParamsList) *CombinedScanner {
             return CombinedScanner{ .query = Scanner.init(query_string), .pathname = PathnameScanner.init(pathname, routename, url_params) };
@@ -994,7 +994,7 @@ pub const PathnameScanner = struct {
     routename: []const u8,
     i: usize = 0,
     
-pub fn _create(allocator: std.mem.Allocator) !*PathnameScanner { const self_ptr = try allocator.create(PathnameScanner); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub inline fn isDone(self: *const PathnameScanner) bool {
             return (self.params.len <= self.i);
@@ -1027,7 +1027,7 @@ pub const Scanner = struct {
     i: usize,
     start: usize = 0,
     
-pub fn _create(allocator: std.mem.Allocator) !*Scanner { const self_ptr = try allocator.create(Scanner); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(query_string: []const u8) *Scanner {
             if (((query_string.len > 0) and (query_string[0] == 63))) {

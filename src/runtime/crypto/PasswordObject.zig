@@ -162,7 +162,7 @@ pub fn get(self: AlgorithmDef_, pw: []const u8) ?AlgorithmEnum {
 
 pub const PasswordObject = struct {
     
-pub fn _create(allocator: std.mem.Allocator) !*PasswordObject { const self_ptr = try allocator.create(PasswordObject); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn hash(self: *const PasswordObject, allocator: std.mem.Allocator, password: []const u8, algorithm: Algorithm_Value) anyerror![]const u8 {
         _ = &self;
@@ -432,7 +432,7 @@ pub fn run(task: *bun.ThreadPool.Task) void {
 
 pub const JSPasswordObject = struct {
     
-pub fn _create(allocator: std.mem.Allocator) !*JSPasswordObject { const self_ptr = try allocator.create(JSPasswordObject); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn JSPasswordObject__create(self: *const JSPasswordObject, globalObject: *jsc.JSGlobalObject) jsc.JSValue {
         _ = &self;

@@ -342,7 +342,7 @@ pub const FetchTasklet = struct {
     tracker: jsc.Debugger.AsyncTaskTracker,
     ref_count: AtomicValue(u32) = AtomicValue(u32).init(1),
     
-pub fn _create(allocator: std.mem.Allocator) !*FetchTasklet { const self_ptr = try allocator.create(FetchTasklet); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn ref(self: *FetchTasklet) void {
             const count = self.ref_count.fetchAdd(1, .monotonic);

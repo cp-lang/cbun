@@ -64,5 +64,31 @@
 - `us_socket_t.cp` / `us_socket_t.zig`: 288 行 (-17.7% 压缩)，规范底层 C 结构体与回调指针，双重验证全部通过。
 - `vtable.cp` / `vtable.zig`: 98 行 (-16.9% 压缩)，规范虚函数表派发与 trampoline，双重验证全部通过。
 
+### `src/runtime/webcore/blob/` 底层二进制与存储子系统 4 个核心模块
+- `Store.cp` / `Store.zig`:
+  - 572 行 vs 原版 577 行 (-0.9%)；
+  - 拆解嵌套内部类 `File`, `S3`, `Bytes` 为顶层独立类 `StoreFile`, `StoreS3`, `StoreBytes`，并在 `Store` 内部设置别名；
+  - 修复 `import { Value as AtomicValue }` 为两段式模块别名导入；
+  - 规范内层异步回调包装器结构体避免参数名遮蔽，双重验证全部通过。
+- `copy_file.cp` / `copy_file.zig`:
+  - 817 行 vs 原版 1,286 行 (-36.5% 净压缩)；
+  - 消除裸接收器 `*_`，全面规范为 `*this: *CopyFile` 声明可变方法接收器；
+  - 拆解嵌套类 `ReadWriteLoop` 为顶层 `CopyFileWindowsReadWriteLoop`；
+  - 规范 `@c static fn onRead`, `onWrite`, `onChmod` 消除字段伪冲突；
+  - 优化克隆降级逻辑消除 catch 块中 unreachable 跳转；
+  - 修复 Zig 关键字枚举 `.@"continue"`，双重验证全部通过。
+- `read_file.cp` / `read_file.zig`:
+  - 751 行 vs 原版 829 行 (-9.4% 净压缩)；
+  - 引入 `const ClosingStateAtomic = AtomicValue(ClosingState);` 规避泛型类字段定义冲突；
+  - 采用顶层 `export type ReadFileOnReadFileCallback` 声明函数指针别名；
+  - 显式声明静态回调函数 `@c static fn onReadable`, `onRequestReadable`, `doReadLoopTask`, `onFileInitialStat`, `onRead`；
+  - 消除冗余 `@ptrCast`，双重验证全部通过。
+- `write_file.cp` / `write_file.zig`:
+  - 684 行 vs 原版 757 行 (-9.6% 净压缩)；
+  - 规范可变接收器 `*this: *WriteFile` 和 `*this: *WriteFileWindows`；
+  - 消除多分支模式匹配尾部逗号语法问题；
+  - 提升 `const log` 与 `const bloblog` 至模块顶层消除重复定义；
+  - 规避平台指针断言过度嵌套类型转换，双重验证全部通过。
+
 ### 冷热文档归档
 - `SESSION_H.md`, `CHANGELOG_H.md`, `DEVLOG_H.md`: 归档历史记录，确立热日志极简轻量。

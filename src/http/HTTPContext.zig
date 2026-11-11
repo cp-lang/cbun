@@ -32,6 +32,8 @@ pub fn HTTPContext(comptime ssl: bool) type {
         secure: ?*bun.BoringSSL.c.SSL_CTX = null,
         active_h2_sessions: std.ArrayListUnmanaged(*bun.http.H2.ClientSession) = .{},
         pending_h2_connects: std.ArrayListUnmanaged(*bun.http.H2.PendingConnect) = .{},
+        
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn markTaggedSocketAsDead(socket: HTTPSocket, tagged: ActiveSocket) void {
                 if (tagged.is(PooledSocket)) {

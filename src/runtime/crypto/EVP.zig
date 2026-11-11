@@ -126,7 +126,7 @@ pub const EVP = struct {
     md: *const BoringSSL.EVP_MD = undefined,
     algorithm: Algorithm_,
     
-pub fn _create(allocator: std.mem.Allocator) !*EVP { const self_ptr = try allocator.create(EVP); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(algorithm: Algorithm_, md: *const BoringSSL.EVP_MD, engine: *BoringSSL.ENGINE) EVP {
             _ = bun.BoringSSL.load();

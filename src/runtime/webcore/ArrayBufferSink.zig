@@ -34,7 +34,7 @@ pub const ArrayBufferSink = struct {
     streaming: bool = false,
     as_uint8array: bool = false,
     
-pub fn _create(allocator: std.mem.Allocator) !*ArrayBufferSink { const self_ptr = try allocator.create(ArrayBufferSink); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn connect(self: *ArrayBufferSink, signal: Signal) void {
             _ = assert((self.reader == null));
