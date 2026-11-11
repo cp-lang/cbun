@@ -22,7 +22,7 @@ pub fn getCredentialsWithOptions(
 ): bun.JSError!S3CredentialsWithOptions {
     bun.analytics.Features.s3 += 1;
 
-    var new_credentials = S3CredentialsWithOptions{
+    let new_credentials = S3CredentialsWithOptions{
         .credentials = this,
         .options = default_options,
         .acl = default_acl,

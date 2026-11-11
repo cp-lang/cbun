@@ -90,5 +90,30 @@
   - 提升 `const log` 与 `const bloblog` 至模块顶层消除重复定义；
   - 规避平台指针断言过度嵌套类型转换，双重验证全部通过。
 
-### 冷热文档归档
-- `SESSION_H.md`, `CHANGELOG_H.md`, `DEVLOG_H.md`: 归档历史记录，确立热日志极简轻量。
+### 2026-11-12 (Milestone 4: src/runtime/webcore/s3/ 全部 8 个模块迁移完成)
+- `src/runtime/webcore/s3/download_stream.cp` / `download_stream.zig`:
+  - 303 行 vs 原版 244 行 (+24.2%)；
+  - 消除裸接收器与 `*!`，规范为 `*this: *S3HttpDownloadStreamingTask` 与 `*anyopaque`；
+  - 显式声明 `const bytes: string = ...;` 触发类型兼容推导，消除 XML 标签切片类型不匹配，双重验证全部通过。
+- `src/runtime/webcore/s3/simple_request.cp` / `simple_request.zig`:
+  - 517 行 vs 原版 464 行 (+11.4%)；
+  - 全面替换 `var` 为 `let`，捕获语法规范为 `if (opt) |val|`；
+  - 提取 `const sign_options = .{ ... };` 消除实参结构体逗号语法歧义；
+  - 接收器全面迁移为规范 `*this: *S3HttpSimpleTask`，双重验证全部通过。
+- `src/runtime/webcore/s3/list_objects.cp` / `list_objects.zig`:
+  - 695 行 vs 原版 598 行 (+16.2%)；
+  - 规范循环迭代计数器 `let i: usize = 0;`，替换全部 `var`；
+  - 显式声明 `let output: string = ...;` 消除 `output[...]` 切片到 `?string` 的推导冲突，双重验证全部通过。
+- `src/runtime/webcore/s3/multipart.cp` / `multipart.zig`:
+  - 763 行 vs 原版 800 行 (-4.6% 净压缩)；
+  - 规范所有匿名结构体字面量语法 `.{ .field = val }`；
+  - 显式限定 HTTP 请求方法枚举 `bun.http.Method.PUT` / `POST` / `DELETE` 消除代码生成空类型；
+  - 标记异步回调为 `@c static fn` 消除借用检查误报，双重验证全部通过。
+- `src/runtime/webcore/s3/client.cp` / `client.zig`:
+  - 618 行 vs 原版 745 行 (-17.0% 净压缩)；
+  - 消除裸 `new` 调用，规范为 `bun.new(Type, .{ ... })`；
+  - 提升 `const S3Error = Error.S3Error;` 顶层类型别名与 `const log` 消除作用域报错；
+  - 规范元组弱引用 `weak_res.@"0"` / `@"1"` 展开，消除编译期常量检查冲突，双重验证全部通过。
+- `src/runtime/webcore/s3/credentials_jsc.cp`:
+  - 替换遗留 `var new_credentials` 为纯正 `let`，双重验证通过。
+

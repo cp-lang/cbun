@@ -124,7 +124,7 @@ export struct S3ListObjectsV2Result {
         if (contents := _.contents) {
             let jsContents = JSValue.createEmptyArray(globalObject, contents.items.len)?;
 
-            var i: usize = 0;
+            let i: usize = 0;
             for (item of contents.items) {
                 let objectInfo = JSValue.createEmptyObject(globalObject, 0);
                 objectInfo.put(globalObject, ZigString.static("key"), BunString.createUTF8ForJS(globalObject, item.key)?);
@@ -176,7 +176,7 @@ export struct S3ListObjectsV2Result {
         if (common_prefixes := _.common_prefixes) {
             let jsCommonPrefixes = JSValue.createEmptyArray(globalObject, common_prefixes.items.len)?;
 
-            var i: usize = 0;
+            let i: usize = 0;
             for (prefix of common_prefixes.items) {
                 let jsPrefix = JSValue.createEmptyObject(globalObject, 0);
                 jsPrefix.put(globalObject, ZigString.static("prefix"), BunString.createUTF8ForJS(globalObject, prefix)?);
@@ -288,7 +288,7 @@ pub fn parseS3ListObjectsResult(xml: string): !S3ListObjectsV2Result {
                                     if (__tag_end := strings.indexOf(xml[i..], "</ETag>")) {
                                         let input = xml[i .. i + __tag_end];
                                         let size = replacementSize(u8, input, "&quot;", "\"");
-                                        let output = default_allocator.alloc(u8, size)?;
+                                        let output: string = default_allocator.alloc(u8, size)?;
                                         let len = replace(u8, input, "&quot;", "\"", output);
 
                                         if (len != 0) {

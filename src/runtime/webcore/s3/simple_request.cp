@@ -69,15 +69,15 @@ export enum S3PartResult {
 }
 
 export enum S3HttpSimpleTaskCallback {
-    stat(fn (S3StatResult, *!) JSTerminatedError!void),
-    download(fn (S3DownloadResult, *!) JSTerminatedError!void),
-    upload(fn (S3UploadResult, *!) JSTerminatedError!void),
-    delete(fn (S3DeleteResult, *!) JSTerminatedError!void),
-    listObjects(fn (S3ListObjectsResult, *!) JSTerminatedError!void),
-    commit(fn (S3CommitResult, *!) JSTerminatedError!void),
-    part(fn (S3PartResult, *!) JSTerminatedError!void),
+    stat(fn (S3StatResult, *anyopaque) JSTerminatedError!void),
+    download(fn (S3DownloadResult, *anyopaque) JSTerminatedError!void),
+    upload(fn (S3UploadResult, *anyopaque) JSTerminatedError!void),
+    delete(fn (S3DeleteResult, *anyopaque) JSTerminatedError!void),
+    listObjects(fn (S3ListObjectsResult, *anyopaque) JSTerminatedError!void),
+    commit(fn (S3CommitResult, *anyopaque) JSTerminatedError!void),
+    part(fn (S3PartResult, *anyopaque) JSTerminatedError!void),
 
-    pub fn fail(this: S3HttpSimpleTaskCallback, code: []const u8, message: []const u8, context: *!): JSTerminatedError!void {
+    pub fn fail(this: S3HttpSimpleTaskCallback, code: []const u8, message: []const u8, context: *anyopaque): JSTerminatedError!void {
         switch (this) {
             .upload(cb) => {
                 cb(.{
@@ -138,7 +138,7 @@ export enum S3HttpSimpleTaskCallback {
         }
     }
 
-    pub fn notFound(this: S3HttpSimpleTaskCallback, code: []const u8, message: []const u8, context: *!): JSTerminatedError!void {
+    pub fn notFound(this: S3HttpSimpleTaskCallback, code: []const u8, message: []const u8, context: *anyopaque): JSTerminatedError!void {
         switch (this) {
             .download(cb) => {
                 cb(.{
@@ -187,7 +187,7 @@ export class S3HttpSimpleTask {
     vm: *jsc.VirtualMachine;
     sign_result: SignResult;
     headers: bun.http.Headers;
-    callback_context: *!;
+    callback_context: *anyopaque;
     callback: Callback;
     response_buffer: bun.MutableString = .{
         .allocator = bun.default_allocator,
@@ -202,29 +202,29 @@ export class S3HttpSimpleTask {
     proxy_url: []const u8 = "";
     poll_ref: bun.Async.KeepAlive = bun.Async.KeepAlive.init();
 
-    pub fn release(*_) {
-        if (*certificate := _.result.certificate_info) {
+    pub fn release(*this: *S3HttpSimpleTask): void {
+        if (this.result.certificate_info) |certificate| {
             certificate.deinit(bun.default_allocator);
         }
-        _.poll_ref.unref(_.vm);
-        _.response_buffer.deinit();
-        _.headers.deinit();
-        _.sign_result.deinit();
-        _.http.clearData();
-        if (range := _.range) {
+        this.poll_ref.unref(this.vm);
+        this.response_buffer.deinit();
+        this.headers.deinit();
+        this.sign_result.deinit();
+        this.http.clearData();
+        if (this.range) |range| {
             bun.default_allocator.free(range);
         }
-        if (_.proxy_url.len > 0) {
-            bun.default_allocator.free(_.proxy_url);
+        if (this.proxy_url.len > 0) {
+            bun.default_allocator.free(this.proxy_url);
         }
-        if (*metadata := _.result.metadata) {
+        if (this.result.metadata) |metadata| {
             metadata.deinit(bun.default_allocator);
         }
     }
 
-    pub fn deinit(_: *S3HttpSimpleTask) {
-        _.release();
-        bun.destroy(_);
+    pub fn deinit(this: *S3HttpSimpleTask): void {
+        this.release();
+        bun.destroy(this);
     }
 
     const ErrorType = enum {
@@ -232,26 +232,26 @@ export class S3HttpSimpleTask {
         failure,
     };
 
-    fn errorWithBody(_: *S3HttpSimpleTask, comptime error_type: ErrorType): JSTerminatedError!void {
-        var code: string = "UnknownError";
-        var message: string = "an unexpected error has occurred";
-        var has_error_code = false;
+    fn errorWithBody(this: *S3HttpSimpleTask, comptime error_type: ErrorType): JSTerminatedError!void {
+        let code: string = "UnknownError";
+        let message: string = "an unexpected error has occurred";
+        let has_error_code = false;
 
-        if (req_err := _.result.fail) {
+        if (this.result.fail) |req_err| {
             code = @errorName(req_err);
             has_error_code = true;
-        } else if (body := _.result.body) {
-            const bytes = body.list.items;
+        } else if (this.result.body) |body| {
+            const bytes: string = body.list.items;
             if (bytes.len > 0) {
-                message = bytes[0..];
-                if (start := strings.indexOf(bytes, "<Code>")) {
-                    if (end := strings.indexOf(bytes, "</Code>")) {
+                message = bytes;
+                if (strings.indexOf(bytes, "<Code>")) |start| {
+                    if (strings.indexOf(bytes, "</Code>")) |end| {
                         code = bytes[start + "<Code>".len .. end];
                         has_error_code = true;
                     }
                 }
-                if (start := strings.indexOf(bytes, "<Message>")) {
-                    if (end := strings.indexOf(bytes, "</Message>")) {
+                if (strings.indexOf(bytes, "<Message>")) |start| {
+                    if (strings.indexOf(bytes, "</Message>")) |end| {
                         message = bytes[start + "<Message>".len .. end];
                     }
                 }
@@ -263,32 +263,32 @@ export class S3HttpSimpleTask {
                 code = "NoSuchKey";
                 message = "The specified key does not exist.";
             }
-            _.callback.notFound(code, message, _.callback_context)?;
+            this.callback.notFound(code, message, this.callback_context)?;
         } else {
-            _.callback.fail(code, message, _.callback_context)?;
+            this.callback.fail(code, message, this.callback_context)?;
         }
     }
 
-    fn failIfContainsError(_: *S3HttpSimpleTask, status: u32): JSTerminatedError!bool {
-        var code: string = "UnknownError";
-        var message: string = "an unexpected error has occurred";
+    fn failIfContainsError(this: *S3HttpSimpleTask, status: u32): JSTerminatedError!bool {
+        let code: string = "UnknownError";
+        let message: string = "an unexpected error has occurred";
 
-        if (req_err := _.result.fail) {
+        if (this.result.fail) |req_err| {
             code = @errorName(req_err);
-        } else if (body := _.result.body) {
-            const bytes = body.list.items;
-            var has_error = false;
+        } else if (this.result.body) |body| {
+            const bytes: string = body.list.items;
+            let has_error = false;
             if (bytes.len > 0) {
-                message = bytes[0..];
+                message = bytes;
                 if (strings.indexOf(bytes, "<Error>") != null) {
                     has_error = true;
-                    if (start := strings.indexOf(bytes, "<Code>")) {
-                        if (end := strings.indexOf(bytes, "</Code>")) {
+                    if (strings.indexOf(bytes, "<Code>")) |start| {
+                        if (strings.indexOf(bytes, "</Code>")) |end| {
                             code = bytes[start + "<Code>".len .. end];
                         }
                     }
-                    if (start := strings.indexOf(bytes, "<Message>")) {
-                        if (end := strings.indexOf(bytes, "</Message>")) {
+                    if (strings.indexOf(bytes, "<Message>")) |start| {
+                        if (strings.indexOf(bytes, "</Message>")) |end| {
                             message = bytes[start + "<Message>".len .. end];
                         }
                     }
@@ -301,20 +301,20 @@ export class S3HttpSimpleTask {
             return false;
         }
 
-        _.callback.fail(code, message, _.callback_context)?;
+        this.callback.fail(code, message, this.callback_context)?;
         return true;
     }
 
-    pub fn onResponse(_: *S3HttpSimpleTask): JSTerminatedError!void {
-        defer _.deinit();
-        if (!_.result.isSuccess()) {
-            _.errorWithBody(.failure)?;
+    pub fn onResponse(this: *S3HttpSimpleTask): JSTerminatedError!void {
+        defer this.deinit();
+        if (!this.result.isSuccess()) {
+            this.errorWithBody(.failure)?;
             return;
         }
-        bun.assert(_.result.metadata != null);
-        const response = _.result.metadata.?.response;
+        bun.assert(this.result.metadata != null);
+        const response = this.result.metadata.?.response;
 
-        switch (_.callback) {
+        switch (this.callback) {
             .stat(cb) => {
                 switch (response.status_code) {
                     200 => {
@@ -327,65 +327,65 @@ export class S3HttpSimpleTask {
                                 .contentType = response.headers.get("content-type") orelse "",
                                 .size = cl_size,
                             },
-                        }, _.callback_context)?;
+                        }, this.callback_context)?;
                     },
                     404 => {
-                        _.errorWithBody(.not_found)?;
+                        this.errorWithBody(.not_found)?;
                     },
                     else => {
-                        _.errorWithBody(.failure)?;
+                        this.errorWithBody(.failure)?;
                     },
                 }
             },
             .delete(cb) => {
                 switch (response.status_code) {
                     200, 204 => {
-                        cb(.{ .success = {} }, _.callback_context)?;
+                        cb(.{ .success = {} }, this.callback_context)?;
                     },
                     404 => {
-                        _.errorWithBody(.not_found)?;
+                        this.errorWithBody(.not_found)?;
                     },
                     else => {
-                        _.errorWithBody(.failure)?;
+                        this.errorWithBody(.failure)?;
                     },
                 }
             },
             .listObjects(cb) => {
                 switch (response.status_code) {
                     200 => {
-                        if (body := _.result.body) {
+                        if (this.result.body) |body| {
                             const success = ListObjects.parseS3ListObjectsResult(body.slice()) catch {
-                                _.errorWithBody(.failure)?;
+                                this.errorWithBody(.failure)?;
                                 return;
                             };
-                            cb(.{ .success = success }, _.callback_context)?;
+                            cb(.{ .success = success }, this.callback_context)?;
                         } else {
-                            _.errorWithBody(.failure)?;
+                            this.errorWithBody(.failure)?;
                         }
                     },
                     404 => {
-                        _.errorWithBody(.not_found)?;
+                        this.errorWithBody(.not_found)?;
                     },
                     else => {
-                        _.errorWithBody(.failure)?;
+                        this.errorWithBody(.failure)?;
                     },
                 }
             },
             .upload(cb) => {
                 switch (response.status_code) {
                     200 => {
-                        cb(.{ .success = {} }, _.callback_context)?;
+                        cb(.{ .success = {} }, this.callback_context)?;
                     },
                     else => {
-                        _.errorWithBody(.failure)?;
+                        this.errorWithBody(.failure)?;
                     },
                 }
             },
             .download(cb) => {
                 switch (response.status_code) {
                     200, 204, 206 => {
-                        const body = _.response_buffer;
-                        _.response_buffer = .{
+                        const body = this.response_buffer;
+                        this.response_buffer = .{
                             .allocator = bun.default_allocator,
                             .list = .{
                                 .items = &.{},
@@ -397,40 +397,40 @@ export class S3HttpSimpleTask {
                                 .etag = response.headers.get("etag") orelse "",
                                 .body = body,
                             },
-                        }, _.callback_context)?;
+                        }, this.callback_context)?;
                     },
                     404 => {
-                        _.errorWithBody(.not_found)?;
+                        this.errorWithBody(.not_found)?;
                     },
                     else => {
-                        _.errorWithBody(.failure)?;
+                        this.errorWithBody(.failure)?;
                     },
                 }
             },
             .commit(cb) => {
-                if (!(_.failIfContainsError(response.status_code)?)) {
-                    cb(.{ .success = {} }, _.callback_context)?;
+                if (!this.failIfContainsError(response.status_code)?) {
+                    cb(.{ .success = {} }, this.callback_context)?;
                 }
             },
             .part(cb) => {
-                if (!(_.failIfContainsError(response.status_code)?)) {
-                    if (etag := response.headers.get("etag")) {
-                        cb(.{ .etag = etag }, _.callback_context)?;
+                if (!this.failIfContainsError(response.status_code)?) {
+                    if (response.headers.get("etag")) |etag| {
+                        cb(.{ .etag = etag }, this.callback_context)?;
                     } else {
-                        _.errorWithBody(.failure)?;
+                        this.errorWithBody(.failure)?;
                     }
                 }
             },
         }
     }
 
-    pub fn httpCallback(_: *S3HttpSimpleTask, async_http: *bun.http.AsyncHTTP, result: bun.http.HTTPClientResult) {
+    pub fn httpCallback(this: *S3HttpSimpleTask, async_http: *bun.http.AsyncHTTP, result: bun.http.HTTPClientResult): void {
         const is_done = !result.has_more;
-        _.result = result;
-        _.http = async_http.*;
-        _.response_buffer = async_http.response_buffer.*;
+        this.result = result;
+        this.http = async_http.*;
+        this.response_buffer = async_http.response_buffer.*;
         if (is_done) {
-            _.vm.eventLoop().enqueueTaskConcurrent(_.concurrent_task.from(_, .manual_deinit));
+            this.vm.eventLoop().enqueueTaskConcurrent(this.concurrent_task.from(this, .manual_deinit));
         }
     }
 }
@@ -454,9 +454,9 @@ pub fn executeSimpleS3Request(
     this: *const S3Credentials,
     options: S3SimpleRequestOptions,
     callback: S3HttpSimpleTask.Callback,
-    callback_context: *!,
+    callback_context: *anyopaque,
 ): JSTerminatedError!void {
-    var result = this.signRequest(.{
+    const sign_options = .{
         .path = options.path,
         .method = options.method,
         .search_params = options.search_params,
@@ -465,20 +465,21 @@ pub fn executeSimpleS3Request(
         .acl = options.acl,
         .storage_class = options.storage_class,
         .request_payer = options.request_payer,
-    }, false, null) catch |sign_err| {
-        if (range_ := options.range) bun.default_allocator.free(range_);
+    };
+    let result = this.signRequest(sign_options, false, null) catch |sign_err| {
+        if (options.range) |range_| bun.default_allocator.free(range_);
         const error_code_and_message = getSignErrorCodeAndMessage(sign_err);
         callback.fail(error_code_and_message.code, error_code_and_message.message, callback_context)?;
         return;
     };
 
     const headers = brk: {
-        var header_buffer: [12]picohttp.Header = undefined;
-        if (range_ := options.range) {
+        let header_buffer: [12]picohttp.Header = undefined;
+        if (options.range) |range_| {
             const _headers = result.mixWithHeader(&header_buffer, .{ .name = "range", .value = range_ });
             break :brk bun.handleOom(bun.http.Headers.fromPicoHttpHeaders(_headers, bun.default_allocator));
         } else {
-            if (content_type := options.content_type) {
+            if (options.content_type) |content_type| {
                 if (content_type.len > 0) {
                     const _headers = result.mixWithHeader(&header_buffer, .{ .name = "Content-Type", .value = content_type });
                     break :brk bun.handleOom(bun.http.Headers.fromPicoHttpHeaders(_headers, bun.default_allocator));
@@ -523,7 +524,7 @@ pub fn executeSimpleS3Request(
     );
 
     bun.http.HTTPThread.init(&.{});
-    var batch = bun.ThreadPool.Batch{};
+    let batch = bun.ThreadPool.Batch{};
     task.http.schedule(bun.default_allocator, &batch);
     bun.http.http_thread.schedule(batch);
 }

@@ -8,12 +8,11 @@ import { S3Credentials } from "../../../s3_signing/credentials";
 import { S3Error } from "../../../s3_signing/error";
 import { StorageClass } from "../../../s3_signing/storage_class";
 import * as S3SimpleRequest from "./simple_request";
-import { default_allocator, handleOom, destroy, ByteList, MutableString, Output, JSTerminated, JSError, OOM, strings } from "bun";
+import { default_allocator, handleOom, destroy, ByteList, MutableString, Output, strings } from "bun";
 import { JSGlobalObject, VirtualMachine, WebCore } from "bun:jsc";
 import { IntegerBitSet } from "bun:bit_set";
 import { StreamBuffer } from "bun:io";
 import { KeepAlive } from "bun:Async";
-import { ArrayListUnmanaged } from "std:array_list";
 import { bufPrint } from "std:fmt";
 
 const executeSimpleS3Request = S3SimpleRequest.executeSimpleS3Request;
@@ -63,100 +62,103 @@ export struct UploadPart {
         return a.number < b.number;
     }
 
-    fn freeAllocatedSlice(*_) {
-        let slice = _.allocatedSlice();
+    fn freeAllocatedSlice(*this: *UploadPart): void {
+        let slice = this.allocatedSlice();
         if (slice.len > 0) {
             default_allocator.free(slice);
         }
-        _.data = "";
-        _.allocated_size = 0;
+        this.data = "";
+        this.allocated_size = 0;
     }
 
-    fn allocatedSlice(*_): string {
-        if (_.allocated_size > 0) {
-            return _.data[0.._.allocated_size];
+    fn allocatedSlice(this: *const UploadPart): string {
+        if (this.allocated_size > 0) {
+            return this.data[0..this.allocated_size];
         }
         return "";
     }
 
-    pub fn onPartResponse(result: S3SimpleRequest.S3PartResult, self: *UploadPart): JSTerminatedError!void {
-        if (self.state == .canceled or self.ctx.state == .finished) {
-            log("onPartResponse {} canceled", [self.partNumber]);
-            self.freeAllocatedSlice();
-            self.ctx.deref();
+    @c static fn onPartResponse(result: S3SimpleRequest.S3PartResult, self_any: *anyopaque): JSTerminatedError!void {
+        const this: *UploadPart = @ptrCast(@alignCast(self_any));
+        if (this.state == .canceled or this.ctx.state == .finished) {
+            log("onPartResponse {} canceled", .{ this.partNumber });
+            this.freeAllocatedSlice();
+            this.ctx.deref();
             return;
         }
 
-        self.state = .completed;
+        this.state = .completed;
 
         switch (result) {
-            .failure s3_err => {
-                if (self.retry > 0) {
-                    log("onPartResponse {} retry", [self.partNumber]);
-                    self.retry -= 1;
-                    self.perform()?;
+            .failure(s3_err) => {
+                if (this.retry > 0) {
+                    log("onPartResponse {} retry", .{ this.partNumber });
+                    this.retry -= 1;
+                    this.perform()?;
                     return;
                 } else {
-                    self.state = .not_assigned;
-                    log("onPartResponse {} failed", [self.partNumber]);
-                    self.freeAllocatedSlice();
-                    defer self.ctx.deref();
-                    return self.ctx.fail(s3_err);
+                    this.state = .not_assigned;
+                    log("onPartResponse {} failed", .{ this.partNumber });
+                    this.freeAllocatedSlice();
+                    defer this.ctx.deref();
+                    return this.ctx.fail(s3_err);
                 }
             },
-            .etag etag => {
-                log("onPartResponse {} success", [self.partNumber]);
-                let sent = self.data.len;
-                self.freeAllocatedSlice();
-                self.ctx.multipart_etags.append(default_allocator, .{
-                    number: self.partNumber,
-                    etag: handleOom(default_allocator.dupe(u8, etag)),
-                }) catch (oom_err) handleOom(oom_err);
-                self.state = .not_assigned;
-                defer self.ctx.deref();
-                self.ctx.available.set(self.index);
-                self.ctx.drainEnqueuedParts(sent)?;
+            .etag(etag) => {
+                log("onPartResponse {} success", .{ this.partNumber });
+                let sent = this.data.len;
+                this.freeAllocatedSlice();
+                this.ctx.multipart_etags.append(default_allocator, .{
+                    .number = this.partNumber,
+                    .etag = handleOom(default_allocator.dupe(u8, etag)),
+                }) catch |oom_err| handleOom(oom_err);
+                this.state = .not_assigned;
+                defer this.ctx.deref();
+                this.ctx.available.set(this.index);
+                this.ctx.drainEnqueuedParts(sent)?;
             },
         }
     }
 
-    fn perform(*_): JSTerminatedError!void {
+    fn perform(*this: *UploadPart): JSTerminatedError!void {
         let params_buffer: [2048]u8 = undefined;
-        let search_params = bufPrint(&params_buffer, "?partNumber={}&uploadId={s}&x-id=UploadPart", [
-            _.partNumber,
-            _.ctx.upload_id,
-        ]) catch unreachable;
-        executeSimpleS3Request(_.ctx.credentials, .{
-            path: _.ctx.path,
-            method: .PUT,
-            proxy_url: _.ctx.proxyUrl(),
-            body: _.data,
-            search_params: search_params,
-            request_payer: _.ctx.request_payer,
-        }, .{ part: @ptrCast(&onPartResponse) }, _)?;
+        let search_params = bufPrint(&params_buffer, "?partNumber={}&uploadId={s}&x-id=UploadPart", .{
+            this.partNumber,
+            this.ctx.upload_id,
+        }) catch unreachable;
+        const req_opts = .{
+            .path = this.ctx.path,
+            .method = bun.http.Method.PUT,
+            .proxy_url = this.ctx.proxyUrl(),
+            .body = this.data,
+            .search_params = search_params,
+            .request_payer = this.ctx.request_payer,
+        };
+        const cb = .{ .part = @ptrCast(&onPartResponse) };
+        executeSimpleS3Request(this.ctx.credentials, req_opts, cb, this)?;
     }
 
-    pub fn start(*_): JSTerminatedError!void {
-        if (_.state != .pending or _.ctx.state != .multipart_completed) return;
-        _.ctx.ref();
-        _.state = .started;
-        _.perform()?;
+    pub fn start(*this: *UploadPart): JSTerminatedError!void {
+        if (this.state != .pending or this.ctx.state != .multipart_completed) return;
+        this.ctx.ref();
+        this.state = .started;
+        this.perform()?;
     }
 
-    pub fn cancel(*_) {
-        let state = _.state;
-        _.state = .canceled;
+    pub fn cancel(*this: *UploadPart): void {
+        let state = this.state;
+        this.state = .canceled;
 
         switch (state) {
             .pending => {
-                _.freeAllocatedSlice();
+                this.freeAllocatedSlice();
             },
             else => {},
         }
     }
 }
 
-export struct MultiPartUpload {
+export class MultiPartUpload {
     const OneMiB: usize = MultiPartUploadOptions.OneMiB;
     const MAX_SINGLE_UPLOAD_SIZE: usize = MultiPartUploadOptions.MAX_SINGLE_UPLOAD_SIZE;
     const MIN_SINGLE_UPLOAD_SIZE: usize = MultiPartUploadOptions.MIN_SINGLE_UPLOAD_SIZE;
@@ -188,139 +190,148 @@ export struct MultiPartUpload {
     content_disposition: ?string = null;
     content_encoding: ?string = null;
     upload_id: string = "";
-    uploadid_buffer: MutableString = .{ allocator: default_allocator, list: .{} };
+    uploadid_buffer: MutableString = .{
+        .allocator = default_allocator,
+        .list = .{
+            .items = &.{},
+            .capacity = 0,
+        },
+    };
 
-    multipart_etags: ArrayListUnmanaged(UploadPartResult) = .{};
+    multipart_etags: std.ArrayListUnmanaged(UploadPartResult) = .{};
     multipart_upload_list: ByteList = .{};
 
     state: MultiPartUploadState = .not_started;
 
-    callback: fn (S3SimpleRequest.S3UploadResult, *!) JSTerminatedError!void;
-    onWritable: ?fn (task: *MultiPartUpload, ctx: *!, flushed: u64) void = null;
-    callback_context: *!;
+    callback: fn (S3SimpleRequest.S3UploadResult, *anyopaque) JSTerminatedError!void;
+    onWritable: ?fn (task: *MultiPartUpload, ctx: *anyopaque, flushed: u64) void = null;
+    callback_context: *anyopaque;
 
     const Self = @This();
     const RefCount = bun.ptr.RefCount(Self, "ref_count", deinit, .{});
     pub const ref = RefCount.ref;
     pub const deref = RefCount.deref;
 
-    pub fn deinit(*_) {
+    pub fn deinit(*this: *MultiPartUpload): void {
         log("deinit", .{});
-        if (queue := _.queue) {
-            _.queue = null;
+        if (this.queue) |queue| {
+            this.queue = null;
             default_allocator.free(queue);
         }
-        _.poll_ref.unref(_.vm);
-        default_allocator.free(_.path);
-        if (_.proxy.len > 0) {
-            default_allocator.free(_.proxy);
+        this.poll_ref.unref(this.vm);
+        default_allocator.free(this.path);
+        if (this.proxy.len > 0) {
+            default_allocator.free(this.proxy);
         }
-        if (ct := _.content_type) {
+        if (this.content_type) |ct| {
             if (ct.len > 0) {
                 default_allocator.free(ct);
             }
         }
-        if (cd := _.content_disposition) {
+        if (this.content_disposition) |cd| {
             if (cd.len > 0) {
                 default_allocator.free(cd);
             }
         }
-        if (ce := _.content_encoding) {
+        if (this.content_encoding) |ce| {
             if (ce.len > 0) {
                 default_allocator.free(ce);
             }
         }
-        _.credentials.deref();
-        _.uploadid_buffer.deinit();
-        for (tag of _.multipart_etags.items) {
+        this.credentials.deref();
+        this.uploadid_buffer.deinit();
+        for (tag of this.multipart_etags.items) {
             default_allocator.free(tag.etag);
         }
-        if (_.multipart_etags.capacity > 0)
-            _.multipart_etags.deinit(default_allocator);
-        if (_.multipart_upload_list.cap > 0)
-            _.multipart_upload_list.deinit(default_allocator);
-        destroy(_);
+        if (this.multipart_etags.capacity > 0)
+            this.multipart_etags.deinit(default_allocator);
+        if (this.multipart_upload_list.cap > 0)
+            this.multipart_upload_list.deinit(default_allocator);
+        destroy(this);
     }
 
-    pub fn singleSendUploadResponse(result: S3SimpleRequest.S3UploadResult, self: *MultiPartUpload): JSError!void {
-        if (self.state == .finished) return;
+    @c static fn singleSendUploadResponse(result: S3SimpleRequest.S3UploadResult, self_any: *anyopaque): JSTerminatedError!void {
+        const this: *MultiPartUpload = @ptrCast(@alignCast(self_any));
+        if (this.state == .finished) return;
         switch (result) {
-            .failure s3_err => {
-                if (self.options.retry > 0) {
-                    const retry_val = self.options.retry;
-                    log("singleSendUploadResponse {} retry", .{retry_val});
-                    self.options.retry -= 1;
-                    executeSimpleS3Request(self.credentials, .{
-                        path: self.path,
-                        method: .PUT,
-                        proxy_url: self.proxyUrl(),
-                        body: self.buffered.slice(),
-                        content_type: self.content_type,
-                        content_disposition: self.content_disposition,
-                        content_encoding: self.content_encoding,
-                        acl: self.acl,
-                        storage_class: self.storage_class,
-                        request_payer: self.request_payer,
-                    }, .{ upload: @ptrCast(&singleSendUploadResponse) }, self)?;
+            .failure(s3_err) => {
+                if (this.options.retry > 0) {
+                    const retry_val = this.options.retry;
+                    log("singleSendUploadResponse {} retry", .{ retry_val });
+                    this.options.retry -= 1;
+                    const req_opts = .{
+                        .path = this.path,
+                        .method = bun.http.Method.PUT,
+                        .proxy_url = this.proxyUrl(),
+                        .body = this.buffered.slice(),
+                        .content_type = this.content_type,
+                        .content_disposition = this.content_disposition,
+                        .content_encoding = this.content_encoding,
+                        .acl = this.acl,
+                        .storage_class = this.storage_class,
+                        .request_payer = this.request_payer,
+                    };
+                    const cb = .{ .upload = @ptrCast(&singleSendUploadResponse) };
+                    executeSimpleS3Request(this.credentials, req_opts, cb, this)?;
                     return;
                 } else {
                     log("singleSendUploadResponse failed", .{});
-                    return self.fail(s3_err);
+                    return this.fail(s3_err);
                 }
             },
             .success => {
                 log("singleSendUploadResponse success", .{});
-                if (callback := self.onWritable) {
-                    callback(self, self.callback_context, self.buffered.size());
+                if (this.onWritable) |callback| {
+                    callback(this, this.callback_context, this.buffered.size());
                 }
-                self.done()?;
+                this.done()?;
             },
         }
     }
 
-    fn getCreatePart(*_, chunk: string, allocated_size: usize, needs_clone: bool): ?*UploadPart {
-        let index = _.available.findFirstSet() ?? return null;
-        let queueSize = _.options.queueSize;
+    fn getCreatePart(*this: *MultiPartUpload, chunk: string, allocated_size: usize, needs_clone: bool): ?*UploadPart {
+        let index = this.available.findFirstSet() orelse return null;
+        let queueSize = this.options.queueSize;
         if (index >= queueSize) {
             return null;
         }
-        _.available.unset(index);
-        defer _.currentPartNumber += 1;
-        if (_.queue == null) {
+        this.available.unset(index);
+        defer this.currentPartNumber += 1;
+        if (this.queue == null) {
             let queue = handleOom(default_allocator.alloc(UploadPart, queueSize));
             @memset(queue, UploadPart {
-                data: "",
-                ctx: _,
-                allocated_size: 0,
-                state: .not_assigned,
-                partNumber: 0,
-                retry: 0,
-                index: 0,
+                data = "",
+                ctx = this,
+                allocated_size = 0,
+                state = .not_assigned,
+                partNumber = 0,
+                retry = 0,
+                index = 0,
             });
-            _.queue = queue;
+            this.queue = queue;
         }
         let data = if (needs_clone) handleOom(default_allocator.dupe(u8, chunk)) else chunk;
         let allocated_len = if (needs_clone) data.len else allocated_size;
 
-        let queue_item = &_.queue.?[index];
+        let queue_item = &this.queue.?[index];
         queue_item.* = .{
-            data: data,
-            allocated_size: allocated_len,
-            partNumber: _.currentPartNumber,
-            ctx: _,
-            index: @truncate(index),
-            retry: _.options.retry,
-            state: .pending,
+            .data = data,
+            .allocated_size = allocated_len,
+            .partNumber = this.currentPartNumber,
+            .ctx = this,
+            .index = @truncate(index),
+            .retry = this.options.retry,
+            .state = .pending,
         };
         return queue_item;
     }
 
-    fn drainEnqueuedParts(*_, flushed: u64): JSTerminatedError!void {
-        if (_.state == .finished or _.state == .singlefile_started) {
+    fn drainEnqueuedParts(*this: *MultiPartUpload, flushed: u64): JSTerminatedError!void {
+        if (this.state == .finished or this.state == .singlefile_started) {
             return;
         }
-        if (_.state == .multipart_completed) {
-            if (queue := _.queue) {
+        if (this.state == .multipart_completed) {
+            if (this.queue) |queue| {
                 for (*part of queue) {
                     if (part.state == .pending) {
                         part.start()?;
@@ -328,345 +339,358 @@ export struct MultiPartUpload {
                 }
             }
         }
-        let partSize = _.partSizeInBytes();
-        if (_.ended or _.buffered.size() >= partSize) {
-            _.processMultiPart(partSize)?;
+        let partSize = this.partSizeInBytes();
+        if (this.ended or this.buffered.size() >= partSize) {
+            this.processMultiPart(partSize)?;
         }
 
-        if (_.isQueueEmpty()) {
-            if (callback := _.onWritable) {
-                callback(_, _.callback_context, flushed);
+        if (this.isQueueEmpty()) {
+            if (this.onWritable) |callback| {
+                callback(this, this.callback_context, flushed);
             }
-            if (_.ended) {
-                _.done()?;
+            if (this.ended) {
+                this.done()?;
             }
-        } else if (!_.hasBackpressure() and flushed > 0) {
-            if (callback := _.onWritable) {
-                callback(_, _.callback_context, flushed);
+        } else if (!this.hasBackpressure() and flushed > 0) {
+            if (this.onWritable) |callback| {
+                callback(this, this.callback_context, flushed);
             }
         }
     }
 
-    pub fn fail(*_, s3_err: S3Error): JSTerminatedError!void {
+    pub fn fail(*this: *MultiPartUpload, s3_err: S3Error): JSTerminatedError!void {
         const err_code = s3_err.code;
         const err_msg = s3_err.message;
         log("fail {s}:{s}", .{ err_code, err_msg });
-        _.ended = true;
-        if (queue := _.queue) {
+        this.ended = true;
+        if (this.queue) |queue| {
             for (*task of queue) {
                 if (task.state != .not_assigned) {
                     task.cancel();
                 }
             }
         }
-        if (_.state != .finished) {
-            let old_state = _.state;
-            _.state = .finished;
-            _.callback(.{ failure: s3_err }, _.callback_context)?;
+        if (this.state != .finished) {
+            let old_state = this.state;
+            this.state = .finished;
+            this.callback(.{ .failure = s3_err }, this.callback_context)?;
 
             if (old_state == .multipart_completed) {
-                _.rollbackMultiPartRequest()?;
+                this.rollbackMultiPartRequest()?;
             } else {
-                _.deref();
+                this.deref();
             }
         }
     }
 
-    fn done(*_): JSTerminatedError!void {
-        if (_.state == .multipart_completed) {
-            _.state = .finished;
-            sort.block(UploadPartResult, _.multipart_etags.items, _, UploadPart.sortEtags);
-            handleOom(_.multipart_upload_list.appendSlice(
+    fn done(*this: *MultiPartUpload): JSTerminatedError!void {
+        if (this.state == .multipart_completed) {
+            this.state = .finished;
+            sort.block(UploadPartResult, this.multipart_etags.items, this, UploadPart.sortEtags);
+            handleOom(this.multipart_upload_list.appendSlice(
                 default_allocator,
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
             ));
-            for (tag of _.multipart_etags.items) {
-                handleOom(_.multipart_upload_list.appendFmt(default_allocator, "<Part><PartNumber>{}</PartNumber><ETag>{s}</ETag></Part>", [tag.number, tag.etag]));
+            for (tag of this.multipart_etags.items) {
+                handleOom(this.multipart_upload_list.appendFmt(default_allocator, "<Part><PartNumber>{}</PartNumber><ETag>{s}</ETag></Part>", .{ tag.number, tag.etag }));
                 default_allocator.free(tag.etag);
             }
-            _.multipart_etags.deinit(default_allocator);
-            _.multipart_etags = .{};
-            handleOom(_.multipart_upload_list.appendSlice(
+            this.multipart_etags.deinit(default_allocator);
+            this.multipart_etags = .{};
+            handleOom(this.multipart_upload_list.appendSlice(
                 default_allocator,
                 "</CompleteMultipartUpload>",
             ));
-            _.commitMultiPartRequest()?;
-        } else if (_.state == .singlefile_started) {
-            _.state = .finished;
-            defer _.deref();
-            _.callback(.{ success: {} }, _.callback_context)?;
+            this.commitMultiPartRequest()?;
+        } else if (this.state == .singlefile_started) {
+            this.state = .finished;
+            defer this.deref();
+            this.callback(.{ .success = {} }, this.callback_context)?;
         }
     }
 
-    pub fn startMultiPartRequestResult(result: S3SimpleRequest.S3DownloadResult, self: *MultiPartUpload): JSError!void {
-        defer self.deref();
-        if (self.state == .finished) return;
+    @c static fn startMultiPartRequestResult(result: S3SimpleRequest.S3DownloadResult, self_any: *anyopaque): JSTerminatedError!void {
+        const this: *MultiPartUpload = @ptrCast(@alignCast(self_any));
+        defer this.deref();
+        if (this.state == .finished) return;
         switch (result) {
-            .failure s3_err => {
-                const s_path = self.path;
+            .failure(s3_err) => {
+                const s_path = this.path;
                 const err_msg = s3_err.message;
                 log("startMultiPartRequestResult {s} failed {s}: {s}", .{ s_path, err_msg, err_msg });
-                self.fail(s3_err)?;
+                this.fail(s3_err)?;
             },
-            .success response => {
-                let slice = response.body.list.items;
-                self.uploadid_buffer = result.success.body;
+            .success(response) => {
+                let slice: string = response.body.list.items;
+                this.uploadid_buffer = response.body;
 
-                if (start := strings.indexOf(slice, "<UploadId>")) {
-                    if (end := strings.indexOf(slice, "</UploadId>")) {
-                        self.upload_id = slice[start + 10 .. end];
+                if (strings.indexOf(slice, "<UploadId>")) |start| {
+                    if (strings.indexOf(slice, "</UploadId>")) |end| {
+                        this.upload_id = slice[start + 10 .. end];
                     }
                 }
-                if (self.upload_id.len == 0) {
-                    log("startMultiPartRequestResult {s} failed invalid id", [self.path]);
-                    self.fail(.{
-                        code: "UnknownError",
-                        message: "Failed to initiate multipart upload",
+                if (this.upload_id.len == 0) {
+                    log("startMultiPartRequestResult {s} failed invalid id", .{ this.path });
+                    this.fail(.{
+                        .code = "UnknownError",
+                        .message = "Failed to initiate multipart upload",
                     })?;
                     return;
                 }
-                log("startMultiPartRequestResult {s} success id: {s}", [self.path, self.upload_id]);
-                self.state = .multipart_completed;
-                self.drainEnqueuedParts(0)?;
+                log("startMultiPartRequestResult {s} success id: {s}", .{ this.path, this.upload_id });
+                this.state = .multipart_completed;
+                this.drainEnqueuedParts(0)?;
             },
-            .not_found => self.fail(.{
-                code: "UnknownError",
-                message: "Failed to initiate multipart upload",
-            })?,
+            .not_found => {
+                this.fail(.{
+                    .code = "UnknownError",
+                    .message = "Failed to initiate multipart upload",
+                })?;
+            },
         }
     }
 
-    pub fn onCommitMultiPartRequest(result: S3SimpleRequest.S3CommitResult, self: *MultiPartUpload): JSTerminatedError!void {
-        log("onCommitMultiPartRequest {s}", [self.upload_id]);
+    @c static fn onCommitMultiPartRequest(result: S3SimpleRequest.S3CommitResult, self_any: *anyopaque): JSTerminatedError!void {
+        const this: *MultiPartUpload = @ptrCast(@alignCast(self_any));
+        log("onCommitMultiPartRequest {s}", .{ this.upload_id });
         switch (result) {
-            .failure s3_err => {
-                if (self.options.retry > 0) {
-                    self.options.retry -= 1;
-                    self.commitMultiPartRequest()?;
+            .failure(s3_err) => {
+                if (this.options.retry > 0) {
+                    this.options.retry -= 1;
+                    this.commitMultiPartRequest()?;
                     return;
                 }
-                defer self.deref();
-                self.state = .finished;
-                self.callback(.{ failure: s3_err }, self.callback_context)?;
+                defer this.deref();
+                this.state = .finished;
+                this.callback(.{ .failure = s3_err }, this.callback_context)?;
             },
             .success => {
-                defer self.deref();
-                self.state = .finished;
-                self.callback(.{ success: {} }, self.callback_context)?;
+                defer this.deref();
+                this.state = .finished;
+                this.callback(.{ .success = {} }, this.callback_context)?;
             },
         }
     }
 
-    pub fn onRollbackMultiPartRequest(result: S3SimpleRequest.S3UploadResult, self: *MultiPartUpload): JSTerminatedError!void {
-        log("onRollbackMultiPartRequest {s}", [self.upload_id]);
+    @c static fn onRollbackMultiPartRequest(result: S3SimpleRequest.S3UploadResult, self_any: *anyopaque): JSTerminatedError!void {
+        const this: *MultiPartUpload = @ptrCast(@alignCast(self_any));
+        log("onRollbackMultiPartRequest {s}", .{ this.upload_id });
         switch (result) {
             .failure => {
-                if (self.options.retry > 0) {
-                    self.options.retry -= 1;
-                    self.rollbackMultiPartRequest()?;
+                if (this.options.retry > 0) {
+                    this.options.retry -= 1;
+                    this.rollbackMultiPartRequest()?;
                     return;
                 }
-                self.deref();
+                this.deref();
             },
             .success => {
-                self.deref();
+                this.deref();
             },
         }
     }
 
-    fn commitMultiPartRequest(*_): JSTerminatedError!void {
-        log("commitMultiPartRequest {s}", [_.upload_id]);
+    fn commitMultiPartRequest(*this: *MultiPartUpload): JSTerminatedError!void {
+        log("commitMultiPartRequest {s}", .{ this.upload_id });
         let params_buffer: [2048]u8 = undefined;
-        let searchParams = bufPrint(&params_buffer, "?uploadId={s}", [
-            _.upload_id,
-        ]) catch unreachable;
+        let searchParams = bufPrint(&params_buffer, "?uploadId={s}", .{
+            this.upload_id,
+        }) catch unreachable;
 
-        executeSimpleS3Request(_.credentials, .{
-            path: _.path,
-            method: .POST,
-            proxy_url: _.proxyUrl(),
-            body: _.multipart_upload_list.slice(),
-            search_params: searchParams,
-            request_payer: _.request_payer,
-        }, .{ commit: @ptrCast(&onCommitMultiPartRequest) }, _)?;
+        const req_opts = .{
+            .path = this.path,
+            .method = bun.http.Method.POST,
+            .proxy_url = this.proxyUrl(),
+            .body = this.multipart_upload_list.slice(),
+            .search_params = searchParams,
+            .request_payer = this.request_payer,
+        };
+        const cb = .{ .commit = @ptrCast(&onCommitMultiPartRequest) };
+        executeSimpleS3Request(this.credentials, req_opts, cb, this)?;
     }
 
-    fn rollbackMultiPartRequest(*_): JSTerminatedError!void {
-        log("rollbackMultiPartRequest {s}", [_.upload_id]);
+    fn rollbackMultiPartRequest(*this: *MultiPartUpload): JSTerminatedError!void {
+        log("rollbackMultiPartRequest {s}", .{ this.upload_id });
         let params_buffer: [2048]u8 = undefined;
-        let search_params = bufPrint(&params_buffer, "?uploadId={s}", [
-            _.upload_id,
-        ]) catch unreachable;
+        let search_params = bufPrint(&params_buffer, "?uploadId={s}", .{
+            this.upload_id,
+        }) catch unreachable;
 
-        executeSimpleS3Request(_.credentials, .{
-            path: _.path,
-            method: .DELETE,
-            proxy_url: _.proxyUrl(),
-            body: "",
-            search_params: search_params,
-            request_payer: _.request_payer,
-        }, .{ upload: @ptrCast(&onRollbackMultiPartRequest) }, _)?;
+        const req_opts = .{
+            .path = this.path,
+            .method = bun.http.Method.DELETE,
+            .proxy_url = this.proxyUrl(),
+            .body = "",
+            .search_params = search_params,
+            .request_payer = this.request_payer,
+        };
+        const cb = .{ .upload = @ptrCast(&onRollbackMultiPartRequest) };
+        executeSimpleS3Request(this.credentials, req_opts, cb, this)?;
     }
 
-    fn enqueuePart(*_, chunk: string, allocated_size: usize, needs_clone: bool): JSTerminatedError!bool {
-        let part = _.getCreatePart(chunk, allocated_size, needs_clone) ?? return false;
+    fn enqueuePart(*this: *MultiPartUpload, chunk: string, allocated_size: usize, needs_clone: bool): JSTerminatedError!bool {
+        let part = this.getCreatePart(chunk, allocated_size, needs_clone) ?? return false;
 
-        if (_.state == .not_started) {
-            _.state = .multipart_started;
-            _.ref();
-            executeSimpleS3Request(_.credentials, .{
-                path: _.path,
-                method: .POST,
-                proxy_url: _.proxyUrl(),
-                body: "",
-                search_params: "?uploads=",
-                content_type: _.content_type,
-                content_disposition: _.content_disposition,
-                content_encoding: _.content_encoding,
-                acl: _.acl,
-                storage_class: _.storage_class,
-                request_payer: _.request_payer,
-            }, .{ download: @ptrCast(&startMultiPartRequestResult) }, _)?;
-        } else if (_.state == .multipart_completed) {
+        if (this.state == .not_started) {
+            this.state = .multipart_started;
+            this.ref();
+            const req_opts = .{
+                .path = this.path,
+                .method = bun.http.Method.POST,
+                .proxy_url = this.proxyUrl(),
+                .body = "",
+                .search_params = "?uploads=",
+                .content_type = this.content_type,
+                .content_disposition = this.content_disposition,
+                .content_encoding = this.content_encoding,
+                .acl = this.acl,
+                .storage_class = this.storage_class,
+                .request_payer = this.request_payer,
+            };
+            const cb = .{ .download = @ptrCast(&startMultiPartRequestResult) };
+            executeSimpleS3Request(this.credentials, req_opts, cb, this)?;
+        } else if (this.state == .multipart_completed) {
             part.start()?;
         }
         return true;
     }
 
-    fn processMultiPart(*_, part_size: usize): JSTerminatedError!void {
-        log("processMultiPart {s} {d}", [_.path, part_size]);
-        if (_.buffered.isEmpty() and _.isQueueEmpty() and _.ended) {
-            _.done()?;
+    fn processMultiPart(*this: *MultiPartUpload, part_size: usize): JSTerminatedError!void {
+        log("processMultiPart {s} {d}", .{ this.path, part_size });
+        if (this.buffered.isEmpty() and this.isQueueEmpty() and this.ended) {
+            this.done()?;
             return;
         }
         defer {
-            if (_.buffered.isEmpty()) {
-                _.buffered.reset();
+            if (this.buffered.isEmpty()) {
+                this.buffered.reset();
             }
         }
 
-        while (_.buffered.isNotEmpty()) {
-            let len = @min(part_size, _.buffered.size());
-            if (len < part_size and !_.ended) {
-                log("processMultiPart {s} {d} slice too small", [_.path, len]);
+        while (this.buffered.isNotEmpty()) {
+            let len = @min(part_size, this.buffered.size());
+            if (len < part_size and !this.ended) {
+                log("processMultiPart {s} {d} slice too small", .{ this.path, len });
                 break;
             }
-            if (_.buffered.cursor == 0 and _.buffered.size() == len) {
-                let allocated_size = _.buffered.memoryCost();
-                let slice = _.buffered.slice();
+            if (this.buffered.cursor == 0 and this.buffered.size() == len) {
+                let allocated_size = this.buffered.memoryCost();
+                let slice = this.buffered.slice();
 
-                if (_.enqueuePart(slice, allocated_size, false)?) {
-                    log("processMultiPart {s} {d} full buffer enqueued", [_.path, slice.len]);
-                    _.buffered = .{};
+                if (this.enqueuePart(slice, allocated_size, false)?) {
+                    log("processMultiPart {s} {d} full buffer enqueued", .{ this.path, slice.len });
+                    this.buffered = .{};
                     return;
                 }
-                log("processMultiPart {s} {d} queue full", [_.path, slice.len]);
+                log("processMultiPart {s} {d} queue full", .{ this.path, slice.len });
                 return;
             }
 
-            let slice = _.buffered.slice()[0..len];
-            if (_.enqueuePart(slice, slice.len, true)?) {
-                log("processMultiPart {s} {d} slice enqueued", [_.path, slice.len]);
-                _.buffered.wrote(len);
+            let slice = this.buffered.slice()[0..len];
+            if (this.enqueuePart(slice, slice.len, true)?) {
+                log("processMultiPart {s} {d} slice enqueued", .{ this.path, slice.len });
+                this.buffered.wrote(len);
             } else {
-                log("processMultiPart {s} {d} queue full", [_.path, slice.len]);
+                log("processMultiPart {s} {d} queue full", .{ this.path, slice.len });
                 break;
             }
         }
     }
 
-    pub fn proxyUrl(*_): ?string {
-        return _.proxy;
+    pub fn proxyUrl(this: *const MultiPartUpload): ?string {
+        return this.proxy;
     }
 
-    fn processBuffered(*_, part_size: usize) {
-        if (_.ended and _.buffered.size() < _.partSizeInBytes() and _.state == .not_started) {
-            log("processBuffered {s} singlefile_started", [_.path]);
-            _.state = .singlefile_started;
-            executeSimpleS3Request(_.credentials, .{
-                path: _.path,
-                method: .PUT,
-                proxy_url: _.proxyUrl(),
-                body: _.buffered.slice(),
-                content_type: _.content_type,
-                content_disposition: _.content_disposition,
-                content_encoding: _.content_encoding,
-                acl: _.acl,
-                storage_class: _.storage_class,
-                request_payer: _.request_payer,
-            }, .{ upload: @ptrCast(&singleSendUploadResponse) }, _) catch {};
+    fn processBuffered(*this: *MultiPartUpload, part_size: usize): void {
+        if (this.ended and this.buffered.size() < this.partSizeInBytes() and this.state == .not_started) {
+            log("processBuffered {s} singlefile_started", .{ this.path });
+            this.state = .singlefile_started;
+            const req_opts = .{
+                .path = this.path,
+                .method = bun.http.Method.PUT,
+                .proxy_url = this.proxyUrl(),
+                .body = this.buffered.slice(),
+                .content_type = this.content_type,
+                .content_disposition = this.content_disposition,
+                .content_encoding = this.content_encoding,
+                .acl = this.acl,
+                .storage_class = this.storage_class,
+                .request_payer = this.request_payer,
+            };
+            const cb = .{ .upload = @ptrCast(&singleSendUploadResponse) };
+            executeSimpleS3Request(this.credentials, req_opts, cb, this) catch {};
         } else {
-            _.processMultiPart(part_size) catch {};
+            this.processMultiPart(part_size) catch {};
         }
     }
 
-    pub fn partSizeInBytes(*_): usize {
-        return _.options.partSize;
+    pub fn partSizeInBytes(this: *const MultiPartUpload): usize {
+        return this.options.partSize;
     }
 
-    pub fn continueStream(*_) {
-        if (_.state == .wait_stream_check) {
-            _.state = .not_started;
-            if (_.ended) {
-                _.processBuffered(_.partSizeInBytes());
+    pub fn continueStream(*this: *MultiPartUpload): void {
+        if (this.state == .wait_stream_check) {
+            this.state = .not_started;
+            if (this.ended) {
+                this.processBuffered(this.partSizeInBytes());
             }
         }
     }
 
-    pub fn hasBackpressure(*_): bool {
-        let index = _.available.findFirstSet() ?? return true;
-        return index >= _.options.queueSize;
+    pub fn hasBackpressure(this: *const MultiPartUpload): bool {
+        let index = this.available.findFirstSet() orelse return true;
+        return index >= this.options.queueSize;
     }
 
-    pub fn isQueueEmpty(*_): bool {
-        return _.available.mask == IntegerBitSet(MAX_QUEUE_SIZE).initFull().mask;
+    pub fn isQueueEmpty(this: *const MultiPartUpload): bool {
+        return this.available.mask == IntegerBitSet(MAX_QUEUE_SIZE).initFull().mask;
     }
 
-    fn write(*_, chunk: string, is_last: bool, comptime encoding: WriteEncoding): OOMError!ResumableSinkBackpressure {
-        if (_.ended) return .done;
-        _.ref();
-        defer _.deref();
-        if (_.state == .wait_stream_check and chunk.len == 0 and is_last) {
-            _.ended = true;
-            if (_.buffered.size() > 0) {
-                _.processBuffered(_.partSizeInBytes());
+    fn write(*this: *MultiPartUpload, chunk: string, is_last: bool, comptime encoding: WriteEncoding): OOMError!ResumableSinkBackpressure {
+        if (this.ended) return .done;
+        this.ref();
+        defer this.deref();
+        if (this.state == .wait_stream_check and chunk.len == 0 and is_last) {
+            this.ended = true;
+            if (this.buffered.size() > 0) {
+                this.processBuffered(this.partSizeInBytes());
             }
-            return if (_.hasBackpressure()) .backpressure else .want_more;
+            return if (this.hasBackpressure()) .backpressure else .want_more;
         }
         if (is_last) {
-            _.ended = true;
+            this.ended = true;
             if (chunk.len > 0) {
                 switch (encoding) {
-                    .bytes => _.buffered.write(chunk)?,
-                    .latin1 => _.buffered.writeLatin1(chunk, true)?,
-                    .utf16 => _.buffered.writeUTF16(@alignCast(std.mem.bytesAsSlice(u16, chunk)))?,
+                    .bytes => this.buffered.write(chunk)?,
+                    .latin1 => this.buffered.writeLatin1(chunk, true)?,
+                    .utf16 => this.buffered.writeUTF16(@alignCast(std.mem.bytesAsSlice(u16, chunk)))?,
                 }
             }
-            _.processBuffered(_.partSizeInBytes());
+            this.processBuffered(this.partSizeInBytes());
         } else {
-            if (chunk.len == 0) return if (_.hasBackpressure()) .backpressure else .want_more;
+            if (chunk.len == 0) return if (this.hasBackpressure()) .backpressure else .want_more;
             switch (encoding) {
-                .bytes => _.buffered.write(chunk)?,
-                .latin1 => _.buffered.writeLatin1(chunk, true)?,
-                .utf16 => _.buffered.writeUTF16(@alignCast(std.mem.bytesAsSlice(u16, chunk)))?,
+                .bytes => this.buffered.write(chunk)?,
+                .latin1 => this.buffered.writeLatin1(chunk, true)?,
+                .utf16 => this.buffered.writeUTF16(@alignCast(std.mem.bytesAsSlice(u16, chunk)))?,
             }
-            let partSize = _.partSizeInBytes();
-            if (_.buffered.size() >= partSize) {
-                _.processBuffered(partSize);
+            let partSize = this.partSizeInBytes();
+            if (this.buffered.size() >= partSize) {
+                this.processBuffered(partSize);
             }
         }
-        return if (_.hasBackpressure()) .backpressure else .want_more;
+        return if (this.hasBackpressure()) .backpressure else .want_more;
     }
 
-    pub fn writeLatin1(*_, chunk: string, is_last: bool): OOMError!ResumableSinkBackpressure {
-        return _.write(chunk, is_last, .latin1);
+    pub fn writeLatin1(*this: *MultiPartUpload, chunk: string, is_last: bool): OOMError!ResumableSinkBackpressure {
+        return this.write(chunk, is_last, .latin1);
     }
 
-    pub fn writeUTF16(*_, chunk: string, is_last: bool): OOMError!ResumableSinkBackpressure {
-        return _.write(chunk, is_last, .utf16);
+    pub fn writeUTF16(*this: *MultiPartUpload, chunk: string, is_last: bool): OOMError!ResumableSinkBackpressure {
+        return this.write(chunk, is_last, .utf16);
     }
 
-    pub fn writeBytes(*_, chunk: string, is_last: bool): OOMError!ResumableSinkBackpressure {
-        return _.write(chunk, is_last, .bytes);
+    pub fn writeBytes(*this: *MultiPartUpload, chunk: string, is_last: bool): OOMError!ResumableSinkBackpressure {
+        return this.write(chunk, is_last, .bytes);
     }
 }

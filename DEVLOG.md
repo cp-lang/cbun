@@ -64,14 +64,38 @@
 
 ---
 
-## 4. 下一阶段攻坚规划：`src/runtime/webcore/s3/`（5个模块）与根目录（18个模块）
+## 4. Milestone 4 攻坚总结：`src/runtime/webcore/s3/`（8个模块全部达成）
 
-1. **子模块分类**：
-   - `src/runtime/webcore/s3/` (5 个模块：`client.cp`, `download_stream.cp`, `list_objects.cp`, `multipart.cp`, `simple_request.cp`)
-   - `src/runtime/webcore/` (18 个根目录模块：`Blob.cp`, `Body.cp`, `CookieMap.cp`, `Crypto.cp`, `FileReader.cp`, `FormData.cp`, `ReadableStream.cp`, `Request.cp`, `Response.cp`, `S3Client.cp`, `S3File.cp`, `Sink.cp`, `TextDecoder.cp`, `TextEncoder.cp`, `TextEncoderStreamEncoder.cp`, `encoding.cp`, `fetch.cp`, `streams.cp`)
+### 4.1 字符串切片推导与静态类型转换机制
+- **问题机理**：
+  在 XML 解析过程中，通过 `bytes[start .. end]` 截取字符串，由于 `const bytes = list.items` 未带类型标注，其在语义分析时被推断为 `Array(Auto)`，导致赋值给 `string` 或 `?string` 时触发 `E0207: type mismatch: expected 'String', found 'Array(Auto)'`。
+- **解决手段**：
+  为源切片显式声明类型标注 `const bytes: string = list.items;`。经此标注后，切片表达式推导出 `Array(U8)`，进而命中 `sema.rs:4650` 中允许将 `Array(U8)` 强制转换为 `String` 的安全类型规则。
+
+### 4.2 函数参数中匿名结构体逗号解析歧义
+- **问题机理**：
+  在 CP 解析器中，直接在参数位置书写多行匿名结构体 `fn_call(.{ .a = 1, .b = 2 }, arg2)` 时，结构体闭合大括号后的逗号易被解析器判为词法异常。
+- **解决手段**：
+  提取前置常量声明 `const opts = .{ .a = 1, .b = 2 }; fn_call(opts, arg2)`，既提升代码可读性与复用性，又彻底根除了解析器的上下文歧义。
+
+### 4.3 静态回调中的借用检查隔离
+- **问题机理**：
+  在类内部定义被 C-ABI 捕获的回调函数时，如果定义为普通方法，CPC 默认赋予只读接收器。当通过 `@ptrCast` 获取实例指针并修改内部字段时，借用检查器会将此类修改视作针对局部只读接收器的非法写操作。
+- **解决手段**：
+  强制将所有非成员 C-ABI 回调声明为 `@c static fn`，并通过 `let self: *T = @ptrCast(@alignCast(ctx));` 明确可变借用权限，确保在生命周期内合规解构与写入。
+
+---
+
+## 5. 最终决战攻坚规划：`src/runtime/webcore/` 根目录（最后 18 个模块）
+
+1. **模块清单与特征分析**：
+   - 数据流核心：`streams.cp`, `ReadableStream.cp`, `Sink.cp`
+   - 网络与请求：`fetch.cp`, `Request.cp`, `Response.cp`, `Body.cp`, `CookieMap.cp`, `FormData.cp`
+   - 编码与加解密：`encoding.cp`, `TextEncoder.cp`, `TextDecoder.cp`, `TextEncoderStreamEncoder.cp`, `Crypto.cp`
+   - 存储与高层客户端：`Blob.cp`, `FileReader.cp`, `S3Client.cp`, `S3File.cp`
 2. **攻坚推进策略**：
-   - 立即集中攻坚 `src/runtime/webcore/s3/` 全部 5 个模块；
    - 保持 100% 纯正 CP 语言（0 处 `zig {}`，0 处 `var`）；
    - 双重验证（`cpc --lib` + `vendor/zig/zig ast-check`）；
    - 行数膨胀率严守 $\le +20\%$；
-   - 阶段性成果及时原子 Git 提交。
+   - 逐步冲刺全仓 258/258 (100%) 完备转译。
+

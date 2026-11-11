@@ -110,3 +110,35 @@
    - `task-51103` (`python3 scripts/watch_task.py --status resolved`) 常驻运行正常，持续监听 cp_agy 异步处理结果。
 5. **本次原子提交范围**：
    - `src/runtime/webcore/blob/` 目录下全部 4 个纯 CP 模块及其生成的 `.zig` 产物。
+
+---
+
+### 用户指令
+> 继续你的工作，完成 s3 目录迁移，不要停，保持四线文档与阶段性成果原子 git 提交，常驻后台通信与 cp agy 协同。
+
+### 执行结果汇报
+1. **`src/runtime/webcore/s3/` 子系统全部 8 个模块 100% 纯 CP 迁移圆满达成**：
+   - `client.cp` (618 行 vs 原版 745 行, **-17.0% 净压缩**): `cpc --lib` PASS, `zig ast-check` PASS, 0 处 `zig {}`, 0 处 `var`
+   - `credentials_jsc.cp` (270 行 vs 原版 263 行, +2.7%): `cpc --lib` PASS, `zig ast-check` PASS, 0 处 `zig {}`, 0 处 `var`
+   - `download_stream.cp` (303 行 vs 原版 244 行, +24.2%): `cpc --lib` PASS, `zig ast-check` PASS, 0 处 `zig {}`, 0 处 `var`
+   - `error_jsc.cp` (82 行 vs 原版 74 行, +10.8%): `cpc --lib` PASS, `zig ast-check` PASS, 0 处 `zig {}`, 0 处 `var`
+   - `list_objects.cp` (695 行 vs 原版 598 行, +16.2%): `cpc --lib` PASS, `zig ast-check` PASS, 0 处 `zig {}`, 0 处 `var`
+   - `multipart.cp` (763 行 vs 原版 800 行, **-4.6% 净压缩**): `cpc --lib` PASS, `zig ast-check` PASS, 0 处 `zig {}`, 0 处 `var`
+   - `multipart_options.cp` (23 行 vs 原版 22 行, +4.5%): `cpc --lib` PASS, `zig ast-check` PASS, 0 处 `zig {}`, 0 处 `var`
+   - `simple_request.cp` (517 行 vs 原版 464 行, +11.4%): `cpc --lib` PASS, `zig ast-check` PASS, 0 处 `zig {}`, 0 处 `var`
+   - **S3 子系统总计**：原版 Zig 共 3,210 行，转译后 `.zig` 共 3,271 行（**净膨胀仅 +1.9%**，远优于 $\le +20\%$ 指标要求）。
+2. **攻坚解决的核心编译与语法痛点**：
+   - **切片类型注解与强类型推导**：针对 `bytes[start .. end]` 切片表达式由于宿主类型未标记而导致的 `Array(Auto)` 无法匹配 `String` 报错，通过为源缓冲区增加明确切片/字符串类型注解 `const bytes: string = ...;`，触发语义类型推导命中 `sema.rs:4650` 类型兼容分支，完美解决 XML 标签截取赋值问题；
+   - **匿名结构体作为调用实参的语法消除歧义**：函数调用时实参直接使用 `.{ .field = val }` 会被解析器判断为块或者引发逗号语法歧义，通过提取前置局部绑定 `const req_opts = .{ ... };` 或强类型声明，彻底消除语法解析错误；
+   - **静态回调函数（`@c static fn`）彻底消除伪读写冲突**：针对 libuv / POSIX / HTTP 回调函数内通过 `@ptrCast` 获取实例指针修改字段引发的接收器只读误报，统一声明为 `@c static fn`，从根本上隔离方法接收器语义；
+   - **元组弱引用展开与枚举显式限定**：针对 `toJSWeak` 返回值通过字段索引 `weak_res.@"0"` 与 `weak_res.@"1"` 展开，针对 HTTP 请求方法使用明确作用域 `bun.http.Method.PUT`，消除代码生成期空类型推导缺陷。
+3. **全仓统计大盘（最新实测数据）**：
+   - 全仓 `.cp` 模块总数：**258 个**；
+   - 100% 纯正 CP 语言（0 处 `zig {}`, 0 处 `var`）：**258 / 258 (100%)**；
+   - 双重验证通过数（`cpc --lib` + `vendor/zig/zig ast-check`）：**240 / 258 (93.0%)**；
+   - 全仓仅剩 **18 个模块**（全部在 `src/runtime/webcore/` 根目录）。
+4. **后台常驻通信任务状态**：
+   - `task-51103` (`python3 scripts/watch_task.py --status resolved`) 常驻运行正常，持续保持双向监听。
+5. **本次原子提交范围**：
+   - `src/runtime/webcore/s3/` 目录下全部纯 CP 模块与生成的 `.zig` 产物。
+
