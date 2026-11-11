@@ -1334,3 +1334,13 @@
   - 生成行数 1411 行 vs 原版 1512 行（-6.7% 净压缩），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
 - `src/runtime/webcore/fetch/`:
   - 全子系统核心网络任务引擎 100% 达成双重编译验证（通过率 1/1）。
+
+- `src/runtime/dns_jsc/dns.cp` / `dns.zig`:
+  - 彻底攻克 3,400+ 行大型核心网络 DNS 解析器迁移；
+  - 采用 `[*InternalRequest; MAX_ENTRIES]` 规范定长指针数组语法，消除类型退化；
+  - 优化 `@ptrCast` 表达式消除指针赋值移动语义陷阱（`__req_moved`）与多层冗余强转；
+  - 将 `internal` 命名空间内 17 个方法全部标记为 `static` / `@c static`，彻底杜绝 C-ABI 导出函数被错误注入 `self: internal`；
+  - 提取独立顶层 `internal_log` 并重构 `tryPush` 切片迭代，杜绝歧义与 `_` 标识符未脱糖问题；
+  - 生成行数 3,608 行 vs 原版 3,649 行（-41 行净压缩，负膨胀），通过 `cpc --lib` 与 `vendor/zig/zig ast-check`。
+- `src/runtime/dns_jsc/`:
+  - 全目录 1 个大型核心 DNS 模块 100% 达成双重编译验证（通过率 1/1）。

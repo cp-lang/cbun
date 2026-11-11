@@ -2820,3 +2820,20 @@ Level 2 (聚合根模块，依赖上述全部 3 个模块):
     - `src/uws_sys/quic/Context.cp`（生成 104 行 vs 原始 56 行，`quic/` 全目录 5/5 达成）；
     - `src/runtime/webcore/fetch/FetchTasklet.cp`（生成 1411 行 vs 原始 1512 行，-6.7% 净压缩，100% 纯正 CP，0 处 `zig {}`，0 处 `var`）；
     - 全部双重验证 100% 绿灯通过！
+
+### 4. runtime/dns_jsc/dns.cp 3,400+行大型网络子系统攻坚实录
+- **右值指针标识符的所有权移动判定与 `@ptrCast` 保护**：
+  - 在 CPC 代码生成中，针对二元赋值 `left = right;`，若 `right` 为 `Expr::Ident` 且类型为拥有指针（`*T`），编译器会将其标记为移出（`moved_vars`），并在赋值后注入 `__req_moved = true;`。对于共享网络请求（如 `socket.* = req;`），这会导致后续读取触发 `use of moved value` 或未声明变量错误；
+  - 解决方案：将右值包装为转换表达式 `socket.* = @ptrCast(req);`。由于 `@ptrCast` 是函数调用表达式而非裸标识符，编译器不会将其判定为所有权转移，成功消除了非法移动。
+- **结构体定长数组声明的 Rust 风格语法 `[T; N]`**：
+  - 在类与结构体字段声明中，若书写为 `[MAX_ENTRIES]*InternalRequest`，解析器在探测类型时会发生歧义将其回退为 `any`；
+  - 解决方案：采用标准语法 `[*InternalRequest; MAX_ENTRIES]`，编译器能够 100% 精准将其映射为 Zig 原生 `[MAX_ENTRIES]*InternalRequest`。
+- **无状态命名空间结构体成员的 `static` 规范化**：
+  - `internal` 是封装内部 DNS 逻辑的纯命名空间结构体（无任何成员字段）。CP 编译器默认将类/结构体内未冠以 `_` 或 `this` 的方法作为实例只读方法处理，并在代码生成时注入首参 `self: internal`；对于导出给 C 运行时调用的 `@c fn us_getaddrinfo(...)`，首参被污染导致 C-ABI 不兼容且产生 `unused function parameter` 编译报错；
+  - 解决方案：为 `internal` 下的所有函数显式添加 `static`（如 `pub static fn getaddrinfo`、`@c static fn us_getaddrinfo_cancel` 等），彻底清除了隐式 `self` 参数。
+- **循环表达式切片提取与接收者脱糖**：
+  - 在 `tryPush` 中，原语法 `for (_.cache[0.._.len]) |*e|` 嵌套在 `for` 头部时，`_` 未能正确脱糖为实例接收者 `self`，导致生成代码中出现裸 `_` 标识符；
+  - 解决方案：在循环前提取局部变量 `let slice = _.cache[0.._.len]; for (slice) |*e|`，使接收者字段访问在普通语句上下文完成脱糖，顺利通过 Zig AST 校验。
+- **成果**：
+  - `src/runtime/dns_jsc/dns.cp`（3,407 行纯正 CP，0 处 `zig {}`，生成 3,608 行 vs 原版 3,649 行，实现负膨胀代码精简）；
+  - 双重验证（`cpc --lib` + `vendor/zig/zig ast-check`）100% 全部通过！
