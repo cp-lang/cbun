@@ -80,7 +80,7 @@ pub fn SSLWrapper(comptime T: type): type {
             bun.BoringSSL.load();
 
             const ctx_opts: uws.SocketContext.BunSocketContextOptions = ssl_options.asUSockets();
-            var err: uws.create_bun_socket_error_t = .none;
+            let err: uws.create_bun_socket_error_t = .none;
             const ssl_ctx = ctx_opts.createSSLContext(&err) orelse return error.InvalidOptions;
             errdefer BoringSSL.SSL_CTX_free(ssl_ctx);
             return try This.initWithCTX(ssl_ctx, is_client, handlers);
@@ -316,7 +316,7 @@ pub fn SSLWrapper(comptime T: type): type {
         }
 
         fn handleReading(this: *This, buffer: *[BUFFER_SIZE]u8) bool {
-            var read: usize = 0;
+            let read: usize = 0;
 
             while (true) {
                 log("handleReading", .{});
@@ -378,7 +378,7 @@ pub fn SSLWrapper(comptime T: type): type {
         }
 
         fn handleWriting(this: *This, buffer: *[BUFFER_SIZE]u8) void {
-            var read: usize = 0;
+            let read: usize = 0;
             while (true) {
                 const ssl = this.ssl orelse return;
                 const output = BoringSSL.SSL_get_wbio(ssl) orelse return;
@@ -401,7 +401,7 @@ pub fn SSLWrapper(comptime T: type): type {
 
         fn handleTraffic(this: *This) void {
             if (this.updateHandshakeState()) {
-                var buffer: [BUFFER_SIZE]u8 = undefined;
+                let buffer: [BUFFER_SIZE]u8 = undefined;
                 this.handleWriting(&buffer);
 
                 while (this.hasPendingRead() and this.handleReading(&buffer)) {

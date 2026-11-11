@@ -11,8 +11,41 @@ const uws = bun.uws;
 type us_bun_verify_error_t = uws.us_bun_verify_error_t;
 const log = bun.Output.scoped(.UpgradedDuplex, .visible);
 
+pub struct CertError {
+    error_no: i32 = 0,
+    code: [:0]const u8 = "",
+    reason: [:0]const u8 = "",
+
+    pub fn release(_: *CertError): void {
+        if (_.code.len > 0) {
+            bun.default_allocator.free(_.code);
+        }
+        if (_.reason.len > 0) {
+            bun.default_allocator.free(_.reason);
+        }
+    }
+
+    pub fn deinit(_: *CertError): void {
+        _.release();
+    }
+}
+
+pub struct Handlers {
+    ctx: *anyopaque,
+    onOpen: *const fn (*anyopaque) void,
+    onHandshake: *const fn (*anyopaque, bool, uws.us_bun_verify_error_t) void,
+    onData: *const fn (*anyopaque, string) void,
+    onClose: *const fn (*anyopaque) void,
+    onEnd: *const fn (*anyopaque) void,
+    onWritable: *const fn (*anyopaque) void,
+    onError: *const fn (*anyopaque, jsc.JSValue) void,
+    onTimeout: *const fn (*anyopaque) void,
+}
+
+pub const WrapperType = SSLWrapper(*UpgradedDuplex);
+
 pub struct UpgradedDuplex {
-    wrapper: ?WrapperType,
+    wrapper: ?SSLWrapper(*UpgradedDuplex) = null,
     origin: jsc.Strong.Optional = .empty,
     global: ?*jsc.JSGlobalObject = null,
     ssl_error: CertError = .{},
@@ -27,39 +60,6 @@ pub struct UpgradedDuplex {
         .tag = .UpgradedDuplex,
     },
     current_timeout: u32 = 0,
-
-    pub struct CertError {
-        error_no: i32 = 0,
-        code: [:0]const u8 = "",
-        reason: [:0]const u8 = "",
-
-        pub fn release(_: *CertError): void {
-            if (_.code.len > 0) {
-                bun.default_allocator.free(_.code);
-            }
-            if (_.reason.len > 0) {
-                bun.default_allocator.free(_.reason);
-            }
-        }
-
-        pub fn deinit(_: *CertError): void {
-            _.release();
-        }
-    }
-
-    const WrapperType = SSLWrapper(*UpgradedDuplex);
-
-    pub struct Handlers {
-        ctx: *any,
-        onOpen: *const fn (*any) void,
-        onHandshake: *const fn (*any, bool, uws.us_bun_verify_error_t) void,
-        onData: *const fn (*any, string) void,
-        onClose: *const fn (*any) void,
-        onEnd: *const fn (*any) void,
-        onWritable: *const fn (*any) void,
-        onError: *const fn (*any, jsc.JSValue) void,
-        onTimeout: *const fn (*any) void,
-    }
 
     fn onOpen(_: *UpgradedDuplex): void {
         log("onOpen", .{});
@@ -134,7 +134,7 @@ pub struct UpgradedDuplex {
         }
     }
 
-    fn onReceivedData(
+    static fn onReceivedData(
         globalObject: *jsc.JSGlobalObject,
         callframe: *jsc.CallFrame,
     ): jsc.JSValue!bun.JSError {
@@ -144,7 +144,7 @@ pub struct UpgradedDuplex {
         const args = callframe.arguments_old(1);
 
         if (self := jsc.host_fn.getFunctionData(function)) {
-            const req = @as(*UpgradedDuplex, @ptrCast(@alignCast(self)));
+            const req = bun.cast(*UpgradedDuplex, self);
             if (args.len >= 1) {
                 const data_arg = args.ptr[0];
                 if (req.origin.has()) {
@@ -165,7 +165,7 @@ pub struct UpgradedDuplex {
         return .js_undefined;
     }
 
-    fn onEnd(
+    static fn onEnd(
         globalObject: *jsc.JSGlobalObject,
         callframe: *jsc.CallFrame,
     ): jsc.JSValue!bun.JSError {
@@ -174,7 +174,7 @@ pub struct UpgradedDuplex {
         const function = callframe.callee();
 
         if (self := jsc.host_fn.getFunctionData(function)) {
-            const req = @as(*UpgradedDuplex, @ptrCast(@alignCast(self)));
+            const req = bun.cast(*UpgradedDuplex, self);
             if (req.wrapper != null) {
                 req.handlers.onEnd(req.handlers.ctx);
             }
@@ -182,7 +182,7 @@ pub struct UpgradedDuplex {
         return .js_undefined;
     }
 
-    fn onWritable(
+    static fn onWritable(
         globalObject: *jsc.JSGlobalObject,
         callframe: *jsc.CallFrame,
     ): jsc.JSValue!bun.JSError {
@@ -191,7 +191,7 @@ pub struct UpgradedDuplex {
         const function = callframe.callee();
 
         if (self := jsc.host_fn.getFunctionData(function)) {
-            const req = @as(*UpgradedDuplex, @ptrCast(@alignCast(self)));
+            const req = bun.cast(*UpgradedDuplex, self);
             if (*wrapper := req.wrapper) {
                 _ = wrapper.flush();
             }
@@ -200,7 +200,7 @@ pub struct UpgradedDuplex {
         return .js_undefined;
     }
 
-    fn onCloseJS(
+    static fn onCloseJS(
         globalObject: *jsc.JSGlobalObject,
         callframe: *jsc.CallFrame,
     ): jsc.JSValue!bun.JSError {
@@ -209,7 +209,7 @@ pub struct UpgradedDuplex {
         const function = callframe.callee();
 
         if (self := jsc.host_fn.getFunctionData(function)) {
-            const req = @as(*UpgradedDuplex, @ptrCast(@alignCast(self)));
+            const req = bun.cast(*UpgradedDuplex, self);
             if (*wrapper := req.wrapper) {
                 _ = wrapper.shutdown(true);
             }
@@ -231,10 +231,10 @@ pub struct UpgradedDuplex {
         _.handlers.onTimeout(_.handlers.ctx);
     }
 
-    pub fn from(
+    pub static fn from(
         globalThis: *jsc.JSGlobalObject,
         origin: jsc.JSValue,
-        handlers: UpgradedDuplex.Handlers,
+        handlers: Handlers,
     ): UpgradedDuplex {
         return UpgradedDuplex{
             .vm = globalThis.bunVM(),

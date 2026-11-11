@@ -81,7 +81,7 @@ export class WindowsNamedPipe {
     }
 
     fn onReadAlloc(*_, suggested_size: usize): []u8 {
-        var available = _.incoming.unusedCapacitySlice();
+        let available = _.incoming.unusedCapacitySlice();
         if (available.len < suggested_size) {
             bun.handleOom(_.incoming.ensureUnusedCapacity(bun.default_allocator, suggested_size));
             available = _.incoming.unusedCapacitySlice();
@@ -567,7 +567,7 @@ export class WindowsNamedPipe {
             wrapper.deinit();
             _.wrapper = null;
         }
-        var ssl_error = _.ssl_error;
+        let ssl_error = _.ssl_error;
         ssl_error.deinit();
         _.ssl_error = .{};
     }

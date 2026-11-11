@@ -26,7 +26,17 @@ const callback_fields = [
     "onHandshake",
 ];
 
+pub struct HandlersScope {
+    handlers: *Handlers,
+
+    pub fn exit(_: *HandlersScope): bool {
+        _.handlers.vm.eventLoop().exit();
+        return _.handlers.markInactive();
+    }
+}
+
 pub struct Handlers {
+    pub const Scope = HandlersScope;
     onOpen: jsc.JSValue = .zero,
     onClose: jsc.JSValue = .zero,
     onData: jsc.JSValue = .zero,
@@ -52,16 +62,7 @@ pub struct Handlers {
         _.active_connections += 1;
     }
 
-    pub struct Scope {
-        handlers: *Handlers,
-
-        pub fn exit(_: *Scope): bool {
-            _.handlers.vm.eventLoop().exit();
-            return _.handlers.markInactive();
-        }
-    }
-
-    pub fn enter(_: *Handlers): Scope {
+    pub fn enter(_: *Handlers): HandlersScope {
         _.markActive();
         _.vm.eventLoop().enter();
         return .{ .handlers = _ };
@@ -128,17 +129,17 @@ pub struct Handlers {
         return true;
     }
 
-    pub fn fromJS(
+    pub static fn fromJS(
         globalObject: *jsc.JSGlobalObject,
         opts: jsc.JSValue,
         is_server: bool,
     ): Handlers!bun.JSError {
         let generated: jsc.generated.SocketConfigHandlers = jsc.generated.SocketConfigHandlers.fromJS(globalObject, opts)?;
         defer generated.deinit();
-        return .fromGenerated(globalObject, &generated, is_server);
+        return Handlers.fromGenerated(globalObject, &generated, is_server);
     }
 
-    pub fn fromGenerated(
+    pub static fn fromGenerated(
         globalObject: *jsc.JSGlobalObject,
         generated: *const jsc.generated.SocketConfigHandlers,
         is_server: bool,
@@ -228,8 +229,9 @@ pub struct Handlers {
         _.onError.protect();
         _.onHandshake.protect();
     }
+}
 
-    pub struct SocketConfig {
+pub struct SocketConfig {
         hostname_or_unix: jsc.ZigString.Slice,
         port: ?u16 = null,
         fd: ?bun.FD = null,
@@ -283,21 +285,22 @@ pub struct Handlers {
             generated: *const jsc.generated.SocketConfig,
             is_server: bool,
         ): SocketConfig!bun.JSError {
-            let result: SocketConfig = ({
-                let ssl: ?SSLConfig = switch (generated.tls) {
-                    .none => null,
-                    .boolean b => if (b) .zero else null,
-                    .object *s => SSLConfig.fromGenerated(vm, global, s)?,
-                };
-                errdefer bun.memory.deinit(&ssl);
-                break .{
-                    .hostname_or_unix = .empty,
-                    .fd = if (generated.fd) |fd| .fromUV(fd) else null,
-                    .ssl = ssl,
-                    .handlers = Handlers.fromGenerated(global, &generated.handlers, is_server)?,
-                    .default_data = if (generated.data.isUndefined()) .zero else generated.data,
-                };
-            });
+            let ssl: ?SSLConfig = switch (generated.tls) {
+                .none => null,
+                .boolean => |b| if (b) .zero else null,
+                .object => |s| SSLConfig.fromGenerated(vm, global, s)?,
+            };
+            errdefer bun.memory.deinit(&ssl);
+            let fd_val: ?bun.FD = if (generated.fd != null) bun.FD.fromUV(generated.fd.?) else null;
+            let default_data_val = if (generated.data.isUndefined()) .zero else generated.data;
+            let handlers_val = Handlers.fromGenerated(global, &generated.handlers, is_server)?;
+            let result: SocketConfig = .{
+                .hostname_or_unix = .empty,
+                .fd = fd_val,
+                .ssl = ssl,
+                .handlers = handlers_val,
+                .default_data = default_data_val,
+            };
             errdefer result.release();
 
             if (result.fd != null) {
@@ -317,9 +320,13 @@ pub struct Handlers {
                 if (hostname.length() == 0) return global.throwInvalidArguments("Expected a non-empty \"hostname\"", .{});
                 result.hostname_or_unix = hostname.toUTF8(bun.default_allocator);
                 const slice = result.hostname_or_unix.slice();
-                result.port = generated.port orelse bun.URL.parse(slice).getPort() orelse ({
+                if (generated.port) |p| {
+                    result.port = p;
+                } else if (bun.URL.parse(slice).getPort()) |p| {
+                    result.port = p;
+                } else {
                     return global.throwInvalidArguments("Missing \"port\"", .{});
-                });
+                }
                 result.exclusive = generated.exclusive;
                 result.allowHalfOpen = generated.allow_half_open;
                 result.reusePort = generated.reuse_port;
@@ -338,7 +345,6 @@ pub struct Handlers {
         ): SocketConfig!bun.JSError {
             let generated: jsc.generated.SocketConfig = jsc.generated.SocketConfig.fromJS(globalObject, opts)?;
             defer generated.deinit();
-            return .fromGenerated(vm, globalObject, &generated, is_server);
+            return SocketConfig.fromGenerated(vm, globalObject, &generated, is_server);
         }
     }
-}

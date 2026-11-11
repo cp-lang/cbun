@@ -36,7 +36,7 @@ pub const WindowsNamedPipe = struct {
     current_timeout: u32 = 0,
     flags: Flags = .{},
     
-pub fn _create(allocator: std.mem.Allocator) !*WindowsNamedPipe { const self_ptr = try allocator.create(WindowsNamedPipe); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *WindowsNamedPipe, wrapper: ?WrapperType, pipe: if (Environment.isWindows) ?*uv.Pipe else void, vm: *bun.jsc.VirtualMachine, writer: bun.io.StreamingWriter(WindowsNamedPipe,.{.onClose=onClose,.onWritable=onWritable,.onError=onError,.onWrite=onWrite,}), incoming: bun.ByteList, ssl_error: CertError, handlers: Handlers, connect_req: uv.uv_connect_t, event_loop_timer: EventLoopTimer, current_timeout: u32, flags: Flags) void {
         var __writer_moved = false; _ = &__writer_moved;

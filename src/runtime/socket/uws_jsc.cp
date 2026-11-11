@@ -55,7 +55,7 @@ pub fn anyWebSocketGetTopicsAsJSArray(ws: uws.AnyWebSocket, globalObject: *jsc.J
     }
 
     let stack_fallback = std.heap.stackFallback(16 * 1024, bun.default_allocator);
-    var node_buffer: jsc.Node.BlobOrStringOrBuffer = undefined;
+    let node_buffer: jsc.Node.BlobOrStringOrBuffer = undefined;
     if (data.isUndefined()) {
         node_buffer = jsc.Node.BlobOrStringOrBuffer{ .string_or_buffer = jsc.Node.StringOrBuffer.empty };
     } else {
