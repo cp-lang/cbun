@@ -2,94 +2,48 @@
 const std = @import("std");
 const string = []const u8;
 
-    const uws = bun.uws;
-    const SocketAddress = uws.SocketAddress;
-
-    const c = struct {
-        const Handler = ?*const fn (*Response, *Request, ?*anyopaque) callconv(.c) void;
-        const ListenHandler = ?*const fn (?*ListenSocket, ?*anyopaque) callconv(.c) void;
-        const HeaderCb = *const fn ([*]const u8, usize, [*]const u8, usize, ?*anyopaque) callconv(.c) void;
-
-        extern fn uws_h3_create_app(BunSocketContextOptions, u32) ?*App;
-        extern fn uws_h3_app_destroy(*App) void;
-        extern fn uws_h3_app_close(*App) void;
-        extern fn uws_h3_app_clear_routes(*App) void;
-        extern fn uws_h3_app_add_server_name(*App, [*:0]const u8, BunSocketContextOptions) bool;
-        extern fn uws_h3_res_write_continue(*Response) void;
-        extern fn uws_h3_app_get(*App, [*]const u8, usize, Handler, ?*anyopaque) void;
-        extern fn uws_h3_app_post(*App, [*]const u8, usize, Handler, ?*anyopaque) void;
-        extern fn uws_h3_app_put(*App, [*]const u8, usize, Handler, ?*anyopaque) void;
-        extern fn uws_h3_app_delete(*App, [*]const u8, usize, Handler, ?*anyopaque) void;
-        extern fn uws_h3_app_patch(*App, [*]const u8, usize, Handler, ?*anyopaque) void;
-        extern fn uws_h3_app_head(*App, [*]const u8, usize, Handler, ?*anyopaque) void;
-        extern fn uws_h3_app_options(*App, [*]const u8, usize, Handler, ?*anyopaque) void;
-        extern fn uws_h3_app_connect(*App, [*]const u8, usize, Handler, ?*anyopaque) void;
-        extern fn uws_h3_app_trace(*App, [*]const u8, usize, Handler, ?*anyopaque) void;
-        extern fn uws_h3_app_any(*App, [*]const u8, usize, Handler, ?*anyopaque) void;
-        extern fn uws_h3_app_listen_with_config(*App, ?[*:0]const u8, u16, i32, ListenHandler, ?*anyopaque) void;
-        extern fn uws_h3_listen_socket_port(*ListenSocket) i32;
-        extern fn uws_h3_listen_socket_local_address(*ListenSocket, [*]u8, c_int) c_int;
-        extern fn uws_h3_listen_socket_close(*ListenSocket) void;
-
-        extern fn uws_h3_res_state(*Response) State;
-        extern fn uws_h3_res_end(*Response, [*c]const u8, usize, bool) void;
-        extern fn uws_h3_res_end_stream(*Response, bool) void;
-        extern fn uws_h3_res_force_close(*Response) void;
-        extern fn uws_h3_res_try_end(*Response, [*c]const u8, usize, usize, bool) bool;
-        extern fn uws_h3_res_end_without_body(*Response, bool) void;
-        extern fn uws_h3_res_pause(*Response) void;
-        extern fn uws_h3_res_resume(*Response) void;
-        extern fn uws_h3_res_write_status(*Response, [*c]const u8, usize) void;
-        extern fn uws_h3_res_write_header(*Response, [*c]const u8, usize, [*c]const u8, usize) void;
-        extern fn uws_h3_res_write_header_int(*Response, [*c]const u8, usize, u64) void;
-        extern fn uws_h3_res_mark_wrote_content_length_header(*Response) void;
-        extern fn uws_h3_res_write_mark(*Response) void;
-        extern fn uws_h3_res_flush_headers(*Response, bool) void;
-        extern fn uws_h3_res_write(*Response, ?[*]const u8, *usize) bool;
-        extern fn uws_h3_res_get_write_offset(*Response) u64;
-        extern fn uws_h3_res_override_write_offset(*Response, u64) void;
-        extern fn uws_h3_res_has_responded(*Response) bool;
-        extern fn uws_h3_res_get_buffered_amount(*Response) u64;
-        extern fn uws_h3_res_reset_timeout(*Response) void;
-        extern fn uws_h3_res_timeout(*Response, u8) void;
-        extern fn uws_h3_res_end_sendfile(*Response, u64, bool) void;
-        extern fn uws_h3_res_get_socket_data(*Response) ?*anyopaque;
-        extern fn uws_h3_res_on_writable(*Response, ?*const fn (*Response, u64, ?*anyopaque) callconv(.c) bool, ?*anyopaque) void;
-        extern fn uws_h3_res_clear_on_writable(*Response) void;
-        extern fn uws_h3_res_on_aborted(*Response, ?*const fn (*Response, ?*anyopaque) callconv(.c) void, ?*anyopaque) void;
-        extern fn uws_h3_res_on_timeout(*Response, ?*const fn (*Response, ?*anyopaque) callconv(.c) void, ?*anyopaque) void;
-        extern fn uws_h3_res_on_data(*Response, ?*const fn (*Response, [*c]const u8, usize, bool, ?*anyopaque) callconv(.c) void, ?*anyopaque) void;
-        extern fn uws_h3_res_cork(*Response, ?*anyopaque, *const fn (?*anyopaque) callconv(.c) void) void;
-        extern fn uws_h3_res_get_remote_address_info(*Response, *[*]const u8, *i32, *bool) usize;
-
-        extern fn uws_h3_req_get_yield(*Request) bool;
-        extern fn uws_h3_req_set_yield(*Request, bool) void;
-        extern fn uws_h3_req_get_url(*Request, *[*]const u8) usize;
-        extern fn uws_h3_req_get_method(*Request, *[*]const u8) usize;
-        extern fn uws_h3_req_get_header(*Request, [*c]const u8, usize, *[*]const u8) usize;
-        extern fn uws_h3_req_get_query(*Request, [*c]const u8, usize, *[*]const u8) usize;
-        extern fn uws_h3_req_get_parameter(*Request, u16, *[*]const u8) usize;
-        extern fn uws_h3_req_for_each_header(*Request, HeaderCb, ?*anyopaque) void;
-    };
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+pub const Handler = ?*const fn (*Response, *Request, ?*anyopaque) callconv(.c) void;
+pub const ListenHandler = ?*const fn (?*ListenSocket, ?*anyopaque) callconv(.c) void;
+pub const HeaderCb = *const fn ([*c]const u8, usize, [*c]const u8, usize, ?*anyopaque) callconv(.c) void;
+pub const WritableHandler = ?*const fn (*Response, u64, ?*anyopaque) callconv(.c) bool;
+pub const VoidHandler = ?*const fn (*Response, ?*anyopaque) callconv(.c) void;
+pub const DataHandler = ?*const fn (*Response, [*c]const u8, usize, bool, ?*anyopaque) callconv(.c) void;
+pub const CorkHandler = *const fn (?*anyopaque) callconv(.c) void;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
 
 pub const bun = @import("bun");
 pub const State = @import("./Response.zig").State;
 pub const WriteResult = @import("./Response.zig").WriteResult;
 pub const BunSocketContextOptions = @import("./SocketContext.zig").BunSocketContextOptions;
+pub const ListenConfig = extern struct {
+    port: u16,
+    host: ?[*:0]const u8 = null,
+    options: i32 = 0,
+};
+
 pub const ListenSocket = opaque {
 
 pub fn close(self: *ListenSocket) void {
-            c.uws_h3_listen_socket_close(self);
+            _ = uws_h3_listen_socket_close(self);
     }
 
 pub fn getLocalPort(self: *ListenSocket) i32 {
-            return c.uws_h3_listen_socket_port(self);
+            return uws_h3_listen_socket_port(self);
     }
 
-pub fn getLocalAddress(self: *ListenSocket, buf: []u8) ?[]const u8 {
-            const n = c.uws_h3_listen_socket_local_address(self, buf.ptr, @intCast(buf.len));
-            if (n <= 0) return null;
-            return buf[0..@intCast(n)];
+pub fn getLocalAddress(self: *ListenSocket, buf: []const u8) ?[]const u8 {
+            var n = uws_h3_listen_socket_local_address(self, buf.ptr, (if (comptime @typeInfo(@TypeOf(buf.len)) == .@"enum") cp_cast_int(i32, @intFromEnum(buf.len)) else cp_cast_int(i32, buf.len)));
+            _ = &n;
+            if ((n <= 0)) {
+                return null;
+            }
+            return buf[0..(if (comptime @typeInfo(@TypeOf(n)) == .@"enum") cp_cast_int(usize, @intFromEnum(n)) else cp_cast_int(usize, n))];
     }
 };
 
@@ -101,147 +55,173 @@ pub fn isAncient(self: *const Request) bool {
     }
 
 pub fn getYield(self: *Request) bool {
-            return c.uws_h3_req_get_yield(self);
+            return uws_h3_req_get_yield(self);
     }
 
 pub fn setYield(self: *Request, y: bool) void {
-            c.uws_h3_req_set_yield(self, y);
+            _ = uws_h3_req_set_yield(self, y);
     }
 
 pub fn url(self: *Request) []const u8 {
             var p: [*]const u8 = undefined;
-            return p[0..c.uws_h3_req_get_url(self, &p)];
+            _ = &p;
+            var len = uws_h3_req_get_url(self, (&p));
+            _ = &len;
+            return p[0..len];
     }
 
 pub fn method(self: *Request) []const u8 {
             var p: [*]const u8 = undefined;
-            return p[0..c.uws_h3_req_get_method(self, &p)];
+            _ = &p;
+            var len = uws_h3_req_get_method(self, (&p));
+            _ = &len;
+            return p[0..len];
     }
 
 pub fn header(self: *Request, name: []const u8) ?[]const u8 {
             var p: [*]const u8 = undefined;
-            const n = c.uws_h3_req_get_header(self, name.ptr, name.len, &p);
-            return if (n == 0) null else p[0..n];
+            _ = &p;
+            var n = uws_h3_req_get_header(self, name.ptr, name.len, (&p));
+            _ = &n;
+            return (if ((n == 0)) null else p[0..n]);
     }
 
 pub fn dateForHeader(self: *Request, name: []const u8) !?u64 {
-            const value = self.header(name) orelse return null;
-            var s = bun.String.init(value);
-            defer s.deref();
-            const ms = try s.parseDate(bun.jsc.VirtualMachine.get().global);
-            if (!std.math.isNan(ms) and std.math.isFinite(ms) and ms >= 0) return @intFromFloat(ms);
+            var value = self.header(name);
+            _ = &value;
+            if ((value == null)) {
+                return null;
+            }
+            var s = bun.String.init(value.?);
+            _ = &s;
+            defer {
+            _ = s.deref();
+            }
+            var ms = try s.parseDate((bun.jsc.VirtualMachine.get()).?.global);
+            _ = &ms;
+            if ((((!bun.math.isNan(ms)) and bun.math.isFinite(ms)) and (ms >= 0.0))) {
+                return (if (comptime @typeInfo(@TypeOf(ms)) == .@"enum") cp_cast_int(u64, @intFromEnum(ms)) else cp_cast_int(u64, ms));
+            }
             return null;
     }
 
 pub fn query(self: *Request, name: []const u8) []const u8 {
             var p: [*]const u8 = undefined;
-            return p[0..c.uws_h3_req_get_query(self, name.ptr, name.len, &p)];
+            _ = &p;
+            var len = uws_h3_req_get_query(self, name.ptr, name.len, (&p));
+            _ = &len;
+            return p[0..len];
     }
 
 pub fn parameter(self: *Request, idx: u16) []const u8 {
             var p: [*]const u8 = undefined;
-            return p[0..c.uws_h3_req_get_parameter(self, idx, &p)];
+            _ = &p;
+            var len = uws_h3_req_get_parameter(self, idx, (&p));
+            _ = &len;
+            return p[0..len];
     }
 
-pub fn forEachHeader(self: *Request, comptime Ctx: type, comptime cb: anytype, ctx: *Ctx) void {
-            const Wrap = struct {
-                fn each(n: [*]const u8, nl: usize, v: [*]const u8, vl: usize, ud: ?*anyopaque) callconv(.c) void {
-                    cb(@ptrCast(@alignCast(ud.?)), n[0..nl], v[0..vl]);
-                }
-            };
-            c.uws_h3_req_for_each_header(self, Wrap.each, ctx);
+pub fn forEachHeader(self: *Request, ctx: anytype, comptime cb: anytype) void {
+            var Wrap = struct {
+            pub fn each(n: [*c]const u8, nl: usize, v: [*c]const u8, vl: usize, ud: ?*anyopaque) callconv(.c) void {
+                cb(@ptrCast(ud), n[0..nl], v[0..vl]);
+            }
+        };
+            _ = &Wrap;
+            _ = uws_h3_req_for_each_header(self, Wrap.each, @ptrCast(ctx));
     }
 };
 
 pub const Response = opaque {
 
 pub fn end(self: *Response, data: []const u8, close_connection: bool) void {
-            c.uws_h3_res_end(self, data.ptr, data.len, close_connection);
+            _ = uws_h3_res_end(self, data.ptr, data.len, close_connection);
     }
 
 pub fn tryEnd(self: *Response, data: []const u8, total: usize, close_connection: bool) bool {
-            return c.uws_h3_res_try_end(self, data.ptr, data.len, total, close_connection);
+            return uws_h3_res_try_end(self, data.ptr, data.len, total, close_connection);
     }
 
 pub fn endWithoutBody(self: *Response, close_connection: bool) void {
-            c.uws_h3_res_end_without_body(self, close_connection);
+            _ = uws_h3_res_end_without_body(self, close_connection);
     }
 
 pub fn endStream(self: *Response, close_connection: bool) void {
-            c.uws_h3_res_end_stream(self, close_connection);
+            _ = uws_h3_res_end_stream(self, close_connection);
     }
 
 pub fn endSendFile(self: *Response, write_offset: u64, close_connection: bool) void {
-            c.uws_h3_res_end_sendfile(self, write_offset, close_connection);
+            _ = uws_h3_res_end_sendfile(self, write_offset, close_connection);
     }
 
 pub fn write(self: *Response, data: []const u8) WriteResult {
             var len: usize = data.len;
-            return if (c.uws_h3_res_write(self, data.ptr, &len)) .{ .want_more = len } else .{ .backpressure = len };
+            _ = &len;
+            return (if (uws_h3_res_write(self, data.ptr, (&len))) WriteResult.want_more(len) else WriteResult.backpressure(len));
     }
 
 pub fn writeStatus(self: *Response, status: []const u8) void {
-            c.uws_h3_res_write_status(self, status.ptr, status.len);
+            _ = uws_h3_res_write_status(self, status.ptr, status.len);
     }
 
 pub fn writeHeader(self: *Response, key: []const u8, value: []const u8) void {
-            c.uws_h3_res_write_header(self, key.ptr, key.len, value.ptr, value.len);
+            _ = uws_h3_res_write_header(self, key.ptr, key.len, value.ptr, value.len);
     }
 
 pub fn writeHeaderInt(self: *Response, key: []const u8, value: u64) void {
-            c.uws_h3_res_write_header_int(self, key.ptr, key.len, value);
+            _ = uws_h3_res_write_header_int(self, key.ptr, key.len, value);
     }
 
 pub fn writeMark(self: *Response) void {
-            c.uws_h3_res_write_mark(self);
+            _ = uws_h3_res_write_mark(self);
     }
 
 pub fn markWroteContentLengthHeader(self: *Response) void {
-            c.uws_h3_res_mark_wrote_content_length_header(self);
+            _ = uws_h3_res_mark_wrote_content_length_header(self);
     }
 
 pub fn writeContinue(self: *Response) void {
-            c.uws_h3_res_write_continue(self);
+            _ = uws_h3_res_write_continue(self);
     }
 
 pub fn flushHeaders(self: *Response, immediate: bool) void {
-            c.uws_h3_res_flush_headers(self, immediate);
+            _ = uws_h3_res_flush_headers(self, immediate);
     }
 
 pub fn pause(self: *Response) void {
-            c.uws_h3_res_pause(self);
+            _ = uws_h3_res_pause(self);
     }
 
 pub fn @"resume"(self: *Response) void {
-            c.uws_h3_res_resume(self);
+            _ = uws_h3_res_resume(self);
     }
 
 pub fn timeout(self: *Response, seconds: u8) void {
-            c.uws_h3_res_timeout(self, seconds);
+            _ = uws_h3_res_timeout(self, seconds);
     }
 
 pub fn resetTimeout(self: *Response) void {
-            c.uws_h3_res_reset_timeout(self);
+            _ = uws_h3_res_reset_timeout(self);
     }
 
 pub fn getWriteOffset(self: *Response) u64 {
-            return c.uws_h3_res_get_write_offset(self);
+            return uws_h3_res_get_write_offset(self);
     }
 
 pub fn overrideWriteOffset(self: *Response, off: u64) void {
-            c.uws_h3_res_override_write_offset(self, off);
+            _ = uws_h3_res_override_write_offset(self, off);
     }
 
 pub fn getBufferedAmount(self: *Response) u64 {
-            return c.uws_h3_res_get_buffered_amount(self);
+            return uws_h3_res_get_buffered_amount(self);
     }
 
 pub fn hasResponded(self: *Response) bool {
-            return c.uws_h3_res_has_responded(self);
+            return uws_h3_res_has_responded(self);
     }
 
 pub fn state(self: *Response) State {
-            return c.uws_h3_res_state(self);
+            return uws_h3_res_state(self);
     }
 
 pub fn shouldCloseConnection(self: *Response) bool {
@@ -270,200 +250,325 @@ pub fn markNeedsMore(self: *const Response) void {
         _ = &self;
     }
 
-pub fn getSocketData(self: *Response) ?*anyopaque {
-            return c.uws_h3_res_get_socket_data(self);
+pub fn getSocketData(self: *Response) *?*anyopaque {
+            return uws_h3_res_get_socket_data(self);
     }
 
-pub fn getRemoteSocketInfo(self: *Response) ?SocketAddress {
-            var addr: SocketAddress = .{ .ip = undefined, .port = undefined, .is_ipv6 = undefined };
+pub fn getRemoteSocketInfo(self: *Response) ?bun.uws.SocketAddress {
+            var addr = bun.uws.SocketAddress{ .ip = undefined, .port = undefined, .is_ipv6 = undefined };
+            _ = &addr;
             var ip_ptr: [*]const u8 = undefined;
-            const len = c.uws_h3_res_get_remote_address_info(self, &ip_ptr, &addr.port, &addr.is_ipv6);
-            if (len == 0) return null;
+            _ = &ip_ptr;
+            var len = uws_h3_res_get_remote_address_info(self, (&ip_ptr), (&addr.port), (&addr.is_ipv6));
+            _ = &len;
+            if ((len == 0)) {
+                return null;
+            }
             addr.ip = ip_ptr[0..len];
             return addr;
     }
 
 pub fn forceClose(self: *Response) void {
-            c.uws_h3_res_force_close(self);
+            _ = uws_h3_res_force_close(self);
     }
 
-pub fn onWritable(self: *Response, comptime UD: type, comptime handler: anytype, ud: UD) void {
-            const W = struct {
-                fn cb(r: *Response, off: u64, p: ?*anyopaque) callconv(.c) bool {
-                    return handler(@ptrCast(@alignCast(p.?)), off, r);
-                }
-            };
-            c.uws_h3_res_on_writable(self, W.cb, ud);
+pub fn onWritable(self: *Response, ud: anytype, comptime handler: anytype) void {
+            var W = struct {
+            pub fn cb(r: *Response, off: u64, p: ?*anyopaque) callconv(.c) bool {
+                return handler(@ptrCast(p), off, r);
+            }
+        };
+            _ = &W;
+            _ = uws_h3_res_on_writable(self, W.cb, @ptrCast(ud));
     }
 
 pub fn clearOnWritable(self: *Response) void {
-            c.uws_h3_res_clear_on_writable(self);
+            _ = uws_h3_res_clear_on_writable(self);
     }
 
-pub fn onAborted(self: *Response, comptime UD: type, comptime handler: anytype, ud: UD) void {
-            const W = struct {
-                fn cb(r: *Response, p: ?*anyopaque) callconv(.c) void {
-                    handler(@ptrCast(@alignCast(p.?)), r);
-                }
-            };
-            c.uws_h3_res_on_aborted(self, W.cb, ud);
+pub fn onAborted(self: *Response, ud: anytype, comptime handler: anytype) void {
+            var W = struct {
+            pub fn cb(r: *Response, p: ?*anyopaque) callconv(.c) void {
+                handler(@ptrCast(p), r);
+            }
+        };
+            _ = &W;
+            _ = uws_h3_res_on_aborted(self, W.cb, @ptrCast(ud));
     }
 
 pub fn clearAborted(self: *Response) void {
-            c.uws_h3_res_on_aborted(self, null, null);
+            _ = uws_h3_res_on_aborted(self, null, null);
     }
 
-pub fn onTimeout(self: *Response, comptime UD: type, comptime handler: anytype, ud: UD) void {
-            const W = struct {
-                fn cb(r: *Response, p: ?*anyopaque) callconv(.c) void {
-                    handler(@ptrCast(@alignCast(p.?)), r);
-                }
-            };
-            c.uws_h3_res_on_timeout(self, W.cb, ud);
+pub fn onTimeout(self: *Response, ud: anytype, comptime handler: anytype) void {
+            var W = struct {
+            pub fn cb(r: *Response, p: ?*anyopaque) callconv(.c) void {
+                handler(@ptrCast(p), r);
+            }
+        };
+            _ = &W;
+            _ = uws_h3_res_on_timeout(self, W.cb, @ptrCast(ud));
     }
 
 pub fn clearTimeout(self: *Response) void {
-            c.uws_h3_res_on_timeout(self, null, null);
+            _ = uws_h3_res_on_timeout(self, null, null);
     }
 
-pub fn onData(self: *Response, comptime UD: type, comptime handler: anytype, ud: UD) void {
-            const W = struct {
-                fn cb(r: *Response, ptr: [*c]const u8, len: usize, last: bool, p: ?*anyopaque) callconv(.c) void {
-                    handler(@ptrCast(@alignCast(p.?)), r, if (len > 0) ptr[0..len] else "", last);
-                }
-            };
-            c.uws_h3_res_on_data(self, W.cb, ud);
+pub fn onData(self: *Response, ud: anytype, comptime handler: anytype) void {
+            var W = struct {
+            pub fn cb(r: *Response, ptr: [*c]const u8, len: usize, last: bool, p: ?*anyopaque) callconv(.c) void {
+                handler(@ptrCast(p), r, if (len > 0) ptr[0..len] else "", last);
+            }
+        };
+            _ = &W;
+            _ = uws_h3_res_on_data(self, W.cb, @ptrCast(ud));
     }
 
 pub fn clearOnData(self: *Response) void {
-            c.uws_h3_res_on_data(self, null, null);
+            _ = uws_h3_res_on_data(self, null, null);
     }
 
 pub fn corked(self: *Response, comptime handler: anytype, args: anytype) void {
             _ = self;
-            @call(.auto, handler, args);
+            _ = @call(.auto, handler, args);
     }
 
-pub fn runCorkedWithType(self: *Response, comptime UD: type, comptime handler: anytype, ud: UD) void {
-            const W = struct {
-                fn cb(p: ?*anyopaque) callconv(.c) void {
-                    handler(@ptrCast(@alignCast(p.?)));
-                }
-            };
-            c.uws_h3_res_cork(self, ud, W.cb);
+pub fn runCorkedWithType(self: *Response, ud: anytype, comptime handler: anytype) void {
+            var W = struct {
+            pub fn cb(p: ?*anyopaque) callconv(.c) void {
+                handler(@ptrCast(p));
+            }
+        };
+            _ = &W;
+            _ = uws_h3_res_cork(self, @ptrCast(ud), W.cb);
     }
 };
 
 pub const App = opaque {
 
 pub fn create(opts: BunSocketContextOptions, idle_timeout_s: u32) ?*App {
-            return c.uws_h3_create_app(opts, idle_timeout_s);
+            return uws_h3_create_app(opts, idle_timeout_s);
     }
 
-pub fn addServerNameWithOptions(self: *App, hostname: anytype, opts: BunSocketContextOptions) !void {
-            if (!c.uws_h3_app_add_server_name(self, hostname.ptr, opts)) return error.FailedToAddServerName;
+pub fn addServerNameWithOptions(self: *App, hostname: []const u8, opts: BunSocketContextOptions) ?void {
+            if ((!uws_h3_app_add_server_name(self, hostname.ptr, opts))) {
+                return error.FailedToAddServerName;
+            }
     }
 
 pub fn destroy(self: *App) void {
-            c.uws_h3_app_destroy(self);
+            _ = uws_h3_app_destroy(self);
     }
 
 pub fn close(self: *App) void {
-            c.uws_h3_app_close(self);
+            _ = uws_h3_app_close(self);
     }
 
 pub fn clearRoutes(self: *App) void {
-            c.uws_h3_app_clear_routes(self);
+            _ = uws_h3_app_clear_routes(self);
     }
 
-pub fn get(self: *App, p: []const u8, comptime UD: type, ud: UD, comptime h: anytype) void {
-            route(.get, self, p, UD, ud, h);
+pub fn route(self: *App, comptime f: anytype, pattern: []const u8, ud: anytype, comptime handler: anytype) void {
+            var W = struct {
+            pub fn cb(res: *Response, req: *Request, p: ?*anyopaque) callconv(.c) void {
+                handler(@ptrCast(p), req, res);
+            }
+        };
+            _ = &W;
+            _ = f(self, pattern.ptr, pattern.len, W.cb, @ptrCast(ud));
     }
 
-pub fn post(self: *App, p: []const u8, comptime UD: type, ud: UD, comptime h: anytype) void {
-            route(.post, self, p, UD, ud, h);
+pub fn get(self: *App, p: []const u8, ud: anytype, comptime h: anytype) void {
+            _ = self.route(uws_h3_app_get, p, ud, h);
     }
 
-pub fn put(self: *App, p: []const u8, comptime UD: type, ud: UD, comptime h: anytype) void {
-            route(.put, self, p, UD, ud, h);
+pub fn post(self: *App, p: []const u8, ud: anytype, comptime h: anytype) void {
+            _ = self.route(uws_h3_app_post, p, ud, h);
     }
 
-pub fn delete(self: *App, p: []const u8, comptime UD: type, ud: UD, comptime h: anytype) void {
-            route(.delete, self, p, UD, ud, h);
+pub fn put(self: *App, p: []const u8, ud: anytype, comptime h: anytype) void {
+            _ = self.route(uws_h3_app_put, p, ud, h);
     }
 
-pub fn patch(self: *App, p: []const u8, comptime UD: type, ud: UD, comptime h: anytype) void {
-            route(.patch, self, p, UD, ud, h);
+pub fn delete(self: *App, p: []const u8, ud: anytype, comptime h: anytype) void {
+            _ = self.route(uws_h3_app_delete, p, ud, h);
     }
 
-pub fn head(self: *App, p: []const u8, comptime UD: type, ud: UD, comptime h: anytype) void {
-            route(.head, self, p, UD, ud, h);
+pub fn patch(self: *App, p: []const u8, ud: anytype, comptime h: anytype) void {
+            _ = self.route(uws_h3_app_patch, p, ud, h);
     }
 
-pub fn options(self: *App, p: []const u8, comptime UD: type, ud: UD, comptime h: anytype) void {
-            route(.options, self, p, UD, ud, h);
+pub fn head(self: *App, p: []const u8, ud: anytype, comptime h: anytype) void {
+            _ = self.route(uws_h3_app_head, p, ud, h);
     }
 
-pub fn any(self: *App, p: []const u8, comptime UD: type, ud: UD, comptime h: anytype) void {
-            route(.any, self, p, UD, ud, h);
+pub fn options(self: *App, p: []const u8, ud: anytype, comptime h: anytype) void {
+            _ = self.route(uws_h3_app_options, p, ud, h);
     }
 
-pub fn method(self: *App, m: bun.http.Method, p: []const u8, comptime UD: type, ud: UD, comptime h: anytype) void {
+pub fn any(self: *App, p: []const u8, ud: anytype, comptime h: anytype) void {
+            _ = self.route(uws_h3_app_any, p, ud, h);
+    }
+
+pub fn method(self: *App, m: bun.http.Method, p: []const u8, ud: anytype, comptime h: anytype) void {
             switch (m) {
-                .GET => self.get(p, UD, ud, h),
-                .POST => self.post(p, UD, ud, h),
-                .PUT => self.put(p, UD, ud, h),
-                .DELETE => self.delete(p, UD, ud, h),
-                .PATCH => self.patch(p, UD, ud, h),
-                .OPTIONS => self.options(p, UD, ud, h),
-                .HEAD => self.head(p, UD, ud, h),
-                .CONNECT => route(.connect, self, p, UD, ud, h),
-                .TRACE => route(.trace, self, p, UD, ud, h),
-                else => {},
-            }
+.GET => {
+_ = self.get(p, ud, h);
+},
+.POST => {
+_ = self.post(p, ud, h);
+},
+.PUT => {
+_ = self.put(p, ud, h);
+},
+.DELETE => {
+_ = self.delete(p, ud, h);
+},
+.PATCH => {
+_ = self.patch(p, ud, h);
+},
+.OPTIONS => {
+_ = self.options(p, ud, h);
+},
+.HEAD => {
+_ = self.head(p, ud, h);
+},
+.CONNECT => {
+_ = self.route(uws_h3_app_connect, p, ud, h);
+},
+.TRACE => {
+_ = self.route(uws_h3_app_trace, p, ud, h);
+},
+else => {
+
+},
+}
     }
 
-pub fn listenWithConfig(self: *App, comptime UD: type, ud: UD, comptime handler: anytype, config: ListenConfig) void {
-            const W = struct {
-                fn cb(ls: ?*ListenSocket, p: ?*anyopaque) callconv(.c) void {
-                    handler(@ptrCast(@alignCast(p.?)), ls);
-                }
-            };
-            c.uws_h3_app_listen_with_config(self, config.host, config.port, config.options, W.cb, ud);
-    }
-    fn route(
-                comptime which: @TypeOf(.x),
-                this: *App,
-                pattern: []const u8,
-                comptime UD: type,
-                ud: UD,
-                comptime handler: fn (UD, *Request, *Response) void,
-            ) void {
-                const W = struct {
-                    fn cb(res: *Response, req: *Request, p: ?*anyopaque) callconv(.c) void {
-                        handler(@ptrCast(@alignCast(p.?)), req, res);
-                    }
-                };
-                const f = switch (which) {
-                    .get => c.uws_h3_app_get,
-                    .post => c.uws_h3_app_post,
-                    .put => c.uws_h3_app_put,
-                    .delete => c.uws_h3_app_delete,
-                    .patch => c.uws_h3_app_patch,
-                    .head => c.uws_h3_app_head,
-                    .options => c.uws_h3_app_options,
-                    .connect => c.uws_h3_app_connect,
-                    .trace => c.uws_h3_app_trace,
-                    .any => c.uws_h3_app_any,
-                    else => unreachable,
-                };
-                f(this, pattern.ptr, pattern.len, W.cb, ud);
+pub fn listenWithConfig(self: *App, ud: anytype, comptime handler: anytype, config: ListenConfig) void {
+            var W = struct {
+            pub fn cb(ls: ?*ListenSocket, p: ?*anyopaque) callconv(.c) void {
+                handler(@ptrCast(p), ls);
             }
+        };
+            _ = &W;
+            _ = uws_h3_app_listen_with_config(self, config.host, config.port, config.options, W.cb, @ptrCast(ud));
+    }
 };
 
-pub const ListenConfig = extern struct {
-    port: u16,
-            host: ?[*:0]const u8 = null,
-            options: i32 = 0,
-};
 
+pub extern "c" fn uws_h3_create_app(opts: BunSocketContextOptions, idle_timeout: u32) callconv(.c) ?*App;
+
+pub extern "c" fn uws_h3_app_destroy(app: *App) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_close(app: *App) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_clear_routes(app: *App) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_add_server_name(app: *App, name: [*:0]const u8, opts: BunSocketContextOptions) callconv(.c) bool;
+
+pub extern "c" fn uws_h3_res_write_continue(res: *Response) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_get(app: *App, p: [*]const u8, len: usize, h: Handler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_post(app: *App, p: [*]const u8, len: usize, h: Handler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_put(app: *App, p: [*]const u8, len: usize, h: Handler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_delete(app: *App, p: [*]const u8, len: usize, h: Handler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_patch(app: *App, p: [*]const u8, len: usize, h: Handler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_head(app: *App, p: [*]const u8, len: usize, h: Handler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_options(app: *App, p: [*]const u8, len: usize, h: Handler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_connect(app: *App, p: [*]const u8, len: usize, h: Handler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_trace(app: *App, p: [*]const u8, len: usize, h: Handler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_any(app: *App, p: [*]const u8, len: usize, h: Handler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_app_listen_with_config(app: *App, host: ?[*:0]const u8, port: u16, options: i32, h: ListenHandler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_listen_socket_port(ls: *ListenSocket) callconv(.c) i32;
+
+pub extern "c" fn uws_h3_listen_socket_local_address(ls: *ListenSocket, buf: [*]u8, len: i32) callconv(.c) i32;
+
+pub extern "c" fn uws_h3_listen_socket_close(ls: *ListenSocket) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_state(res: *Response) callconv(.c) State;
+
+pub extern "c" fn uws_h3_res_end(res: *Response, data: [*]const u8, len: usize, close_conn: bool) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_end_stream(res: *Response, close_conn: bool) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_force_close(res: *Response) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_try_end(res: *Response, data: [*]const u8, len: usize, total: usize, close_conn: bool) callconv(.c) bool;
+
+pub extern "c" fn uws_h3_res_end_without_body(res: *Response, close_conn: bool) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_pause(res: *Response) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_resume(res: *Response) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_write_status(res: *Response, status: [*]const u8, len: usize) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_write_header(res: *Response, k: [*]const u8, kl: usize, v: [*]const u8, vl: usize) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_write_header_int(res: *Response, k: [*]const u8, kl: usize, v: u64) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_mark_wrote_content_length_header(res: *Response) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_write_mark(res: *Response) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_flush_headers(res: *Response, immediate: bool) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_write(res: *Response, data: [*]const ?u8, len: *usize) callconv(.c) bool;
+
+pub extern "c" fn uws_h3_res_get_write_offset(res: *Response) callconv(.c) u64;
+
+pub extern "c" fn uws_h3_res_override_write_offset(res: *Response, off: u64) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_has_responded(res: *Response) callconv(.c) bool;
+
+pub extern "c" fn uws_h3_res_get_buffered_amount(res: *Response) callconv(.c) u64;
+
+pub extern "c" fn uws_h3_res_reset_timeout(res: *Response) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_timeout(res: *Response, timeout: u8) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_end_sendfile(res: *Response, write_offset: u64, close_conn: bool) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_get_socket_data(res: *Response) callconv(.c) *?*anyopaque;
+
+pub extern "c" fn uws_h3_res_on_writable(res: *Response, h: WritableHandler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_clear_on_writable(res: *Response) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_on_aborted(res: *Response, h: VoidHandler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_on_timeout(res: *Response, h: VoidHandler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_on_data(res: *Response, h: DataHandler, ud: ?*anyopaque) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_cork(res: *Response, ud: ?*anyopaque, h: CorkHandler) callconv(.c) void;
+
+pub extern "c" fn uws_h3_res_get_remote_address_info(res: *Response, ip: *[*]const u8, port: *i32, is_ipv6: *bool) callconv(.c) usize;
+
+pub extern "c" fn uws_h3_req_get_yield(req: *Request) callconv(.c) bool;
+
+pub extern "c" fn uws_h3_req_set_yield(req: *Request, yield: bool) callconv(.c) void;
+
+pub extern "c" fn uws_h3_req_get_url(req: *Request, dest: *[*]const u8) callconv(.c) usize;
+
+pub extern "c" fn uws_h3_req_get_method(req: *Request, dest: *[*]const u8) callconv(.c) usize;
+
+pub extern "c" fn uws_h3_req_get_header(req: *Request, name: [*]const u8, len: usize, dest: *[*]const u8) callconv(.c) usize;
+
+pub extern "c" fn uws_h3_req_get_query(req: *Request, name: [*]const u8, len: usize, dest: *[*]const u8) callconv(.c) usize;
+
+pub extern "c" fn uws_h3_req_get_parameter(req: *Request, idx: u16, dest: *[*]const u8) callconv(.c) usize;
+
+pub extern "c" fn uws_h3_req_for_each_header(req: *Request, cb: HeaderCb, ud: ?*anyopaque) callconv(.c) void;

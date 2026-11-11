@@ -1,3 +1,4 @@
+
 import bun from "bun";
 
 @c {
@@ -25,7 +26,7 @@ export @extern @value class BunSocketContextOptions {
     client_renegotiation_limit: u32 = 3,
     client_renegotiation_window: u32 = 600,
 
-    pub static fn createSSLContext(options: BunSocketContextOptions, err: anytype): *bun.BoringSSL.c.SSL_CTX?! {
+    pub static fn createSSLContext(options: BunSocketContextOptions, *err: anytype): *bun.BoringSSL.c.SSL_CTX?! {
         return us_ssl_ctx_from_options(options, err);
     }
 
@@ -33,45 +34,63 @@ export @extern @value class BunSocketContextOptions {
         return us_ssl_ctx_live_count();
     }
 
-    pub fn digest(this): u8[32] {
-        let h = bun.sha.Hashers.SHA256.init();
-        let feedZ = fn(hp: *bun.sha.Hashers.SHA256, s: cstr?): void {
-            hp.update([if (s != null) 1 else 0]);
-            if (s != null) hp.update(bun.sliceTo(s!, 0));
-            hp.update([0]);
-        };
-        let feedArr = fn(hp: *bun.sha.Hashers.SHA256, arr: [*]cstr?!, n: u32): void {
-            hp.update([if (arr != null) 1 else 0]);
-            hp.update(bun.mem.asBytes(&n));
-            if (arr != null) {
-                for (s in arr![0..n]) {
-                    hp.update([if (s != null) 1 else 0]);
-                    if (s != null) hp.update(bun.sliceTo(s!, 0));
-                    hp.update([0]);
-                }
-            }
-            hp.update([0]);
-        };
-        let feedPath = fn(hp: *bun.sha.Hashers.SHA256, s: cstr?): void {
-            hp.update([if (s != null) 1 else 0]);
-            if (s != null) {
-                let path = bun.sliceTo(s!, 0);
-                hp.update(path);
-                let meta: i64[3] = [0, 0, 0];
-                if (path.len > 0) {
-                    switch (bun.sys.stat(path)) {
-                        .result(st) => {
-                            let mt = st.mtime();
-                            meta = [mt.sec as i64, mt.nsec as i64, st.size as i64];
-                        },
-                        .err => {},
-                    }
-                }
-                hp.update(bun.mem.asBytes(&meta));
-            }
-            hp.update([0]);
-        };
+    static fn feedZ(hp: *bun.sha.Hashers.SHA256, s: cstr?): void {
+        let flag: [1]u8 = .{(if (s != null) 1 else 0)};
+        hp.update(&flag);
+        if (s != null) {
+            let p = s.?;
+            hp.update(bun.sliceTo(p, 0));
+        }
+        let term: [1]u8 = .{0};
+        hp.update(&term);
+    }
 
+    static fn feedArr(hp: *bun.sha.Hashers.SHA256, arr: [*]cstr?!, n: u32): void {
+        let flag: [1]u8 = .{(if (arr != null) 1 else 0)};
+        hp.update(&flag);
+        hp.update(bun.mem.asBytes(&n));
+        if (arr != null) {
+            let a = arr.?;
+            for (a[0..n]) |s| {
+                let s_flag: [1]u8 = .{(if (s != null) 1 else 0)};
+                hp.update(&s_flag);
+                if (s != null) {
+                    let p = s.?;
+                    hp.update(bun.sliceTo(p, 0));
+                }
+                let term: [1]u8 = .{0};
+                hp.update(&term);
+            }
+        }
+        let term: [1]u8 = .{0};
+        hp.update(&term);
+    }
+
+    static fn feedPath(hp: *bun.sha.Hashers.SHA256, s: cstr?): void {
+        let flag: [1]u8 = .{(if (s != null) 1 else 0)};
+        hp.update(&flag);
+        if (s != null) {
+            let p = s.?;
+            let path = bun.sliceTo(p, 0);
+            hp.update(path);
+            let meta: [3]i64 = .{0, 0, 0};
+            if (path.len > 0) {
+                switch (bun.sys.stat(path)) {
+                    .result(st) => {
+                        let mt = st.mtime();
+                        meta = .{ mt.sec as i64, mt.nsec as i64, st.size as i64 };
+                    },
+                    .err => {},
+                }
+            }
+            hp.update(bun.mem.asBytes(&meta));
+        }
+        let term: [1]u8 = .{0};
+        hp.update(&term);
+    }
+
+    pub fn digest(this): [32]u8 {
+        let h = bun.sha.Hashers.SHA256.init();
         feedPath(&h, this.key_file_name);
         feedPath(&h, this.cert_file_name);
         feedZ(&h, this.passphrase);
@@ -87,7 +106,7 @@ export @extern @value class BunSocketContextOptions {
         h.update(bun.mem.asBytes(&this.request_cert));
         h.update(bun.mem.asBytes(&this.client_renegotiation_limit));
         h.update(bun.mem.asBytes(&this.client_renegotiation_window));
-        let out: u8[32] = undefined;
+        let out: [32]u8 = undefined;
         h.final(&out);
         return out;
     }
@@ -95,18 +114,33 @@ export @extern @value class BunSocketContextOptions {
     pub fn approxCertBytes(this): usize {
         let n: usize = 0;
         if (this.key != null) {
-            for (k in this.key![0..this.key_count]) {
-                if (k != null) n += bun.sliceTo(k!, 0).len;
+            let keys = this.key.?;
+            let key_count = this.key_count;
+            for (keys[0..key_count]) |k| {
+                if (k != null) {
+                    let kp = k.?;
+                    n += bun.sliceTo(kp, 0).len;
+                }
             }
         }
         if (this.cert != null) {
-            for (k in this.cert![0..this.cert_count]) {
-                if (k != null) n += bun.sliceTo(k!, 0).len;
+            let certs = this.cert.?;
+            let cert_count = this.cert_count;
+            for (certs[0..cert_count]) |k| {
+                if (k != null) {
+                    let kp = k.?;
+                    n += bun.sliceTo(kp, 0).len;
+                }
             }
         }
         if (this.ca != null) {
-            for (k in this.ca![0..this.ca_count]) {
-                if (k != null) n += bun.sliceTo(k!, 0).len;
+            let cas = this.ca.?;
+            let ca_count = this.ca_count;
+            for (cas[0..ca_count]) |k| {
+                if (k != null) {
+                    let kp = k.?;
+                    n += bun.sliceTo(kp, 0).len;
+                }
             }
         }
         return n;

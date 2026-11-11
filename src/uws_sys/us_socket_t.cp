@@ -26,7 +26,7 @@ import { SocketKind } from "./SocketKind.zig";
     fn us_socket_open(s: *us_socket_t, is_client: i32, ip: ?[*]const u8, ip_length: i32): ?*us_socket_t;
     fn us_socket_pause(s: *us_socket_t): void;
     fn us_socket_resume(s: *us_socket_t): void;
-    fn us_socket_close(s: *us_socket_t, code: us_socket_t.CloseCode, reason: *!?): ?*us_socket_t;
+    fn us_socket_close(s: *us_socket_t, code: SocketCloseCode, reason: *!?): ?*us_socket_t;
     fn us_socket_shutdown(s: *us_socket_t): void;
     fn us_socket_is_closed(s: *us_socket_t): i32;
     fn us_socket_shutdown_read(s: *us_socket_t): void;
@@ -41,12 +41,14 @@ import { SocketKind } from "./SocketKind.zig";
     fn us_socket_start_tls_handshake(s: *us_socket_t): void;
 }
 
+pub enum SocketCloseCode: i32 {
+    normal = 0,
+    failure = 1,
+    fast_shutdown = 2,
+}
+
 export @opaque class us_socket_t {
-    pub enum CloseCode: i32 {
-        normal = 0,
-        failure = 1,
-        fast_shutdown = 2,
-    }
+    pub const CloseCode = SocketCloseCode;
 
     pub fn open(*this, is_client: bool, ip_addr: string?): void {
         let client_int: i32 = if (is_client) 1 else 0;
@@ -58,7 +60,7 @@ export @opaque class us_socket_t {
         }
     }
 
-    pub fn close(*this, code: us_socket_t.CloseCode): void {
+    pub fn close(*this, code: SocketCloseCode): void {
         us_socket_close(this, code, null);
     }
 
@@ -260,13 +262,13 @@ export @extern @value class us_socket_stream_buffer_t {
     pub fn toStreamBuffer(this): bun.io.StreamBuffer {
         let items: u8[] = if (this.list_ptr != null) this.list_ptr.?[0..this.list_len] else &[];
         let cap: usize = if (this.list_ptr != null) this.list_cap else 0;
-        return bun.io.StreamBuffer {
-            list = .{
-                allocator = bun.default_allocator,
-                items = items,
-                capacity = cap,
+        return bun.io.StreamBuffer{
+            .list = .{
+                .allocator = bun.default_allocator,
+                .items = items,
+                .capacity = cap,
             },
-            cursor = this.cursor,
+            .cursor = this.cursor,
         };
     }
 

@@ -33,7 +33,7 @@ pub fn BodyReaderMixin(comptime Wrap: type, comptime field: []const u8, comptime
 
         fn onData(ctx: *@This(), resp: uws.AnyResponse, chunk: []const u8, last: bool) !void {
             if (last) {
-                var body = ctx.body;
+                let body = ctx.body;
                 defer body.deinit();
                 ctx.body = .init(ctx.body.allocator);
                 resp.clearOnData();
@@ -49,7 +49,7 @@ pub fn BodyReaderMixin(comptime Wrap: type, comptime field: []const u8, comptime
         }
 
         fn onOOM(ctx: *@This(), r: uws.AnyResponse) void {
-            var body = ctx.body;
+            let body = ctx.body;
             ctx.body = .init(ctx.body.allocator);
             body.deinit();
             r.clearAborted();
@@ -63,7 +63,7 @@ pub fn BodyReaderMixin(comptime Wrap: type, comptime field: []const u8, comptime
         }
 
         fn onInvalid(ctx: *@This(), r: uws.AnyResponse) void {
-            var body = ctx.body;
+            let body = ctx.body;
             ctx.body = .init(ctx.body.allocator);
             body.deinit();
             r.clearAborted();

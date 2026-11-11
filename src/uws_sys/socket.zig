@@ -305,6 +305,8 @@ pub fn group(self: AnySocket) *SocketGroup {
 pub fn SocketHandler(comptime is_ssl: bool) type {
     return struct {
         socket: InternalSocket,
+        
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn getNativeHandle(self: @This()) ?*NativeSocketHandleType(is_ssl) {
                 {
@@ -710,6 +712,64 @@ pub fn fromNamedPipe(pipe: *bun.uws.WindowsNamedPipe) Self {
                 return Self{ .socket = InternalSocket{ .pipe = pipe } };
         }
 
+pub fn fromFd(g: *SocketGroup, k: SocketKind, handle: bun.FD, comptime This: type, this_ptr: *This, comptime socket_field_name: ?[]const u8, is_ipc: bool) ?Self {
+                const ThisPtr = ?*This;
+                const raw = ((g.fromFd(k, null, @sizeOf(ThisPtr), handle.native(), is_ipc)) orelse { return null; });
+                const socket_ = Self{ .socket = InternalSocket{ .connected = raw } };
+                (raw.ext(ThisPtr)).* = this_ptr;
+                if ((socket_field_name != null)) {
+                    @field(this_ptr, socket_field_name.?) = socket_;
+                }
+                return socket_;
+        }
+
+pub fn connectGroup(g: *SocketGroup, kind: SocketKind, ssl_ctx: ?*bun.uws.SslCtx, raw_host: []const u8, port: anytype, owner: anytype, allow_half_open: bool) !Self {
+                const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
+                const OwnerPtr = ?*Owner;
+                const opts: c_int = (if (allow_half_open) bun.uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0);
+                const host = (if ((((raw_host.len > 1) and (raw_host[0] == 91)) and (raw_host[@as(usize, @intCast((raw_host.len - 1)))] == 93))) raw_host[1..(raw_host.len - 1)] else raw_host);
+                var stack: [256]u8 = undefined;
+                _ = &stack;
+                const hostZ: [:0]const u8 = (if ((host.len < stack.len)) blk: {
+                _ = @memcpy(stack[0..host.len], host);
+                stack[cp_cast_int(usize, host.len)] = 0;
+                break :blk stack[0..host.len :0];
+} else bun.handleOom(bun.default_allocator.dupeZ(u8, host)));
+                defer {
+                if ((hostZ.ptr != (&stack))) {
+                    _ = bun.default_allocator.free(hostZ);
+                }
+                }
+                return (switch (g.connect(kind, ssl_ctx, hostZ, @intCast(port), opts, @sizeOf(OwnerPtr))) {
+.failed => error.FailedToOpenSocket,
+.socket => |s| blk: {
+                (s.ext(OwnerPtr)).* = owner;
+                break :blk Self{ .socket = InternalSocket{ .connected = s } };
+},
+.connecting => |cs| blk: {
+                (cs.ext(OwnerPtr)).* = owner;
+                break :blk Self{ .socket = InternalSocket{ .connecting = cs } };
+},
+});
+        }
+
+pub fn connectUnixGroup(g: *SocketGroup, kind: SocketKind, ssl_ctx: ?*bun.uws.SslCtx, path: []const u8, owner: anytype, allow_half_open: bool) !Self {
+                const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
+                const OwnerPtr = ?*Owner;
+                const opts: c_int = (if (allow_half_open) bun.uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0);
+                const s = ((g.connectUnix(kind, ssl_ctx, path.ptr, path.len, opts, @sizeOf(OwnerPtr))) orelse { return error.FailedToOpenSocket; });
+                (s.ext(OwnerPtr)).* = owner;
+                return Self{ .socket = InternalSocket{ .connected = s } };
+        }
+
+pub fn adoptGroup(tcp: *us_socket_t, g: *SocketGroup, kind: SocketKind, comptime Owner: type, comptime field: []const u8, owner: *Owner) bool {
+                const AnyPtr = (&anyopaque);
+                const new_s = ((tcp.adopt(g, kind, @sizeOf(AnyPtr), @sizeOf(AnyPtr))) orelse { return false; });
+                (new_s.ext(AnyPtr)).* = owner;
+                @field(owner, field) = Self{ .socket = InternalSocket{ .connected = new_s } };
+                return true;
+        }
+
 pub fn from(socket: *us_socket_t) Self {
                 return Self{ .socket = InternalSocket{ .connected = socket } };
         }
@@ -723,95 +783,6 @@ pub fn fromAny(socket: InternalSocket) Self {
         }
         pub const Self = @This();
         pub const detached: SocketHandler(is_ssl) = .{ .socket = .detached };
-        pub const fromFd = struct {
-                pub fn call(
-                    g: *SocketGroup,
-                    k: SocketKind,
-                    handle: bun.FD,
-                    comptime This: type,
-                    this: *This,
-                    comptime socket_field_name: ?[]const u8,
-                    is_ipc: bool,
-                ) ?SocketHandler(is_ssl) {
-                    const raw = g.fromFd(k, null, @sizeOf(?*This), handle.native(), is_ipc) orelse return null;
-                    const socket_ = SocketHandler(is_ssl){ .socket = .{ .connected = raw } };
-        
-                    raw.ext(?*This).* = this;
-                    if (comptime socket_field_name) |field| {
-                        @field(this, field) = socket_;
-                    }
-                    return socket_;
-                }
-            }.call;
-        pub const connectGroup = struct {
-                pub fn call(
-                    g: *SocketGroup,
-                    kind: SocketKind,
-                    ssl_ctx: ?*bun.uws.SslCtx,
-                    raw_host: []const u8,
-                    port: anytype,
-                    owner: anytype,
-                    allow_half_open: bool,
-                ) !SocketHandler(is_ssl) {
-                    const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
-                    const opts: c_int = if (allow_half_open) bun.uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0;
-                    const host = if (raw_host.len > 1 and raw_host[0] == '[' and raw_host[raw_host.len - 1] == ']')
-                        raw_host[1 .. raw_host.len - 1]
-                    else
-                        raw_host;
-                    var stack: [256]u8 = undefined;
-                    const hostZ: [:0]const u8 = if (host.len < stack.len) blk: {
-                        @memcpy(stack[0..host.len], host);
-                        stack[host.len] = 0;
-                        break :blk stack[0..host.len :0];
-                    } else bun.handleOom(bun.default_allocator.dupeZ(u8, host));
-                    defer if (hostZ.ptr != &stack) bun.default_allocator.free(hostZ);
-        
-                    return switch (g.connect(kind, ssl_ctx, hostZ, @intCast(port), opts, @sizeOf(?*Owner))) {
-                        .failed => error.FailedToOpenSocket,
-                        .socket => |s| blk: {
-                            s.ext(?*Owner).* = owner;
-                            break :blk .{ .socket = .{ .connected = s } };
-                        },
-                        .connecting => |cs| blk: {
-                            cs.ext(?*Owner).* = owner;
-                            break :blk .{ .socket = .{ .connecting = cs } };
-                        },
-                    };
-                }
-            }.call;
-        pub const connectUnixGroup = struct {
-                pub fn call(
-                    g: *SocketGroup,
-                    kind: SocketKind,
-                    ssl_ctx: ?*bun.uws.SslCtx,
-                    path: []const u8,
-                    owner: anytype,
-                    allow_half_open: bool,
-                ) !SocketHandler(is_ssl) {
-                    const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
-                    const opts: c_int = if (allow_half_open) bun.uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0;
-                    const s = g.connectUnix(kind, ssl_ctx, path.ptr, path.len, opts, @sizeOf(?*Owner)) orelse
-                        return error.FailedToOpenSocket;
-                    s.ext(?*Owner).* = owner;
-                    return .{ .socket = .{ .connected = s } };
-                }
-            }.call;
-        pub const adoptGroup = struct {
-                pub fn call(
-                    tcp: *us_socket_t,
-                    g: *SocketGroup,
-                    kind: SocketKind,
-                    comptime Owner: type,
-                    comptime field: []const u8,
-                    owner: *Owner,
-                ) bool {
-                    const new_s = tcp.adopt(g, kind, @sizeOf(*anyopaque), @sizeOf(*anyopaque)) orelse return false;
-                    new_s.ext(*anyopaque).* = owner;
-                    @field(owner, field) = .{ .socket = .{ .connected = new_s } };
-                    return true;
-                }
-            }.call;
     };
 }
 

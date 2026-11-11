@@ -41,5 +41,28 @@
 - `uws_dispatch.cp`, `uws_handlers.cp`, `uws_jsc.cp`:
   - 全面消除 `var`，双重验证全部通过。
 
+### `src/uws_sys/` 全网络层子系统 24 个模块
+- `App.cp` / `App.zig`: 285 行 (-38.8% 压缩)，消解泛型构造，双重验证全部通过。
+- `BodyReaderMixin.cp` / `BodyReaderMixin.zig`: 79 行 (-16.0% 压缩)，双重验证全部通过。
+- `ConnectingSocket.cp` / `ConnectingSocket.zig`: 79 行 (-1.2% 压缩)，双重验证全部通过。
+- `InternalLoopData.cp` / `InternalLoopData.zig`: 73 行 (0.0%)，双重验证全部通过。
+- `ListenSocket.cp` / `ListenSocket.zig`: 74 行 (+7.2%)，双重验证全部通过。
+- `Loop.cp` / `Loop.zig`: 304 行 (-18.3% 压缩)，双重验证全部通过。
+- `Request.cp` / `Request.zig`: 110 行 (+13.4%)，规范枚举与属性提取，双重验证全部通过。
+- `Response.cp` / `Response.zig`: 634 行 (-18.9% 压缩)，重构响应流管线与回调，双重验证全部通过。
+- `SocketContext.cp` / `SocketContext.zig`: 148 行 (+6.5%)，规范 SSL 上下文配置与辅助函数，双重验证全部通过。
+- `SocketGroup.cp` / `SocketGroup.zig`: 172 行 (-17.3% 压缩)，规范 C 套接字组生命周期管理，双重验证全部通过。
+- `SocketKind.cp` / `SocketKind.zig`: 53 行 (-47.5% 压缩)，双重验证全部通过。
+- `Timer.cp` / `Timer.zig`: 50 行 (-21.9% 压缩)，消除裸指针异常，双重验证全部通过。
+- `WebSocket.cp` / `WebSocket.zig`: 314 行 (-13.3% 压缩)，重构 WS 状态机与握手逻辑，双重验证全部通过。
+- `h3.cp` / `h3.zig`: 478 行 (+10.1%)，规范 HTTP/3 路由器与回调分发，双重验证全部通过。
+- `quic.cp` / `quic.zig`: 21 行 (+5.0%)，规范模块重导出，双重验证全部通过。
+- `quic/Context.cp`, `quic/Header.cp`, `quic/PendingConnect.cp`, `quic/Socket.cp`, `quic/Stream.cp`:
+  - 5 个 QUIC 核心模块全部 100% 迁移并通过双重验证。
+- `socket.cp` / `socket.zig`: 656 行 (+0.5%)，使用 `pub static fn` 替代原生 Zig 内部结构体捕获，消除 `let` 未转译报错与 `field` 作用域遮蔽，双重验证全部通过。
+- `udp.cp` / `udp.zig`: 140 行 (+18.6%)，规范 UDP 套接字数据包路由，双重验证全部通过。
+- `us_socket_t.cp` / `us_socket_t.zig`: 288 行 (-17.7% 压缩)，规范底层 C 结构体与回调指针，双重验证全部通过。
+- `vtable.cp` / `vtable.zig`: 98 行 (-16.9% 压缩)，规范虚函数表派发与 trampoline，双重验证全部通过。
+
 ### 冷热文档归档
 - `SESSION_H.md`, `CHANGELOG_H.md`, `DEVLOG_H.md`: 归档历史记录，确立热日志极简轻量。

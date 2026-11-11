@@ -2,32 +2,38 @@
 const std = @import("std");
 const string = []const u8;
 
-    const uws = bun.uws;
-    const BoringSSL = bun.BoringSSL.c;
-
-    pub const CString = [*c]const u8;
-    pub const CertArray = ?[*]const ?[*:0]const u8;
-    pub const DigestArray = [32]u8;
-
-    pub const c = struct {
-        pub extern fn us_ssl_ctx_from_options(BunSocketContextOptions, *uws.create_bun_socket_error_t) ?*BoringSSL.SSL_CTX;
-        pub extern fn us_ssl_ctx_live_count() c_long;
-    };
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime __T: type, comptime idx: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; return @FieldType(__T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime __T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime __T: type, comptime offset_from_end: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const n = @typeInfo(__T).@"struct".fields.len; return @FieldType(__T, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime __T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(__T).@"struct".fields.len; return @field(v, std.fmt.comptimePrint("{d}", .{n - offset_from_end})); } }
+pub fn CpUnpackSliceType(comptime __T: type, comptime start_idx: usize) type { if (__T == ?Message or __T == Message) return []const Message; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return __T; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return []const @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return []const @typeInfo(__T).array.child; const fields = @typeInfo(__T).@"struct".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime __T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(__T).@"struct".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint("{d}", .{f_idx}))); } return buf; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
 
 pub const bun = @import("bun");
 pub const BunSocketContextOptions = extern struct {
-    key_file_name: CString = null,
-    cert_file_name: CString = null,
-    passphrase: CString = null,
-    dh_params_file_name: CString = null,
-    ca_file_name: CString = null,
-    ssl_ciphers: CString = null,
+    key_file_name: ?[*:0]const u8 = null,
+    cert_file_name: ?[*:0]const u8 = null,
+    passphrase: ?[*:0]const u8 = null,
+    dh_params_file_name: ?[*:0]const u8 = null,
+    ca_file_name: ?[*:0]const u8 = null,
+    ssl_ciphers: ?[*:0]const u8 = null,
     ssl_prefer_low_memory_usage: i32 = 0,
-    key: CertArray = null,
+    key: ?[*][*:0]u8 = null,
     key_count: u32 = 0,
-    cert: CertArray = null,
+    cert: ?[*][*:0]u8 = null,
     cert_count: u32 = 0,
-    ca: CertArray = null,
+    ca: ?[*][*:0]u8 = null,
     ca_count: u32 = 0,
     secure_options: u32 = 0,
     reject_unauthorized: i32 = 0,
@@ -35,82 +41,157 @@ pub const BunSocketContextOptions = extern struct {
     client_renegotiation_limit: u32 = 3,
     client_renegotiation_window: u32 = 600,
 
-pub fn createSSLContext(options: BunSocketContextOptions, err: anytype) ?*BoringSSL.SSL_CTX {
-            return c.us_ssl_ctx_from_options(options, err);
+pub fn createSSLContext(options: BunSocketContextOptions, err: anytype) *?bun.BoringSSL.c.SSL_CTX {
+            return us_ssl_ctx_from_options(options, err);
     }
 
-pub fn digest(self: BunSocketContextOptions) DigestArray {
-            var h = bun.sha.Hashers.SHA256.init();
-            const feedZ = struct {
-                fn f(hp: *bun.sha.Hashers.SHA256, s: [*c]const u8) void {
-                    hp.update(&.{@intFromBool(s != null)});
-                    if (s) |p| hp.update(bun.sliceTo(p, 0));
-                    hp.update(&.{0});
-                }
-            }.f;
-            const feedArr = struct {
-                fn f(hp: *bun.sha.Hashers.SHA256, arr: ?[*]const ?[*:0]const u8, n: u32) void {
-                    hp.update(&.{@intFromBool(arr != null)});
-                    hp.update(std.mem.asBytes(&n));
-                    if (arr) |a| for (a[0..n]) |s| {
-                        hp.update(&.{@intFromBool(s != null)});
-                        if (s) |p| hp.update(bun.sliceTo(p, 0));
-                        hp.update(&.{0});
-                    };
-                    hp.update(&.{0});
-                }
-            }.f;
-            const feedPath = struct {
-                fn f(hp: *bun.sha.Hashers.SHA256, s: [*c]const u8) void {
-                    hp.update(&.{@intFromBool(s != null)});
-                    if (s) |p| {
-                        const path = std.mem.span(@as([*:0]const u8, @ptrCast(p)));
-                        hp.update(path);
-                        var meta: [3]i64 = @splat(0);
-                        if (path.len > 0) switch (bun.sys.stat(path)) {
-                            .result => |st| {
-                                const mt = st.mtime();
-                                meta = .{ @intCast(mt.sec), @intCast(mt.nsec), @intCast(st.size) };
-                            },
-                            .err => {},
-                        };
-                        hp.update(std.mem.asBytes(&meta));
+pub fn liveCount() i64 {
+            return us_ssl_ctx_live_count();
+    }
+
+pub fn feedZ(hp: *bun.sha.Hashers.SHA256, s: ?[*:0]const u8) void {
+            var flag: [1]u8 = .{ (if ((s != null)) 1 else 0) };
+            _ = &flag;
+            _ = hp.update((&flag));
+            if ((s != null)) {
+                var p = s.?;
+                _ = &p;
+                _ = hp.update(bun.sliceTo(p, 0));
+            }
+            var term: [1]u8 = .{ 0 };
+            _ = &term;
+            _ = hp.update((&term));
+    }
+
+pub fn feedArr(hp: *bun.sha.Hashers.SHA256, arr: ?[*][*:0]u8, n: u32) void {
+            var flag: [1]u8 = .{ (if ((arr != null)) 1 else 0) };
+            _ = &flag;
+            _ = hp.update((&flag));
+            _ = hp.update(bun.mem.asBytes((&n)));
+            if ((arr != null)) {
+                var a = arr.?;
+                _ = &a;
+                for (a[0..n]) |s| {
+                    var s_flag: [1]u8 = .{ (if ((s != null)) 1 else 0) };
+                    _ = &s_flag;
+                    _ = hp.update((&s_flag));
+                    if ((s != null)) {
+                        var p = s.?;
+                        _ = &p;
+                        _ = hp.update(bun.sliceTo(p, 0));
                     }
-                    hp.update(&.{0});
+                    var term: [1]u8 = .{ 0 };
+                    _ = &term;
+                    _ = hp.update((&term));
                 }
-            }.f;
-            feedPath(&h, self.key_file_name);
-            feedPath(&h, self.cert_file_name);
-            feedZ(&h, self.passphrase);
-            feedPath(&h, self.dh_params_file_name);
-            feedPath(&h, self.ca_file_name);
-            feedZ(&h, self.ssl_ciphers);
-            h.update(std.mem.asBytes(&self.ssl_prefer_low_memory_usage));
-            feedArr(&h, self.key, self.key_count);
-            feedArr(&h, self.cert, self.cert_count);
-            feedArr(&h, self.ca, self.ca_count);
-            h.update(std.mem.asBytes(&self.secure_options));
-            h.update(std.mem.asBytes(&self.reject_unauthorized));
-            h.update(std.mem.asBytes(&self.request_cert));
-            h.update(std.mem.asBytes(&self.client_renegotiation_limit));
-            h.update(std.mem.asBytes(&self.client_renegotiation_window));
+            }
+            var term: [1]u8 = .{ 0 };
+            _ = &term;
+            _ = hp.update((&term));
+    }
+
+pub fn feedPath(hp: *bun.sha.Hashers.SHA256, s: ?[*:0]const u8) void {
+            var flag: [1]u8 = .{ (if ((s != null)) 1 else 0) };
+            _ = &flag;
+            _ = hp.update((&flag));
+            if ((s != null)) {
+                var p = s.?;
+                _ = &p;
+                var path = bun.sliceTo(p, 0);
+                _ = &path;
+                _ = hp.update(path);
+                var meta: [3]i64 = .{ 0, 0, 0 };
+                _ = &meta;
+                if ((path.len > 0)) {
+                    switch (bun.sys.stat(path)) {
+.result => |st| {
+var mt = st.mtime();
+                    _ = &mt;
+                    meta = .{ (if (comptime @typeInfo(@TypeOf(mt.sec)) == .@"enum") cp_cast_int(i64, @intFromEnum(mt.sec)) else cp_cast_int(i64, mt.sec)), (if (comptime @typeInfo(@TypeOf(mt.nsec)) == .@"enum") cp_cast_int(i64, @intFromEnum(mt.nsec)) else cp_cast_int(i64, mt.nsec)), (if (comptime @typeInfo(@TypeOf(st.size)) == .@"enum") cp_cast_int(i64, @intFromEnum(st.size)) else cp_cast_int(i64, st.size)) };
+},
+.err => {
+
+},
+}
+                }
+                _ = hp.update(bun.mem.asBytes((&meta)));
+            }
+            var term: [1]u8 = .{ 0 };
+            _ = &term;
+            _ = hp.update((&term));
+    }
+
+pub fn digest(self: BunSocketContextOptions) [32]u8 {
+            var h = bun.sha.Hashers.SHA256.init();
+            _ = &h;
+            _ = BunSocketContextOptions.feedPath(h, self.key_file_name);
+            _ = BunSocketContextOptions.feedPath(h, self.cert_file_name);
+            _ = BunSocketContextOptions.feedZ(h, self.passphrase);
+            _ = BunSocketContextOptions.feedPath(h, self.dh_params_file_name);
+            _ = BunSocketContextOptions.feedPath(h, self.ca_file_name);
+            _ = BunSocketContextOptions.feedZ(h, self.ssl_ciphers);
+            _ = h.update(bun.mem.asBytes((&self.ssl_prefer_low_memory_usage)));
+            _ = BunSocketContextOptions.feedArr(h, self.key, self.key_count);
+            _ = BunSocketContextOptions.feedArr(h, self.cert, self.cert_count);
+            _ = BunSocketContextOptions.feedArr(h, self.ca, self.ca_count);
+            _ = h.update(bun.mem.asBytes((&self.secure_options)));
+            _ = h.update(bun.mem.asBytes((&self.reject_unauthorized)));
+            _ = h.update(bun.mem.asBytes((&self.request_cert)));
+            _ = h.update(bun.mem.asBytes((&self.client_renegotiation_limit)));
+            _ = h.update(bun.mem.asBytes((&self.client_renegotiation_window)));
             var out: [32]u8 = undefined;
-            h.final(&out);
+            _ = &out;
+            _ = h.final((&out));
             return out;
     }
 
 pub fn approxCertBytes(self: BunSocketContextOptions) usize {
             var n: usize = 0;
-            if (self.key) |arr| for (arr[0..self.key_count]) |k| {
-                if (k) |s| n += bun.sliceTo(s, 0).len;
-            };
-            if (self.cert) |arr| for (arr[0..self.cert_count]) |k| {
-                if (k) |s| n += bun.sliceTo(s, 0).len;
-            };
-            if (self.ca) |arr| for (arr[0..self.ca_count]) |k| {
-                if (k) |s| n += bun.sliceTo(s, 0).len;
-            };
+            _ = &n;
+            if ((self.key != null)) {
+                var keys = self.key.?;
+                _ = &keys;
+                var key_count = self.key_count;
+                _ = &key_count;
+                for (keys[0..key_count]) |k| {
+                    if ((k != null)) {
+                        var kp = k.?;
+                        _ = &kp;
+                        n = (n + bun.sliceTo(kp, 0).len);
+                    }
+                }
+            }
+            if ((self.cert != null)) {
+                var certs = self.cert.?;
+                _ = &certs;
+                var cert_count = self.cert_count;
+                _ = &cert_count;
+                for (certs[0..cert_count]) |k| {
+                    if ((k != null)) {
+                        var kp = k.?;
+                        _ = &kp;
+                        n = (n + bun.sliceTo(kp, 0).len);
+                    }
+                }
+            }
+            if ((self.ca != null)) {
+                var cas = self.ca.?;
+                _ = &cas;
+                var ca_count = self.ca_count;
+                _ = &ca_count;
+                for (cas[0..ca_count]) |k| {
+                    if ((k != null)) {
+                        var kp = k.?;
+                        _ = &kp;
+                        n = (n + bun.sliceTo(kp, 0).len);
+                    }
+                }
+            }
             return n;
     }
 };
 
+
+pub extern "c" fn us_ssl_ctx_from_options(options: BunSocketContextOptions, err: *bun.uws.create_bun_socket_error_t) callconv(.c) *?bun.BoringSSL.c.SSL_CTX;
+
+pub extern "c" fn us_ssl_ctx_live_count() callconv(.c) i64;

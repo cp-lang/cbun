@@ -26,21 +26,31 @@
 
 ---
 
-## 2. 下一阶段攻坚规划：`src/uws_sys/`（9个模块）与 `src/runtime/webcore/`（27个模块）
+## 2. uws_sys 网络层全子系统攻坚与技术总结
 
-1. **`src/uws_sys/` 重点攻坚清单**：
-   - `BodyReaderMixin.cp`
-   - `Client.cp`
-   - `HttpResponse.cp`
-   - `Loop.cp`
-   - `MultipartParser.cp`
-   - `PerMessageDeflate.cp`
-   - `socket.cp`
-   - `TopicTree.cp`
-   - `WebSocket.cp`
-2. **方法论**：
-   - 先对 9 个文件进行编译诊断扫描，提取具体报错特征；
-   - 坚持 100% 纯 CP 语言（0 处 `zig {}`，0 处 `var`）；
-   - 双重验证（`cpc --lib` + `vendor/zig/zig ast-check`）确保绝对正确；
-   - 膨胀率严守 $\le +20\%$；
-   - 阶段闭环后更新四线文档并原子 git 提交。
+### 2.1 静态结构体工厂与方法模式
+- **问题机理**：
+  在原始 Zig 代码中，经常使用 `pub const connectGroup = struct { pub fn call(...) ... }.call;` 等匿名结构体闭包。但在 CPC 中，类内部的 `pub const ... = struct { ... };` 属于 Zig 原生常量捕获，其内部代码直接直通转译，导致内部声明的 `let` 无法被 CPC 状态机和语句转译器识别为 `var`，并在 AST-Check 中引发语法报错。
+- **消解手段**：
+  将此类匿名结构体调用重构为纯正的 CP 静态类方法：`pub static fn connectGroup(...): !Self { ... }`。CPC 正确识别方法作用域，将 `let stack: [256]u8 = undefined;` 正确降级为 Zig 的 `var stack: [256]u8 = undefined;`。
+
+### 2.2 泛型函数中的类型表达式规避
+- **问题机理**：
+  在函数签名或参数传递中，`@sizeOf(?*This)` 或 `raw.ext(?*This)` 中直接出现 `?*This` 时，由于 `?` 作为前缀在 CP 表达式解析器中被视为非法 Token，导致解析中断报 `unexpected token 'Semicolon'`。
+- **消解手段**：
+  在方法体内将复合类型显式提升为类型别名：`const ThisPtr = ?*This;`，然后传递标识符 `@sizeOf(ThisPtr)` 和 `raw.ext(ThisPtr)`，完美桥接类型位置与值位置的语义界限。
+
+---
+
+## 3. 下一阶段攻坚规划：`src/runtime/webcore/`（27个未闭环模块）
+
+1. **子模块分类**：
+   - `src/runtime/webcore/blob/` (4 个模块：`BlobPart.cp`, `BlobPool.cp`, `Blob.cp`, `File.cp`)
+   - `src/runtime/webcore/s3/` (5 个模块：`s3.cp`, `Signer.cp`, `Credentials.cp`, 等)
+   - `src/runtime/webcore/` (18 个根目录模块：`Body.cp`, `Request.cp`, `Response.cp`, `Headers.cp`, `Fetch.cp`, 等)
+2. **攻坚推进策略**：
+   - 优先攻克 `blob/` 与 `s3/` 独立子目录；
+   - 保持 100% 纯正 CP 语言（0 处 `zig {}`，0 处 `var`）；
+   - 双重验证（`cpc --lib` + `vendor/zig/zig ast-check`）；
+   - 行数膨胀率严守 $\le +20\%$；
+   - 阶段性成果及时原子 Git 提交。

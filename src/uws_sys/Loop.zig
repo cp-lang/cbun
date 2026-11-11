@@ -9,7 +9,7 @@ pub const LoopHandler = struct {
     loop: *Loop,
     cb: *const fn (*anyopaque, *Loop) callconv(.c) void,
     
-pub fn _create(allocator: std.mem.Allocator) !*LoopHandler { const self_ptr = try allocator.create(LoopHandler); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *LoopHandler, loop: *Loop, cb: *const fn (*anyopaque, *Loop) callconv(.c) void) void {
             self.loop = loop;

@@ -2,12 +2,20 @@
 const std = @import("std");
 const string = []const u8;
 
-pub extern fn us_quic_global_init() callconv(.c) void;
-    pub const globalInit = us_quic_global_init;
+pub const Context = context_mod.Context;
+pub const Socket = socket_mod.Socket;
+pub const Stream = stream_mod.Stream;
+pub const PendingConnect = pending_mod.PendingConnect;
+pub const Header = header_mod.Header;
+pub const Qpack = header_mod.Qpack;
+pub const context_mod = @import("./quic/Context.zig");
+pub const socket_mod = @import("./quic/Socket.zig");
+pub const stream_mod = @import("./quic/Stream.zig");
+pub const pending_mod = @import("./quic/PendingConnect.zig");
+pub const header_mod = @import("./quic/Header.zig");
 
-pub const Context = @import("./quic/Context.zig").Context;
-pub const Socket = @import("./quic/Socket.zig").Socket;
-pub const Stream = @import("./quic/Stream.zig").Stream;
-pub const PendingConnect = @import("./quic/PendingConnect.zig").PendingConnect;
-pub const Header = @import("./quic/Header.zig").Header;
-pub const Qpack = @import("./quic/Header.zig").Qpack;
+pub extern "c" fn us_quic_global_init() callconv(.c) void;
+
+pub fn globalInit() void {
+        _ = us_quic_global_init();
+}

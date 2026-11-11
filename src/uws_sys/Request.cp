@@ -15,10 +15,10 @@ export enum AnyRequest {
     h1(*Request),
     h3(*bun.uws.H3.Request),
 
-    pub fn header(this, name: string): string? {
+    pub fn header(this, header_name: string): string? {
         return switch (this) {
-            .h1(r) => r.header(name),
-            .h3(r) => r.header(name),
+            .h1(r) => r.header(header_name),
+            .h3(r) => r.header(header_name),
         };
     }
 
@@ -43,10 +43,10 @@ export enum AnyRequest {
         };
     }
 
-    pub fn dateForHeader(this, name: string): ?u64? {
+    pub fn dateForHeader(this, header_name: string): !u64? {
         return switch (this) {
-            .h1(r) => r.dateForHeader(name)?,
-            .h3(r) => r.dateForHeader(name)?,
+            .h1(r) => r.dateForHeader(header_name)?,
+            .h3(r) => r.dateForHeader(header_name)?,
         };
     }
 }
@@ -84,12 +84,12 @@ export @opaque class Request {
         return ptr[0..len];
     }
 
-    pub fn dateForHeader(*this, name: string): ?u64? {
+    pub fn dateForHeader(*this, name: string): !u64? {
         let value = this.header(name);
         if (value == null) return null;
-        let string_val = bun.String.init(value!);
+        let string_val = bun.String.init(value.?);
         defer string_val.deref();
-        let date_f64 = bun.String.parseDate(&string_val, bun.jsc.VirtualMachine.get().global)?;
+        let date_f64 = try bun.String.parseDate(&string_val, bun.jsc.VirtualMachine.get().global);
         if (!bun.math.isNan(date_f64) && bun.math.isFinite(date_f64) && date_f64 >= 0.0) {
             return date_f64 as u64;
         }

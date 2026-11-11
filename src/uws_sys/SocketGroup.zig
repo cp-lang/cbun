@@ -27,7 +27,7 @@ pub const VTable = struct {
     on_connecting_error: ?*const fn (*ConnectingSocket, i32) callconv(.c) ?*ConnectingSocket = null,
     on_handshake: ?*const fn (*us_socket_t, i32, bun.uws.us_bun_verify_error_t, ?*anyopaque) callconv(.c) void = null,
     
-pub fn _create(allocator: std.mem.Allocator) !*VTable { const self_ptr = try allocator.create(VTable); self_ptr.* = undefined; return self_ptr; }
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
 pub fn init(self: *VTable, on_open: ?*const fn (*us_socket_t, i32, [*]u8, i32) callconv(.c) ?*us_socket_t, on_data: ?*const fn (*us_socket_t, [*]u8, i32) callconv(.c) ?*us_socket_t, on_fd: ?*const fn (*us_socket_t, i32) callconv(.c) ?*us_socket_t, on_writable: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t, on_close: ?*const fn (*us_socket_t, i32, ?*anyopaque) callconv(.c) ?*us_socket_t, on_timeout: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t, on_long_timeout: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t, on_end: ?*const fn (*us_socket_t) callconv(.c) ?*us_socket_t, on_connect_error: ?*const fn (*us_socket_t, i32) callconv(.c) ?*us_socket_t, on_connecting_error: ?*const fn (*ConnectingSocket, i32) callconv(.c) ?*ConnectingSocket, on_handshake: ?*const fn (*us_socket_t, i32, bun.uws.us_bun_verify_error_t, ?*anyopaque) callconv(.c) void) void {
             self.on_open = on_open;

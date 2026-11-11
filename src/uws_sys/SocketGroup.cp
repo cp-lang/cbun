@@ -155,7 +155,7 @@ export @extern class SocketGroup {
         fd: bun.FD,
         ipc: bool,
     ): *us_socket_t? {
-        var ipc_int: i32 = 0;
+        let ipc_int: i32 = 0;
         if (ipc) {
             ipc_int = 1;
         }

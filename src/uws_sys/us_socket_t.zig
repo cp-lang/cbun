@@ -6,6 +6,16 @@ fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val
 pub const bun = @import("bun");
 pub const SocketGroup = @import("./SocketGroup.zig").SocketGroup;
 pub const SocketKind = @import("./SocketKind.zig").SocketKind;
+pub const SocketCloseCode = enum(i32) {
+    normal = 0,
+    failure = 1,
+    fast_shutdown = 2,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
+
 pub const us_socket_t = opaque {
 
 pub fn open(self: *us_socket_t, is_client: bool, ip_addr: ?[]const u8) void {
@@ -20,7 +30,7 @@ pub fn open(self: *us_socket_t, is_client: bool, ip_addr: ?[]const u8) void {
             }
     }
 
-pub fn close(self: *us_socket_t, code: us_socket_t.CloseCode) void {
+pub fn close(self: *us_socket_t, code: SocketCloseCode) void {
             _ = us_socket_close(self, code, null);
     }
 
@@ -31,7 +41,7 @@ pub fn localAddress(self: *us_socket_t, buf: []u8) ![]const u8 {
             if ((length < 0)) {
                 var errno = bun.sys.getErrno(length);
                 var __errno_moved = false; _ = &__errno_moved;
-                defer if (!__errno_moved) { const T = @TypeOf(errno); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = errno.release() catch {}; } else { errno.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = errno; _drop_val.release(); } };
+                defer if (!__errno_moved) { const __T = @TypeOf(errno); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = errno.release() catch {}; } else { errno.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = errno; _drop_val.release(); } };
                 return bun.errnoToZigErr(errno);
             }
             return buf[0..(if (comptime @typeInfo(@TypeOf(length)) == .@"enum") cp_cast_int(usize, @intFromEnum(length)) else cp_cast_int(usize, length))];
@@ -44,7 +54,7 @@ pub fn remoteAddress(self: *us_socket_t, buf: []u8) ![]const u8 {
             if ((length < 0)) {
                 var errno = bun.sys.getErrno(length);
                 var __errno_moved = false; _ = &__errno_moved;
-                defer if (!__errno_moved) { const T = @TypeOf(errno); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = errno.release() catch {}; } else { errno.release(); } } } else if (@typeInfo(T) == .@"struct" and @hasDecl(T, "release")) { var _drop_val = errno; _drop_val.release(); } };
+                defer if (!__errno_moved) { const __T = @TypeOf(errno); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = errno.release() catch {}; } else { errno.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = errno; _drop_val.release(); } };
                 return bun.errnoToZigErr(errno);
             }
             return buf[0..(if (comptime @typeInfo(@TypeOf(length)) == .@"enum") cp_cast_int(usize, @intFromEnum(length)) else cp_cast_int(usize, length))];
@@ -198,11 +208,7 @@ pub fn getError(self: *us_socket_t) i32 {
 pub fn isEstablished(self: *us_socket_t) bool {
             return (us_socket_is_established(self) > 0);
     }
-    pub enum CloseCode: i32 {
-            normal = 0,
-            failure = 1,
-            fast_shutdown = 2,
-        }
+    pub const CloseCode = SocketCloseCode;
 };
 
 pub const us_socket_stream_buffer_t = extern struct {
@@ -232,7 +238,7 @@ pub fn toStreamBuffer(self: us_socket_stream_buffer_t) bun.io.StreamBuffer {
             _ = &items;
             var cap: usize = (if ((self.list_ptr != null)) self.list_cap else 0);
             _ = &cap;
-            return bun.io.StreamBuffer{ .list = .{ allocator = bun.default_allocator, items = items, capacity = cap }, .cursor = self.cursor };
+            return bun.io.StreamBuffer{ .list = .{ .allocator = bun.default_allocator, .items = items, .capacity = cap }, .cursor = self.cursor };
     }
 
 pub fn release(self: *us_socket_stream_buffer_t) void {
@@ -293,7 +299,7 @@ pub extern "c" fn us_socket_pause(s: *us_socket_t) callconv(.c) void;
 
 pub extern "c" fn us_socket_resume(s: *us_socket_t) callconv(.c) void;
 
-pub extern "c" fn us_socket_close(s: *us_socket_t, code: us_socket_t.CloseCode, reason: ?*anyopaque) callconv(.c) ?*us_socket_t;
+pub extern "c" fn us_socket_close(s: *us_socket_t, code: SocketCloseCode, reason: ?*anyopaque) callconv(.c) ?*us_socket_t;
 
 pub extern "c" fn us_socket_shutdown(s: *us_socket_t) callconv(.c) void;
 

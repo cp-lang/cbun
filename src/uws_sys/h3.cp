@@ -1,3 +1,11 @@
+
+pub const Handler = ?*const fn (*Response, *Request, ?*anyopaque) callconv(.c) void;
+pub const ListenHandler = ?*const fn (?*ListenSocket, ?*anyopaque) callconv(.c) void;
+pub const HeaderCb = *const fn ([*c]const u8, usize, [*c]const u8, usize, ?*anyopaque) callconv(.c) void;
+pub const WritableHandler = ?*const fn (*Response, u64, ?*anyopaque) callconv(.c) bool;
+pub const VoidHandler = ?*const fn (*Response, ?*anyopaque) callconv(.c) void;
+pub const DataHandler = ?*const fn (*Response, [*c]const u8, usize, bool, ?*anyopaque) callconv(.c) void;
+pub const CorkHandler = *const fn (?*anyopaque) callconv(.c) void;
 // src/uws_sys/h3.cp
 // HTTP/3 bindings for uWebSockets / libusockets in CP language
 
@@ -6,23 +14,23 @@ import { State, WriteResult } from "./Response.cp";
 import { BunSocketContextOptions } from "./SocketContext.cp";
 
 @c {
-    fn uws_h3_create_app(opts: BunSocketContextOptions, idle_timeout: u32): App?!;
+    fn uws_h3_create_app(opts: BunSocketContextOptions, idle_timeout: u32): ?*App;
     fn uws_h3_app_destroy(app: *App): void;
     fn uws_h3_app_close(app: *App): void;
     fn uws_h3_app_clear_routes(app: *App): void;
     fn uws_h3_app_add_server_name(app: *App, name: cstr, opts: BunSocketContextOptions): bool;
     fn uws_h3_res_write_continue(res: *Response): void;
-    fn uws_h3_app_get(app: *App, p: [*]const u8!, len: usize, h: @c ((res: *Response, req: *Request, ud: *any?!): void)?, ud: *any?!): void;
-    fn uws_h3_app_post(app: *App, p: [*]const u8!, len: usize, h: @c ((res: *Response, req: *Request, ud: *any?!): void)?, ud: *any?!): void;
-    fn uws_h3_app_put(app: *App, p: [*]const u8!, len: usize, h: @c ((res: *Response, req: *Request, ud: *any?!): void)?, ud: *any?!): void;
-    fn uws_h3_app_delete(app: *App, p: [*]const u8!, len: usize, h: @c ((res: *Response, req: *Request, ud: *any?!): void)?, ud: *any?!): void;
-    fn uws_h3_app_patch(app: *App, p: [*]const u8!, len: usize, h: @c ((res: *Response, req: *Request, ud: *any?!): void)?, ud: *any?!): void;
-    fn uws_h3_app_head(app: *App, p: [*]const u8!, len: usize, h: @c ((res: *Response, req: *Request, ud: *any?!): void)?, ud: *any?!): void;
-    fn uws_h3_app_options(app: *App, p: [*]const u8!, len: usize, h: @c ((res: *Response, req: *Request, ud: *any?!): void)?, ud: *any?!): void;
-    fn uws_h3_app_connect(app: *App, p: [*]const u8!, len: usize, h: @c ((res: *Response, req: *Request, ud: *any?!): void)?, ud: *any?!): void;
-    fn uws_h3_app_trace(app: *App, p: [*]const u8!, len: usize, h: @c ((res: *Response, req: *Request, ud: *any?!): void)?, ud: *any?!): void;
-    fn uws_h3_app_any(app: *App, p: [*]const u8!, len: usize, h: @c ((res: *Response, req: *Request, ud: *any?!): void)?, ud: *any?!): void;
-    fn uws_h3_app_listen_with_config(app: *App, host: cstr?, port: u16, options: i32, h: @c ((ls: *ListenSocket?!, ud: *any?!): void)?, ud: *any?!): void;
+    fn uws_h3_app_get(app: *App, p: [*]const u8!, len: usize, h: Handler, ud: ?*anyopaque): void;
+    fn uws_h3_app_post(app: *App, p: [*]const u8!, len: usize, h: Handler, ud: ?*anyopaque): void;
+    fn uws_h3_app_put(app: *App, p: [*]const u8!, len: usize, h: Handler, ud: ?*anyopaque): void;
+    fn uws_h3_app_delete(app: *App, p: [*]const u8!, len: usize, h: Handler, ud: ?*anyopaque): void;
+    fn uws_h3_app_patch(app: *App, p: [*]const u8!, len: usize, h: Handler, ud: ?*anyopaque): void;
+    fn uws_h3_app_head(app: *App, p: [*]const u8!, len: usize, h: Handler, ud: ?*anyopaque): void;
+    fn uws_h3_app_options(app: *App, p: [*]const u8!, len: usize, h: Handler, ud: ?*anyopaque): void;
+    fn uws_h3_app_connect(app: *App, p: [*]const u8!, len: usize, h: Handler, ud: ?*anyopaque): void;
+    fn uws_h3_app_trace(app: *App, p: [*]const u8!, len: usize, h: Handler, ud: ?*anyopaque): void;
+    fn uws_h3_app_any(app: *App, p: [*]const u8!, len: usize, h: Handler, ud: ?*anyopaque): void;
+    fn uws_h3_app_listen_with_config(app: *App, host: cstr?, port: u16, options: i32, h: ListenHandler, ud: ?*anyopaque): void;
     fn uws_h3_listen_socket_port(ls: *ListenSocket): i32;
     fn uws_h3_listen_socket_local_address(ls: *ListenSocket, buf: [*]u8!, len: i32): i32;
     fn uws_h3_listen_socket_close(ls: *ListenSocket): void;
@@ -50,12 +58,12 @@ import { BunSocketContextOptions } from "./SocketContext.cp";
     fn uws_h3_res_timeout(res: *Response, timeout: u8): void;
     fn uws_h3_res_end_sendfile(res: *Response, write_offset: u64, close_conn: bool): void;
     fn uws_h3_res_get_socket_data(res: *Response): *any?!;
-    fn uws_h3_res_on_writable(res: *Response, h: @c ((res: *Response, off: u64, ud: *any?!): bool)?, ud: *any?!): void;
+    fn uws_h3_res_on_writable(res: *Response, h: WritableHandler, ud: ?*anyopaque): void;
     fn uws_h3_res_clear_on_writable(res: *Response): void;
-    fn uws_h3_res_on_aborted(res: *Response, h: @c ((res: *Response, ud: *any?!): void)?, ud: *any?!): void;
-    fn uws_h3_res_on_timeout(res: *Response, h: @c ((res: *Response, ud: *any?!): void)?, ud: *any?!): void;
-    fn uws_h3_res_on_data(res: *Response, h: @c ((res: *Response, ptr: [*]const u8!, len: usize, last: bool, ud: *any?!): void)?, ud: *any?!): void;
-    fn uws_h3_res_cork(res: *Response, ud: *any?!, h: @c ((ud: *any?!): void)): void;
+    fn uws_h3_res_on_aborted(res: *Response, h: VoidHandler, ud: ?*anyopaque): void;
+    fn uws_h3_res_on_timeout(res: *Response, h: VoidHandler, ud: ?*anyopaque): void;
+    fn uws_h3_res_on_data(res: *Response, h: DataHandler, ud: ?*anyopaque): void;
+    fn uws_h3_res_cork(res: *Response, ud: ?*anyopaque, h: CorkHandler): void;
     fn uws_h3_res_get_remote_address_info(res: *Response, ip: *[*]const u8!, port: *i32, is_ipv6: *bool): usize;
 
     fn uws_h3_req_get_yield(req: *Request): bool;
@@ -65,7 +73,7 @@ import { BunSocketContextOptions } from "./SocketContext.cp";
     fn uws_h3_req_get_header(req: *Request, name: [*]const u8!, len: usize, dest: *[*]const u8!): usize;
     fn uws_h3_req_get_query(req: *Request, name: [*]const u8!, len: usize, dest: *[*]const u8!): usize;
     fn uws_h3_req_get_parameter(req: *Request, idx: u16, dest: *[*]const u8!): usize;
-    fn uws_h3_req_for_each_header(req: *Request, cb: @c ((name: [*]const u8!, nl: usize, val: [*]const u8!, vl: usize, ud: *any?!): void), ud: *any?!): void;
+    fn uws_h3_req_for_each_header(req: *Request, cb: HeaderCb, ud: ?*anyopaque): void;
 }
 
 export @extern @value class ListenConfig {
@@ -121,12 +129,12 @@ export @opaque class Request {
         return if (n == 0) null else p[0..n];
     }
 
-    pub fn dateForHeader(*this, name: string): ?u64? {
+    pub fn dateForHeader(*this, name: string): !u64? {
         let value = this.header(name);
         if (value == null) return null;
-        let s = bun.String.init(value!);
+        let s = bun.String.init(value.?);
         defer s.deref();
-        let ms = s.parseDate(bun.jsc.VirtualMachine.get().global)?;
+        let ms = try s.parseDate(bun.jsc.VirtualMachine.get().global);
         if (!bun.math.isNan(ms) && bun.math.isFinite(ms) && ms >= 0.0) return ms as u64;
         return null;
     }
@@ -143,17 +151,17 @@ export @opaque class Request {
         return p[0..len];
     }
 
-    pub fn forEachHeader<Ctx>(
+    pub fn forEachHeader(
         *this,
-        ctx: *Ctx,
-        cb: fn(*Ctx, string, string): void,
+        ctx: anytype,
+        comptime cb: anytype,
     ): void {
         let Wrap = struct {
-            @c pub fn each(n: [*]const u8!, nl: usize, v: [*]const u8!, vl: usize, ud: *any?!): void {
-                cb(ud as *Ctx, n[0..nl], v[0..vl]);
+            pub fn each(n: [*c]const u8, nl: usize, v: [*c]const u8, vl: usize, ud: ?*anyopaque) callconv(.c) void {
+                cb(@ptrCast(ud), n[0..nl], v[0..vl]);
             }
         };
-        uws_h3_req_for_each_header(this, Wrap.each, ctx as *any?!);
+        uws_h3_req_for_each_header(this, Wrap.each, @ptrCast(ctx));
     }
 }
 
@@ -282,90 +290,91 @@ export @opaque class Response {
         uws_h3_res_force_close(this);
     }
 
-    pub fn onWritable<UD>(
+    pub fn onWritable(
         *this,
-        ud: *UD,
-        handler: fn(*UD, u64, *Response): bool,
+        ud: anytype,
+        comptime handler: anytype,
     ): void {
         let W = struct {
-            @c pub fn cb(r: *Response, off: u64, p: *any?!): bool {
-                return handler(p as *UD, off, r);
+            pub fn cb(r: *Response, off: u64, p: ?*anyopaque) callconv(.c) bool {
+                return handler(@ptrCast(p), off, r);
             }
         };
-        uws_h3_res_on_writable(this, W.cb, ud as *any?!);
+        uws_h3_res_on_writable(this, W.cb, @ptrCast(ud));
     }
 
     pub fn clearOnWritable(*this): void {
         uws_h3_res_clear_on_writable(this);
     }
 
-    pub fn onAborted<UD>(
+    pub fn onAborted(
         *this,
-        ud: *UD,
-        handler: fn(*UD, *Response): void,
+        ud: anytype,
+        comptime handler: anytype,
     ): void {
         let W = struct {
-            @c pub fn cb(r: *Response, p: *any?!): void {
-                handler(p as *UD, r);
+            pub fn cb(r: *Response, p: ?*anyopaque) callconv(.c) void {
+                handler(@ptrCast(p), r);
             }
         };
-        uws_h3_res_on_aborted(this, W.cb, ud as *any?!);
+        uws_h3_res_on_aborted(this, W.cb, @ptrCast(ud));
     }
 
     pub fn clearAborted(*this): void {
         uws_h3_res_on_aborted(this, null, null);
     }
 
-    pub fn onTimeout<UD>(
+    pub fn onTimeout(
         *this,
-        ud: *UD,
-        handler: fn(*UD, *Response): void,
+        ud: anytype,
+        comptime handler: anytype,
     ): void {
         let W = struct {
-            @c pub fn cb(r: *Response, p: *any?!): void {
-                handler(p as *UD, r);
+            pub fn cb(r: *Response, p: ?*anyopaque) callconv(.c) void {
+                handler(@ptrCast(p), r);
             }
         };
-        uws_h3_res_on_timeout(this, W.cb, ud as *any?!);
+        uws_h3_res_on_timeout(this, W.cb, @ptrCast(ud));
     }
 
     pub fn clearTimeout(*this): void {
         uws_h3_res_on_timeout(this, null, null);
     }
 
-    pub fn onData<UD>(
+    pub fn onData(
         *this,
-        ud: *UD,
-        handler: fn(*UD, *Response, string, bool): void,
+        ud: anytype,
+        comptime handler: anytype,
     ): void {
         let W = struct {
-            @c pub fn cb(r: *Response, ptr: [*]const u8!, len: usize, last: bool, p: *any?!): void {
-                handler(p as *UD, r, if (len > 0) ptr[0..len] else "", last);
+            pub fn cb(r: *Response, ptr: [*c]const u8, len: usize, last: bool, p: ?*anyopaque) callconv(.c) void {
+                handler(@ptrCast(p), r, if (len > 0) ptr[0..len] else "", last);
             }
         };
-        uws_h3_res_on_data(this, W.cb, ud as *any?!);
+        uws_h3_res_on_data(this, W.cb, @ptrCast(ud));
     }
 
     pub fn clearOnData(*this): void {
         uws_h3_res_on_data(this, null, null);
     }
 
-    pub fn corked<F>(*this, handler: F, args: anytype): void {
-        handler(args);
+    pub fn corked(*this, comptime handler: anytype, args: anytype): void {
+        _ = this;
+        @call(.auto, handler, args);
     }
 
-    pub fn runCorkedWithType<UD>(*this, ud: *UD, handler: fn(*UD): void): void {
+    pub fn runCorkedWithType(*this, ud: anytype, comptime handler: anytype): void {
         let W = struct {
-            @c pub fn cb(p: *any?!): void {
-                handler(p as *UD);
+            pub fn cb(p: ?*anyopaque) callconv(.c) void {
+                handler(@ptrCast(p));
             }
         };
-        uws_h3_res_cork(this, ud as *any?!, W.cb);
+        uws_h3_res_cork(this, @ptrCast(ud), W.cb);
     }
 }
 
 export @opaque class App {
-    pub static fn create(opts: BunSocketContextOptions, idle_timeout_s: u32): App? {
+    pub static fn create(opts: BunSocketContextOptions, idle_timeout_s: u32): ?*App {
         return uws_h3_create_app(opts, idle_timeout_s);
     }
 
@@ -385,59 +394,59 @@ export @opaque class App {
         uws_h3_app_clear_routes(this);
     }
 
-    fn route<UD>(
+    fn route(
         *this,
-        f: @c ((app: *App, p: [*]const u8!, len: usize, h: @c ((res: *Response, req: *Request, ud: *any?!): void)?, ud: *any?!): void),
+        comptime f: anytype,
         pattern: string,
-        ud: *UD,
-        handler: fn(*UD, *Request, *Response): void,
+        ud: anytype,
+        comptime handler: anytype,
     ): void {
         let W = struct {
-            @c pub fn cb(res: *Response, req: *Request, p: *any?!): void {
-                handler(p as *UD, req, res);
+            pub fn cb(res: *Response, req: *Request, p: ?*anyopaque) callconv(.c) void {
+                handler(@ptrCast(p), req, res);
             }
         };
-        f(this, pattern.ptr, pattern.len, W.cb, ud as *any?!);
+        f(this, pattern.ptr, pattern.len, W.cb, @ptrCast(ud));
     }
 
-    pub fn get<UD>(*this, p: string, ud: *UD, h: fn(*UD, *Request, *Response): void): void {
+    pub fn get(*this, p: string, ud: anytype, comptime h: anytype): void {
         this.route(uws_h3_app_get, p, ud, h);
     }
 
-    pub fn post<UD>(*this, p: string, ud: *UD, h: fn(*UD, *Request, *Response): void): void {
+    pub fn post(*this, p: string, ud: anytype, comptime h: anytype): void {
         this.route(uws_h3_app_post, p, ud, h);
     }
 
-    pub fn put<UD>(*this, p: string, ud: *UD, h: fn(*UD, *Request, *Response): void): void {
+    pub fn put(*this, p: string, ud: anytype, comptime h: anytype): void {
         this.route(uws_h3_app_put, p, ud, h);
     }
 
-    pub fn delete<UD>(*this, p: string, ud: *UD, h: fn(*UD, *Request, *Response): void): void {
+    pub fn delete(*this, p: string, ud: anytype, comptime h: anytype): void {
         this.route(uws_h3_app_delete, p, ud, h);
     }
 
-    pub fn patch<UD>(*this, p: string, ud: *UD, h: fn(*UD, *Request, *Response): void): void {
+    pub fn patch(*this, p: string, ud: anytype, comptime h: anytype): void {
         this.route(uws_h3_app_patch, p, ud, h);
     }
 
-    pub fn head<UD>(*this, p: string, ud: *UD, h: fn(*UD, *Request, *Response): void): void {
+    pub fn head(*this, p: string, ud: anytype, comptime h: anytype): void {
         this.route(uws_h3_app_head, p, ud, h);
     }
 
-    pub fn options<UD>(*this, p: string, ud: *UD, h: fn(*UD, *Request, *Response): void): void {
+    pub fn options(*this, p: string, ud: anytype, comptime h: anytype): void {
         this.route(uws_h3_app_options, p, ud, h);
     }
 
-    pub fn any<UD>(*this, p: string, ud: *UD, h: fn(*UD, *Request, *Response): void): void {
+    pub fn any(*this, p: string, ud: anytype, comptime h: anytype): void {
         this.route(uws_h3_app_any, p, ud, h);
     }
 
-    pub fn method<UD>(
+    pub fn method(
         *this,
         m: bun.http.Method,
         p: string,
-        ud: *UD,
-        h: fn(*UD, *Request, *Response): void,
+        ud: anytype,
+        comptime h: anytype,
     ): void {
         switch (m) {
             .GET => this.get(p, ud, h),
@@ -453,17 +462,17 @@ export @opaque class App {
         }
     }
 
-    pub fn listenWithConfig<UD>(
+    pub fn listenWithConfig(
         *this,
-        ud: *UD,
-        handler: fn(*UD, *ListenSocket?): void,
+        ud: anytype,
+        comptime handler: anytype,
         config: ListenConfig,
     ): void {
         let W = struct {
-            @c pub fn cb(ls: *ListenSocket?!, p: *any?!): void {
-                handler(p as *UD, ls);
+            pub fn cb(ls: ?*ListenSocket, p: ?*anyopaque) callconv(.c) void {
+                handler(@ptrCast(p), ls);
             }
         };
-        uws_h3_app_listen_with_config(this, config.host, config.port, config.options, W.cb, ud as *any?!);
+        uws_h3_app_listen_with_config(this, config.host, config.port, config.options, W.cb, @ptrCast(ud));
     }
 }
