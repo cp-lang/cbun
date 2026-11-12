@@ -194,3 +194,28 @@
   - **全仓编译检验**：258 个 CP 模块转译出 `.zig` 后，全部通过 `vendor/zig/zig ast-check`，成功率 258 / 258 (100.0%)。
 
 
+
+## [2026-11-13] Milestone 7 Phase 1: 内存分配器子系统 (src/bun_alloc) 纯正 CP 重构与规范治理
+
+### 新增与重构 CP 模块 (7 个模块全部通过 cpc --lib 与 zig ast-check)
+- `src/bun_alloc/fallback.cp` / `fallback.zig` (备份 `fallback_.zig`):
+  - 13 行纯正 CP 语言，`freeWithoutSize(ptr: *!?) void`，0 处 `zig {}`，0 处 `var`；
+- `src/bun_alloc/NullableAllocator.cp` / `NullableAllocator.zig` (备份 `NullableAllocator_.zig`):
+  - 51 行值语义 `export struct NullableAllocator`，包装标准分配器与 WTF 分配器，0 处 `zig {}`，0 处 `var`；
+- `src/bun_alloc/MaxHeapAllocator.cp` / `MaxHeapAllocator.zig` (备份 `MaxHeapAllocator_.zig`):
+  - 65 行堆跟踪分配器，`export struct MaxHeapAllocator`，`*this` 独占可变修饰，0 处 `zig {}`，0 处 `var`；
+- `src/bun_alloc/BufferFallbackAllocator.cp` / `BufferFallbackAllocator.zig` (备份 `BufferFallbackAllocator_.zig`):
+  - 88 行缓冲回退分配器，`export struct BufferFallbackAllocator`，0 处 `zig {}`，0 处 `var`；
+- `src/bun_alloc/maybe_owned.cp` / `maybe_owned.zig` (备份 `maybe_owned_.zig`):
+  - 102 行泛型包装器 `pub fn MaybeOwned(comptime Allocator: type): type`，0 处 `zig {}`，0 处 `var`；
+- `src/bun_alloc/heap_breakdown.cp` / `heap_breakdown.zig` (备份 `heap_breakdown_.zig`):
+  - 136 行不透明内存区域跟踪 `pub const Zone = opaque { ... };`，0 处 `zig {}`，0 处 `var`；
+- `src/bun_alloc/basic.cp` / `basic.zig` (备份 `basic_.zig`):
+  - 160 行基础内存分配器总成，支持 Mimalloc 与 C 分配器，0 处 `zig {}`，0 处 `var`。
+
+### 工程工作流与开发指令升级 (GEMINI.md)
+- **确立上游单一真理源**：确立 `/data/dev/cp/cp_agent_ref.md`（219行精炼规范）为全智能体统一语法契约；
+- **确立子智能体并行分发门槛**：模块数 $\ge 3$ 或代码量 $> 500$ 行必须切片派离子智能体并行攻坚，严禁主线程串行积压；
+- **双向交互透明化**：主智能体与 `cp agy` 交互信息在屏幕实时回显并实时追加写入 `SESSION.md`；
+- **确立 5 项静态正则拦截门禁**：严禁 `zig {}`、`var`、`.@"0"`、`*anyopaque`、`*any!`；
+- **确立 Quota 耗尽自动恢复**：调用 `schedule` 工具注册后台唤醒定时器，保证配额恢复后无缝自动复工。
