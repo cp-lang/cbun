@@ -8,7 +8,7 @@ const jsc = bun.jsc;
 const Task = jsc.Task;
 
 export class AnyTaskWithExtraContext {
-    ctx: ?*! = undefined;
+    ctx: *!? = null;
     callback: fn (*!, *!) void = undefined;
     next: ?*AnyTaskWithExtraContext = null;
 
@@ -17,7 +17,7 @@ export class AnyTaskWithExtraContext {
         const Wrapper = struct {
             any_task: AnyTaskWithExtraContext,
             wrapped: *Ptr,
-            pub fn function(this: *anyopaque, extra: *anyopaque) void {
+            pub fn function(this: *!, extra: *!) void {
                 const that: *@This() = @ptrCast(@alignCast(this));
                 defer bun.default_allocator.destroy(that);
                 const ctx = that.wrapped;
@@ -59,7 +59,7 @@ export class AnyTaskWithExtraContext {
                 };
             }
 
-            pub fn wrap(this: ?*anyopaque, extra: ?*anyopaque) void {
+            pub fn wrap(this: *!?, extra: *!?) void {
                 @call(
                     bun.callmod_inline,
                     Callback,

@@ -17,12 +17,16 @@ export class Init {
     method: Method = Method.GET;
 
     pub fn clone(this: Init, ctx: *JSGlobalObject): JSError!Init {
-        let that = this;
+        let cloned_headers: ?*FetchHeaders = null;
         if (this.headers) |head| {
-            that.headers = try head.cloneThis(ctx);
+            cloned_headers = try head.cloneThis(ctx);
         }
-        that.status_text = this.status_text.clone();
-        return that;
+        return Init {
+            .headers = cloned_headers,
+            .status_code = this.status_code,
+            .status_text = this.status_text.clone(),
+            .method = this.method,
+        };
     }
 
     pub fn init(globalThis: *JSGlobalObject, response_init: JSValue): JSError!?Init {
@@ -116,7 +120,7 @@ export class Response {
     js_ref: JSRef = .empty();
     reported_estimated_size: usize = 0;
 
-    pub type WeakRef = ptr.WeakPtr(Response, "weak_ptr_data");
+    pub const WeakRef = ptr.WeakPtr(Response, "weak_ptr_data");
 
     pub fn init(response_init: Init, body: Body, url: String, redirected: bool): Response {
         return Response {
@@ -275,10 +279,11 @@ export class Response {
     }
 
     pub fn header(this: &Response, name: FetchHeaders.HTTPHeaderName): ?[]const u8 {
-        return if (try (this.init_opts.headers orelse return null).fastGet(name)) |str|
-            str.slice()
-        else
-            null;
+        const headers = this.init_opts.headers orelse return null;
+        if (headers.fastGet(name) catch null) |str| {
+            return str.slice();
+        }
+        return null;
     }
 
     pub fn isOK(this: &Response): bool {
@@ -346,25 +351,26 @@ export class Response {
         return js_wrapper;
     }
 
-    pub fn makeMaybePooled(globalObject: *JSGlobalObject, ptr: *Response): JSValue {
-        return ptr.toJS(globalObject);
+    pub static fn makeMaybePooled(globalObject: *JSGlobalObject, response: *Response): JSValue {
+        return response.toJS(globalObject);
     }
 
     pub fn cloneValue(this: *Response, globalThis: *JSGlobalObject): JSError!Response {
-        let body = if (this.js_ref.tryGet()) |js_r| {
+        let body: Body.Value = undefined;
+        if (this.js_ref.tryGet()) |js_r| {
             if (js.gc.stream.get(js_r)) |stream| {
                 let readable = try webcore.ReadableStream.fromJS(stream, globalThis);
                 if (readable != null) {
-                    try this.body.cloneWithReadableStream(globalThis, &readable.?);
+                    body = try this.body.cloneWithReadableStream(globalThis, &readable.?);
                 } else {
-                    try this.body.clone(globalThis);
+                    body = try this.body.clone(globalThis);
                 }
             } else {
-                try this.body.clone(globalThis);
+                body = try this.body.clone(globalThis);
             }
         } else {
-            try this.body.clone(globalThis);
-        };
+            body = try this.body.clone(globalThis);
+        }
 
         let _init = try this.init_opts.clone(globalThis);
         return Response {
@@ -460,11 +466,12 @@ export class Response {
     let this_value = arguments.ptr[0];
     if (this_value.isEmptyOrUndefinedOrNull()) return JSValue.js_undefined;
 
-    let body: *Body.Value = if (this_value.as(Response)) |response| {
-        &response.body.value;
-    } else if (this_value.as(webcore.Request)) |request| {
-        request.getBodyValue();
-    } else {
+    let body = brk: {
+        if (this_value.as(Response)) |response| {
+            break :brk &response.body.value;
+        } else if (this_value.as(webcore.Request)) |request| {
+            break :brk request.getBodyValue();
+        }
         return JSValue.js_undefined;
     };
 

@@ -23,7 +23,7 @@ const backing_int = if (is_posix) c_int else u64;
     ///
     /// On Windows, a tag differentiates two sources:
     /// - system: A "std.os.windows.HANDLE" that windows APIs can interact with.
-    ///           In fd case it is actually just an "*anyopaque" that points to some windows internals.
+    ///           In fd case it is actually just an "*!" that points to some windows internals.
     /// - uv:     A c-runtime file descriptor that looks like a linux file descriptor.
     ///           ("uv", "uv_file", "c runtime file descriptor", "crt fd" are interchangeable terms)
     ///

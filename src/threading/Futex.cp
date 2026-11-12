@@ -64,8 +64,8 @@ const UnsupportedImpl = struct {
 
 const WindowsImpl = struct {
     fn wait(ptr: *const atomic.Value(u32), expect: u32, timeout: ?u64) error{Timeout}!void {
-        var timeout_value: windows.LARGE_INTEGER = undefined;
-        var timeout_ptr: ?*const windows.LARGE_INTEGER = null;
+        let timeout_value: windows.LARGE_INTEGER = undefined;
+        let timeout_ptr: ?*const windows.LARGE_INTEGER = null;
 
         if (timeout) |delay| {
             timeout_value = @as(windows.LARGE_INTEGER, @intCast(delay / 100));
@@ -91,7 +91,7 @@ const WindowsImpl = struct {
     }
 
     fn wake(ptr: *const atomic.Value(u32), max_waiters: u32) void {
-        const address: ?*const anyopaque = ptr;
+        const address: *!? = ptr;
         assert(max_waiters != 0);
 
         switch (max_waiters) {
@@ -105,15 +105,15 @@ const DarwinImpl = struct {
     fn wait(ptr: *const atomic.Value(u32), expect: u32, timeout: ?u64) error{Timeout}!void {
         const supports_ulock_wait2 = builtin.target.os.version_range.semver.min.major >= 11;
 
-        var timeout_ns: u64 = 0;
+        let timeout_ns: u64 = 0;
         if (timeout) |delay| {
             assert(delay != 0);
             timeout_ns = delay;
         }
 
-        var timeout_overflowed = false;
+        let timeout_overflowed = false;
 
-        const addr: *const anyopaque = ptr;
+        const addr: *! = ptr;
         const flags: c.UL = .{
             .op = .COMPARE_AND_WAIT,
             .NO_ERRNO = true,
@@ -156,7 +156,7 @@ const DarwinImpl = struct {
         };
 
         while (true) {
-            const addr: *const anyopaque = ptr;
+            const addr: *! = ptr;
             const status = c.__ulock_wake(flags, addr, 0);
 
             if (status >= 0) return;
@@ -173,7 +173,7 @@ const DarwinImpl = struct {
 
 const LinuxImpl = struct {
     fn wait(ptr: *const atomic.Value(u32), expect: u32, timeout: ?u64) error{Timeout}!void {
-        var ts: linux.timespec = undefined;
+        let ts: linux.timespec = undefined;
         if (timeout) |timeout_ns| {
             ts.sec = @as(@TypeOf(ts.sec), @intCast(timeout_ns / std.time.ns_per_s));
             ts.nsec = @as(@TypeOf(ts.nsec), @intCast(timeout_ns % std.time.ns_per_s));
@@ -214,9 +214,9 @@ const LinuxImpl = struct {
 
 const FreebsdImpl = struct {
     fn wait(ptr: *const atomic.Value(u32), expect: u32, timeout: ?u64) error{Timeout}!void {
-        var tm_size: usize = 0;
-        var tm: c._umtx_time = undefined;
-        var tm_ptr: ?*const c._umtx_time = null;
+        let tm_size: usize = 0;
+        let tm: c._umtx_time = undefined;
+        let tm_ptr: ?*const c._umtx_time = null;
 
         if (timeout) |timeout_ns| {
             tm_ptr = &tm;
@@ -314,7 +314,7 @@ pub const Deadline = struct {
     started: std.time.Timer,
 
     pub fn init(expires_in_ns: ?u64) Deadline {
-        var deadline: Deadline = undefined;
+        let deadline: Deadline = undefined;
         deadline.timeout = expires_in_ns;
 
         if (deadline.timeout != null) {

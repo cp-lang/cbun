@@ -36,9 +36,11 @@ pub fn OPENSSL_memory_alloc(size: usize) ?*anyopaque {
 }
 
 pub fn OPENSSL_memory_free(ptr: *anyopaque) void {
-        const len = bun.mimalloc.mi_usable_size(ptr);
-        _ = @memset(@as([*]u8, @ptrCast(@alignCast(ptr)))[0..len], 0);
-        _ = bun.mimalloc.mi_free(ptr);
+        {
+            const len = bun.mimalloc.mi_usable_size(ptr);
+            _ = @memset(@as([*]u8, @ptrCast(@alignCast(ptr)))[0..len], 0);
+            _ = bun.mimalloc.mi_free(ptr);
+        }
 }
 
 pub fn OPENSSL_memory_get_size(ptr: ?*anyopaque) usize {

@@ -8,7 +8,7 @@ pub const Format = enum {
     iife,
     cjs,
     internal_bake_dev,
-    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn get(s: []const u8) ?@This() { return fromString(s); }
     pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
     pub fn fromName(s: []const u8) ?@This() { return get(s); }
     pub fn name(self: @This()) []const u8 { return @tagName(self); }

@@ -314,10 +314,24 @@ const KEvent = (if (Environment.isFreeBSD) std.c.Kevent else std.posix.system.ke
 const EventType = (if (Environment.isLinux) linux.epoll_event else KEvent);
 pub const Request = struct {
     next: ?*Request = null,
-    callback: *const fn (*Request) Action,
+    callback: *const *const fn(*Request) Action,
     scheduled: bool = false,
 
     pub const Queue = bun.UnboundedQueue(Request, .next);
+};
+pub const ActionFileAction = struct {
+    fd: bun.FD,
+    poll: *Poll,
+    ctx: *anyopaque,
+    tag: Pollable.Tag,
+    onError: *const *const fn(*anyopaque, sys.Error) void,
+};
+pub const ActionCloseAction = struct {
+    fd: bun.FD,
+    poll: *Poll,
+    ctx: *anyopaque,
+    tag: Pollable.Tag,
+    onDone: *const *const fn(*anyopaque) void,
 };
 const Pollable = struct {
     const Tag = enum(bun.TaggedPointer.Tag) {
@@ -641,23 +655,11 @@ const posix = std.posix;
 const linux = std.os.linux;
 pub const bun = @import("bun");
 pub const Action = union(enum) {
-    readable: FileAction,
-    writable: FileAction,
-    close: CloseAction,
-    pub const FileAction = struct {
-            fd: bun.FD,
-            poll: *Poll,
-            ctx: *anyopaque,
-            tag: Pollable.Tag,
-            onError: *const fn (*anyopaque, sys.Error) void,
-        };
-    pub const CloseAction = struct {
-            fd: bun.FD,
-            poll: *Poll,
-            ctx: *anyopaque,
-            tag: Pollable.Tag,
-            onDone: *const fn (*anyopaque) void,
-        };
+    readable: ActionFileAction,
+    writable: ActionFileAction,
+    close: ActionCloseAction,
+    pub const FileAction = ActionFileAction;
+    pub const CloseAction = ActionCloseAction;
 };
 
 

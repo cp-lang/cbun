@@ -6,8 +6,8 @@ const jsc = bun.jsc;
 const Task = jsc.Task;
 
 pub const AnyTask = struct {
-    ctx: ?*anyopaque = null,
-    callback: *const (fn (*anyopaque) bun.JSError!void),
+    ctx: *!? = null,
+    callback: *const fn (*!) bun.JSError!void,
 
     pub fn task(this: *AnyTask) Task {
         return Task.init(this);
@@ -29,7 +29,7 @@ pub const AnyTask = struct {
                 };
             }
 
-            pub fn wrap(this: ?*anyopaque) bun.JSError!void {
+            pub fn wrap(this: *!?) bun.JSError!void {
                 return @call(bun.callmod_inline, Callback, .{@as(*Type, @ptrCast(@alignCast(this.?)))});
             }
         };

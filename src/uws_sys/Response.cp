@@ -1,8 +1,8 @@
 
-pub const ResWritableHandler = ?*const fn (res_: *uws_res, offset: u64, user_data: ?*anyopaque) callconv(.c) bool;
-pub const ResVoidHandler = ?*const fn (res_: *uws_res, user_data: ?*anyopaque) callconv(.c) void;
-pub const ResDataHandler = ?*const fn (res_: *uws_res, data: [*c]const u8, len: usize, last: bool, ud: ?*anyopaque) callconv(.c) void;
-pub const ResCorkHandler = *const fn (ud: ?*anyopaque) callconv(.c) void;
+pub const ResWritableHandler = ?*const fn (res_: *uws_res, offset: u64, user_data: *!?) callconv(.c) bool;
+pub const ResVoidHandler = ?*const fn (res_: *uws_res, user_data: *!?) callconv(.c) void;
+pub const ResDataHandler = ?*const fn (res_: *uws_res, data: [*c]const u8, len: usize, last: bool, ud: *!?) callconv(.c) void;
+pub const ResCorkHandler = *const fn (ud: *!?) callconv(.c) void;
 // src/uws_sys/Response.cp
 // Zig wrapper around uws::Response<bool isSSL> from µWebSockets in CP language
 
@@ -59,7 +59,7 @@ export @opaque class uws_res {}
     fn uws_res_end(ssl: i32, res: *uws_res, data: [*]const u8!, length: usize, close_conn: bool): void;
     fn uws_res_flush_headers(ssl: i32, res: *uws_res, flushImmediately: bool): void;
     fn uws_res_is_corked(ssl: i32, res: *uws_res): bool;
-    fn uws_res_get_socket_data(ssl: i32, res: *uws_res): ?*anyopaque;
+    fn uws_res_get_socket_data(ssl: i32, res: *uws_res): *!?;
     fn uws_res_pause(ssl: i32, res: *uws_res): void;
     fn uws_res_resume(ssl: i32, res: *uws_res): void;
     fn uws_res_write_continue(ssl: i32, res: *uws_res): void;
@@ -75,17 +75,17 @@ export @opaque class uws_res {}
     fn uws_res_get_write_offset(ssl: i32, res: *uws_res): u64;
     fn uws_res_override_write_offset(ssl: i32, res: *uws_res, off: u64): void;
     fn uws_res_has_responded(ssl: i32, res: *uws_res): bool;
-    fn uws_res_on_writable(ssl: i32, res: *uws_res, handler: ResWritableHandler, user_data: ?*anyopaque): void;
+    fn uws_res_on_writable(ssl: i32, res: *uws_res, handler: ResWritableHandler, user_data: *!?): void;
     fn uws_res_clear_on_writable(ssl: i32, res: *uws_res): void;
-    fn uws_res_on_aborted(ssl: i32, res: *uws_res, handler: ResVoidHandler, optional_data: ?*anyopaque): void;
-    fn uws_res_on_timeout(ssl: i32, res: *uws_res, handler: ResVoidHandler, optional_data: ?*anyopaque): void;
+    fn uws_res_on_aborted(ssl: i32, res: *uws_res, handler: ResVoidHandler, optional_data: *!?): void;
+    fn uws_res_on_timeout(ssl: i32, res: *uws_res, handler: ResVoidHandler, optional_data: *!?): void;
     fn uws_res_try_end(ssl: i32, res: *uws_res, data: [*]const u8?!, length: usize, total: usize, close: bool): bool;
     fn uws_res_end_stream(ssl: i32, res: *uws_res, close_connection: bool): void;
     fn uws_res_prepare_for_sendfile(ssl: i32, res: *uws_res): void;
     fn uws_res_get_native_handle(ssl: i32, res: *uws_res): *bun.uws.Socket;
-    fn uws_res_on_data(ssl: i32, res: *uws_res, handler: ResDataHandler, optional_data: ?*anyopaque): void;
-    fn uws_res_upgrade(ssl: i32, res: *uws_res, data: ?*anyopaque, key: [*c]const u8, kl: usize, proto: [*c]const u8, pl: usize, ext: [*c]const u8, el: usize, ws: *bun.uws.WebSocketUpgradeContext): *bun.uws.Socket;
-    fn uws_res_cork(ssl: i32, res: *uws_res, ctx: ?*anyopaque, corker: ResCorkHandler): void;
+    fn uws_res_on_data(ssl: i32, res: *uws_res, handler: ResDataHandler, optional_data: *!?): void;
+    fn uws_res_upgrade(ssl: i32, res: *uws_res, data: *!?, key: [*c]const u8, kl: usize, proto: [*c]const u8, pl: usize, ext: [*c]const u8, el: usize, ws: *bun.uws.WebSocketUpgradeContext): *bun.uws.Socket;
+    fn uws_res_cork(ssl: i32, res: *uws_res, ctx: *!?, corker: ResCorkHandler): void;
 }
 
 pub fn NewResponse(comptime ssl_flag: i32): type {
@@ -102,7 +102,7 @@ pub fn NewResponse(comptime ssl_flag: i32): type {
         return uws_res_try_end(ssl_flag, this.downcast(), data.ptr, data.len, total, close_);
     }
 
-    pub fn getSocketData(this: *@This()): ?*anyopaque {
+    pub fn getSocketData(this: *@This()): *!? {
         return uws_res_get_socket_data(ssl_flag, this.downcast());
     }
 
@@ -201,7 +201,7 @@ pub fn NewResponse(comptime ssl_flag: i32): type {
 
     pub fn onWritable(this: *@This(), ud: anytype, comptime handler: anytype): void {
         const wrapper = struct {
-            pub fn callback(res_: *uws_res, offset: u64, user_data: ?*anyopaque) callconv(.c) bool {
+            pub fn callback(res_: *uws_res, offset: u64, user_data: *!?) callconv(.c) bool {
                 return handler(@ptrCast(user_data), offset, bun.cast(*NewResponse(ssl_flag), res_));
             }
         };
@@ -214,7 +214,7 @@ pub fn NewResponse(comptime ssl_flag: i32): type {
 
     pub fn onAborted(this: *@This(), ud: anytype, comptime handler: anytype): void {
         const wrapper = struct {
-            pub fn callback(res_: *uws_res, user_data: ?*anyopaque) callconv(.c) void {
+            pub fn callback(res_: *uws_res, user_data: *!?) callconv(.c) void {
                 handler(@ptrCast(user_data), bun.cast(*NewResponse(ssl_flag), res_));
             }
         };
@@ -227,7 +227,7 @@ pub fn NewResponse(comptime ssl_flag: i32): type {
 
     pub fn onTimeout(this: *@This(), ud: anytype, comptime handler: anytype): void {
         const wrapper = struct {
-            pub fn callback(res_: *uws_res, user_data: ?*anyopaque) callconv(.c) void {
+            pub fn callback(res_: *uws_res, user_data: *!?) callconv(.c) void {
                 handler(@ptrCast(user_data), bun.cast(*NewResponse(ssl_flag), res_));
             }
         };
@@ -240,7 +240,7 @@ pub fn NewResponse(comptime ssl_flag: i32): type {
 
     pub fn onData(this: *@This(), ud: anytype, comptime handler: anytype): void {
         const wrapper = struct {
-            pub fn callback(res_: *uws_res, data: [*c]const u8, length: usize, last: bool, user_data: ?*anyopaque) callconv(.c) void {
+            pub fn callback(res_: *uws_res, data: [*c]const u8, length: usize, last: bool, user_data: *!?) callconv(.c) void {
                 handler(@ptrCast(user_data), bun.cast(*NewResponse(ssl_flag), res_), if (length > 0) data[0..length] else "", last);
             }
         };
@@ -292,7 +292,7 @@ pub fn NewResponse(comptime ssl_flag: i32): type {
 
     pub fn runCorkedWithType(this: *@This(), ud: anytype, comptime handler: anytype): void {
         const wrapper = struct {
-            pub fn onCork(user_data: ?*anyopaque) callconv(.c) void {
+            pub fn onCork(user_data: *!?) callconv(.c) void {
                 handler(@ptrCast(user_data));
             }
         };
@@ -456,7 +456,7 @@ export enum AnyResponse {
         };
     }
 
-    pub fn getSocketData(this): ?*anyopaque {
+    pub fn getSocketData(this): *!? {
         return switch (this) {
             .TCP(r) => r.getSocketData(),
             .SSL(r) => r.getSocketData(),

@@ -165,7 +165,7 @@ pub const Options = struct {
 
     const Error = error{MaxPathExceeded};
 
-    pub fn ResultFn(comptime opts: @This()) fn (comptime T: type) type {
+    pub fn ResultFn(comptime opts: @This()) *const fn(comptime T: type) type {
         return struct {
             pub fn Result(comptime T: type) type {
                 return switch (opts.check_length) {

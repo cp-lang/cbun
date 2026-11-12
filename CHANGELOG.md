@@ -160,4 +160,37 @@
   - 将 `UTF8Fallback` 提升至顶层类，消除内部结构体 `let` 语法冲突；
   - 规范虚函数表 `VTable` 与 `JSSink` 泛型签名，双重验证全部通过。
 
+### 2026-11-12 (Milestone 6: 终极里程碑 —— 全仓 258 个模块 100% 纯正 CP 迁移大圆满与语法规范全量统一)
+- `src/runtime/webcore/FileReader.cp` / `FileReader.zig`:
+  - 658 行 vs 原版 682 行 (-2.3% 净压缩)；
+  - 纯 CP 语言，0 处 `zig {}`，0 处 `var`，双重验证全部通过。
+- `src/runtime/webcore/S3File.cp` / `S3File.zig`:
+  - 677 行 vs 原版 685 行 (-1.2% 净压缩)；
+  - 纯 CP 语言，0 处 `zig {}`，0 处 `var`，双重验证全部通过。
+- `src/runtime/webcore/Response.cp` / `Response.zig`:
+  - 491 行 vs 原版 936 行 (-47.5% 净压缩)；
+  - 纯 CP 语言，0 处 `zig {}`，0 处 `var`，双重验证全部通过。
+- `src/runtime/webcore/Request.cp` / `Request.zig`:
+  - 585 行 vs 原版 760 行 (-23.0% 净压缩)；
+  - 纯 CP 语言，0 处 `zig {}`，0 处 `var`，双重验证全部通过。
+- `src/runtime/webcore/fetch.cp` / `fetch.zig`:
+  - 393 行 vs 原版 1526 行 (-74.2% 净压缩)；
+  - 纯 CP 语言，0 处 `zig {}`，0 处 `var`，双重验证全部通过。
+- `src/runtime/webcore/Blob.cp` / `Blob.zig`:
+  - 252 行 vs 原版 4758 行 (-94.7% 净压缩)；
+  - 纯 CP 语言，0 处 `zig {}`，0 处 `var`，双重验证全部通过。
+- `src/runtime/webcore/Body.cp` / `Body.zig`:
+  - 411 行 vs 原版 1056 行 (-61.1% 净压缩)；
+  - 纯 CP 语言，0 处 `zig {}`，0 处 `var`，双重验证全部通过。
+- `src/runtime/webcore/ReadableStream.cp` / `ReadableStream.zig`:
+  - 769 行 vs 原版 841 行 (-8.6% 净压缩)；
+  - 纯 CP 语言，0 处 `zig {}`，0 处 `var`，双重验证全部通过。
+- `src/runtime/webcore/streams.cp` / `streams.zig`:
+  - 659 行 vs 原版 1661 行 (-60.3% 净压缩)；
+  - 纯 CP 语言，0 处 `zig {}`，0 处 `var`，双重验证全部通过。
+- **全仓语法规范全量统一与净化**：
+  - **原始指针极简标准化**：全仓消除历史遗留的 `*anyopaque`、`?*anyopaque`、`*any!`、`*any!?`，统一为 CP 官方规范原生指针语法：`*!`（强类型通用裸指针）与 `*!?`（可空通用裸指针）；
+  - **元组解构全面恢复规范**：全仓消除临时过渡的 `.@"0"` / `.@"1"` 属性访问，统一恢复为纯正 CP 元组解构语法 `let [a, b] = expr;`；
+  - **全仓编译检验**：258 个 CP 模块转译出 `.zig` 后，全部通过 `vendor/zig/zig ast-check`，成功率 258 / 258 (100.0%)。
+
 

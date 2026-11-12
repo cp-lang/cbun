@@ -2107,10 +2107,10 @@ pub fn isAbort(self: HTTPClientResult) bool {
             unknown: void,
         };
     pub const Callback = struct {
-            ctx: ?*anyopaque,
+            ctx: HttpCallbackCtx,
             function: Function,
     
-            pub const Function = *const fn (ctx: ?*anyopaque, async_http: *AsyncHTTP, result: HTTPClientResult) void;
+            pub const Function = *const fn (ctx: HttpCallbackCtx, async_http: *AsyncHTTP, result: HTTPClientResult) void;
     
             pub fn run(self: Callback, async_http: *AsyncHTTP, result: HTTPClientResult) void {
                 self.function(self.ctx, async_http, result);
@@ -2125,7 +2125,7 @@ pub fn isAbort(self: HTTPClientResult) bool {
                         };
                     }
     
-                    fn wrapped_callback(ptr: ?*anyopaque, async_http: *AsyncHTTP, result: HTTPClientResult) void {
+                    fn wrapped_callback(ptr: HttpCallbackCtx, async_http: *AsyncHTTP, result: HTTPClientResult) void {
                         const casted: Type = @ptrCast(@alignCast(ptr));
                         @call(bun.callmod_inline, callback, .{ casted, async_http, result });
                     }
@@ -2134,6 +2134,7 @@ pub fn isAbort(self: HTTPClientResult) bool {
         };
 };
 
+pub const HttpCallbackCtx = ?*anyopaque;
 
 pub fn getAllocator() std.mem.Allocator {
         return default_allocator;
@@ -2559,4 +2560,3 @@ pub fn hashHeaderConst(comptime name: []const u8) u64 {
 pub fn getUserAgentHeader() picohttp.Header {
         return picohttp.Header{ .name = "User-Agent", .value = (if ((overridden_default_user_agent.len > 0)) overridden_default_user_agent else Global.user_agent) };
 }
-pub const __CpObj = struct {  };

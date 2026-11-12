@@ -1,6 +1,8 @@
 import bun from "bun";
 import { Loop } from "./Loop.cp";
 
+pub type ConstRawPtr = *!?;
+
 @c {
     fn us_create_udp_socket(
         loop: ?*Loop,
@@ -16,7 +18,7 @@ import { Loop } from "./Loop.cp";
     ): ?*Socket;
     fn us_udp_socket_connect(socket: *Socket, hostname: cstr, port: u32): i32;
     fn us_udp_socket_disconnect(socket: *Socket): i32;
-    fn us_udp_socket_send(socket: *Socket, payloads: [*c]const [*c]const u8, lengths: [*c]const usize, addresses: [*c]const ?*const anyopaque, count: i32): i32;
+    fn us_udp_socket_send(socket: *Socket, payloads: [*c]const [*c]const u8, lengths: [*c]const usize, addresses: [*c]const ConstRawPtr, count: i32): i32;
     fn us_udp_socket_user(socket: *Socket): *!?;
     fn us_udp_socket_bind(socket: *Socket, hostname: cstr, port: u32): i32;
     fn us_udp_socket_bound_port(socket: *Socket): i32;
@@ -53,7 +55,7 @@ export @opaque class Socket {
         return us_create_udp_socket(loop, data_cb, drain_cb, close_cb, recv_error_cb, host, port, options, err, user_data);
     }
 
-    pub fn send(*this, payloads: [*]const u8[], lengths: usize[], addresses: ?*const anyopaque[]): i32 {
+    pub fn send(*this, payloads: [*]const u8[], lengths: usize[], addresses: ConstRawPtr[]): i32 {
         bun.assert(payloads.len == lengths.len && payloads.len == addresses.len);
         return us_udp_socket_send(this, payloads.ptr, lengths.ptr, addresses.ptr, payloads.len as i32);
     }

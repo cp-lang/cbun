@@ -20,7 +20,7 @@ export class Flags {
 export class InternalJSEventCallback {
     function: jsc.Strong.Optional = .empty;
 
-    pub type EventType = jsc.API.NodeHTTPResponse.AbortEvent;
+    pub const EventType = jsc.API.NodeHTTPResponse.AbortEvent;
 
     pub fn init(function: JSValue, globalThis: *JSGlobalObject): InternalJSEventCallback {
         return InternalJSEventCallback {
@@ -71,7 +71,7 @@ export class Request {
     reported_estimated_size: usize = 0;
     internal_event_callback: InternalJSEventCallback = .{};
 
-    pub type WeakRef = ptr.WeakPtr(Request, "weak_ptr_data");
+    pub const WeakRef = ptr.WeakPtr(Request, "weak_ptr_data");
 
     pub fn memoryCost(this: &Request): usize {
         return @sizeOf(Request) + this.request_context.memoryCost() + this.url.byteSlice().len + this.body.value.memoryCost();
@@ -324,7 +324,7 @@ export class Request {
         return "http://";
     }
 
-    pub fn ensureURL(this: *Request): sys.OOM!void {
+    pub fn ensureURL(this: *Request): !void {
         if (!this.url.isEmpty()) return;
 
         if (this.request_context.getRequest()) |req| {
@@ -342,14 +342,14 @@ export class Request {
                     });
 
                     if (url_bytelength < 128) {
-                        var buffer: [128]u8 = undefined;
+                        let buffer: [128]u8 = undefined;
                         let url = sys.fmt.bufPrint(&buffer, "{s}{f}{s}", .{
                             this.getProtocol(),
                             fmt,
                             req_url,
                         }) catch @panic("Unexpected error while printing URL");
 
-                        var href = jsc.URL.hrefFromString(String.fromBytes(url));
+                        let href = jsc.URL.hrefFromString(String.fromBytes(url));
                         if (!href.isEmpty()) {
                             if (href.byteSlice().ptr == url.ptr) {
                                 this.url = String.cloneLatin1(url[0..href.length()]);
@@ -364,7 +364,7 @@ export class Request {
                     }
 
                     if (strings.isAllASCII(host) and strings.isAllASCII(req_url)) {
-                        let (s, bytes) = String.createUninitialized(.latin1, url_bytelength);
+                        let [s, bytes] = String.createUninitialized(.latin1, url_bytelength);
                         this.url = s;
                         _ = sys.fmt.bufPrint(bytes, "{s}{f}{s}", .{
                             this.getProtocol(),
@@ -436,14 +436,23 @@ export class Request {
             this.headers = FetchHeaders.createFromUWS(req);
         } else {
             this.headers = FetchHeaders.createEmpty();
-            let content_type = switch (this.body.value) {
-                .Blob => |blob| blob.content_type,
-                .Locked => |locked| if (locked.readable.get(globalThis)) |*readable| switch (readable.ptr) {
-                    .Blob => |blob| blob.content_type,
-                    else => null,
-                } else null,
-                else => null,
-            };
+            let content_type: ?[]const u8 = null;
+            switch (this.body.value) {
+                .Blob => |blob| {
+                    content_type = blob.content_type;
+                },
+                .Locked => |locked| {
+                    if (locked.readable.get(globalThis)) |*readable| {
+                        switch (readable.ptr) {
+                            .Blob => |blob| {
+                                content_type = blob.content_type;
+                            },
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
 
             if (content_type) |ct| {
                 if (ct.len > 0) {
@@ -496,20 +505,21 @@ export class Request {
         _ = allocator;
         this.ensureURL() catch {};
         let vm = globalThis.bunVM();
-        let body_ = if (this.js_ref.tryGet()) |js_ref| {
+        let body_: Body.Value = undefined;
+        if (this.js_ref.tryGet()) |js_ref| {
             if (js.gc.stream.get(js_ref)) |stream| {
                 let readable = try webcore.ReadableStream.fromJS(stream, globalThis);
                 if (readable != null) {
-                    try this.body.value.cloneWithReadableStream(globalThis, &readable.?);
+                    body_ = try this.body.value.cloneWithReadableStream(globalThis, &readable.?);
                 } else {
-                    try this.body.value.clone(globalThis);
+                    body_ = try this.body.value.clone(globalThis);
                 }
             } else {
-                try this.body.value.clone(globalThis);
+                body_ = try this.body.value.clone(globalThis);
             }
         } else {
-            try this.body.value.clone(globalThis);
-        };
+            body_ = try this.body.value.clone(globalThis);
+        }
         defer {
             // error cleanup handled by caller
         }

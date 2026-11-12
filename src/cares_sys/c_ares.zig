@@ -6,7 +6,7 @@ fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val
 pub const socklen_t = c.socklen_t;
 pub const ares_ssize_t = isize;
 pub const ares_socket_t = (if (bun.Environment.isWindows) std.os.windows.ws2_32.SOCKET else c_int);
-pub const ares_sock_state_cb = ?*const fn (?*anyopaque, ares_socket_t, c_int, c_int) callconv(.c) void;
+pub const ares_sock_state_cb = ?*const *const fn(?*anyopaque, ares_socket_t, c_int, c_int) callconv(.c) void;
 pub const struct_apattern = opaque {};
 pub const AF = std.posix.AF;
 pub const NSClass = enum(c_int) {
@@ -196,7 +196,7 @@ pub const struct_hostent = extern struct {
     pub const toJSResponse = @import("../runtime/dns_jsc/cares_jsc.zig").hostentToJSResponse;
 
     pub fn Callback(comptime Type: type) type {
-        return fn (*Type, status: ?Error, timeouts: i32, results: ?*struct_hostent) void;
+        return *const fn(*Type, status: ?Error, timeouts: i32, results: ?*struct_hostent) void;
     }
 
     pub fn hostCallbackWrapper(
@@ -271,7 +271,7 @@ pub const hostent_with_ttls = struct {
     pub const toJSResponse = @import("../runtime/dns_jsc/cares_jsc.zig").hostentWithTtlsToJSResponse;
 
     pub fn Callback(comptime Type: type) type {
-        return fn (*Type, status: ?Error, timeouts: i32, results: ?*hostent_with_ttls) void;
+        return *const fn(*Type, status: ?Error, timeouts: i32, results: ?*hostent_with_ttls) void;
     }
 
     pub fn hostCallbackWrapper(
@@ -361,7 +361,7 @@ pub const struct_nameinfo = extern struct {
     pub const toJSResponse = @import("../runtime/dns_jsc/cares_jsc.zig").nameinfoToJSResponse;
 
     pub fn Callback(comptime Type: type) type {
-        return fn (*Type, status: ?Error, timeouts: i32, node: ?struct_nameinfo) void;
+        return *const fn(*Type, status: ?Error, timeouts: i32, node: ?struct_nameinfo) void;
     }
 
     pub fn CallbackWrapper(
@@ -426,7 +426,7 @@ pub const AddrInfo = extern struct {
     }
 
     pub fn Callback(comptime Type: type) type {
-        return fn (*Type, status: ?Error, timeouts: i32, results: ?*AddrInfo) void;
+        return *const fn(*Type, status: ?Error, timeouts: i32, results: ?*AddrInfo) void;
     }
 
     pub fn callbackWrapper(
@@ -588,21 +588,21 @@ pub const Channel = opaque {
     }
 };
 var ares_has_loaded = std.atomic.Value(bool).init(false);
-pub const ares_callback = ?*const fn (?*anyopaque, c_int, c_int, [*c]u8, c_int) callconv(.c) void;
-pub const ares_host_callback = ?*const fn (?*anyopaque, c_int, c_int, ?*struct_hostent) callconv(.c) void;
-pub const ares_nameinfo_callback = ?*const fn (?*anyopaque, c_int, c_int, [*c]u8, [*c]u8) callconv(.c) void;
-pub const ares_sock_create_callback = ?*const fn (ares_socket_t, c_int, ?*anyopaque) callconv(.c) c_int;
-pub const ares_sock_config_callback = ?*const fn (ares_socket_t, c_int, ?*anyopaque) callconv(.c) c_int;
-pub const ares_addrinfo_callback = *const fn (?*anyopaque, c_int, c_int, ?*AddrInfo) callconv(.c) void;
-pub const ares_malloc_callback = ?*const fn (usize) callconv(.c) ?*anyopaque;
-pub const ares_free_callback = ?*const fn (?*anyopaque) callconv(.c) void;
-pub const ares_realloc_callback = ?*const fn (?*anyopaque, usize) callconv(.c) ?*anyopaque;
+pub const ares_callback = ?*const *const fn(?*anyopaque, c_int, c_int, [*c]u8, c_int) callconv(.c) void;
+pub const ares_host_callback = ?*const *const fn(?*anyopaque, c_int, c_int, ?*struct_hostent) callconv(.c) void;
+pub const ares_nameinfo_callback = ?*const *const fn(?*anyopaque, c_int, c_int, [*c]u8, [*c]u8) callconv(.c) void;
+pub const ares_sock_create_callback = ?*const *const fn(ares_socket_t, c_int, ?*anyopaque) callconv(.c) c_int;
+pub const ares_sock_config_callback = ?*const *const fn(ares_socket_t, c_int, ?*anyopaque) callconv(.c) c_int;
+pub const ares_addrinfo_callback = *const *const fn(?*anyopaque, c_int, c_int, ?*AddrInfo) callconv(.c) void;
+pub const ares_malloc_callback = ?*const *const fn(usize) callconv(.c) ?*anyopaque;
+pub const ares_free_callback = ?*const *const fn(?*anyopaque) callconv(.c) void;
+pub const ares_realloc_callback = ?*const *const fn(?*anyopaque, usize) callconv(.c) ?*anyopaque;
 pub const ares_socket_functions = extern struct {
-    socket: ?*const fn (c_int, c_int, c_int, ?*anyopaque) callconv(.c) ares_socket_t = null,
-    close: ?*const fn (ares_socket_t, ?*anyopaque) callconv(.c) c_int = null,
-    connect: ?*const fn (ares_socket_t, [*c]const struct_sockaddr, ares_socklen_t, ?*anyopaque) callconv(.c) c_int = null,
-    recvfrom: ?*const fn (ares_socket_t, ?*anyopaque, usize, c_int, [*c]struct_sockaddr, [*c]ares_socklen_t, ?*anyopaque) callconv(.c) ares_ssize_t = null,
-    sendv: ?*const fn (ares_socket_t, [*c]const iovec, c_int, ?*anyopaque) callconv(.c) ares_ssize_t = null,
+    socket: ?*const *const fn(c_int, c_int, c_int, ?*anyopaque) callconv(.c) ares_socket_t = null,
+    close: ?*const *const fn(ares_socket_t, ?*anyopaque) callconv(.c) c_int = null,
+    connect: ?*const *const fn(ares_socket_t, [*c]const struct_sockaddr, ares_socklen_t, ?*anyopaque) callconv(.c) c_int = null,
+    recvfrom: ?*const *const fn(ares_socket_t, ?*anyopaque, usize, c_int, [*c]struct_sockaddr, [*c]ares_socklen_t, ?*anyopaque) callconv(.c) ares_ssize_t = null,
+    sendv: ?*const *const fn(ares_socket_t, [*c]const iovec, c_int, ?*anyopaque) callconv(.c) ares_ssize_t = null,
 };
 const union_unnamed_2 = extern union {
     _S6_u8: [16]u8,
@@ -631,7 +631,7 @@ pub const struct_ares_caa_reply = extern struct {
     pub const toJS = @import("../runtime/dns_jsc/cares_jsc.zig").caaReplyToJS;
 
     pub fn Callback(comptime Type: type) type {
-        return fn (*Type, status: ?Error, timeouts: i32, results: ?*struct_ares_caa_reply) void;
+        return *const fn(*Type, status: ?Error, timeouts: i32, results: ?*struct_ares_caa_reply) void;
     }
 
     pub fn callbackWrapper(
@@ -674,7 +674,7 @@ pub const struct_ares_srv_reply = extern struct {
     pub const toJS = @import("../runtime/dns_jsc/cares_jsc.zig").srvReplyToJS;
 
     pub fn Callback(comptime Type: type) type {
-        return fn (*Type, status: ?Error, timeouts: i32, results: ?*struct_ares_srv_reply) void;
+        return *const fn(*Type, status: ?Error, timeouts: i32, results: ?*struct_ares_srv_reply) void;
     }
 
     pub fn callbackWrapper(
@@ -715,7 +715,7 @@ pub const struct_ares_mx_reply = extern struct {
     pub const toJS = @import("../runtime/dns_jsc/cares_jsc.zig").mxReplyToJS;
 
     pub fn Callback(comptime Type: type) type {
-        return fn (*Type, status: ?Error, timeouts: i32, results: ?*struct_ares_mx_reply) void;
+        return *const fn(*Type, status: ?Error, timeouts: i32, results: ?*struct_ares_mx_reply) void;
     }
 
     pub fn callbackWrapper(
@@ -758,7 +758,7 @@ pub const struct_ares_txt_reply = extern struct {
     pub const toJSForAny = @import("../runtime/dns_jsc/cares_jsc.zig").txtReplyToJSForAny;
 
     pub fn Callback(comptime Type: type) type {
-        return fn (*Type, status: ?Error, timeouts: i32, results: ?*struct_ares_txt_reply) void;
+        return *const fn(*Type, status: ?Error, timeouts: i32, results: ?*struct_ares_txt_reply) void;
     }
 
     pub fn callbackWrapper(
@@ -809,7 +809,7 @@ pub const struct_ares_naptr_reply = extern struct {
     pub const toJS = @import("../runtime/dns_jsc/cares_jsc.zig").naptrReplyToJS;
 
     pub fn Callback(comptime Type: type) type {
-        return fn (*Type, status: ?Error, timeouts: i32, results: ?*struct_ares_naptr_reply) void;
+        return *const fn(*Type, status: ?Error, timeouts: i32, results: ?*struct_ares_naptr_reply) void;
     }
 
     pub fn callbackWrapper(
@@ -854,7 +854,7 @@ pub const struct_ares_soa_reply = extern struct {
     pub const toJS = @import("../runtime/dns_jsc/cares_jsc.zig").soaReplyToJS;
 
     pub fn Callback(comptime Type: type) type {
-        return fn (*Type, status: ?Error, timeouts: i32, results: ?*struct_ares_soa_reply) void;
+        return *const fn(*Type, status: ?Error, timeouts: i32, results: ?*struct_ares_soa_reply) void;
     }
 
     pub fn callbackWrapper(
@@ -909,7 +909,7 @@ pub const struct_any_reply = struct {
     pub const toJS = @import("../runtime/dns_jsc/cares_jsc.zig").anyReplyToJS;
 
     pub fn Callback(comptime Type: type) type {
-        return fn (*Type, status: ?Error, timeouts: i32, results: ?*struct_any_reply) void;
+        return *const fn(*Type, status: ?Error, timeouts: i32, results: ?*struct_any_reply) void;
     }
 
     pub fn callbackWrapper(
@@ -1410,7 +1410,7 @@ pub extern "c" fn ares_gethostbyname(channel: *Channel, name: [*c]const u8, fami
 
 pub extern "c" fn ares_gethostbyname_file(channel: *Channel, name: [*c]const u8, family: c_int, host: ?[*:null]struct_hostent) callconv(.c) c_int;
 
-pub extern "c" fn ares_gethostbyaddr(channel: *Channel, addr: ?*const anyopaque, addrlen: c_int, family: c_int, callback: ares_host_callback, arg: ?*anyopaque) callconv(.c) void;
+pub extern "c" fn ares_gethostbyaddr(channel: *Channel, addr: ?*anyopaque, addrlen: c_int, family: c_int, callback: ares_host_callback, arg: ?*anyopaque) callconv(.c) void;
 
 pub extern "c" fn ares_getnameinfo(channel: *Channel, sa: [*c]const struct_sockaddr, salen: ares_socklen_t, flags: c_int, callback: ares_nameinfo_callback, arg: ?*anyopaque) callconv(.c) void;
 
@@ -1436,7 +1436,7 @@ pub extern "c" fn ares_parse_aaaa_reply(abuf: [*c]const u8, alen: c_int, host: ?
 
 pub extern "c" fn ares_parse_caa_reply(abuf: [*c]const u8, alen: c_int, caa_out: [*c][*c]struct_ares_caa_reply) callconv(.c) c_int;
 
-pub extern "c" fn ares_parse_ptr_reply(abuf: [*c]const u8, alen: c_int, addr: ?*const anyopaque, addrlen: c_int, family: c_int, host: ?[*c]struct_hostent) callconv(.c) c_int;
+pub extern "c" fn ares_parse_ptr_reply(abuf: [*c]const u8, alen: c_int, addr: ?*anyopaque, addrlen: c_int, family: c_int, host: ?[*c]struct_hostent) callconv(.c) c_int;
 
 pub extern "c" fn ares_parse_ns_reply(abuf: [*c]const u8, alen: c_int, host: ?[*c]struct_hostent) callconv(.c) c_int;
 
@@ -1474,7 +1474,7 @@ pub extern "c" fn ares_get_servers(channel: *Channel, servers: *?*struct_ares_ad
 
 pub extern "c" fn ares_get_servers_ports(channel: *Channel, servers: *?*struct_ares_addr_port_node) callconv(.c) c_int;
 
-pub extern "c" fn ares_inet_ntop(af: c_int, src: ?*const anyopaque, dst: [*]u8, size: ares_socklen_t) callconv(.c) ?[*:0]u8;
+pub extern "c" fn ares_inet_ntop(af: c_int, src: ?*anyopaque, dst: [*]u8, size: ares_socklen_t) callconv(.c) ?[*:0]u8;
 
 pub extern "c" fn ares_inet_pton(af: c_int, src: [*c]const u8, dst: ?*anyopaque) callconv(.c) c_int;
 

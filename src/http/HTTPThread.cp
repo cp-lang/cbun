@@ -125,6 +125,10 @@ export struct InitOpts {
     onInitError: ?fn (error_val: InitError, opts: InitOpts) = null,
 }
 
+pub type SslCtxKey = *!;
+pub let custom_ssl_context_map = std.AutoArrayHashMap(SslCtxKey, SslContextCacheEntry).init(bun.default_allocator);
+pub let init_once = bun.once(initOnce);
+
 export @root @value struct HTTPThread {
     loop: *bun.jsc.MiniEventLoop,
     http_context: HTTPContextTCP,
@@ -148,9 +152,6 @@ export @root @value struct HTTPThread {
     timer: std.time.Timer,
     lazy_libdeflater: *LibdeflateState? = null,
     lazy_request_body_buffer: *HeapRequestBodyBuffer? = null,
-
-    pub var custom_ssl_context_map = std.AutoArrayHashMap(*anyopaque, SslContextCacheEntry).init(bun.default_allocator);
-    pub var init_once = bun.once(initOnce);
 
     fn deflater(*this): *LibdeflateState {
         if (this.lazy_libdeflater == null) {

@@ -48,7 +48,7 @@ pub fn release(self: *ImmediateObject) void {
             _ = bun.destroy(self);
     }
 
-pub fn deinit(self: *const ImmediateObject) void {
+pub fn deinit(self: *ImmediateObject) void {
             _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
     }
 
@@ -57,44 +57,44 @@ pub fn constructor(globalObject: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame)
             return globalObject.throw("Immediate is not constructible", .{});
     }
 
-pub fn getEventLoopTimer(self: *const ImmediateObject) *EventLoopTimer {
+pub fn getEventLoopTimer(self: *ImmediateObject) *EventLoopTimer {
             return (&self.event_loop_timer);
     }
 
-pub fn runImmediateTask(self: *const ImmediateObject, vm: *VirtualMachine) bool {
+pub fn runImmediateTask(self: *ImmediateObject, vm: *VirtualMachine) bool {
             return self.internals.runImmediateTask(vm);
     }
 
-pub fn toPrimitive(self: *const ImmediateObject, globalObject: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
+pub fn toPrimitive(self: *ImmediateObject, globalObject: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
             _ = globalObject;
             _ = callFrame;
             return self.internals.toPrimitive();
     }
 
-pub fn doRef(self: *const ImmediateObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
+pub fn doRef(self: *ImmediateObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
             return self.internals.doRef(globalThis, callFrame.this());
     }
 
-pub fn doUnref(self: *const ImmediateObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
+pub fn doUnref(self: *ImmediateObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
             return self.internals.doUnref(globalThis, callFrame.this());
     }
 
-pub fn hasRef(self: *const ImmediateObject, globalObject: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
+pub fn hasRef(self: *ImmediateObject, globalObject: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
             _ = globalObject;
             _ = callFrame;
             return self.internals.hasRef();
     }
 
-pub fn finalize(self: *const ImmediateObject) void {
+pub fn finalize(self: *ImmediateObject) void {
             _ = self.internals.finalize();
     }
 
-pub fn getDestroyed(self: *const ImmediateObject, globalThis: *JSGlobalObject) JSValue {
+pub fn getDestroyed(self: *ImmediateObject, globalThis: *JSGlobalObject) JSValue {
             _ = globalThis;
             return JSValue.jsBoolean(self.internals.getDestroyed());
     }
 
-pub fn dispose(self: *const ImmediateObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
+pub fn dispose(self: *ImmediateObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
             _ = callFrame;
             _ = self.internals.cancel(globalThis.bunVM());
             return JSValue.js_undefined;

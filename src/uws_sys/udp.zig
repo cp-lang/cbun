@@ -11,9 +11,9 @@ pub fn create(loop: *Loop, data_cb: ?*const fn (*Socket, *PacketBuffer, i32) cal
             return us_create_udp_socket(loop, data_cb, drain_cb, close_cb, recv_error_cb, host, port, options, err, user_data);
     }
 
-pub fn send(self: *Socket, payloads: [*]const []const u8, lengths: []const usize, addresses: ?*const []const anyopaque) i32 {
-            _ = bun.assert(((payloads.len == lengths.len) and (payloads.len == (addresses).?.len)));
-            return us_udp_socket_send(self, payloads.ptr, lengths.ptr, (addresses).?.ptr, (if (comptime @typeInfo(@TypeOf(payloads.len)) == .@"enum") cp_cast_int(i32, @intFromEnum(payloads.len)) else cp_cast_int(i32, payloads.len)));
+pub fn send(self: *Socket, payloads: [*]const []const u8, lengths: []const usize, addresses: []const ConstRawPtr) i32 {
+            _ = bun.assert(((payloads.len == lengths.len) and (payloads.len == addresses.len)));
+            return us_udp_socket_send(self, payloads.ptr, lengths.ptr, addresses.ptr, (if (comptime @typeInfo(@TypeOf(payloads.len)) == .@"enum") cp_cast_int(i32, @intFromEnum(payloads.len)) else cp_cast_int(i32, payloads.len)));
     }
 
 pub fn user(self: *Socket) ?*anyopaque {
@@ -104,6 +104,7 @@ pub fn getTruncated(self: *PacketBuffer, index: i32) bool {
     }
 };
 
+pub const ConstRawPtr = ?*anyopaque;
 
 pub extern "c" fn us_create_udp_socket(loop: ?*Loop, data_cb: ?*const fn (*Socket, *PacketBuffer, i32) callconv(.c) void, drain_cb: ?*const fn (*Socket) callconv(.c) void, close_cb: ?*const fn (*Socket) callconv(.c) void, recv_error_cb: ?*const fn (*Socket, i32) callconv(.c) void, host: ?[*:0]const u8, port: u16, options: i32, err: ?*i32, user_data: ?*anyopaque) callconv(.c) ?*Socket;
 
@@ -111,7 +112,7 @@ pub extern "c" fn us_udp_socket_connect(socket: *Socket, hostname: [*:0]const u8
 
 pub extern "c" fn us_udp_socket_disconnect(socket: *Socket) callconv(.c) i32;
 
-pub extern "c" fn us_udp_socket_send(socket: *Socket, payloads: [*c]const [*c]const u8, lengths: [*c]const usize, addresses: [*c]const ?*const anyopaque, count: i32) callconv(.c) i32;
+pub extern "c" fn us_udp_socket_send(socket: *Socket, payloads: [*c]const [*c]const u8, lengths: [*c]const usize, addresses: [*c]const ConstRawPtr, count: i32) callconv(.c) i32;
 
 pub extern "c" fn us_udp_socket_user(socket: *Socket) callconv(.c) ?*anyopaque;
 

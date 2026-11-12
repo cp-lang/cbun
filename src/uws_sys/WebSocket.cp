@@ -1,11 +1,11 @@
 
-pub const CorkCallback = ?*const fn (?*anyopaque) callconv(.c) void;
-pub const TopicCallback = ?*const fn ([*c]const u8, usize, ?*anyopaque) callconv(.c) void;
+pub const CorkCallback = ?*const fn (*!?) callconv(.c) void;
+pub const TopicCallback = ?*const fn ([*c]const u8, usize, *!?) callconv(.c) void;
 
 pub const uws_websocket_handler = ?*const fn (*RawWebSocket) callconv(.c) void;
 pub const uws_websocket_message_handler = ?*const fn (*RawWebSocket, [*c]const u8, usize, bun.uws.Opcode) callconv(.c) void;
 pub const uws_websocket_close_handler = ?*const fn (*RawWebSocket, i32, [*c]const u8, usize) callconv(.c) void;
-pub const uws_websocket_upgrade_handler = ?*const fn (?*anyopaque, *uws_res, *Request, *bun.uws.WebSocketUpgradeContext, usize) callconv(.c) void;
+pub const uws_websocket_upgrade_handler = ?*const fn (*!?, *uws_res, *Request, *bun.uws.WebSocketUpgradeContext, usize) callconv(.c) void;
 pub const uws_websocket_ping_pong_handler = ?*const fn (*RawWebSocket, [*c]const u8, usize) callconv(.c) void;
 // src/uws_sys/WebSocket.cp
 // WebSocket wrapper and behavior dispatcher in CP language
@@ -27,8 +27,8 @@ export @opaque class RawWebSocket {
 
 @c {
     fn uws_ws_memory_cost(ssl: i32, ws: *RawWebSocket): usize;
-    fn uws_ws(ssl: i32, app: *uws_app_t, ctx: *any!, pattern: [*]const u8!, pattern_len: usize, id: usize, behavior: *const WebSocketBehavior): void;
-    fn uws_ws_get_user_data(ssl: i32, ws: *RawWebSocket?!): *any?!;
+    fn uws_ws(ssl: i32, app: *uws_app_t, ctx: *!, pattern: [*]const u8!, pattern_len: usize, id: usize, behavior: *const WebSocketBehavior): void;
+    fn uws_ws_get_user_data(ssl: i32, ws: *RawWebSocket?!): *!?;
     fn uws_ws_close(ssl: i32, ws: *RawWebSocket?!): void;
     fn uws_ws_send(ssl: i32, ws: *RawWebSocket?!, message: [*c]const u8, length: usize, opcode: bun.uws.Opcode): bun.uws.SendStatus;
     fn uws_ws_send_with_options(ssl: i32, ws: *RawWebSocket?!, message: [*c]const u8, length: usize, opcode: bun.uws.Opcode, compress: bool, fin: bool): bun.uws.SendStatus;
@@ -37,11 +37,11 @@ export @opaque class RawWebSocket {
     fn uws_ws_send_first_fragment_with_opcode(ssl: i32, ws: *RawWebSocket?!, message: [*c]const u8, length: usize, opcode: bun.uws.Opcode, compress: bool): bun.uws.SendStatus;
     fn uws_ws_send_last_fragment(ssl: i32, ws: *RawWebSocket?!, message: [*c]const u8, length: usize, compress: bool): bun.uws.SendStatus;
     fn uws_ws_end(ssl: i32, ws: *RawWebSocket?!, code: i32, message: [*c]const u8, length: usize): void;
-    fn uws_ws_cork(ssl: i32, ws: *RawWebSocket?!, handler: CorkCallback, user_data: ?*anyopaque): void;
+    fn uws_ws_cork(ssl: i32, ws: *RawWebSocket?!, handler: CorkCallback, user_data: *!?): void;
     fn uws_ws_subscribe(ssl: i32, ws: *RawWebSocket?!, topic: [*]const u8!, length: usize): bool;
     fn uws_ws_unsubscribe(ssl: i32, ws: *RawWebSocket?!, topic: [*]const u8!, length: usize): bool;
     fn uws_ws_is_subscribed(ssl: i32, ws: *RawWebSocket?!, topic: [*]const u8!, length: usize): bool;
-    fn uws_ws_iterate_topics(ssl: i32, ws: *RawWebSocket?!, callback: TopicCallback, user_data: ?*anyopaque): void;
+    fn uws_ws_iterate_topics(ssl: i32, ws: *RawWebSocket?!, callback: TopicCallback, user_data: *!?): void;
     fn uws_ws_publish(ssl: i32, ws: *RawWebSocket?!, topic: [*]const u8!, topic_length: usize, message: [*]const u8!, message_length: usize): bool;
     fn uws_ws_publish_with_options(ssl: i32, ws: *RawWebSocket?!, topic: [*]const u8!, topic_length: usize, message: [*]const u8!, message_length: usize, opcode: bun.uws.Opcode, compress: bool): bool;
     fn uws_ws_get_buffered_amount(ssl: i32, ws: *RawWebSocket?!): usize;
@@ -84,7 +84,7 @@ pub fn WebSocket(comptime ssl_flag: i32): type { return struct {
 
     pub fn cork(this: *@This(), ctx: anytype, comptime callback: anytype): void {
         const Wrapper = struct {
-            pub fn wrap(user_data: ?*anyopaque) callconv(.c) void {
+            pub fn wrap(user_data: *!?) callconv(.c) void {
                 callback(@ptrCast(user_data));
             }
         };
@@ -282,7 +282,7 @@ export @extern @value class WebSocketBehavior {
                 Type.onClose(this_val, ws, code, if (length > 0 and message != null) message[0..length] else "");
             }
 
-            pub fn onUpgrade(ptr: ?*anyopaque, res: *uws_res, req: *Request, context: *bun.uws.WebSocketUpgradeContext, id: usize) callconv(.c) void {
+            pub fn onUpgrade(ptr: *!?, res: *uws_res, req: *Request, context: *bun.uws.WebSocketUpgradeContext, id: usize) callconv(.c) void {
                 ServerType.onWebSocketUpgrade(
                     bun.cast(*ServerType, ptr),
                     bun.cast(*bun.uws.Response(if (ssl) 1 else 0), res),

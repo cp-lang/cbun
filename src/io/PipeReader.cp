@@ -13,7 +13,7 @@ const uv = bun.windows.libuv;
 // This is a runtime type instead of comptime due to bugs in Zig.
 // https://github.com/ziglang/zig/issues/18664
 const BufferedReaderVTable = struct {
-    parent: *anyopaque = undefined,
+    parent: *! = undefined,
     fns: *const Fn = undefined,
 
     pub fn init(comptime Type: type) BufferedReaderVTable {
@@ -23,27 +23,27 @@ const BufferedReaderVTable = struct {
     }
 
     pub const Fn = struct {
-        onReadChunk: ?*const fn (*anyopaque, chunk: []const u8, hasMore: ReadState) bool = null,
-        onReaderDone: *const fn (*anyopaque) void,
-        onReaderError: *const fn (*anyopaque, bun.sys.Error) void,
-        loop: *const fn (*anyopaque) *Async.Loop,
-        eventLoop: *const fn (*anyopaque) jsc.EventLoopHandle,
+        onReadChunk: ?*const fn (*!, chunk: []const u8, hasMore: ReadState) bool = null,
+        onReaderDone: *const fn (*!) void,
+        onReaderError: *const fn (*!, bun.sys.Error) void,
+        loop: *const fn (*!) *Async.Loop,
+        eventLoop: *const fn (*!) jsc.EventLoopHandle,
 
         pub fn init(comptime Type: type) *const BufferedReaderVTable.Fn {
             const fns = struct {
-                fn onReadChunk(this: *anyopaque, chunk: []const u8, hasMore: ReadState) bool {
+                fn onReadChunk(this: *!, chunk: []const u8, hasMore: ReadState) bool {
                     return Type.onReadChunk(@as(*Type, @ptrCast(@alignCast(this))), chunk, hasMore);
                 }
-                fn onReaderDone(this: *anyopaque) void {
+                fn onReaderDone(this: *!) void {
                     return Type.onReaderDone(@as(*Type, @ptrCast(@alignCast(this))));
                 }
-                fn onReaderError(this: *anyopaque, err: bun.sys.Error) void {
+                fn onReaderError(this: *!, err: bun.sys.Error) void {
                     return Type.onReaderError(@as(*Type, @ptrCast(@alignCast(this))), err);
                 }
-                fn eventLoop(this: *anyopaque) jsc.EventLoopHandle {
+                fn eventLoop(this: *!) jsc.EventLoopHandle {
                     return jsc.EventLoopHandle.init(Type.eventLoop(@as(*Type, @ptrCast(@alignCast(this)))));
                 }
-                fn loop(this: *anyopaque) *Async.Loop {
+                fn loop(this: *!) *Async.Loop {
                     return Type.loop(@as(*Type, @ptrCast(@alignCast(this))));
                 }
             };
@@ -124,7 +124,7 @@ const PosixBufferedReader = struct {
         return @sizeOf(@This()) + this._buffer.capacity;
     }
 
-    pub fn from(to: *@This(), other: *PosixBufferedReader, parent_: *anyopaque) void {
+    pub fn from(to: *@This(), other: *PosixBufferedReader, parent_: *!) void {
         to.* = .{
             .handle = other.handle,
             ._buffer = other.buffer().*,
@@ -143,7 +143,7 @@ const PosixBufferedReader = struct {
         to.handle.setOwner(to);
     }
 
-    pub fn setParent(this: *PosixBufferedReader, parent_: *anyopaque) void {
+    pub fn setParent(this: *PosixBufferedReader, parent_: *!) void {
         this.vtable.parent = parent_;
         this.handle.setOwner(this);
     }
@@ -710,14 +710,14 @@ const PosixBufferedReader = struct {
 };
 
 const WindowsBufferedReaderVTable = struct {
-    onReaderDone: *const fn (*anyopaque) void,
-    onReaderError: *const fn (*anyopaque, bun.sys.Error) void,
+    onReaderDone: *const fn (*!) void,
+    onReaderError: *const fn (*!, bun.sys.Error) void,
     onReadChunk: ?*const fn (
-        *anyopaque,
+        *!,
         chunk: []const u8,
         hasMore: ReadState,
     ) bool = null,
-    loop: *const fn (*anyopaque) *Async.Loop,
+    loop: *const fn (*!) *Async.Loop,
 };
 
 pub const WindowsBufferedReader = struct {
@@ -727,7 +727,7 @@ pub const WindowsBufferedReader = struct {
     flags: Flags = .{},
     maxbuf: ?*MaxBuf = null,
 
-    parent: *anyopaque = undefined,
+    parent: *! = undefined,
     vtable: WindowsBufferedReaderVTable = undefined,
 
     pub fn memoryCost(this: *const WindowsBufferedReader) usize {
@@ -752,16 +752,16 @@ pub const WindowsBufferedReader = struct {
 
     pub fn init(comptime Type: type) WindowsBufferedReader {
         const fns = struct {
-            fn onReadChunk(this: *anyopaque, chunk: []const u8, hasMore: ReadState) bool {
+            fn onReadChunk(this: *!, chunk: []const u8, hasMore: ReadState) bool {
                 return Type.onReadChunk(@as(*Type, @ptrCast(@alignCast(this))), chunk, hasMore);
             }
-            fn onReaderDone(this: *anyopaque) void {
+            fn onReaderDone(this: *!) void {
                 return Type.onReaderDone(@as(*Type, @ptrCast(@alignCast(this))));
             }
-            fn onReaderError(this: *anyopaque, err: bun.sys.Error) void {
+            fn onReaderError(this: *!, err: bun.sys.Error) void {
                 return Type.onReaderError(@as(*Type, @ptrCast(@alignCast(this))), err);
             }
-            fn loop(this: *anyopaque) *Async.Loop {
+            fn loop(this: *!) *Async.Loop {
                 return Type.loop(@as(*Type, @ptrCast(@alignCast(this))));
             }
         };

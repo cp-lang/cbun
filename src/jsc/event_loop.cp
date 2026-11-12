@@ -364,7 +364,7 @@ export class EventLoop {
         if (!loop.isActive()) {
             if (_.forever_timer == null) {
                 unsafe {
-                    const self_ptr: *any! = @ptrCast(_);
+                    const self_ptr: *! = @ptrCast(_);
                     let t = uws.Timer.create(loop, self_ptr);
                     t.set(self_ptr, &noopForeverTimer, 1000 * 60 * 4, 1000 * 60 * 4);
                     _.forever_timer = t;

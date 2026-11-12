@@ -2,11 +2,11 @@
 const std = @import("std");
 const string = []const u8;
 
-pub const ClientErrorHandler = ?*const fn (data: ?*anyopaque, code: i32, socket: *us_socket_t, err_code: u8, raw_pkt: [*c]u8, len: i32) callconv(.c) void;
-pub const RouteHandler = ?*const fn (res: *uws_res, req: *Request, ud: ?*anyopaque) callconv(.c) void;
-pub const ListenHandler = ?*const fn (socket: ?*ListenSocket, conf: uws_app_listen_config_t, data: ?*anyopaque) callconv(.c) void;
-pub const ListenConfigHandler = ?*const fn (socket: ?*ListenSocket, data: ?*anyopaque) callconv(.c) void;
-pub const ListenDomainHandler = ?*const fn (ls: *ListenSocket, domain_str: [*:0]const u8, flags: i32, data: ?*anyopaque) callconv(.c) void;
+pub const ClientErrorHandler = ?*const *const fn(data: ?*anyopaque, code: i32, socket: *us_socket_t, err_code: u8, raw_pkt: [*c]u8, len: i32) callconv(.c) void;
+pub const RouteHandler = ?*const *const fn(res: *uws_res, req: *Request, ud: ?*anyopaque) callconv(.c) void;
+pub const ListenHandler = ?*const *const fn(socket: ?*ListenSocket, conf: uws_app_listen_config_t, data: ?*anyopaque) callconv(.c) void;
+pub const ListenConfigHandler = ?*const *const fn(socket: ?*ListenSocket, data: ?*anyopaque) callconv(.c) void;
+pub const ListenDomainHandler = ?*const *const fn(ls: *ListenSocket, domain_str: [*:0]const u8, flags: i32, data: ?*anyopaque) callconv(.c) void;
 pub const App = NewApp;
 pub const AppTCP = NewApp(false);
 pub const AppTLS = NewApp(true);

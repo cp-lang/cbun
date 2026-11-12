@@ -129,7 +129,7 @@ pub const EventLoopTimer = struct {
     };
 
     pub const TimerCallback = struct {
-        callback: *const fn (*TimerCallback) void,
+        callback: *const *const fn(*TimerCallback) void,
         ctx: *anyopaque,
         event_loop_timer: Self,
     };

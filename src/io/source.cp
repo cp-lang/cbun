@@ -133,7 +133,7 @@ export union(enum) Source {
         };
     }
 
-    pub fn setData(this: Source, data: ?*anyopaque): void {
+    pub fn setData(this: Source, data: *!?): void {
         switch (this) {
             .pipe pipe => { pipe.data = data; },
             .tty tty => { tty.data = data; },
@@ -142,7 +142,7 @@ export union(enum) Source {
         }
     }
 
-    pub fn getData(this: Source): ?*anyopaque {
+    pub fn getData(this: Source): *!? {
         return switch (this) {
             .pipe pipe => pipe.data,
             .tty tty => tty.data,

@@ -7,6 +7,8 @@ import { SocketGroup } from "./SocketGroup.cp";
 import { SocketKind } from "./SocketKind.cp";
 import { us_socket_t } from "./us_socket_t.cp";
 
+pub type AnyPtr = *!;
+
 export enum InternalSocket {
     connected(*us_socket_t),
     connecting(*ConnectingSocket),
@@ -525,7 +527,6 @@ export class SocketHandler<const is_ssl: bool> {
         @comptime field: []const u8,
         owner: *Owner,
     ): bool {
-        const AnyPtr = *anyopaque;
         const new_s = tcp.adopt(g, kind, @sizeOf(AnyPtr), @sizeOf(AnyPtr)) orelse return false;
         new_s.ext(AnyPtr).* = owner;
         @field(owner, field) = Self { socket = InternalSocket.connected(new_s) };

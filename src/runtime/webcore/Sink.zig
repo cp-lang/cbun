@@ -104,12 +104,12 @@ pub const Sink = struct {
     
 pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
-pub fn initWithType(self: *const Sink, comptime Type: type, handler: *Type) Sink {
+pub fn initWithType(self: *const Sink, comptime Type: type, handler: *Type) *Sink {
         _ = &self;
             return .{ .ptr = @ptrCast(handler), .vtable = VTable.wrap(Type), .status = .ready, .used = false };
     }
 
-pub fn init(self: *Sink, handler: anytype) Sink {
+pub fn init(self: *Sink, handler: anytype) *Sink {
         _ = &self;
             return self.initWithType(meta.Child(@TypeOf(handler)), handler);
     }
@@ -252,13 +252,13 @@ pub fn JSSink(comptime SinkType: type, comptime abi_name: []const u8) type {
             return @sizeOf(ThisSink) + SinkType.memoryCost(&this.sink);
         }
 
-        const AssignToStreamFn = *const fn (*JSGlobalObject, JSValue, *anyopaque, **anyopaque) callconv(.c) JSValue;
-        const OnCloseFn = *const fn (JSValue, JSValue) callconv(.c) void;
-        const OnReadyFn = *const fn (JSValue, JSValue, JSValue) callconv(.c) void;
-        const OnStartFn = *const fn (JSValue, *JSGlobalObject) callconv(.c) void;
-        const CreateObjectFn = *const fn (*JSGlobalObject, *anyopaque, usize) callconv(.c) JSValue;
-        const SetDestroyCallbackFn = *const fn (JSValue, usize) callconv(.c) void;
-        const DetachPtrFn = *const fn (JSValue) callconv(.c) void;
+        const AssignToStreamFn = *const *const fn(*JSGlobalObject, JSValue, *anyopaque, **anyopaque) callconv(.c) JSValue;
+        const OnCloseFn = *const *const fn(JSValue, JSValue) callconv(.c) void;
+        const OnReadyFn = *const *const fn(JSValue, JSValue, JSValue) callconv(.c) void;
+        const OnStartFn = *const *const fn(JSValue, *JSGlobalObject) callconv(.c) void;
+        const CreateObjectFn = *const *const fn(*JSGlobalObject, *anyopaque, usize) callconv(.c) JSValue;
+        const SetDestroyCallbackFn = *const *const fn(JSValue, usize) callconv(.c) void;
+        const DetachPtrFn = *const *const fn(JSValue) callconv(.c) void;
 
         const assignToStreamExtern = @extern(AssignToStreamFn, .{ .name = abi_name ++ "__assignToStream" });
         const onCloseExtern = @extern(OnCloseFn, .{ .name = abi_name ++ "__onClose" }).*;
@@ -345,7 +345,7 @@ pub fn JSSink(comptime SinkType: type, comptime abi_name: []const u8) type {
             _,
         };
         const fromJSExtern = @extern(
-            *const fn (value: JSValue) callconv(.c) FromJSResult,
+            *const *const fn(value: JSValue) callconv(.c) FromJSResult,
             .{ .name = abi_name ++ "__fromJS" },
         );
 

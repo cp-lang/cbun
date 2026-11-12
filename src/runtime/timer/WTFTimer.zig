@@ -41,7 +41,7 @@ pub fn init(self: *WTFTimer, vm: *VirtualMachine, run_loop_timer: *RunLoopTimer,
             self.script_execution_context_id = script_execution_context_id;
     }
 
-pub fn run(self: *const WTFTimer, vm: *VirtualMachine) void {
+pub fn run(self: *WTFTimer, vm: *VirtualMachine) void {
             if ((self.event_loop_timer.state == .ACTIVE)) {
                 _ = vm.timer.remove((&self.event_loop_timer));
             }
@@ -52,7 +52,7 @@ pub inline fn runWithoutRemoving(self: *const WTFTimer) void {
             _ = self.run_loop_timer.fire();
     }
 
-pub fn update(self: *const WTFTimer, seconds: f64, repeat: bool) void {
+pub fn update(self: *WTFTimer, seconds: f64, repeat: bool) void {
             if ((!(seconds > 0))) {
                 _ = self.imminent.cmpxchgStrong(null, self, .seq_cst, .seq_cst);
                 return;
@@ -72,7 +72,7 @@ pub fn update(self: *const WTFTimer, seconds: f64, repeat: bool) void {
             self.repeat = repeat;
     }
 
-pub fn cancel(self: *const WTFTimer) void {
+pub fn cancel(self: *WTFTimer) void {
             _ = self.lock.lock();
             defer {
             _ = self.lock.unlock();
@@ -85,7 +85,7 @@ pub fn cancel(self: *const WTFTimer) void {
             }
     }
 
-pub fn fire(self: *const WTFTimer, now: *const bun.timespec, vm: *VirtualMachine) void {
+pub fn fire(self: *WTFTimer, now: *const bun.timespec, vm: *VirtualMachine) void {
             _ = now;
             _ = vm;
             self.event_loop_timer.state = .FIRED;
@@ -93,7 +93,7 @@ pub fn fire(self: *const WTFTimer, now: *const bun.timespec, vm: *VirtualMachine
             _ = self.runWithoutRemoving();
     }
 
-pub fn deinit(self: *const WTFTimer) void {
+pub fn deinit(self: *WTFTimer) void {
             _ = self.cancel();
             _ = bun.destroy(self);
     }

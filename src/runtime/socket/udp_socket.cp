@@ -144,10 +144,14 @@ fn onData(socket: *uws.udp.Socket, buf: *uws.udp.PacketBuffer, packets: c_int): 
 }
 
 pub class UDPSocketConfig {
-    const handlers = .{
-        .{ "data", "on_data" },
-        .{ "drain", "on_drain" },
-        .{ "error", "on_error" },
+    const HandlerEntry = struct {
+        name: []const u8,
+        gc_field: []const u8,
+    };
+    const handlers = [_]HandlerEntry{
+        .{ .name = "data", .gc_field = "on_data" },
+        .{ .name = "drain", .gc_field = "on_drain" },
+        .{ .name = "error", .gc_field = "on_error" },
     };
 
     pub const ConnectConfig = struct {
@@ -214,12 +218,12 @@ pub class UDPSocketConfig {
             }
 
             inline for (handlers) |handler| {
-                if (try socket.getTruthyComptime(globalThis, handler.@"0")) |value| {
+                if (try socket.getTruthyComptime(globalThis, handler.name)) |value| {
                     if (!value.isCell() or !value.isCallable()) {
-                        return globalThis.throwInvalidArguments("Expected \"socket.{s}\" to be a function", .{handler.@"0"});
+                        return globalThis.throwInvalidArguments("Expected \"socket.{s}\" to be a function", .{handler.name});
                     }
                     const callback = value.withAsyncContextIfNeeded(globalThis);
-                    UDPSocket.js.gc.set(@field(UDPSocket.js.gc, handler.@"1"), thisValue, globalThis, callback);
+                    UDPSocket.js.gc.set(@field(UDPSocket.js.gc, handler.gc_field), thisValue, globalThis, callback);
                 }
             }
         }

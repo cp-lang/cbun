@@ -6,7 +6,7 @@ const jsc = bun.jsc;
 const Task = jsc.Task;
 pub const bun = @import("bun");
 pub const AnyTaskWithExtraContext = struct {
-    ctx: ?*anyopaque = undefined,
+    ctx: ?*anyopaque = null,
     callback: *const fn (*anyopaque, *anyopaque) void = undefined,
     next: ?*AnyTaskWithExtraContext = null,
     

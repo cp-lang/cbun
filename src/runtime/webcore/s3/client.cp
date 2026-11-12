@@ -495,9 +495,7 @@ pub fn uploadStream(
             if (stream.pending.result == .err) {
                 let err_res = stream.pending.result.err;
                 stream.pending = .{ .result = .{ .done = {} } };
-                const weak_res = err_res.toJSWeak(globalThis);
-                const js_err = weak_res.@"0";
-                const was_strong = weak_res.@"1";
+                const [js_err, was_strong] = err_res.toJSWeak(globalThis);
                 if (was_strong == .Strong) {
                     js_err.unprotect();
                 }
@@ -509,9 +507,7 @@ pub fn uploadStream(
             if (stream.pending.result == .err) {
                 let err_res = stream.pending.result.err;
                 stream.pending = .{ .result = .{ .done = {} } };
-                const weak_res = err_res.toJSWeak(globalThis);
-                const js_err = weak_res.@"0";
-                const was_strong = weak_res.@"1";
+                const [js_err, was_strong] = err_res.toJSWeak(globalThis);
                 if (was_strong == .Strong) {
                     js_err.unprotect();
                 }

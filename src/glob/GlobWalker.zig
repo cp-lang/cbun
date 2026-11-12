@@ -283,11 +283,11 @@ pub const DirEntryAccessor = struct {
 };
 
 pub fn GlobWalker_(
-    comptime ignore_filter_fn: ?*const fn ([]const u8) bool,
+    comptime ignore_filter_fn: ?*const *const fn([]const u8) bool,
     comptime Accessor: type,
     comptime sentinel: bool,
 ) type {
-    const is_ignored: *const fn ([]const u8) bool = if (comptime ignore_filter_fn) |func| func else dummyFilterFalse;
+    const is_ignored: *const *const fn([]const u8) bool = if (comptime ignore_filter_fn) |func| func else dummyFilterFalse;
 
     const count_fds = Accessor.count_fds and bun.Environment.isDebug;
 

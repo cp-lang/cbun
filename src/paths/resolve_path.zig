@@ -976,7 +976,7 @@ pub fn NormalizeOptions(comptime T: type) type {
         return struct {
         allow_above_root: bool = false,
         separator: T = std.fs.path.sep,
-        isSeparator: fn (T) bool = struct {
+        isSeparator: *const fn(T) bool = struct {
             fn call(char: T) bool {
                 return if (comptime std.fs.path.sep == std.fs.path.sep_windows)
                     char == '\\' or char == '/'
@@ -1801,4 +1801,3 @@ pub fn posixToPlatformInPlace(comptime T: type, path_buffer: []const T) void {
             path_buffer[cp_cast_int(usize, index)] = (if (comptime @typeInfo(T) == .@"enum") @as(T, @enumFromInt(std.fs.path.sep)) else @as(T, std.fs.path.sep));
         }
 }
-pub const __CpObj = struct {  };

@@ -41,7 +41,7 @@ pub fn Trampolines(comptime H: type): type {
             return s;
         }
 
-        pub fn on_close(s: *us_socket_t, code: c_int, reason: ?*anyopaque) callconv(.c) ?*us_socket_t {
+        pub fn on_close(s: *us_socket_t, code: c_int, reason: *!?) callconv(.c) ?*us_socket_t {
             call(s, H.onClose, .{ @as(i32, code), reason });
             return s;
         }
@@ -71,7 +71,7 @@ pub fn Trampolines(comptime H: type): type {
             return cs;
         }
 
-        pub fn on_handshake(s: *us_socket_t, ok: c_int, err: bun.uws.us_bun_verify_error_t, _: ?*anyopaque) callconv(.c) void {
+        pub fn on_handshake(s: *us_socket_t, ok: c_int, err: bun.uws.us_bun_verify_error_t, _: *!?) callconv(.c) void {
             call(s, H.onHandshake, .{ ok != 0, err });
         }
     };

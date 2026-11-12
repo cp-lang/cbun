@@ -159,7 +159,7 @@ pub fn PosixPipeWriter(comptime This: type, comptime getFd: *const fn (*This) bu
             };
         }
 
-        fn tryWriteWithWriteFn(this: *This, buf: []const u8, comptime write_fn: *const fn (bun.FD, []const u8) bun.sys.Maybe(usize)) WriteResult {
+        fn tryWriteWithWriteFn(this: *This, buf: []const u8, comptime write_fn: *const *const fn(bun.FD, []const u8) bun.sys.Maybe(usize)) WriteResult {
             const fd = getFd(this);
 
             var offset: usize = 0;
@@ -186,7 +186,7 @@ pub fn PosixPipeWriter(comptime This: type, comptime getFd: *const fn (*This) bu
             return .{ .wrote = offset };
         }
 
-        fn writeToFileType(comptime file_type: FileType) *const (fn (bun.FD, []const u8) bun.sys.Maybe(usize)) {
+        fn writeToFileType(comptime file_type: FileType) *const (*const fn(bun.FD, []const u8) bun.sys.Maybe(usize)) {
             comptime return switch (file_type) {
                 .nonblocking_pipe, .file => &bun.sys.write,
                 .pipe => &writeToBlockingPipe,
@@ -284,12 +284,12 @@ pub fn PosixPipeWriter(comptime This: type, comptime getFd: *const fn (*This) bu
 pub fn PosixBufferedWriter(comptime Parent: type, comptime function_table: anytype) type {
         return struct {
         const PosixWriter = @This();
-        const onWrite: *const fn (*Parent, amount: usize, status: WriteStatus) void = function_table.onWrite;
-        const onError: *const fn (*Parent, bun.sys.Error) void = function_table.onError;
-        const onClose: ?*const fn (*Parent) void = function_table.onClose;
-        const getBuffer: *const fn (*Parent) []const u8 = function_table.getBuffer;
-        const onWritable: ?*const fn (*Parent) void = if (@hasDecl(function_table, "onWritable")) function_table.onWritable else null;
-        const onReady: ?*const fn (*Parent) void = if (@hasDecl(function_table, "onReady")) function_table.onReady else null;
+        const onWrite: *const *const fn(*Parent, amount: usize, status: WriteStatus) void = function_table.onWrite;
+        const onError: *const *const fn(*Parent, bun.sys.Error) void = function_table.onError;
+        const onClose: ?*const *const fn(*Parent) void = function_table.onClose;
+        const getBuffer: *const *const fn(*Parent) []const u8 = function_table.getBuffer;
+        const onWritable: ?*const *const fn(*Parent) void = if (@hasDecl(function_table, "onWritable")) function_table.onWritable else null;
+        const onReady: ?*const *const fn(*Parent) void = if (@hasDecl(function_table, "onReady")) function_table.onReady else null;
 
         handle: PollOrFd = .{ .closed = {} },
         parent: *Parent = undefined,
@@ -486,10 +486,10 @@ pub fn PosixBufferedWriter(comptime Parent: type, comptime function_table: anyty
 
 pub fn PosixStreamingWriter(comptime Parent: type, comptime function_table: anytype) type {
         return struct {
-        const onWrite: fn (*Parent, amount: usize, status: WriteStatus) void = function_table.onWrite;
-        const onError: fn (*Parent, bun.sys.Error) void = function_table.onError;
-        const onReady: ?fn (*Parent) void = if (@hasDecl(function_table, "onReady")) function_table.onReady else null;
-        const onClose: fn (*Parent) void = function_table.onClose;
+        const onWrite: *const fn(*Parent, amount: usize, status: WriteStatus) void = function_table.onWrite;
+        const onError: *const fn(*Parent, bun.sys.Error) void = function_table.onError;
+        const onReady: ?*const fn(*Parent) void = if (@hasDecl(function_table, "onReady")) function_table.onReady else null;
+        const onClose: *const fn(*Parent) void = function_table.onClose;
 
         outgoing: StreamBuffer = .{},
         handle: PollOrFd = .{ .closed = {} },
@@ -1028,12 +1028,12 @@ pub fn WindowsBufferedWriter(comptime Parent: type, comptime function_table: any
         write_buffer: uv.uv_buf_t = uv.uv_buf_t.init(""),
         pending_payload_size: usize = 0,
 
-        const onWrite: *const fn (*Parent, amount: usize, status: WriteStatus) void = function_table.onWrite;
-        const onError: *const fn (*Parent, bun.sys.Error) void = function_table.onError;
-        const onClose: ?*const fn (*Parent) void = function_table.onClose;
-        const getBuffer: *const fn (*Parent) []const u8 = function_table.getBuffer;
-        const onWritable: ?*const fn (*Parent) void = if (@hasDecl(function_table, "onWritable")) function_table.onWritable else null;
-        const onReady: ?*const fn (*Parent) void = if (@hasDecl(function_table, "onReady")) function_table.onReady else null;
+        const onWrite: *const *const fn(*Parent, amount: usize, status: WriteStatus) void = function_table.onWrite;
+        const onError: *const *const fn(*Parent, bun.sys.Error) void = function_table.onError;
+        const onClose: ?*const *const fn(*Parent) void = function_table.onClose;
+        const getBuffer: *const *const fn(*Parent) []const u8 = function_table.getBuffer;
+        const onWritable: ?*const *const fn(*Parent) void = if (@hasDecl(function_table, "onWritable")) function_table.onWritable else null;
+        const onReady: ?*const *const fn(*Parent) void = if (@hasDecl(function_table, "onReady")) function_table.onReady else null;
 
         const WindowsWriter = @This();
 
@@ -1174,10 +1174,10 @@ pub fn WindowsBufferedWriter(comptime Parent: type, comptime function_table: any
 
 pub fn WindowsStreamingWriter(comptime Parent: type, comptime function_table: anytype) type {
         return struct {
-        const onWrite: fn (*Parent, amount: usize, status: WriteStatus) void = function_table.onWrite;
-        const onError: fn (*Parent, bun.sys.Error) void = function_table.onError;
-        const onWritable: ?fn (*Parent) void = function_table.onWritable;
-        const onClose: fn (*Parent) void = function_table.onClose;
+        const onWrite: *const fn(*Parent, amount: usize, status: WriteStatus) void = function_table.onWrite;
+        const onError: *const fn(*Parent, bun.sys.Error) void = function_table.onError;
+        const onWritable: ?*const fn(*Parent) void = function_table.onWritable;
+        const onClose: *const fn(*Parent) void = function_table.onClose;
 
         source: ?Source = null,
         owns_fd: bool = true,

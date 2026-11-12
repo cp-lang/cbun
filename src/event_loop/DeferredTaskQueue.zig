@@ -4,24 +4,24 @@ const string = []const u8;
 
 pub const bun = @import("bun");
 pub const DeferredTaskQueue = struct {
-    map: std.AutoArrayHashMapUnmanaged(?*anyopaque,DeferredRepeatingTask) = .{},
+    map: std.AutoArrayHashMapUnmanaged(RawContext,DeferredRepeatingTask) = .{},
     
 pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
 
-pub fn init(self: *DeferredTaskQueue, map: std.AutoArrayHashMapUnmanaged(?*anyopaque,DeferredRepeatingTask)) void {
+pub fn init(self: *DeferredTaskQueue, map: std.AutoArrayHashMapUnmanaged(RawContext,DeferredRepeatingTask)) void {
         var __map_moved = false; _ = &__map_moved;
         defer if (!__map_moved) { const __T = @TypeOf(map); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = map.release() catch {}; } else { map.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = map; _drop_val.release(); } };
             self.map = map;
     }
 
-pub fn postTask(self: *DeferredTaskQueue, ctx: ?*anyopaque, task: DeferredRepeatingTask) bool {
+pub fn postTask(self: *DeferredTaskQueue, ctx: RawContext, task: DeferredRepeatingTask) bool {
             const existing = bun.handleOom(self.map.getOrPutValue(bun.default_allocator, ctx, task));
             var __existing_moved = false; _ = &__existing_moved;
             defer if (!__existing_moved) { const __T = @TypeOf(existing); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = existing.release() catch {}; } else { existing.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = existing; _drop_val.release(); } };
             return existing.found_existing;
     }
 
-pub fn unregisterTask(self: *DeferredTaskQueue, ctx: ?*anyopaque) bool {
+pub fn unregisterTask(self: *DeferredTaskQueue, ctx: RawContext) bool {
             return self.map.swapRemove(ctx);
     }
 
@@ -54,6 +54,8 @@ pub fn release(self: *DeferredTaskQueue) void {
 pub fn deinit(self: *DeferredTaskQueue) void {
             _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
     }
-    pub const DeferredRepeatingTask = *const fn (*anyopaque) bool;
+    pub const DeferredRepeatingTask = *const fn (TaskContext) bool;
 };
 
+pub const RawContext = ?*anyopaque;
+pub const TaskContext = *anyopaque;

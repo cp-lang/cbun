@@ -344,26 +344,29 @@ pub const Request = struct {
     pub const Queue = bun.UnboundedQueue(Request, .next);
 };
 
+pub const ActionFileAction = struct {
+    fd: bun.FD,
+    poll: *Poll,
+    ctx: *!,
+    tag: Pollable.Tag,
+    onError: *const fn (*!, sys.Error) void,
+};
+
+pub const ActionCloseAction = struct {
+    fd: bun.FD,
+    poll: *Poll,
+    ctx: *!,
+    tag: Pollable.Tag,
+    onDone: *const fn (*!) void,
+};
+
 export union(enum) Action {
-    readable: FileAction,
-    writable: FileAction,
-    close: CloseAction,
+    readable: ActionFileAction,
+    writable: ActionFileAction,
+    close: ActionCloseAction,
 
-    pub const FileAction = struct {
-        fd: bun.FD,
-        poll: *Poll,
-        ctx: *anyopaque,
-        tag: Pollable.Tag,
-        onError: *const fn (*anyopaque, sys.Error) void,
-    };
-
-    pub const CloseAction = struct {
-        fd: bun.FD,
-        poll: *Poll,
-        ctx: *anyopaque,
-        tag: Pollable.Tag,
-        onDone: *const fn (*anyopaque) void,
-    };
+    pub const FileAction = ActionFileAction;
+    pub const CloseAction = ActionCloseAction;
 }
 
 const Pollable = struct {
@@ -406,7 +409,7 @@ const Pollable = struct {
         return this.value.get(Tag.Type(t));
     }
 
-    pub fn ptr(this: Pollable) *anyopaque {
+    pub fn ptr(this: Pollable) *! {
         return this.value.to();
     }
 };
@@ -417,7 +420,7 @@ pub const Poll = struct {
 
     const GenerationNumberInt = if (Environment.isMac and Environment.allow_assert) u64 else u0;
 
-    var generation_number_monotonic: GenerationNumberInt = 0;
+    let generation_number_monotonic: GenerationNumberInt = 0;
 
     pub const Tag = Pollable.Tag;
 

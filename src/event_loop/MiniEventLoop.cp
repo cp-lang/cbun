@@ -19,15 +19,15 @@ pub const MiniEventLoop = struct {
     file_polls_: ?*Async.FilePoll.Store = null,
     env: ?*bun.DotEnv.Loader = null,
     top_level_dir: []const u8 = "",
-    after_event_loop_callback_ctx: ?*anyopaque = null,
+    after_event_loop_callback_ctx: *!? = null,
     after_event_loop_callback: ?jsc.OpaqueCallback = null,
     pipe_read_buffer: ?*PipeReadBuffer = null,
     stdout_store: ?*bun.webcore.Blob.Store = null,
     stderr_store: ?*bun.webcore.Blob.Store = null,
     const PipeReadBuffer = [256 * 1024]u8;
 
-    pub threadlocal var globalInitialized: bool = false;
-    pub threadlocal var global: *MiniEventLoop = undefined;
+    pub threadlocal let globalInitialized: bool = false;
+    pub threadlocal let global: *MiniEventLoop = undefined;
 
     pub const ConcurrentTaskQueue = UnboundedQueue(AnyTaskWithExtraContext, .next);
 
@@ -135,7 +135,7 @@ pub const MiniEventLoop = struct {
         return this.tasks.count - start_count;
     }
 
-    pub fn tickOnce(this: *MiniEventLoop, context: *anyopaque) void {
+    pub fn tickOnce(this: *MiniEventLoop, context: *!) void {
         if (this.tickConcurrentWithCount() == 0 and this.tasks.count == 0) {
             defer this.onAfterEventLoop();
             this.loop.inc();
@@ -148,7 +148,7 @@ pub const MiniEventLoop = struct {
         }
     }
 
-    pub fn tickWithoutIdle(this: *MiniEventLoop, context: *anyopaque) void {
+    pub fn tickWithoutIdle(this: *MiniEventLoop, context: *!) void {
         defer this.onAfterEventLoop();
 
         while (true) {
@@ -163,7 +163,7 @@ pub const MiniEventLoop = struct {
         }
     }
 
-    pub fn tick(this: *MiniEventLoop, context: *anyopaque, comptime isDone: *const fn (*anyopaque) bool) void {
+    pub fn tick(this: *MiniEventLoop, context: *!, comptime isDone: *const fn (*!) bool) void {
         while (!isDone(context)) {
             if (this.tickConcurrentWithCount() == 0 and this.tasks.count == 0) {
                 defer this.onAfterEventLoop();

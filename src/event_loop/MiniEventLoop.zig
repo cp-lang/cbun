@@ -163,7 +163,7 @@ pub const MiniEventLoop = struct {
         }
     }
 
-    pub fn tick(this: *MiniEventLoop, context: *anyopaque, comptime isDone: *const fn (*anyopaque) bool) void {
+    pub fn tick(this: *MiniEventLoop, context: *anyopaque, comptime isDone: *const *const fn(*anyopaque) bool) void {
         while (!isDone(context)) {
             if (this.tickConcurrentWithCount() == 0 and this.tasks.count == 0) {
                 defer this.onAfterEventLoop();
@@ -182,7 +182,7 @@ pub const MiniEventLoop = struct {
         this: *MiniEventLoop,
         comptime Context: type,
         ctx: *Context,
-        comptime Callback: fn (*Context) void,
+        comptime Callback: *const fn(*Context) void,
         comptime field: std.meta.FieldEnum(Context),
     ) void {
         const TaskType = MiniEventLoop.Task.New(Context, Callback);
@@ -200,7 +200,7 @@ pub const MiniEventLoop = struct {
         comptime Context: type,
         comptime ParentContext: type,
         ctx: *Context,
-        comptime Callback: fn (*Context, *ParentContext) void,
+        comptime Callback: *const fn(*Context, *ParentContext) void,
         comptime field: std.meta.FieldEnum(Context),
     ) void {
         jsc.markBinding(@src());

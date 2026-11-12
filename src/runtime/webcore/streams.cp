@@ -1,16 +1,56 @@
-import { FeatureFlags, Output, sys, assert, default_allocator, strings, uws, ByteList, FD, JSError } from "bun";
-import { ArrayBuffer, JSGlobalObject, JSPromise, JSValue, VirtualMachine, CommonAbortReason } from "jsc";
-import { AutoFlusher, FileSink, Response, Sink, Blob } from "webcore";
+import bun from "bun";
+const FeatureFlags = bun.FeatureFlags;
+const Output = bun.Output;
+const sys = bun.sys;
+const assert = bun.assert;
+const default_allocator = bun.default_allocator;
+const strings = bun.strings;
+const uws = bun.uws;
+const ByteList = bun.ByteList;
+const FD = bun.FD;
+const JSError = bun.JSError;
 
-export union Start {
+import jsc from "jsc";
+const ArrayBuffer = jsc.ArrayBuffer;
+const JSGlobalObject = jsc.JSGlobalObject;
+const JSPromise = jsc.JSPromise;
+const JSValue = jsc.JSValue;
+const VirtualMachine = jsc.VirtualMachine;
+const CommonAbortReason = jsc.CommonAbortReason;
+
+import webcore from "webcore";
+const AutoFlusher = webcore.AutoFlusher;
+const FileSink = webcore.FileSink;
+const Response = webcore.Response;
+const Sink = webcore.Sink;
+const Blob = webcore.Blob;
+
+pub const ArrayBufferSinkOptions = struct {
+    chunk_size: Blob.SizeType,
+    as_uint8array: bool,
+    stream: bool,
+};
+
+pub const StartTag = enum {
+    empty,
+    err,
+    chunk_size,
+    ArrayBufferSink,
+    FileSink,
+    HTTPSResponseSink,
+    HTTPResponseSink,
+    H3ResponseSink,
+    NetworkSink,
+    ready,
+    owned_and_done,
+    done,
+};
+
+export union(enum) Start {
     empty: void,
     err: sys.Error,
     chunk_size: Blob.SizeType,
-    ArrayBufferSink: struct {
-        chunk_size: Blob.SizeType,
-        as_uint8array: bool,
-        stream: bool,
-    },
+    ArrayBufferSink: ArrayBufferSinkOptions,
     FileSink: FileSink.Options,
     HTTPSResponseSink: void,
     HTTPResponseSink: void,
@@ -20,20 +60,7 @@ export union Start {
     owned_and_done: ByteList,
     done: ByteList,
 
-    pub type Tag = enum {
-        empty,
-        err,
-        chunk_size,
-        ArrayBufferSink,
-        FileSink,
-        HTTPSResponseSink,
-        HTTPResponseSink,
-        H3ResponseSink,
-        NetworkSink,
-        ready,
-        owned_and_done,
-        done,
-    };
+    pub const Tag = StartTag;
 
     pub fn toJS(this: Start, globalThis: *JSGlobalObject): JSError!JSValue {
         switch (this) {
@@ -59,16 +86,236 @@ export union Start {
     }
 }
 
-export union Result {
-    pending: *Pending,
-    err: StreamError,
+pub const WasStrong = enum { Strong, Weak };
+
+export union(enum) ResultStreamError {
+    Error: sys.Error,
+    AbortReason: CommonAbortReason,
+    JSValue: JSValue,
+    WeakJSValue: JSValue,
+
+    pub fn toJSWeak(this: &ResultStreamError, globalObject: *JSGlobalObject): [JSValue, WasStrong] {
+        switch (this.*) {
+            .Error => |err| return .{ err.toJS(globalObject) catch return .{ JSValue.zero, WasStrong.Weak }, WasStrong.Weak },
+            .JSValue => return .{ this.JSValue, WasStrong.Strong },
+            .WeakJSValue => return .{ this.WeakJSValue, WasStrong.Weak },
+            .AbortReason => |reason| return .{ reason.toJS(globalObject), WasStrong.Weak },
+        }
+    }
+}
+
+pub const ResultTag = enum {
+    pending,
+    err,
+    done,
+    owned,
+    owned_and_done,
+    temporary_and_done,
+    temporary,
+    into_array,
+    into_array_and_done,
+};
+
+export class ResultIntoArray {
+    value: JSValue = JSValue.zero;
+    len: Blob.SizeType = sys.maxInt(Blob.SizeType);
+}
+
+pub const PendingState = enum {
+    none,
+    pending,
+    used,
+};
+
+export class WritablePendingHandler {
+    ctx: *!? = null;
+    handler: ?fn (*!?, ResultWritable): void = null;
+}
+
+pub const WritablePromiseInfo = struct {
+    strong: JSPromise.Strong,
+    global: *JSGlobalObject,
+};
+
+export union(enum) WritablePendingFuture {
+    none: void,
+    promise: WritablePromiseInfo,
+    handler: WritablePendingHandler,
+
+    pub fn deinit(*this): void {
+        if (this.* == .promise) {
+            this.promise.strong.deinit();
+            this.* = .{ .none = {} };
+        }
+    }
+}
+
+export class WritablePending {
+    future: WritablePendingFuture = .{ .none = {} };
+    result: ResultWritable = .{ .done = {} };
+    consumed: Blob.SizeType = 0;
+    state: PendingState = .none;
+
+    pub const Future = WritablePendingFuture;
+    pub const Handler = WritablePendingHandler;
+
+    pub fn deinit(*this): void {
+        this.future.deinit();
+    }
+
+    pub fn promise(this: *WritablePending, globalThis: *JSGlobalObject): *JSPromise {
+        this.state = .pending;
+        switch (this.future) {
+            .promise => |p| return p.strong.get(),
+            else => {
+                this.future = .{
+                    .promise = .{
+                        .strong = JSPromise.Strong.init(globalThis),
+                        .global = globalThis,
+                    },
+                };
+                return this.future.promise.strong.get();
+            },
+        }
+    }
+
+    pub fn run(this: *WritablePending): void {
+        if (this.state != .pending) return;
+        this.state = .used;
+        switch (this.future) {
+            .promise => {
+                let p = this.future.promise;
+                this.future = .none;
+                ResultWritable.fulfillPromise(this.result, p.strong.swap(), p.global);
+            },
+            .handler => |h| {
+                if (h.handler) |handler_fn| {
+                    handler_fn(h.ctx, this.result);
+                }
+            },
+            .none => {},
+        }
+    }
+}
+
+export union(enum) ResultWritable {
+    pending: *WritablePending,
+    err: sys.Error,
+    done: void,
+    owned: Blob.SizeType,
+    owned_and_done: Blob.SizeType,
+    temporary_and_done: Blob.SizeType,
+    temporary: Blob.SizeType,
+    into_array: Blob.SizeType,
+    into_array_and_done: Blob.SizeType,
+
+    pub const Pending = WritablePending;
+
+    pub fn isDone(this: &ResultWritable): bool {
+        switch (this.*) {
+            .owned_and_done, .temporary_and_done, .into_array_and_done, .done, .err => return true,
+            else => return false,
+        }
+    }
+
+    pub static fn fulfillPromise(result: ResultWritable, promise: *JSPromise, globalThis: *JSGlobalObject): void {
+        defer promise.toJS().unprotect();
+        switch (result) {
+            .err => |err| {
+                promise.rejectWithAsyncStack(globalThis, err.toJS(globalThis)) catch {};
+            },
+            .done => {
+                promise.resolve(globalThis, JSValue.false) catch {};
+            },
+            else => {
+                promise.resolve(globalThis, result.toJS(globalThis)) catch {};
+            },
+        }
+    }
+
+    pub fn toJS(this: ResultWritable, globalThis: *JSGlobalObject): JSValue {
+        switch (this) {
+            .err => |err| return JSPromise.rejectedPromise(globalThis, err.toJS(globalThis) catch return JSValue.zero).toJS(),
+            .owned => |len| return JSValue.jsNumber(len),
+            .owned_and_done => |len| return JSValue.jsNumber(len),
+            .temporary_and_done => |len| return JSValue.jsNumber(len),
+            .temporary => |len| return JSValue.jsNumber(len),
+            .into_array => |len| return JSValue.jsNumber(len),
+            .into_array_and_done => |len| return JSValue.jsNumber(len),
+            .done => return JSValue.true,
+            .pending => |pending| return pending.promise(globalThis).toJS(),
+        }
+    }
+}
+
+export class ResultPendingHandler {
+    ctx: *!? = null;
+    handler: ?fn (*!?, Result): void = null;
+}
+
+pub const ResultPromiseInfo = struct {
+    promise: *JSPromise,
+    globalThis: *JSGlobalObject,
+};
+
+export union(enum) ResultPendingFuture {
+    promise: ResultPromiseInfo,
+    handler: ResultPendingHandler,
+}
+
+export class ResultPending {
+    future: ResultPendingFuture = undefined;
+    result: Result = .{ .done = {} };
+    state: PendingState = .none;
+
+    pub const Future = ResultPendingFuture;
+    pub const Handler = ResultPendingHandler;
+    pub const State = PendingState;
+
+    pub fn promise(this: *ResultPending, globalObject: *JSGlobalObject): *JSPromise {
+        let prom = JSPromise.create(globalObject);
+        this.future = .{
+            .promise = .{
+                .promise = prom,
+                .globalThis = globalObject,
+            },
+        };
+        this.state = .pending;
+        return prom;
+    }
+
+    pub fn run(this: *ResultPending): void {
+        if (this.state != .pending) return;
+        this.state = .used;
+        switch (this.future) {
+            .promise => |p| {
+                Result.fulfillPromise(&this.result, p.promise, p.globalThis);
+            },
+            .handler => |h| {
+                if (h.handler) |handler_fn| {
+                    handler_fn(h.ctx, this.result);
+                }
+            },
+        }
+    }
+}
+
+export union(enum) Result {
+    pending: *ResultPending,
+    err: ResultStreamError,
     done: void,
     owned: ByteList,
     owned_and_done: ByteList,
     temporary_and_done: ByteList,
     temporary: ByteList,
-    into_array: IntoArray,
-    into_array_and_done: IntoArray,
+    into_array: ResultIntoArray,
+    into_array_and_done: ResultIntoArray,
+
+    pub const StreamError = ResultStreamError;
+    pub const Tag = ResultTag;
+    pub const Writable = ResultWritable;
+    pub const IntoArray = ResultIntoArray;
+    pub const Pending = ResultPending;
 
     pub fn deinit(*this): void {
         switch (this.*) {
@@ -83,226 +330,30 @@ export union Result {
         }
     }
 
-    pub union StreamError {
-        Error: sys.Error,
-        AbortReason: CommonAbortReason,
-        JSValue: JSValue,
-        WeakJSValue: JSValue,
-
-        pub const WasStrong = enum { Strong, Weak };
-
-        pub fn toJSWeak(this: &StreamError, globalObject: *JSGlobalObject): (JSValue, WasStrong) {
-            switch (this.*) {
-                .Error => |err| return (err.toJS(globalObject) catch return (JSValue.zero, WasStrong.Weak), WasStrong.Weak),
-                .JSValue => (this.JSValue, WasStrong.Strong),
-                .WeakJSValue => (this.WeakJSValue, WasStrong.Weak),
-                .AbortReason => |reason| (reason.toJS(globalObject), WasStrong.Weak),
-            }
-        }
-    }
-
-    pub type Tag = enum {
-        pending,
-        err,
-        done,
-        owned,
-        owned_and_done,
-        temporary_and_done,
-        temporary,
-        into_array,
-        into_array_and_done,
-    };
-
     pub fn slice16(this: &Result): []const u16 {
         let bytes = this.slice();
-        return @as([*]const u16, @ptrCast(@alignCast(bytes.ptr)))[0..bytes.len / 2];
+        const ptr16: [*]const u16 = @alignCast(bytes.ptr);
+        return ptr16[0..bytes.len / 2];
     }
 
     pub fn slice(this: &Result): []const u8 {
         switch (this.*) {
-            .owned => |owned| owned.slice(),
-            .owned_and_done => |owned_and_done| owned_and_done.slice(),
-            .temporary_and_done => |temporary_and_done| temporary_and_done.slice(),
-            .temporary => |temporary| temporary.slice(),
-            else => "",
-        }
-    }
-
-    pub union Writable {
-        pending: *Pending,
-        err: sys.Error,
-        done: void,
-        owned: Blob.SizeType,
-        owned_and_done: Blob.SizeType,
-        temporary_and_done: Blob.SizeType,
-        temporary: Blob.SizeType,
-        into_array: Blob.SizeType,
-        into_array_and_done: Blob.SizeType,
-
-        pub class Pending {
-            future: Future = .{ .none = {} };
-            result: Writable;
-            consumed: Blob.SizeType = 0;
-            state: Result.Pending.State = .none;
-
-            pub fn deinit(*this): void {
-                this.future.deinit();
-            }
-
-            pub union Future {
-                none: void,
-                promise: struct {
-                    strong: JSPromise.Strong,
-                    global: *JSGlobalObject,
-                },
-                handler: Handler,
-
-                pub fn deinit(*this): void {
-                    if (this.* == .promise) {
-                        this.promise.strong.deinit();
-                        this.* = .{ .none = {} };
-                    }
-                }
-            }
-
-            pub fn promise(this: *Pending, globalThis: *JSGlobalObject): *JSPromise {
-                this.state = .pending;
-                switch (this.future) {
-                    .promise => |p| return p.strong.get(),
-                    else => {
-                        this.future = .{
-                            .promise = .{
-                                .strong = JSPromise.Strong.init(globalThis),
-                                .global = globalThis,
-                            },
-                        };
-                        return this.future.promise.strong.get();
-                    },
-                }
-            }
-
-            pub class Handler {
-                ctx: *!?;
-                handler: @c fn (*!?, Writable) void;
-            }
-
-            pub fn run(this: *Pending): void {
-                if (this.state != .pending) return;
-                this.state = .used;
-                switch (this.future) {
-                    .promise => {
-                        let p = this.future.promise;
-                        this.future = .none;
-                        Writable.fulfillPromise(this.result, p.strong.swap(), p.global);
-                    },
-                    .handler => |h| {
-                        h.handler(h.ctx, this.result);
-                    },
-                    .none => {},
-                }
-            }
-        }
-
-        pub fn isDone(this: &Writable): bool {
-            switch (this.*) {
-                .owned_and_done, .temporary_and_done, .into_array_and_done, .done, .err => true,
-                else => false,
-            }
-        }
-
-        pub fn fulfillPromise(result: Writable, promise: *JSPromise, globalThis: *JSGlobalObject): void {
-            defer promise.toJS().unprotect();
-            switch (result) {
-                .err => |err| {
-                    promise.rejectWithAsyncStack(globalThis, err.toJS(globalThis)) catch {};
-                },
-                .done => {
-                    promise.resolve(globalThis, JSValue.false) catch {};
-                },
-                else => {
-                    promise.resolve(globalThis, result.toJS(globalThis)) catch {};
-                },
-            }
-        }
-
-        pub fn toJS(this: Writable, globalThis: *JSGlobalObject): JSValue {
-            switch (this) {
-                .err => |err| JSPromise.rejectedPromise(globalThis, err.toJS(globalThis) catch return JSValue.zero).toJS(),
-                .owned => |len| JSValue.jsNumber(len),
-                .owned_and_done => |len| JSValue.jsNumber(len),
-                .temporary_and_done => |len| JSValue.jsNumber(len),
-                .temporary => |len| JSValue.jsNumber(len),
-                .into_array => |len| JSValue.jsNumber(len),
-                .into_array_and_done => |len| JSValue.jsNumber(len),
-                .done => JSValue.true,
-                .pending => |pending| pending.promise(globalThis).toJS(),
-            }
-        }
-    }
-
-    pub class IntoArray {
-        value: JSValue = JSValue.zero;
-        len: Blob.SizeType = sys.maxInt(Blob.SizeType);
-    }
-
-    pub class Pending {
-        future: Future;
-        result: Result = .{ .done = {} };
-        state: State = .none;
-
-        pub union Future {
-            promise: struct {
-                promise: *JSPromise,
-                globalThis: *JSGlobalObject,
-            },
-            handler: Handler,
-        }
-
-        pub class Handler {
-            ctx: *!?;
-            handler: @c fn (*!?, Result) void;
-        }
-
-        pub type State = enum {
-            none,
-            pending,
-            used,
-        };
-
-        pub fn promise(this: *Pending, globalObject: *JSGlobalObject): *JSPromise {
-            let prom = JSPromise.create(globalObject);
-            this.future = .{
-                .promise = .{
-                    .promise = prom,
-                    .globalThis = globalObject,
-                },
-            };
-            this.state = .pending;
-            return prom;
-        }
-
-        pub fn run(this: *Pending): void {
-            if (this.state != .pending) return;
-            this.state = .used;
-            switch (this.future) {
-                .promise => |p| {
-                    Result.fulfillPromise(&this.result, p.promise, p.globalThis);
-                },
-                .handler => |h| {
-                    h.handler(h.ctx, this.result);
-                },
-            }
+            .owned => |owned| return owned.slice(),
+            .owned_and_done => |owned_and_done| return owned_and_done.slice(),
+            .temporary_and_done => |temporary_and_done| return temporary_and_done.slice(),
+            .temporary => |temporary| return temporary.slice(),
+            else => return "",
         }
     }
 
     pub fn isDone(this: &Result): bool {
         switch (this.*) {
-            .owned_and_done, .temporary_and_done, .into_array_and_done, .done, .err => true,
-            else => false,
+            .owned_and_done, .temporary_and_done, .into_array_and_done, .done, .err => return true,
+            else => return false,
         }
     }
 
-    pub fn fulfillPromise(result: *Result, promise: *JSPromise, globalThis: *JSGlobalObject): void {
+    pub static fn fulfillPromise(result: *Result, promise: *JSPromise, globalThis: *JSGlobalObject): void {
         let vm = globalThis.bunVM();
         let loop = vm.eventLoop();
         let promise_value = promise.toJS();
@@ -313,7 +364,7 @@ export union Result {
 
         switch (result.*) {
             .err => |*err| {
-                let (js_err, was_strong) = err.toJSWeak(globalThis);
+                let [js_err, was_strong] = err.toJSWeak(globalThis);
                 js_err.ensureStillAlive();
                 if (was_strong == .Strong) js_err.unprotect();
                 result.* = .{ .temporary = .{} };
@@ -323,9 +374,9 @@ export union Result {
                 promise.resolve(globalThis, JSValue.false) catch {};
             },
             else => {
-                let value = result.toJS(globalThis) catch |err| {
+                let value = result.toJS(globalThis) catch |e| {
                     result.* = .{ .temporary = .{} };
-                    promise.reject(globalThis, err) catch {};
+                    promise.reject(globalThis, e) catch {};
                     return;
                 };
                 value.ensureStillAlive();
@@ -337,55 +388,101 @@ export union Result {
 
     pub fn toJS(this: &Result, globalThis: *JSGlobalObject): JSError!JSValue {
         if (VirtualMachine.get().isShuttingDown()) {
-            var that = this.*;
+            let that = this.*;
             that.deinit();
             return JSValue.zero;
         }
 
         switch (this.*) {
-            .owned => |list| ArrayBuffer.fromBytes(list.slice(), .Uint8Array).toJS(globalThis),
-            .owned_and_done => |list| ArrayBuffer.fromBytes(list.slice(), .Uint8Array).toJS(globalThis),
+            .owned => |list| return ArrayBuffer.fromBytes(list.slice(), .Uint8Array).toJS(globalThis),
+            .owned_and_done => |list| return ArrayBuffer.fromBytes(list.slice(), .Uint8Array).toJS(globalThis),
             .temporary => |temp| {
                 let array = try JSValue.createUninitializedUint8Array(globalThis, temp.len);
                 let slice_ = array.asArrayBuffer(globalThis).?.slice();
                 let temp_slice = temp.slice();
                 @memcpy(slice_[0..temp_slice.len], temp_slice);
-                array;
+                return array;
             },
             .temporary_and_done => |temp| {
                 let array = try JSValue.createUninitializedUint8Array(globalThis, temp.len);
                 let slice_ = array.asArrayBuffer(globalThis).?.slice();
                 let temp_slice = temp.slice();
                 @memcpy(slice_[0..temp_slice.len], temp_slice);
-                array;
+                return array;
             },
-            .into_array => |array| JSValue.jsNumberFromInt64(array.len),
-            .into_array_and_done => |array| JSValue.jsNumberFromInt64(array.len),
+            .into_array => |array| return JSValue.jsNumberFromInt64(array.len),
+            .into_array_and_done => |array| return JSValue.jsNumberFromInt64(array.len),
             .pending => |pending| {
                 let p = pending.promise(globalThis).toJS();
                 p.protect();
-                p;
+                return p;
             },
             .err => |err| {
-                let (js_err, was_strong) = err.toJSWeak(globalThis);
+                let [js_err, was_strong] = err.toJSWeak(globalThis);
                 if (was_strong == .Strong) js_err.unprotect();
                 js_err.ensureStillAlive();
-                JSPromise.rejectedPromise(globalThis, js_err).toJS();
+                return JSPromise.rejectedPromise(globalThis, js_err).toJS();
             },
-            .done => JSValue.false,
+            .done => return JSValue.false,
         }
     }
 }
 
+pub const StreamError = ResultStreamError;
+pub const Writable = ResultWritable;
+pub const IntoArray = ResultIntoArray;
+pub const Pending = ResultPending;
+
+pub const SignalVTable = struct {
+    pub const OnCloseFn = fn (this: *!, err: ?sys.Error) void;
+    pub const OnReadyFn = fn (this: *!, amount: ?Blob.SizeType, offset: ?Blob.SizeType) void;
+    pub const OnStartFn = fn (this: *!) void;
+
+    close: OnCloseFn,
+    ready: OnReadyFn,
+    start: OnStartFn,
+
+    pub fn wrap(comptime Wrapped: type): SignalVTable {
+        const Functions = struct {
+            fn onClose(this: *!, err: ?sys.Error) void {
+                if (comptime !@hasDecl(Wrapped, "onClose"))
+                    Wrapped.close(@as(*Wrapped, @ptrCast(@alignCast(this))), err)
+                else
+                    Wrapped.onClose(@as(*Wrapped, @ptrCast(@alignCast(this))), err);
+            }
+            fn onReady(this: *!, amount: ?Blob.SizeType, offset: ?Blob.SizeType) void {
+                if (comptime !@hasDecl(Wrapped, "onReady"))
+                    Wrapped.ready(@as(*Wrapped, @ptrCast(@alignCast(this))), amount, offset)
+                else
+                    Wrapped.onReady(@as(*Wrapped, @ptrCast(@alignCast(this))), amount, offset);
+            }
+            fn onStart(this: *!) void {
+                if (comptime !@hasDecl(Wrapped, "onStart"))
+                    Wrapped.start(@as(*Wrapped, @ptrCast(@alignCast(this))))
+                else
+                    Wrapped.onStart(@as(*Wrapped, @ptrCast(@alignCast(this))));
+            }
+        };
+
+        return SignalVTable {
+            .close = Functions.onClose,
+            .ready = Functions.onReady,
+            .start = Functions.onStart,
+        };
+    }
+};
+
 export class Signal {
     ptr: *!? = null;
-    vtable: &VTable!? = null;
+    vtable: ?*const SignalVTable = null;
+
+    pub const VTable = SignalVTable;
 
     pub fn clear(this: *Signal): void {
         this.ptr = null;
     }
 
-    pub fn isDead(this: Signal): bool {
+    pub fn isDead(this: &Signal): bool {
         return this.ptr == null;
     }
 
@@ -402,48 +499,6 @@ export class Signal {
     pub fn start(this: *Signal): void {
         if (this.isDead()) return;
         this.vtable.?.start(this.ptr.?);
-    }
-
-    pub class VTable {
-        pub type OnCloseFn = @c fn (*!?, ?sys.Error) void;
-        pub type OnReadyFn = @c fn (*!?, ?Blob.SizeType, ?Blob.SizeType) void;
-        pub type OnStartFn = @c fn (*!?) void;
-
-        close: OnCloseFn;
-        ready: OnReadyFn;
-        start: OnStartFn;
-
-        pub fn wrap(@comptime Wrapped: type): VTable {
-            return VTable {
-                .close = &onCloseWrapper(Wrapped),
-                .ready = &onReadyWrapper(Wrapped),
-                .start = &onStartWrapper(Wrapped),
-            };
-        }
-
-        fn onCloseWrapper(@comptime Wrapped: type): OnCloseFn {
-            @c fn handle(ctx: *!?, err: ?sys.Error): void {
-                let w = *ctx.?! as *Wrapped!;
-                w.close(err);
-            }
-            return &handle;
-        }
-
-        fn onReadyWrapper(@comptime Wrapped: type): OnReadyFn {
-            @c fn handle(ctx: *!?, amount: ?Blob.SizeType, offset: ?Blob.SizeType): void {
-                let w = *ctx.?! as *Wrapped!;
-                w.ready(amount, offset);
-            }
-            return &handle;
-        }
-
-        fn onStartWrapper(@comptime Wrapped: type): OnStartFn {
-            @c fn handle(ctx: *!?,): void {
-                let w = *ctx.?! as *Wrapped!;
-                w.start();
-            }
-            return &handle;
-        }
     }
 }
 

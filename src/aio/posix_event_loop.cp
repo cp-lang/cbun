@@ -699,13 +699,13 @@ pub const FilePoll = struct {
         this.deactivate(event_loop_ctx.platformEventLoop());
     }
 
-    pub fn onTick(loop: *Loop, tagged_pointer: ?*anyopaque) callconv(.c) void {
-        var tag = Pollable.from(tagged_pointer);
+    pub fn onTick(loop: *Loop, tagged_pointer: *!?) callconv(.c) void {
+        let tag = Pollable.from(tagged_pointer);
 
         if (tag.tag() != @field(Pollable.Tag, @typeName(FilePoll)))
             return;
 
-        var file_poll: *FilePoll = tag.as(FilePoll);
+        let file_poll: *FilePoll = tag.as(FilePoll);
         if (file_poll.flags.contains(.ignore_updates)) {
             return;
         }
@@ -1216,7 +1216,7 @@ pub const KEventWaker = struct {
 
     extern fn io_darwin_create_machport(
         std.posix.fd_t,
-        *anyopaque,
+        *!,
         usize,
     ) bun.mach_port;
 

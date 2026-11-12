@@ -61,13 +61,13 @@ pub fn setParentEventLoop(self: *InternalLoopData, parent: anytype) void {
 .js => |ptr| {
 self.parent_tag = 1;
             {
-                self.parent_ptr = @as(*anyopaque, @ptrCast(@alignCast(ptr)));
+                self.parent_ptr = @as(?*anyopaque, ptr);
             }
 },
 .mini => |ptr| {
 self.parent_tag = 2;
             {
-                self.parent_ptr = @as(*anyopaque, @ptrCast(@alignCast(ptr)));
+                self.parent_ptr = @as(?*anyopaque, ptr);
             }
 },
 }

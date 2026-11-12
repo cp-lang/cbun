@@ -1,12 +1,14 @@
-import { Output, default_allocator, Environment, picohttp, S3 as s3, webcore, http, jsc, String, sys, JSError, analytics } from "bun";
+import bun from "bun";
+import { Output, default_allocator, Environment, picohttp, webcore, http, jsc, String, sys, JSError, analytics, FetchRedirect, Headers } from "bun";
 import { JSGlobalObject, JSValue, CallFrame, JSPromise, VirtualMachine, ZigString, JSType } from "jsc";
 import { FetchHeaders, Blob, Body, Request, Response } from "webcore";
 import { Method } from "../../http_types/Method.zig";
-import { FetchRedirect, Headers } from "bun";
-import { URL as ZigURL } from "../../url/url.zig";
 import { DataURL } from "../../resolver/data_url.zig";
 import { FetchTasklet } from "./fetch/FetchTasklet.zig";
 import { ServerConfig } from "../server/ServerConfig.zig";
+
+const s3 = bun.S3;
+const ZigURL = bun.URL;
 
 export const fetch_error_no_args = "fetch() expects a string but received no arguments.";
 export const fetch_error_blank_url = "fetch() URL must not be a blank string.";
@@ -15,18 +17,18 @@ export const fetch_error_proxy_unix = "fetch() cannot use a proxy with a unix so
 
 fn dataURLResponse(
     _data_url: DataURL,
-    globalThis: *JSGlobalObject,
+    *globalThis: *JSGlobalObject,
     allocator: sys.Allocator,
 ): JSValue {
-    var data_url = _data_url;
+    let data_url = _data_url;
 
     let data = data_url.decodeData(allocator) catch {
         let err = globalThis.createError("failed to fetch the data URL", .{});
         return JSPromise.dangerouslyCreateRejectedPromiseValueWithoutNotifyingVM(globalThis, err);
     };
-    var blob = Blob.init(data, allocator, globalThis);
+    let blob = Blob.init(data, allocator, globalThis);
 
-    var allocated = false;
+    let allocated = false;
     let mime_type = http.MimeType.init(data_url.mime_type, allocator, &allocated);
     blob.content_type = mime_type.value;
     if (allocated) {
@@ -57,7 +59,7 @@ fn dataURLResponse(
         return globalObject.throwNotEnoughArguments("fetch.preconnect", 1, arguments.len);
     }
 
-    var url_str = try jsc.URL.hrefFromJS(arguments[0], globalObject);
+    let url_str = try jsc.URL.hrefFromJS(arguments[0], globalObject);
     defer url_str.deref();
 
     if (globalObject.hasException()) return JSValue.zero;
@@ -101,74 +103,73 @@ export class StringOrURL {
 }
 
 @c pub fn Bun__fetch(
-    ctx: *JSGlobalObject,
+    *globalThis: *JSGlobalObject,
     callframe: *CallFrame,
 ): JSError!JSValue {
-    return fetchImpl(false, ctx, callframe);
+    return fetchImpl(false, globalThis, callframe);
 }
 
 pub fn nodeHttpClient(
-    ctx: *JSGlobalObject,
+    *globalThis: *JSGlobalObject,
     callframe: *CallFrame,
 ): JSError!JSValue {
-    return fetchImpl(true, ctx, callframe);
+    return fetchImpl(true, globalThis, callframe);
 }
 
 fn fetchImpl(
     @comptime allow_get_body: bool,
-    ctx: *JSGlobalObject,
+    *globalThis: *JSGlobalObject,
     callframe: *CallFrame,
 ): JSError!JSValue {
-    let globalThis = ctx;
     let arguments = callframe.arguments_old(2);
     analytics.Features.fetch += 1;
     let vm = VirtualMachine.get();
 
-    var upgraded_connection = false;
-    var force_http2 = false;
-    var force_http3 = false;
-    var force_http1 = false;
+    let upgraded_connection = false;
+    let force_http2 = false;
+    let force_http3 = false;
+    let force_http1 = false;
     let allocator = default_allocator;
 
     if (arguments.len == 0) {
-        let err = ctx.toTypeError(.MISSING_ARGS, fetch_error_no_args, .{});
+        let err = globalThis.toTypeError(.MISSING_ARGS, fetch_error_no_args, .{});
         return JSPromise.dangerouslyCreateRejectedPromiseValueWithoutNotifyingVM(globalThis, err);
     }
 
-    var headers: ?Headers = null;
-    var method = Method.GET;
-    var args = CallFrame.ArgumentsSlice.init(vm, arguments.slice());
+    let headers: ?Headers = null;
+    let method = Method.GET;
+    let args = CallFrame.ArgumentsSlice.init(vm, arguments.slice());
 
-    var url = ZigURL {};
+    let url = ZigURL {};
     let first_arg = args.nextEat().?;
 
-    var body: FetchTasklet.HTTPRequestBody = FetchTasklet.HTTPRequestBody.Empty;
-    var disable_timeout = false;
-    var disable_keepalive = false;
-    var disable_decompression = false;
-    var verbose: http.HTTPVerboseLevel = if (vm.log.level.atLeast(.debug)) .headers else .none;
+    let body: FetchTasklet.HTTPRequestBody = FetchTasklet.HTTPRequestBody.Empty;
+    let disable_timeout = false;
+    let disable_keepalive = false;
+    let disable_decompression = false;
+    let verbose: http.HTTPVerboseLevel = if (vm.log.level.atLeast(.debug)) .headers else .none;
     if (verbose == .none) {
         verbose = vm.getVerboseFetch();
     }
 
-    var proxy: ?ZigURL = null;
-    var redirect_type: FetchRedirect = FetchRedirect.follow;
-    var signal: ?*webcore.AbortSignal = null;
-    var hostname: ?[]u8 = null;
-    var range: ?[]u8 = null;
-    var unix_socket_path = ZigString.Slice.empty;
-    var url_proxy_buffer: []const u8 = "";
+    let proxy: ?ZigURL = null;
+    let redirect_type: FetchRedirect = FetchRedirect.follow;
+    let signal: ?*webcore.AbortSignal = null;
+    let hostname: ?[]u8 = null;
+    let range: ?[]u8 = null;
+    let unix_socket_path = ZigString.Slice.empty;
+    let url_proxy_buffer: string = "";
 
-    enum URLType {
+    const URLType = enum {
         remote,
         file,
         blob,
-    }
-    var url_type = URLType.remote;
+    };
+    let url_type = URLType.remote;
 
-    var ssl_config: ?ServerConfig.SSLConfig.SharedPtr = null;
-    var reject_unauthorized = vm.getTLSRejectUnauthorized();
-    var check_server_identity: JSValue = JSValue.zero;
+    let ssl_config: ?ServerConfig.SSLConfig.SharedPtr = null;
+    let reject_unauthorized = vm.getTLSRejectUnauthorized();
+    let check_server_identity: JSValue = JSValue.zero;
 
     defer {
         if (signal) |sig| {
@@ -198,44 +199,51 @@ fn fetchImpl(
         }
     }
 
-    let options_object: ?JSValue = if (args.nextEat()) |opts| {
-        if (opts.isObject() or opts.jsType() == .DOMWrapper) opts else null;
-    } else null;
+    let options_object: ?JSValue = null;
+    if (args.nextEat()) |opts| {
+        if (opts.isObject() or opts.jsType() == .DOMWrapper) {
+            options_object = opts;
+        }
+    }
 
-    let request: ?*Request = if (first_arg.isCell()) {
-        if (first_arg.asDirect(Request)) |r| r else null;
-    } else null;
+    let request: ?*Request = null;
+    if (first_arg.isCell()) {
+        request = first_arg.asDirect(Request);
+    }
 
     let url_str_optional = if (first_arg.as(Request) == null) try StringOrURL.fromJS(first_arg, globalThis) else null;
     if (globalThis.hasException()) return JSValue.zero;
 
     let request_init_object: ?JSValue = if (request == null and url_str_optional == null and first_arg.isObject()) first_arg else null;
 
-    var url_str = if (url_str_optional) |str| {
-        str;
+    let url_str = String.empty;
+    if (url_str_optional) |str| {
+        url_str = str;
     } else if (request) |req| {
         sys.handleOom(req.ensureURL());
-        req.url.dupeRef();
+        url_str = req.url.dupeRef();
     } else if (request_init_object) |req_init| {
         if (try req_init.fastGet(globalThis, .url)) |u| {
-            if (!u.isUndefined()) try String.fromJS(u, globalThis) else String.empty;
-        } else String.empty;
-    } else String.empty;
+            if (!u.isUndefined()) {
+                url_str = try String.fromJS(u, globalThis);
+            }
+        }
+    }
     defer url_str.deref();
 
     if (globalThis.hasException()) return JSValue.zero;
 
     if (url_str.isEmpty()) {
-        let err = ctx.toTypeError(.INVALID_URL, fetch_error_blank_url, .{});
+        let err = globalThis.toTypeError(.INVALID_URL, fetch_error_blank_url, .{});
         return JSPromise.dangerouslyCreateRejectedPromiseValueWithoutNotifyingVM(globalThis, err);
     }
 
     if (url_str.hasPrefixComptime("data:")) {
-        var url_slice = url_str.toUTF8WithoutRef(allocator);
+        let url_slice = url_str.toUTF8WithoutRef(allocator);
         defer url_slice.deinit();
 
-        var data_url = DataURL.parseWithoutCheck(url_slice.slice()) catch {
-            let err = ctx.createError("failed to fetch the data URL", .{});
+        let data_url = DataURL.parseWithoutCheck(url_slice.slice()) catch {
+            let err = globalThis.createError("failed to fetch the data URL", .{});
             return JSPromise.dangerouslyCreateRejectedPromiseValueWithoutNotifyingVM(globalThis, err);
         };
         data_url.url = url_str;
@@ -243,7 +251,7 @@ fn fetchImpl(
     }
 
     url = ZigURL.fromString(allocator, url_str) catch {
-        let err = ctx.toTypeError(.INVALID_URL, "fetch() URL is invalid", .{});
+        let err = globalThis.toTypeError(.INVALID_URL, "fetch() URL is invalid", .{});
         return JSPromise.dangerouslyCreateRejectedPromiseValueWithoutNotifyingVM(globalThis, err);
     };
 
@@ -296,7 +304,7 @@ fn fetchImpl(
     if (options_object) |opts| {
         if (try opts.fastGet(globalThis, .body)) |b| {
             if (!b.isUndefined()) {
-                body = try FetchTasklet.HTTPRequestBody.fromJS(ctx, b);
+                body = try FetchTasklet.HTTPRequestBody.fromJS(globalThis, b);
             }
         }
     } else if (request) |req| {
@@ -304,7 +312,7 @@ fn fetchImpl(
         if (bodyValue.* == .Used) {
             return globalThis.ERR(.BODY_ALREADY_USED, "Request body already used", .{}).throw();
         }
-        body = FetchTasklet.HTTPRequestBody { .AnyBlob = bodyValue.useAsAnyBlob() };
+        body = .{ .AnyBlob = bodyValue.useAsAnyBlob() };
     }
 
     // headers
@@ -329,7 +337,7 @@ fn fetchImpl(
         return JSPromise.dangerouslyCreateRejectedPromiseValueWithoutNotifyingVM(globalThis, err);
     }
 
-    var promise = JSPromise.Strong.init(globalThis);
+    let promise = JSPromise.Strong.init(globalThis);
     let promise_val = promise.value();
 
     _ = FetchTasklet.queue(
@@ -377,7 +385,7 @@ fn fetchImpl(
 }
 
 fn setHeaders(headers: *?Headers, new_headers: []const picohttp.Header, allocator: sys.Allocator): void {
-    var old = headers.*;
+    let old = headers.*;
     headers.* = sys.handleOom(Headers.fromPicoHttpHeaders(new_headers, allocator));
     if (old) |*h| {
         h.deinit();

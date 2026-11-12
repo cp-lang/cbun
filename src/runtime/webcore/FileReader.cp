@@ -40,27 +40,31 @@ export class FileReader {
         use_buffered: usize,
     };
 
+    pub const OpenedFileBlob = struct {
+        fd: bun.FD,
+        pollable: bool = false,
+        nonblocking: bool = true,
+        file_type: bun.io.FileType = .file,
+    };
+
+    @c extern fn open_as_nonblocking_tty(fd: i32, flags: i32): i32;
+
     pub const Lazy = union(enum) {
         none: void,
         blob: *Blob.Store,
 
-        pub const OpenedFileBlob = struct {
-            fd: bun.FD,
-            pollable: bool = false,
-            nonblocking: bool = true,
-            file_type: bun.io.FileType = .file,
-        };
+        pub const OpenedFileBlob = FileReader.OpenedFileBlob;
+        pub const openFileBlob = FileReader.openFileBlob;
+    };
 
-        pub extern "c" fn open_as_nonblocking_tty(i32, i32): i32;
-
-        pub fn openFileBlob(file: *Blob.Store.File): bun.sys.Maybe(OpenedFileBlob) {
-            var this = OpenedFileBlob{ .fd = bun.invalid_fd };
-            var file_buf: bun.PathBuffer = undefined;
-            var is_nonblocking = false;
+    pub static fn openFileBlob(file: *Blob.Store.File): bun.sys.Maybe(OpenedFileBlob) {
+        let opened = OpenedFileBlob{ .fd = bun.invalid_fd };
+        let file_buf: bun.PathBuffer = undefined;
+        let is_nonblocking = false;
 
             const fd: bun.FD = if (file.pathlike == .fd)
                 if (file.pathlike.fd.stdioTag() != null) brk: {
-                    if (@comptime(Environment.isPosix)) {
+                    if (Environment.isPosix) {
                         const rc = open_as_nonblocking_tty(file.pathlike.fd.native(), bun.O.RDONLY);
                         if (rc > -1) {
                             is_nonblocking = true;
@@ -77,23 +81,23 @@ export class FileReader {
                     }
 
                     const fd: bun.FD = duped.result;
-                    if (@comptime(Environment.isPosix)) {
+                    if (Environment.isPosix) {
                         if (fd.stdioTag() == null) {
-                            is_nonblocking = match (fd.getFcntlFlags()) {
+                            is_nonblocking = switch (fd.getFcntlFlags()) {
                                 .result => |flags| (flags & bun.O.NONBLOCK) != 0,
                                 .err => false,
                             };
                         }
                     }
 
-                    break :brk match (fd.makeLibUVOwnedForSyscall(.dup, .close_on_fail)) {
+                    break :brk switch (fd.makeLibUVOwnedForSyscall(.dup, .close_on_fail)) {
                         .result => |owned_fd| owned_fd,
                         .err => |err| {
                             return .{ .err = err };
                         },
                     };
                 }
-            else match (bun.sys.open(file.pathlike.path.sliceZ(&file_buf), bun.O.RDONLY | bun.O.NONBLOCK | bun.O.CLOEXEC, 0)) {
+            else switch (bun.sys.open(file.pathlike.path.sliceZ(&file_buf), bun.O.RDONLY | bun.O.NONBLOCK | bun.O.CLOEXEC, 0)) {
                 .result => |fd| brk: {
                     if (Environment.isPosix) is_nonblocking = true;
                     break :brk fd;
@@ -104,7 +108,7 @@ export class FileReader {
                 },
             };
 
-            if (@comptime(Environment.isPosix)) {
+            if (Environment.isPosix) {
                 if ((file.is_atty orelse false) or
                     (fd.stdioTag() != null and std.posix.isatty(fd.cast())) or
                     (file.pathlike == .fd and
@@ -114,7 +118,7 @@ export class FileReader {
                     file.is_atty = true;
                 }
 
-                const stat: bun.Stat = match (bun.sys.fstat(fd)) {
+                const stat: bun.Stat = switch (bun.sys.fstat(fd)) {
                     .result => |result| result,
                     .err => |err| {
                         fd.close();
@@ -131,38 +135,37 @@ export class FileReader {
                     is_nonblocking = false;
                 }
 
-                this.pollable = bun.sys.isPollable(stat.mode) or is_nonblocking or (file.is_atty orelse false);
-                this.file_type = if (bun.S.ISFIFO(stat.mode))
+                opened.pollable = bun.sys.isPollable(stat.mode) or is_nonblocking or (file.is_atty orelse false);
+                opened.file_type = if (bun.S.ISFIFO(stat.mode))
                     .pipe
                 else if (bun.S.ISSOCK(stat.mode))
                     .socket
                 else
                     .file;
 
-                if (is_nonblocking and this.file_type != .socket) {
-                    this.file_type = .nonblocking_pipe;
+                if (is_nonblocking and opened.file_type != .socket) {
+                    opened.file_type = .nonblocking_pipe;
                 }
 
-                this.nonblocking = is_nonblocking or (this.pollable and
+                opened.nonblocking = is_nonblocking or (opened.pollable and
                     !(file.is_atty orelse false) and
-                    this.file_type != .pipe);
+                    opened.file_type != .pipe);
 
-                if (this.nonblocking and this.file_type == .pipe) {
-                    this.file_type = .nonblocking_pipe;
+                if (opened.nonblocking and opened.file_type == .pipe) {
+                    opened.file_type = .nonblocking_pipe;
                 }
             }
 
-            this.fd = fd;
-            return .{ .result = this };
+            opened.fd = fd;
+            return .{ .result = opened };
         }
-    };
 
     pub fn eventLoop(this): jsc.EventLoopHandle {
         return this.event_loop;
     }
 
     pub fn loop(this): *bun.Async.Loop {
-        if (@comptime(bun.Environment.isWindows)) {
+        if (bun.Environment.isWindows) {
             return this.eventLoop().loop().uv_loop;
         } else {
             return this.eventLoop().loop();
@@ -182,8 +185,8 @@ export class FileReader {
     pub fn onStart(*this): streams.Start {
         this.reader.setParent(this);
         const was_lazy = this.lazy != .none;
-        var pollable = false;
-        var file_type: bun.io.FileType = .file;
+        let pollable = false;
+        let file_type: bun.io.FileType = .file;
         if (this.lazy == .blob) {
             match (this.lazy.blob.data) {
                 .s3, .bytes => @panic("Invalid state in FileReader: expected file "),
@@ -237,14 +240,14 @@ export class FileReader {
                     },
                 }
             }
-        } else if (@comptime(Environment.isPosix)) {
+        } else if (Environment.isPosix) {
             if (this.reader.flags.pollable and !this.reader.isDone()) {
                 this.waiting_for_onReaderDone = true;
                 _ = this.parent().incrementCount();
             }
         }
 
-        if (@comptime(Environment.isPosix)) {
+        if (Environment.isPosix) {
             if (file_type == .socket) {
                 this.reader.flags.socket = true;
             }
@@ -269,7 +272,7 @@ export class FileReader {
             if (this.buffered.items.len > 0) {
                 return .{ .owned_and_done = bun.ByteList.moveFromList(&this.buffered) };
             }
-        } else if (@comptime(Environment.isPosix)) {
+        } else if (Environment.isPosix) {
             if (!was_lazy and this.reader.flags.pollable) {
                 this.reader.read();
             }
@@ -305,16 +308,16 @@ export class FileReader {
     }
 
     pub fn onReadChunk(*this, init_buf: []const u8, state: bun.io.ReadState): bool {
-        var buf = init_buf;
+        let buf = init_buf;
         log("onReadChunk() = {d} ({s}) - read_inside_on_pull: {s}", .{ buf.len, @tagName(state), @tagName(this.read_inside_on_pull) });
 
         if (this.done) {
             this.reader.close();
             return false;
         }
-        var close = false;
+        let close = false;
         defer if (close) this.reader.close();
-        var hasMore = state != .eof;
+        let hasMore = state != .eof;
 
         if (buf.len > 0) {
             if (this.max_size) |max_size| {
@@ -370,7 +373,7 @@ export class FileReader {
                     this.buffered = reader_buffer.moveToUnmanaged();
                 }
 
-                var buffer = &this.buffered;
+                let buffer = &this.buffered;
                 defer buffer.clearAndFree(bun.default_allocator);
                 if (buffer.items.len > 0) {
                     if (this.pending_view.len >= buffer.items.len) {
@@ -407,7 +410,7 @@ export class FileReader {
             if (bun.isSliceInBuffer(buf, reader_buffer.allocatedSlice())) {
                 if (this.reader.isDone()) {
                     bun.assert_eql(buf.ptr, reader_buffer.items.ptr);
-                    var buffer = reader_buffer.moveToUnmanaged();
+                    let buffer = reader_buffer.moveToUnmanaged();
                     buffer.shrinkRetainingCapacity(buf.len);
                     this.pending.result = .{ .owned_and_done = .moveFromList(&buffer) };
                 } else {
@@ -426,7 +429,7 @@ export class FileReader {
             }
 
             bun.assert_eql(buf.ptr, this.buffered.items.ptr);
-            var buffered = this.buffered;
+            let buffered = this.buffered;
             this.buffered = .{};
             buffered.shrinkRetainingCapacity(buf.len);
 
@@ -454,7 +457,7 @@ export class FileReader {
     pub fn onPull(*this, buffer: []u8, array: jsc.JSValue): streams.Result {
         array.ensureStillAlive();
         defer array.ensureStillAlive();
-        var drained = this.drain();
+        let drained = this.drain();
 
         if (drained.len > 0) {
             log("onPull({d}) = {d}", .{ buffer.len, drained.len });
@@ -551,7 +554,7 @@ export class FileReader {
     pub fn drain(*this): bun.ByteList {
         if (this.buffered.items.len > 0) {
             const out = bun.ByteList.moveFromList(&this.buffered);
-            if (@comptime(Environment.allow_assert)) {
+            if (Environment.allow_assert) {
                 bun.assert(this.reader.buffer().items.ptr != out.ptr);
             }
             return out;
@@ -612,7 +615,7 @@ export class FileReader {
 
     pub fn setRawMode(*this, flag: bool): bun.sys.Maybe(void) {
         if (!Environment.isWindows) {
-            @panic("FileReader.setRawMode must not be called on " ++ @comptime(Environment.os.displayString()));
+            @panic("FileReader.setRawMode must not be called on this OS");
         }
         return this.reader.setRawMode(flag);
     }

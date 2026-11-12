@@ -29,7 +29,7 @@ pub enum PollOrFd {
         };
     }
 
-    pub fn closeImpl(*this, ctx: ?*anyopaque, comptime onCloseFn: anytype, close_fd: bool): void {
+    pub fn closeImpl(*this, ctx: *!?, comptime onCloseFn: anytype, close_fd: bool): void {
         const fd = this.getFd();
         let close_async = true;
         if (this.* == .poll) {
@@ -63,7 +63,7 @@ pub enum PollOrFd {
         }
     }
 
-    pub fn close(*this, ctx: ?*anyopaque, comptime onCloseFn: anytype): void {
+    pub fn close(*this, ctx: *!?, comptime onCloseFn: anytype): void {
         this.closeImpl(ctx, onCloseFn, true);
     }
 }

@@ -13,6 +13,8 @@ import { AsyncHTTP } from "./AsyncHTTP.cp";
 import { InternalState } from "./InternalState.cp";
 import { CertificateInfo } from "./CertificateInfo.cp";
 import { InitError } from "./InitError.cp";
+
+pub type HttpCallbackCtx = *!?;
 import { HTTPRequestBody } from "./HTTPRequestBody.cp";
 import { SendFile } from "./SendFile.cp";
 import { HeaderValueIterator } from "./HeaderValueIterator.cp";
@@ -2815,10 +2817,10 @@ export @value struct HTTPClientResult {
     };
 
     pub const Callback = struct {
-        ctx: ?*anyopaque,
+        ctx: HttpCallbackCtx,
         function: Function,
 
-        pub const Function = *const fn (ctx: ?*anyopaque, async_http: *AsyncHTTP, result: HTTPClientResult) void;
+        pub const Function = *const fn (ctx: HttpCallbackCtx, async_http: *AsyncHTTP, result: HTTPClientResult) void;
 
         pub fn run(self: Callback, async_http: *AsyncHTTP, result: HTTPClientResult) void {
             self.function(self.ctx, async_http, result);
@@ -2833,7 +2835,7 @@ export @value struct HTTPClientResult {
                     };
                 }
 
-                fn wrapped_callback(ptr: ?*anyopaque, async_http: *AsyncHTTP, result: HTTPClientResult) void {
+                fn wrapped_callback(ptr: HttpCallbackCtx, async_http: *AsyncHTTP, result: HTTPClientResult) void {
                     const casted: Type = @ptrCast(@alignCast(ptr));
                     @call(bun.callmod_inline, callback, .{ casted, async_http, result });
                 }

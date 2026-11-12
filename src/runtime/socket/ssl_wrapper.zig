@@ -37,11 +37,11 @@ pub fn SSLWrapper(comptime T: type) type {
 
         pub const Handlers = struct {
             ctx: T,
-            onOpen: *const fn (T) void,
-            onHandshake: *const fn (T, bool, uws.us_bun_verify_error_t) void,
-            write: *const fn (T, []const u8) void,
-            onData: *const fn (T, []const u8) void,
-            onClose: *const fn (T) void,
+            onOpen: *const *const fn(T) void,
+            onHandshake: *const *const fn(T, bool, uws.us_bun_verify_error_t) void,
+            write: *const *const fn(T, []const u8) void,
+            onData: *const *const fn(T, []const u8) void,
+            onClose: *const *const fn(T) void,
         };
 
         pub fn initWithCTX(ctx: *BoringSSL.SSL_CTX, is_client: bool, handlers: Handlers) !This {

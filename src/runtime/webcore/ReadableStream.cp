@@ -1,60 +1,73 @@
-import { Environment, sys as Syscall, default_allocator, assert, TrivialNew, TrivialDeinit, jsc, webcore } from "bun";
+import bun from "bun";
+const Syscall = bun.sys;
+const Environment = bun.Environment;
+const default_allocator = bun.default_allocator;
+const assert = bun.assert;
+const TrivialNew = bun.TrivialNew;
+const TrivialDeinit = bun.TrivialDeinit;
+const jsc = bun.jsc;
+const webcore = bun.webcore;
 
 const JSGlobalObject = jsc.JSGlobalObject;
 const JSValue = jsc.JSValue;
+const CallFrame = jsc.CallFrame;
 const Blob = webcore.Blob;
 const streams = webcore.streams;
+
+export class ReadableStreamStrong {
+    held: jsc.Strong.Optional = .empty;
+
+    pub fn has(*this): bool {
+        return this.held.has();
+    }
+
+    pub fn isDisturbed(this: *const ReadableStreamStrong, global: *jsc.JSGlobalObject): bool {
+        if (this.get(global)) |stream| {
+            return stream.isDisturbed(global);
+        }
+        return false;
+    }
+
+    pub static fn init(stream: ReadableStream, global: *JSGlobalObject): ReadableStreamStrong {
+        return .{
+            .held = .create(stream.value, global),
+        };
+    }
+
+    pub fn get(this: *const ReadableStreamStrong, global: *jsc.JSGlobalObject): ?ReadableStream {
+        if (this.held.get()) |value| {
+            return ReadableStream.fromJS(value, global) catch null;
+        }
+        return null;
+    }
+
+    pub fn deinit(*this): void {
+        this.held.deinit();
+    }
+
+    pub fn tee(*this, global: *JSGlobalObject): bun.JSError!?ReadableStream {
+        if (this.get(global)) |stream| {
+            const [first, second] = (try stream.tee(global)) orelse return null;
+            this.held.set(global, first.value);
+            return second;
+        }
+        return null;
+    }
+}
 
 export class ReadableStream {
     value: JSValue;
     ptr: Source;
 
-    pub const Strong = struct {
-        held: jsc.Strong.Optional = .empty,
-
-        pub fn has(*this): bool {
-            return this.held.has();
-        }
-
-        pub fn isDisturbed(this, global: *jsc.JSGlobalObject): bool {
-            if (this.get(global)) |stream| {
-                return stream.isDisturbed(global);
-            }
-            return false;
-        }
-
-        pub fn init(this: ReadableStream, global: *JSGlobalObject): Strong {
-            return .{
-                .held = .create(this.value, global),
-            };
-        }
-
-        pub fn get(this, global: *jsc.JSGlobalObject): ?ReadableStream {
-            if (this.held.get()) |value| {
-                return ReadableStream.fromJS(value, global) catch null;
-            }
-            return null;
-        }
-
-        pub fn deinit(*this): void {
-            this.held.deinit();
-        }
-
-        pub fn tee(*this, global: *JSGlobalObject): bun.JSError!?ReadableStream {
-            if (this.get(global)) |stream| {
-                const first, const second = (stream.tee(global)?) orelse return null;
-                this.held.set(global, first.value);
-                return second;
-            }
-            return null;
-        }
-    };
+    pub const Strong = ReadableStreamStrong;
 
     extern fn ReadableStream__tee(stream: JSValue, globalThis: *JSGlobalObject, out1: *JSValue, out2: *JSValue): bool;
 
-    pub fn tee(this, globalThis: *JSGlobalObject): bun.JSError!?struct { ReadableStream, ReadableStream } {
-        var out1: JSValue = .zero;
-        var out2: JSValue = .zero;
+    pub const TeeResult = struct { ReadableStream, ReadableStream };
+
+    pub fn tee(this, globalThis: *JSGlobalObject): bun.JSError!?TeeResult {
+        let out1: JSValue = .zero;
+        let out2: JSValue = .zero;
         if (!bun.jsc.fromJSHostCallGeneric(globalThis, @src(), ReadableStream__tee, .{ this.value, globalThis, &out1, &out2 })?) {
             return null;
         }
@@ -94,7 +107,7 @@ export class ReadableStream {
             },
             .File => |blobby| {
                 if (blobby.lazy == .blob) {
-                    var blob = Blob.initWithStore(blobby.lazy.blob, globalThis);
+                    let blob = Blob.initWithStore(blobby.lazy.blob, globalThis);
                     blob.store.?.ref();
                     bun.assert(!blobby.started);
                     stream.done(globalThis);
@@ -208,9 +221,9 @@ export class ReadableStream {
     pub fn fromJS(value: JSValue, globalThis: *JSGlobalObject): bun.JSError!?ReadableStream {
         jsc.markBinding(@src());
         value.ensureStillAlive();
-        var out = value;
+        let out = value;
 
-        var ptr: *!? = null;
+        let ptr: *!? = null;
         return match (bun.jsc.fromJSHostCallGeneric(globalThis, @src(), ReadableStreamTag__tagged, .{ globalThis, &out, &ptr })?) {
             .JavaScript => ReadableStream{
                 .value = out,
@@ -248,19 +261,19 @@ export class ReadableStream {
     }
 
     pub fn fromOwnedSlice(globalThis: *JSGlobalObject, bytes: []u8, recommended_chunk_size: Blob.SizeType): bun.JSError!JSValue {
-        var blob = Blob.init(bytes, default_allocator, globalThis);
+        let blob = Blob.init(bytes, default_allocator, globalThis);
         defer blob.deinit();
         return fromBlobCopyRef(globalThis, &blob, recommended_chunk_size);
     }
 
     pub fn fromBlobCopyRef(globalThis: *JSGlobalObject, blob: *const Blob, recommended_chunk_size: Blob.SizeType): bun.JSError!JSValue {
         jsc.markBinding(@src());
-        var store = blob.store orelse {
+        let store = blob.store orelse {
             return ReadableStream.empty(globalThis);
         };
         match (store.data) {
             .bytes => {
-                var reader = webcore.ByteBlobLoader.Source.new(
+                let reader = webcore.ByteBlobLoader.Source.new(
                     .{
                         .globalThis = globalThis,
                         .context = undefined,
@@ -270,7 +283,7 @@ export class ReadableStream {
                 return reader.toReadableStream(globalThis);
             },
             .file => {
-                var reader = webcore.FileReader.Source.new(.{
+                let reader = webcore.FileReader.Source.new(.{
                     .globalThis = globalThis,
                     .context = .{
                         .event_loop = jsc.EventLoopHandle.init(globalThis.bunVM().eventLoop()),
@@ -288,7 +301,10 @@ export class ReadableStream {
                 const credentials = s3.getCredentials();
                 const path = s3.path();
                 const proxy = globalThis.bunVM().transpiler.env.getHttpProxy(true, null, null);
-                const proxy_url = if (proxy) |p| p.href else null;
+                let proxy_url: ?[]const u8 = null;
+                if (proxy) |p| {
+                    proxy_url = p.href;
+                }
 
                 return bun.S3.readableStream(credentials, path, blob.offset, if (blob.size != Blob.max_size) blob.size else null, proxy_url, s3.request_payer, globalThis);
             },
@@ -301,12 +317,12 @@ export class ReadableStream {
         offset: usize,
     ): bun.JSError!JSValue {
         jsc.markBinding(@src());
-        var store = blob.store orelse {
+        let store = blob.store orelse {
             return ReadableStream.empty(globalThis);
         };
         match (store.data) {
             .file => {
-                var reader = webcore.FileReader.Source.new(.{
+                let reader = webcore.FileReader.Source.new(.{
                     .globalThis = globalThis,
                     .context = .{
                         .event_loop = jsc.EventLoopHandle.init(globalThis.bunVM().eventLoop()),
@@ -332,7 +348,7 @@ export class ReadableStream {
     ): bun.JSError!JSValue {
         _ = parent;
         jsc.markBinding(@src());
-        var source = webcore.FileReader.Source.new(.{
+        let source = webcore.FileReader.Source.new(.{
             .globalThis = globalThis,
             .context = .{
                 .event_loop = jsc.EventLoopHandle.init(globalThis.bunVM().eventLoop()),
@@ -352,7 +368,7 @@ export class ReadableStream {
         return bun.cpp.ReadableStream__used(globalThis);
     }
 
-    pub fn NewSource(
+    pub static fn NewSource(
         @comptime Context: type,
         @comptime name_: []const u8,
         @comptime onStart: anytype,
@@ -365,18 +381,18 @@ export class ReadableStream {
         @comptime toBufferedValue: ?fn (*Context, *JSGlobalObject, streams.BufferAction.Tag): bun.JSError!JSValue,
     ): type {
         return struct {
-            context: Context;
-            cancelled: bool = false;
-            ref_count: u32 = 1;
-            pending_err: ?Syscall.Error = null;
-            close_handler: ?*const fn (*!?) void = null;
-            close_ctx: *!? = null;
-            close_jsvalue: jsc.Strong.Optional = .empty;
-            cancel_handler: ?*const fn (*!?) void = null;
-            cancel_ctx: *!? = null;
-            globalThis: *JSGlobalObject = undefined;
-            this_jsvalue: JSValue = .zero;
-            is_closed: bool = false;
+            context: Context,
+            cancelled: bool = false,
+            ref_count: u32 = 1,
+            pending_err: ?Syscall.Error = null,
+            close_handler: ?fn (*!?): void = null,
+            close_ctx: *!? = null,
+            close_jsvalue: jsc.Strong.Optional = .empty,
+            cancel_handler: ?fn (*!?): void = null,
+            cancel_ctx: *!? = null,
+            globalThis: *JSGlobalObject = undefined,
+            this_jsvalue: JSValue = .zero,
+            is_closed: bool = false,
 
             const This = @This();
             const ReadableStreamSourceType = @This();
@@ -384,41 +400,41 @@ export class ReadableStream {
             pub const new = TrivialNew(This);
             pub const deinit = TrivialDeinit(This);
 
-            pub fn pull(*this, buf: []u8): streams.Result {
+            pub fn pull(this: *This, buf: []u8): streams.Result {
                 return onPull(&this.context, buf, JSValue.zero);
             }
 
-            pub fn ref(*this): void {
+            pub fn ref(this: *This): void {
                 if (setRefUnrefFn) |setRefUnref| {
                     setRefUnref(&this.context, true);
                 }
             }
 
-            pub fn unref(*this): void {
+            pub fn unref(this: *This): void {
                 if (setRefUnrefFn) |setRefUnref| {
                     setRefUnref(&this.context, false);
                 }
             }
 
-            pub fn setRef(*this, value: bool): void {
+            pub fn setRef(this: *This, value: bool): void {
                 if (setRefUnrefFn) |setRefUnref| {
                     setRefUnref(&this.context, value);
                 }
             }
 
-            pub fn start(*this): streams.Start {
+            pub fn start(this: *This): streams.Start {
                 return onStart(&this.context);
             }
 
-            pub fn onPullFromJS(*this, buf: []u8, view: JSValue): streams.Result {
+            pub fn onPullFromJS(this: *This, buf: []u8, view: JSValue): streams.Result {
                 return onPull(&this.context, buf, view);
             }
 
-            pub fn onStartFromJS(*this): streams.Start {
+            pub fn onStartFromJS(this: *This): streams.Start {
                 return onStart(&this.context);
             }
 
-            pub fn cancel(*this): void {
+            pub fn cancel(this: *This): void {
                 if (this.cancelled) return;
                 this.cancelled = true;
                 onCancel(&this.context);
@@ -428,7 +444,7 @@ export class ReadableStream {
                 }
             }
 
-            pub fn onClose(*this): void {
+            pub fn onClose(this: *This): void {
                 if (this.cancelled) return;
                 if (this.close_handler) |close| {
                     this.close_handler = null;
@@ -440,12 +456,12 @@ export class ReadableStream {
                 }
             }
 
-            pub fn incrementCount(*this): void {
+            pub fn incrementCount(this: *This): void {
                 this.ref_count += 1;
             }
 
-            pub fn decrementCount(*this): u32 {
-                if (@comptime(Environment.isDebug)) {
+            pub fn decrementCount(this: *This): u32 {
+                if (Environment.isDebug) {
                     if (this.ref_count == 0) {
                         @panic("Attempted to decrement ref count below zero");
                     }
@@ -459,7 +475,7 @@ export class ReadableStream {
                 return this.ref_count;
             }
 
-            pub fn getError(*this): ?Syscall.Error {
+            pub fn getError(this: *This): ?Syscall.Error {
                 if (this.pending_err) |err| {
                     this.pending_err = null;
                     return err;
@@ -467,14 +483,14 @@ export class ReadableStream {
                 return null;
             }
 
-            pub fn drain(*this): bun.ByteList {
+            pub fn drain(this: *This): bun.ByteList {
                 if (drainInternalBuffer) |drain_fn| {
                     return drain_fn(&this.context);
                 }
                 return .{};
             }
 
-            pub fn toReadableStream(*this, globalThis: *JSGlobalObject): bun.JSError!JSValue {
+            pub fn toReadableStream(this: *ReadableStreamSourceType, globalThis: *JSGlobalObject): bun.JSError!JSValue {
                 const out_value = brk: {
                     if (this.this_jsvalue != .zero) {
                         break :brk this.this_jsvalue;
@@ -486,13 +502,13 @@ export class ReadableStream {
                 return ReadableStream.fromNative(globalThis, out_value);
             }
 
-            pub fn setRawModeFromJS(*this, global: *JSGlobalObject, call_frame: *CallFrame): bun.JSError!JSValue {
+            pub fn setRawModeFromJS(this: *ReadableStreamSourceType, global: *JSGlobalObject, call_frame: *CallFrame): bun.JSError!JSValue {
                 if (@hasDecl(Context, "setRawMode")) {
                     const flag = call_frame.argument(0);
                     if (Environment.allow_assert) {
                         bun.assert(flag.isBoolean());
                     }
-                    return match (this.context.setRawMode(flag == .true)) {
+                    return switch (this.context.setRawMode(flag == .true)) {
                         .result => .js_undefined,
                         .err => |e| e.toJS(global),
                     };
@@ -500,7 +516,7 @@ export class ReadableStream {
                 @compileError("setRawMode is not implemented on " ++ @typeName(Context));
             }
 
-            pub fn setFlowingFromJS(*this, _: *JSGlobalObject, call_frame: *CallFrame): bun.JSError!JSValue {
+            pub fn setFlowingFromJS(this: *ReadableStreamSourceType, _: *JSGlobalObject, call_frame: *CallFrame): bun.JSError!JSValue {
                 if (@hasDecl(Context, "setFlowing")) {
                     const flag = call_frame.argument(0);
                     if (Environment.allow_assert) {
@@ -537,7 +553,7 @@ export class ReadableStream {
             pub const blobFromJS = JSReadableStreamSource.blob;
             pub const bytesFromJS = JSReadableStreamSource.bytes;
 
-            pub fn memoryCost(this): usize {
+            pub fn memoryCost(this: *const ReadableStreamSourceType): usize {
                 if (memoryCostFn) |function| {
                     return function(&this.context) + @sizeOf(ReadableStreamSourceType);
                 }
@@ -552,7 +568,7 @@ export class ReadableStream {
                     const view = arguments.ptr[0];
                     view.ensureStillAlive();
                     this.this_jsvalue = this_jsvalue;
-                    var buffer = view.asArrayBuffer(globalThis) orelse return .js_undefined;
+                    let buffer = view.asArrayBuffer(globalThis) orelse return .js_undefined;
                     return processResult(
                         this_jsvalue,
                         globalThis,
@@ -565,12 +581,12 @@ export class ReadableStream {
                     jsc.markBinding(@src());
                     this.globalThis = globalThis;
                     this.this_jsvalue = callFrame.this();
-                    match (this.onStartFromJS()) {
+                    switch (this.onStartFromJS()) {
                         .empty => return JSValue.jsNumber(0),
                         .ready => return JSValue.jsNumber(16384),
                         .chunk_size => |size| return JSValue.jsNumber(size),
                         .err => |err| {
-                            return globalThis.throwValue(err.toJS(globalThis)?);
+                            return globalThis.throwValue(try err.toJS(globalThis));
                         },
                         else => |rc| {
                             return rc.toJS(globalThis);
@@ -584,10 +600,10 @@ export class ReadableStream {
                 }
 
                 fn processResult(this_jsvalue: JSValue, globalThis: *JSGlobalObject, flags: JSValue, result: streams.Result): bun.JSError!JSValue {
-                    match (result) {
+                    switch (result) {
                         .err => |err| {
                             if (err == .Error) {
-                                return globalThis.throwValue(err.Error.toJS(globalThis)?);
+                                return globalThis.throwValue(try err.Error.toJS(globalThis));
                             } else {
                                 const js_err = err.JSValue;
                                 js_err.ensureStillAlive();
@@ -596,7 +612,7 @@ export class ReadableStream {
                             }
                         },
                         .pending => {
-                            const out = result.toJS(globalThis)?;
+                            const out = try result.toJS(globalThis);
                             js.pendingPromiseSetCached(this_jsvalue, globalThis, out);
                             return out;
                         },
@@ -676,7 +692,7 @@ export class ReadableStream {
 
                 fn onClose(ptr: *!?): void {
                     jsc.markBinding(@src());
-                    var this = ptr.? as *ReadableStreamSourceType!;
+                    const this: *ReadableStreamSourceType = bun.cast(*ReadableStreamSourceType, ptr.?);
                     if (this.close_jsvalue.trySwap()) |cb| {
                         this.globalThis.queueMicrotask(cb, &.{});
                     }

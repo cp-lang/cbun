@@ -21,11 +21,11 @@ const BufferedReaderVTable = struct {
     }
 
     pub const Fn = struct {
-        onReadChunk: ?*const fn (*anyopaque, chunk: []const u8, hasMore: ReadState) bool = null,
-        onReaderDone: *const fn (*anyopaque) void,
-        onReaderError: *const fn (*anyopaque, bun.sys.Error) void,
-        loop: *const fn (*anyopaque) *Async.Loop,
-        eventLoop: *const fn (*anyopaque) jsc.EventLoopHandle,
+        onReadChunk: ?*const *const fn(*anyopaque, chunk: []const u8, hasMore: ReadState) bool = null,
+        onReaderDone: *const *const fn(*anyopaque) void,
+        onReaderError: *const *const fn(*anyopaque, bun.sys.Error) void,
+        loop: *const *const fn(*anyopaque) *Async.Loop,
+        eventLoop: *const *const fn(*anyopaque) jsc.EventLoopHandle,
 
         pub fn init(comptime Type: type) *const BufferedReaderVTable.Fn {
             const fns = struct {
@@ -415,7 +415,7 @@ const PosixBufferedReader = struct {
         return false;
     }
 
-    fn wrapReadFn(comptime func: *const fn (bun.FD, []u8) bun.sys.Maybe(usize)) *const fn (bun.FD, []u8, usize) bun.sys.Maybe(usize) {
+    fn wrapReadFn(comptime func: *const *const fn(bun.FD, []u8) bun.sys.Maybe(usize)) *const *const fn(bun.FD, []u8, usize) bun.sys.Maybe(usize) {
         return struct {
             pub fn call(fd: bun.FD, buf: []u8, offset: usize) bun.sys.Maybe(usize) {
                 _ = offset;
@@ -535,7 +535,7 @@ const PosixBufferedReader = struct {
         }
     }
 
-    fn readWithFn(parent: *PosixBufferedReader, resizable_buffer: *std.array_list.Managed(u8), fd: bun.FD, size_hint: isize, received_hup: bool, comptime file_type: FileType, comptime sys_fn: *const fn (bun.FD, []u8, usize) bun.sys.Maybe(usize)) void {
+    fn readWithFn(parent: *PosixBufferedReader, resizable_buffer: *std.array_list.Managed(u8), fd: bun.FD, size_hint: isize, received_hup: bool, comptime file_type: FileType, comptime sys_fn: *const *const fn(bun.FD, []u8, usize) bun.sys.Maybe(usize)) void {
         _ = size_hint;
         const streaming = parent.vtable.isStreamingEnabled();
 
@@ -706,14 +706,14 @@ const PosixBufferedReader = struct {
     }
 };
 const WindowsBufferedReaderVTable = struct {
-    onReaderDone: *const fn (*anyopaque) void,
-    onReaderError: *const fn (*anyopaque, bun.sys.Error) void,
-    onReadChunk: ?*const fn (
+    onReaderDone: *const *const fn(*anyopaque) void,
+    onReaderError: *const *const fn(*anyopaque, bun.sys.Error) void,
+    onReadChunk: ?*const *const fn(
         *anyopaque,
         chunk: []const u8,
         hasMore: ReadState,
     ) bool = null,
-    loop: *const fn (*anyopaque) *Async.Loop,
+    loop: *const *const fn(*anyopaque) *Async.Loop,
 };
 pub const WindowsBufferedReader = struct {
     source: ?Source = null,

@@ -238,13 +238,12 @@ export class TextDecoder {
                         let joined = default_allocator.alloc(u8, maybe_without_bom.len + _.buffered.len)?;
                         @memcpy(joined[0.._.buffered.len], _.buffered.slice());
                         @memcpy(joined[_.buffered.len..][0..maybe_without_bom.len], maybe_without_bom);
-                        break :blk .{ joined, true };
+                        break :blk [joined, true];
                     }
 
-                    break :blk .{ maybe_without_bom, false };
+                    break :blk [maybe_without_bom, false];
                 });
-                const input = pair.@"0";
-                const deinit_input = pair.@"1";
+                const [input, deinit_input] = pair;
 
                 let maybe_decode_result = if (_.fatal) {
                     strings.toUTF16AllocMaybeBuffered(default_allocator, input, true, flush) catch |e| {
@@ -266,9 +265,7 @@ export class TextDecoder {
 
                 if (decode_result := maybe_decode_result) {
                     if (deinit_input) default_allocator.free(input);
-                    const decoded = decode_result.@"0";
-                    const leftover = decode_result.@"1";
-                    const leftover_len = decode_result.@"2";
+                    const [decoded, leftover, leftover_len] = decode_result;
                     assert(_.buffered.len == 0);
                     if (!flush) {
                         if (leftover_len != 0) {
@@ -290,9 +287,7 @@ export class TextDecoder {
                 else
                     buffer_slice;
 
-                const utf16_res = _.decodeUTF16(input, false, flush)?;
-                const decoded = utf16_res.@"0";
-                const saw_error = utf16_res.@"1";
+                const [decoded, saw_error] = _.decodeUTF16(input, false, flush)?;
 
                 if (saw_error and _.fatal) {
                     decoded.deinit(default_allocator);
@@ -313,9 +308,7 @@ export class TextDecoder {
                 else
                     buffer_slice;
 
-                const utf16_res = _.decodeUTF16(input, true, flush)?;
-                const decoded = utf16_res.@"0";
-                const saw_error = utf16_res.@"1";
+                const [decoded, saw_error] = _.decodeUTF16(input, true, flush)?;
 
                 if (saw_error and _.fatal) {
                     decoded.deinit(default_allocator);

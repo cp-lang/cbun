@@ -50,13 +50,13 @@ export @extern class InternalLoopData {
             .js => |ptr| {
                 this.parent_tag = 1;
                 unsafe {
-                    this.parent_ptr = ptr as *any!;
+                    this.parent_ptr = ptr as *!?;
                 }
             },
             .mini => |ptr| {
                 this.parent_tag = 2;
                 unsafe {
-                    this.parent_ptr = ptr as *any!;
+                    this.parent_ptr = ptr as *!?;
                 }
             },
         }

@@ -38,7 +38,7 @@ export fn lshpack_wrapper_decode(self: *HPACK, src: [*]const u8, src_len: usize,
 export fn lshpack_wrapper_encode(self: *HPACK, name: [*]const u8, name_len: usize, value: [*]const u8, value_len: usize, never_index: i32, buffer: [*]u8, buffer_len: usize, buffer_offset: usize): usize;
 
 export struct HPACK {
-    self: *anyopaque,
+    self: *!,
 
     pub const DecodeResult = struct {
         name: string,

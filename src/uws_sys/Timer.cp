@@ -4,9 +4,11 @@ const uws = bun.uws;
 const Loop = uws.Loop;
 const debug = bun.Output.scoped(.uws, .visible);
 
+pub type OptionalRawPtr = *!?;
+
 const c = struct {
     pub extern fn us_create_timer(loop: ?*Loop, fallthrough: i32, ext_size: c_uint) ?*Timer;
-    pub extern fn us_timer_ext(timer: ?*Timer) *?*anyopaque;
+    pub extern fn us_timer_ext(timer: ?*Timer) *OptionalRawPtr;
     pub extern fn us_timer_close(timer: ?*Timer, fallthrough: i32) void;
     pub extern fn us_timer_set(timer: ?*Timer, cb: ?*const fn (*Timer) callconv(.c) void, ms: i32, repeat_ms: i32) void;
     pub extern fn us_timer_loop(t: ?*Timer) ?*Loop;

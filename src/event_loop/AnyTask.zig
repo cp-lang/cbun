@@ -7,7 +7,7 @@ const jsc = bun.jsc;
 const Task = jsc.Task;
 pub const AnyTask = struct {
     ctx: ?*anyopaque = null,
-    callback: *const (fn (*anyopaque) bun.JSError!void),
+    callback: *const *const fn(*anyopaque) bun.JSError!void,
 
     pub fn task(this: *AnyTask) Task {
         return Task.init(this);

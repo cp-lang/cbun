@@ -32,7 +32,7 @@ pub const WorkPool = struct {
         get().schedule(ThreadPool.Batch.from(task));
     }
 
-    pub fn go(allocator: std.mem.Allocator, comptime Context: type, context: Context, comptime function: fn (Context) void) !void {
+    pub fn go(allocator: std.mem.Allocator, comptime Context: type, context: Context, comptime function: *const fn(Context) void) !void {
         const TaskType = struct {
             task: Task,
             context: Context,

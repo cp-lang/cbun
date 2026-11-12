@@ -3,13 +3,13 @@ const std = @import("std");
 const string = []const u8;
 
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
-pub const Handler = ?*const fn (*Response, *Request, ?*anyopaque) callconv(.c) void;
-pub const ListenHandler = ?*const fn (?*ListenSocket, ?*anyopaque) callconv(.c) void;
-pub const HeaderCb = *const fn ([*c]const u8, usize, [*c]const u8, usize, ?*anyopaque) callconv(.c) void;
-pub const WritableHandler = ?*const fn (*Response, u64, ?*anyopaque) callconv(.c) bool;
-pub const VoidHandler = ?*const fn (*Response, ?*anyopaque) callconv(.c) void;
-pub const DataHandler = ?*const fn (*Response, [*c]const u8, usize, bool, ?*anyopaque) callconv(.c) void;
-pub const CorkHandler = *const fn (?*anyopaque) callconv(.c) void;
+pub const Handler = ?*const *const fn(*Response, *Request, ?*anyopaque) callconv(.c) void;
+pub const ListenHandler = ?*const *const fn(?*ListenSocket, ?*anyopaque) callconv(.c) void;
+pub const HeaderCb = *const *const fn([*c]const u8, usize, [*c]const u8, usize, ?*anyopaque) callconv(.c) void;
+pub const WritableHandler = ?*const *const fn(*Response, u64, ?*anyopaque) callconv(.c) bool;
+pub const VoidHandler = ?*const *const fn(*Response, ?*anyopaque) callconv(.c) void;
+pub const DataHandler = ?*const *const fn(*Response, [*c]const u8, usize, bool, ?*anyopaque) callconv(.c) void;
+pub const CorkHandler = *const *const fn(?*anyopaque) callconv(.c) void;
 fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
 fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
 fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
@@ -250,7 +250,7 @@ pub fn markNeedsMore(self: *const Response) void {
         _ = &self;
     }
 
-pub fn getSocketData(self: *Response) *?*anyopaque {
+pub fn getSocketData(self: *Response) ?*anyopaque {
             return uws_h3_res_get_socket_data(self);
     }
 
@@ -541,7 +541,7 @@ pub extern "c" fn uws_h3_res_timeout(res: *Response, timeout: u8) callconv(.c) v
 
 pub extern "c" fn uws_h3_res_end_sendfile(res: *Response, write_offset: u64, close_conn: bool) callconv(.c) void;
 
-pub extern "c" fn uws_h3_res_get_socket_data(res: *Response) callconv(.c) *?*anyopaque;
+pub extern "c" fn uws_h3_res_get_socket_data(res: *Response) callconv(.c) ?*anyopaque;
 
 pub extern "c" fn uws_h3_res_on_writable(res: *Response, h: WritableHandler, ud: ?*anyopaque) callconv(.c) void;
 

@@ -104,15 +104,15 @@ pub fn fromJS(self: *const UDPSocketConfig, globalThis: *JSGlobalObject, options
                     config.binary_type = maybe_binary_type.?;
                 }
                 inline for (handlers) |handler| {
-                    if (try socket.getTruthyComptime(globalThis, handler.@"0")) |value| {
+                    if (try socket.getTruthyComptime(globalThis, (if (comptime @typeInfo(@TypeOf(handler)) == .@"enum" or @typeInfo(@TypeOf(handler)) == .@"union") @tagName(handler) else handler.name))) |value| {
                         _ = &value;
                         if (((!value.isCell()) or (!value.isCallable()))) {
-                            return globalThis.throwInvalidArguments("Expected \"socket.{s}\" to be a function", .{ handler.@"0" });
+                            return globalThis.throwInvalidArguments("Expected \"socket.{s}\" to be a function", .{ (if (comptime @typeInfo(@TypeOf(handler)) == .@"enum" or @typeInfo(@TypeOf(handler)) == .@"union") @tagName(handler) else handler.name) });
                         }
                         const callback = value.withAsyncContextIfNeeded(globalThis);
                         var __callback_moved = false; _ = &__callback_moved;
                         defer if (!__callback_moved) { const __T = @TypeOf(callback); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) { const RType = @typeInfo(@TypeOf(Child.release)).@"fn".return_type.?; if (@typeInfo(RType) == .error_union) { _ = callback.release() catch {}; } else { callback.release(); } } } else if (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "release")) { var _drop_val = callback; _drop_val.release(); } };
-                        _ = UDPSocket.js.gc.set(@field(UDPSocket.js.gc, handler.@"1"), thisValue, globalThis, callback);
+                        _ = UDPSocket.js.gc.set(@field(UDPSocket.js.gc, handler.gc_field), thisValue, globalThis, callback);
                     }
                 }
             }
@@ -157,10 +157,14 @@ pub fn release(self: *UDPSocketConfig) void {
 pub fn deinit(self: *UDPSocketConfig) void {
             _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
     }
-    const handlers = .{
-            .{ "data", "on_data" },
-            .{ "drain", "on_drain" },
-            .{ "error", "on_error" },
+    const HandlerEntry = struct {
+            name: []const u8,
+            gc_field: []const u8,
+        };
+    const handlers = [_]HandlerEntry{
+            .{ .name = "data", .gc_field = "on_data" },
+            .{ .name = "drain", .gc_field = "on_drain" },
+            .{ .name = "error", .gc_field = "on_error" },
         };
     pub const ConnectConfig = struct {
             port: u16,

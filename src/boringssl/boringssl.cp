@@ -20,17 +20,19 @@ export type SSL_Ptr = *boring.SSL;
 export type X509_Ptr = *boring.X509;
 export type ASN1_OCTET_STRING_Ptr = *boring.ASN1_OCTET_STRING;
 
-export fn OPENSSL_memory_alloc(size: usize): *anyopaque? {
+export fn OPENSSL_memory_alloc(size: usize): *!? {
     return bun.mimalloc.mi_malloc(size);
 }
 
-export fn OPENSSL_memory_free(ptr: *anyopaque): void {
-    const len = bun.mimalloc.mi_usable_size(ptr);
-    @memset(@as([*]u8, ptr)[0..len], 0);
-    bun.mimalloc.mi_free(ptr);
+export fn OPENSSL_memory_free(ptr: *!): void {
+    unsafe {
+        const len = bun.mimalloc.mi_usable_size(ptr);
+        @memset(@as([*]u8, ptr)[0..len], 0);
+        bun.mimalloc.mi_free(ptr);
+    }
 }
 
-export fn OPENSSL_memory_get_size(ptr: *anyopaque?): usize {
+export fn OPENSSL_memory_get_size(ptr: *!?): usize {
     return bun.mimalloc.mi_usable_size(ptr);
 }
 

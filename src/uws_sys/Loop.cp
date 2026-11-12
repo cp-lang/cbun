@@ -165,7 +165,7 @@ export @extern class PosixLoop {
 
     pub fn nextTick(*this, @comptime UserType: type, user_data: UserType, @comptime deferCallback: anytype): void {
         const Handler = struct {
-            pub fn callback(data: *anyopaque) callconv(.c) void {
+            pub fn callback(data: *!) callconv(.c) void {
                 deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
             }
         };
@@ -208,7 +208,7 @@ export @extern class WindowsLoop {
 
     pub static fn get(): *WindowsLoop {
         unsafe {
-            return uws_get_loop_with_native(bun.windows.libuv.Loop.get() as *any!);
+            return uws_get_loop_with_native(bun.windows.libuv.Loop.get() as *!);
         }
     }
 
@@ -279,7 +279,7 @@ export @extern class WindowsLoop {
 
     pub fn nextTick(*this, @comptime UserType: type, user_data: UserType, @comptime deferCallback: anytype): void {
         const Handler = struct {
-            pub fn callback(data: *anyopaque) callconv(.c) void {
+            pub fn callback(data: *!) callconv(.c) void {
                 deferCallback(@as(UserType, @ptrCast(@alignCast(data))));
             }
         };

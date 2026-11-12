@@ -3,9 +3,9 @@ const std = @import("std");
 const string = []const u8;
 
 pub const AdditionalOnAbortCallback = struct {
-    cb: *const fn (this: *anyopaque) void,
+    cb: *const *const fn(this: *anyopaque) void,
     data: *anyopaque,
-    deref_fn: *const fn (this: *anyopaque) void,
+    deref_fn: *const *const fn(this: *anyopaque) void,
 
     pub fn deref(this: AdditionalOnAbortCallback) void {
         this.deref_fn(this.data);

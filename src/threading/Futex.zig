@@ -51,7 +51,7 @@ const WindowsImpl = struct {
     }
 
     fn wake(ptr: *const atomic.Value(u32), max_waiters: u32) void {
-        const address: ?*const anyopaque = ptr;
+        const address: ?*anyopaque = ptr;
         assert(max_waiters != 0);
 
         switch (max_waiters) {
@@ -72,7 +72,7 @@ const DarwinImpl = struct {
 
         var timeout_overflowed = false;
 
-        const addr: *const anyopaque = ptr;
+        const addr: *anyopaque = ptr;
         const flags: c.UL = .{
             .op = .COMPARE_AND_WAIT,
             .NO_ERRNO = true,
@@ -115,7 +115,7 @@ const DarwinImpl = struct {
         };
 
         while (true) {
-            const addr: *const anyopaque = ptr;
+            const addr: *anyopaque = ptr;
             const status = c.__ulock_wake(flags, addr, 0);
 
             if (status >= 0) return;

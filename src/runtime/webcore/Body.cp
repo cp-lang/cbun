@@ -5,6 +5,16 @@ import { MimeType } from "../../http_types/MimeType.zig";
 
 const log = Output.scoped(.Body, .visible);
 
+export union(enum) Action {
+    none: void,
+    getText: void,
+    getJSON: void,
+    getArrayBuffer: void,
+    getBytes: void,
+    getBlob: void,
+    getFormData: ?*FormData.AsyncFormData,
+}
+
 export class PendingValue {
     promise: ?JSValue = null;
     readable: webcore.ReadableStream.Strong = .{};
@@ -19,16 +29,6 @@ export class PendingValue {
     size_hint: Blob.SizeType = 0;
     deinit: bool = false;
     action: Action = Action { .none = {} };
-
-    pub union Action {
-        none: void,
-        getText: void,
-        getJSON: void,
-        getArrayBuffer: void,
-        getBytes: void,
-        getBlob: void,
-        getFormData: ?*FormData.AsyncFormData,
-    }
 
     fn sizeHint(this: &PendingValue): Blob.SizeType {
         if (this.readable.get(this.global)) |readable| {
@@ -57,7 +57,7 @@ export class PendingValue {
     }
 
     pub fn toAnyBlobAllowPromise(this: *PendingValue): ?Blob.Any {
-        let stream = if (this.readable.get(this.global)) |r| r else return null;
+        let stream = this.readable.get(this.global) orelse return null;
         if (stream.toAnyBlob(this.global)) |blob| {
             this.readable.deinit();
             return blob;
@@ -95,7 +95,7 @@ export class PendingValue {
             }
         }
 
-        var promise = JSPromise.create(globalThis);
+        let promise = JSPromise.create(globalThis);
         let promise_value = promise.toJS();
         value.promise = promise_value;
         promise_value.protect();
@@ -108,7 +108,45 @@ export class PendingValue {
     }
 }
 
-export union Value {
+export union(enum) ValueError {
+    AbortReason: CommonAbortReason,
+    SystemError: SystemError,
+    Message: String,
+    TypeError: String,
+    JSValue: jsc.Strong.Optional,
+
+    pub fn toStreamError(this: *ValueError, globalObject: *JSGlobalObject): streams.Result.StreamError {
+        switch (this.*) {
+            .AbortReason => return .{ .AbortReason = this.AbortReason },
+            else => return .{ .JSValue = this.toJS(globalObject) },
+        }
+    }
+
+    pub fn toJS(this: *ValueError, globalObject: *JSGlobalObject): JSValue {
+        let js_value = switch (this.*) {
+            .AbortReason => |reason| reason.toJS(globalObject),
+            .SystemError => |system_error| system_error.toErrorInstance(globalObject),
+            .Message => |message| message.toErrorInstance(globalObject),
+            .TypeError => |message| message.toTypeErrorInstance(globalObject),
+            .JSValue => |js_val| return js_val.get() orelse JSValue.js_undefined,
+        };
+        this.* = .{ .JSValue = .create(js_value, globalObject) };
+        return js_value;
+    }
+
+    pub fn deinit(*this): void {
+        switch (this.*) {
+            .SystemError => |system_error| system_error.deref(),
+            .Message => |message| message.deref(),
+            .TypeError => |message| message.deref(),
+            .JSValue => this.JSValue.deinit(),
+            .AbortReason => {},
+        }
+        this.* = .{ .JSValue = .empty };
+    }
+}
+
+export union(enum) Value {
     Blob: Blob,
     WTFStringImpl: WTF.StringImpl,
     InternalBlob: Blob.Internal,
@@ -118,51 +156,13 @@ export union Value {
     Error: ValueError,
     Null: void,
 
-    pub union ValueError {
-        AbortReason: CommonAbortReason,
-        SystemError: SystemError,
-        Message: String,
-        TypeError: String,
-        JSValue: jsc.Strong.Optional,
-
-        pub fn toStreamError(this: *ValueError, globalObject: *JSGlobalObject): streams.Result.StreamError {
-            switch (this.*) {
-                .AbortReason => return .{ .AbortReason = this.AbortReason },
-                else => return .{ .JSValue = this.toJS(globalObject) },
-            }
-        }
-
-        pub fn toJS(this: *ValueError, globalObject: *JSGlobalObject): JSValue {
-            let js_value = switch (this.*) {
-                .AbortReason => |reason| reason.toJS(globalObject),
-                .SystemError => |system_error| system_error.toErrorInstance(globalObject),
-                .Message => |message| message.toErrorInstance(globalObject),
-                .TypeError => |message| message.toTypeErrorInstance(globalObject),
-                .JSValue => |js_val| return js_val.get() orelse JSValue.js_undefined,
-            };
-            this.* = .{ .JSValue = .create(js_value, globalObject) };
-            return js_value;
-        }
-
-        pub fn deinit(*this): void {
-            switch (this.*) {
-                .SystemError => |system_error| system_error.deref(),
-                .Message => |message| message.deref(),
-                .TypeError => |message| message.deref(),
-                .JSValue => this.JSValue.deinit(),
-                .AbortReason => {},
-            }
-            this.* = .{ .JSValue = .empty };
-        }
-    }
-
     pub fn isDefinitelyEmpty(this: &Value): bool {
         switch (this.*) {
-            .Null, .Used, .Empty => true,
-            .InternalBlob => this.InternalBlob.slice().len == 0,
-            .Blob => this.Blob.size == 0,
-            .WTFStringImpl => this.WTFStringImpl.length() == 0,
-            .Error, .Locked => false,
+            .Null, .Used, .Empty => return true,
+            .InternalBlob => return this.InternalBlob.slice().len == 0,
+            .Blob => return this.Blob.size == 0,
+            .WTFStringImpl => return this.WTFStringImpl.length() == 0,
+            .Error, .Locked => return false,
         }
     }
 
@@ -177,7 +177,7 @@ export union Value {
     pub fn toBlobIfPossible(this: *Value): void {
         if (this.* == .WTFStringImpl) {
             if (this.WTFStringImpl.toUTF8IfNeeded(default_allocator)) |bytes| {
-                var str = this.WTFStringImpl;
+                let str = this.WTFStringImpl;
                 defer str.deref();
                 this.* = .{
                     .InternalBlob = Blob.Internal {
@@ -201,7 +201,7 @@ export union Value {
 
     pub fn size(this: *Value): Blob.SizeType {
         switch (this.*) {
-            .Blob => @truncate(this.Blob.getSizeForBindings()),
+            .Blob => @as(Blob.SizeType, @truncate(this.Blob.getSizeForBindings())),
             .InternalBlob => @as(Blob.SizeType, @truncate(this.InternalBlob.sliceConst().len)),
             .WTFStringImpl => @as(Blob.SizeType, @truncate(this.WTFStringImpl.utf8ByteLength())),
             .Locked => this.Locked.sizeHint(),
@@ -263,13 +263,14 @@ export union Value {
                 return new_blob;
             },
             .WTFStringImpl => {
-                var wtf = this.WTFStringImpl;
+                let wtf = this.WTFStringImpl;
                 defer wtf.deref();
-                let new_blob = if (wtf.toUTF8IfNeeded(default_allocator)) |allocated_slice| {
-                    Blob.init(@constCast(allocated_slice.slice()), default_allocator, VirtualMachine.get().global);
+                let new_blob: Blob = undefined;
+                if (wtf.toUTF8IfNeeded(default_allocator)) |allocated_slice| {
+                    new_blob = Blob.init(@constCast(allocated_slice.slice()), default_allocator, VirtualMachine.get().global);
                 } else {
-                    Blob.init(sys.handleOom(default_allocator.dupe(u8, wtf.latin1Slice())), default_allocator, VirtualMachine.get().global);
-                };
+                    new_blob = Blob.init(sys.handleOom(default_allocator.dupe(u8, wtf.latin1Slice())), default_allocator, VirtualMachine.get().global);
+                }
                 this.* = .{ .Used = {} };
                 return new_blob;
             },
@@ -403,7 +404,7 @@ export class Body {
     }
 
     pub static fn extract(globalThis: *JSGlobalObject, value: JSValue): JSError!Body {
-        var body = Body { .value = Value { .Null = {} } };
+        let body = Body { .value = Value { .Null = {} } };
         // Value extraction from JSValue
         return body;
     }

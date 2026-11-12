@@ -48,7 +48,7 @@ pub fn release(self: *TimeoutObject) void {
             _ = bun.destroy(self);
     }
 
-pub fn deinit(self: *const TimeoutObject) void {
+pub fn deinit(self: *TimeoutObject) void {
             _ = (if (comptime @typeInfo(@TypeOf(self)) == .pointer) (self) else &(self)).release();
     }
 
@@ -57,93 +57,93 @@ pub fn constructor(globalObject: *jsc.JSGlobalObject, callFrame: *jsc.CallFrame)
             return globalObject.throw("Timeout is not constructible", .{});
     }
 
-pub fn getEventLoopTimer(self: *const TimeoutObject) *EventLoopTimer {
+pub fn getEventLoopTimer(self: *TimeoutObject) *EventLoopTimer {
             return (&self.event_loop_timer);
     }
 
-pub fn toPrimitive(self: *const TimeoutObject, globalObject: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
+pub fn toPrimitive(self: *TimeoutObject, globalObject: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
             _ = globalObject;
             _ = callFrame;
             return self.internals.toPrimitive();
     }
 
-pub fn doRef(self: *const TimeoutObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
+pub fn doRef(self: *TimeoutObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
             return self.internals.doRef(globalThis, callFrame.this());
     }
 
-pub fn doUnref(self: *const TimeoutObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
+pub fn doUnref(self: *TimeoutObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
             return self.internals.doUnref(globalThis, callFrame.this());
     }
 
-pub fn doRefresh(self: *const TimeoutObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
+pub fn doRefresh(self: *TimeoutObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
             return self.internals.doRefresh(globalThis, callFrame.this());
     }
 
-pub fn hasRef(self: *const TimeoutObject, globalObject: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
+pub fn hasRef(self: *TimeoutObject, globalObject: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
             _ = globalObject;
             _ = callFrame;
             return self.internals.hasRef();
     }
 
-pub fn finalize(self: *const TimeoutObject) void {
+pub fn finalize(self: *TimeoutObject) void {
             _ = self.internals.finalize();
     }
 
-pub fn getDestroyed(self: *const TimeoutObject, globalThis: *JSGlobalObject) JSValue {
+pub fn getDestroyed(self: *TimeoutObject, globalThis: *JSGlobalObject) JSValue {
             _ = globalThis;
             return JSValue.jsBoolean(self.internals.getDestroyed());
     }
 
-pub fn close(self: *const TimeoutObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) JSValue {
+pub fn close(self: *TimeoutObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) JSValue {
             _ = self.internals.cancel(globalThis.bunVM());
             return callFrame.this();
     }
 
-pub fn get_onTimeout(self: *const TimeoutObject, thisValue: JSValue, globalObject: *JSGlobalObject) JSValue {
+pub fn get_onTimeout(self: *TimeoutObject, thisValue: JSValue, globalObject: *JSGlobalObject) JSValue {
             _ = self;
             _ = globalObject;
             return (TimeoutObject.js.callbackGetCached(thisValue)).?;
     }
 
-pub fn set_onTimeout(self: *const TimeoutObject, thisValue: JSValue, globalThis: *JSGlobalObject, value: JSValue) void {
+pub fn set_onTimeout(self: *TimeoutObject, thisValue: JSValue, globalThis: *JSGlobalObject, value: JSValue) void {
             _ = self;
             _ = TimeoutObject.js.callbackSetCached(thisValue, globalThis, value);
     }
 
-pub fn get_idleTimeout(self: *const TimeoutObject, thisValue: JSValue, globalObject: *JSGlobalObject) JSValue {
+pub fn get_idleTimeout(self: *TimeoutObject, thisValue: JSValue, globalObject: *JSGlobalObject) JSValue {
             _ = self;
             _ = globalObject;
             return (TimeoutObject.js.idleTimeoutGetCached(thisValue)).?;
     }
 
-pub fn set_idleTimeout(self: *const TimeoutObject, thisValue: JSValue, globalThis: *JSGlobalObject, value: JSValue) void {
+pub fn set_idleTimeout(self: *TimeoutObject, thisValue: JSValue, globalThis: *JSGlobalObject, value: JSValue) void {
             _ = self;
             _ = TimeoutObject.js.idleTimeoutSetCached(thisValue, globalThis, value);
     }
 
-pub fn get_repeat(self: *const TimeoutObject, thisValue: JSValue, globalObject: *JSGlobalObject) JSValue {
+pub fn get_repeat(self: *TimeoutObject, thisValue: JSValue, globalObject: *JSGlobalObject) JSValue {
             _ = self;
             _ = globalObject;
             return (TimeoutObject.js.repeatGetCached(thisValue)).?;
     }
 
-pub fn set_repeat(self: *const TimeoutObject, thisValue: JSValue, globalThis: *JSGlobalObject, value: JSValue) void {
+pub fn set_repeat(self: *TimeoutObject, thisValue: JSValue, globalThis: *JSGlobalObject, value: JSValue) void {
             _ = self;
             _ = TimeoutObject.js.repeatSetCached(thisValue, globalThis, value);
     }
 
-pub fn get_idleStart(self: *const TimeoutObject, thisValue: JSValue, globalObject: *JSGlobalObject) JSValue {
+pub fn get_idleStart(self: *TimeoutObject, thisValue: JSValue, globalObject: *JSGlobalObject) JSValue {
             _ = self;
             _ = globalObject;
             return (TimeoutObject.js.idleStartGetCached(thisValue)).?;
     }
 
-pub fn set_idleStart(self: *const TimeoutObject, thisValue: JSValue, globalThis: *JSGlobalObject, value: JSValue) void {
+pub fn set_idleStart(self: *TimeoutObject, thisValue: JSValue, globalThis: *JSGlobalObject, value: JSValue) void {
             _ = self;
             _ = TimeoutObject.js.idleStartSetCached(thisValue, globalThis, value);
     }
 
-pub fn dispose(self: *const TimeoutObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
+pub fn dispose(self: *TimeoutObject, globalThis: *JSGlobalObject, callFrame: *jsc.CallFrame) bun.JSError!JSValue {
             _ = callFrame;
             _ = self.internals.cancel(globalThis.bunVM());
             return JSValue.js_undefined;

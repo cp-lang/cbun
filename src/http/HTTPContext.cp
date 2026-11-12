@@ -8,7 +8,10 @@ import { SocketHandler } from "../uws_sys/socket.cp";
 import { SocketGroup } from "../uws_sys/SocketGroup.cp";
 import { BunSocketContextOptions } from "../uws_sys/SocketContext.cp";
 
-const AnyPtrPtr = **anyopaque;
+pub type AnyPtr = *!;
+pub type AnyPtrPtr = **!;
+pub type OptionalAnyPtr = *!?;
+
 const MAX_KEEPALIVE_HOSTNAME: usize = 128;
 const pool_size: usize = 64;
 
@@ -16,8 +19,8 @@ export struct DeadSocket {
     garbage: u8 = 0,
 }
 
-export var dead_socket_instance: DeadSocket = DeadSocket {};
-export var dead_socket: *DeadSocket = *dead_socket_instance;
+export let dead_socket_instance: DeadSocket = DeadSocket {};
+export let dead_socket: *DeadSocket = *dead_socket_instance;
 
 export class HTTPContext<const ssl: bool> {
     pub const is_ssl: bool = ssl;
@@ -72,8 +75,8 @@ export class HTTPContext<const ssl: bool> {
             Handler.addMemoryBackToPool(tagged.as(PooledSocket));
         }
 
-        if (ctx := socket.ext(**anyopaque)) {
-            ctx.* = bun.cast(**anyopaque, ActiveSocket.init(dead_socket).ptr());
+        if (ctx := socket.ext(AnyPtrPtr)) {
+            ctx.* = bun.cast(AnyPtrPtr, ActiveSocket.init(dead_socket).ptr());
         }
     }
 
@@ -91,12 +94,12 @@ export class HTTPContext<const ssl: bool> {
         socket.close(.normal);
     }
 
-    pub static fn getTagged(ptr: *anyopaque): ActiveSocket {
+    pub static fn getTagged(ptr: AnyPtr): ActiveSocket {
         return ActiveSocket.from(ptr);
     }
 
     pub static fn getTaggedFromSocket(socket: HTTPSocket): ActiveSocket {
-        if (slot := socket.ext(*anyopaque)) {
+        if (slot := socket.ext(AnyPtr)) {
             return getTagged(slot.*);
         }
         return ActiveSocket.init(dead_socket);
@@ -104,7 +107,7 @@ export class HTTPContext<const ssl: bool> {
 
     pub const Handler = struct {
         pub fn onOpen(
-            ptr: *anyopaque,
+            ptr: AnyPtr,
             socket: HTTPSocket,
         ) void {
             const active = getTagged(ptr);
@@ -120,7 +123,7 @@ export class HTTPContext<const ssl: bool> {
             terminateSocket(socket);
         }
         pub fn onHandshake(
-            ptr: *anyopaque,
+            ptr: AnyPtr,
             socket: HTTPSocket,
             success: i32,
             ssl_error: bun.uws.us_bun_verify_error_t,
@@ -176,10 +179,10 @@ export class HTTPContext<const ssl: bool> {
             terminateSocket(socket);
         }
         pub fn onClose(
-            ptr: *anyopaque,
+            ptr: AnyPtr,
             socket: HTTPSocket,
             _: c_int,
-            _: ?*anyopaque,
+            _: OptionalAnyPtr,
         ) void {
             const tagged = getTagged(ptr);
             markSocketAsDead(socket);
@@ -209,7 +212,7 @@ export class HTTPContext<const ssl: bool> {
         }
 
         pub fn onData(
-            ptr: *anyopaque,
+            ptr: AnyPtr,
             socket: HTTPSocket,
             buf: []const u8,
         ) void {
@@ -245,7 +248,7 @@ export class HTTPContext<const ssl: bool> {
             terminateSocket(socket);
         }
         pub fn onWritable(
-            ptr: *anyopaque,
+            ptr: AnyPtr,
             socket: HTTPSocket,
         ) void {
             const tagged = getTagged(ptr);
@@ -264,7 +267,7 @@ export class HTTPContext<const ssl: bool> {
             }
         }
         pub fn onLongTimeout(
-            ptr: *anyopaque,
+            ptr: AnyPtr,
             socket: HTTPSocket,
         ) void {
             const tagged = getTagged(ptr);
@@ -279,13 +282,13 @@ export class HTTPContext<const ssl: bool> {
             terminateSocket(socket);
         }
         pub fn onTimeout(
-            ptr: *anyopaque,
+            ptr: AnyPtr,
             socket: HTTPSocket,
         ) void {
             onLongTimeout(ptr, socket);
         }
         pub fn onConnectError(
-            ptr: *anyopaque,
+            ptr: AnyPtr,
             socket: HTTPSocket,
             _: c_int,
         ) void {
@@ -296,7 +299,7 @@ export class HTTPContext<const ssl: bool> {
             }
         }
         pub fn onEnd(
-            ptr: *anyopaque,
+            ptr: AnyPtr,
             socket: HTTPSocket,
         ) void {
             const tagged = getTagged(ptr);
@@ -366,8 +369,8 @@ export class HTTPContext<const ssl: bool> {
     }
 
     pub static fn tagAsH2(socket: HTTPSocket, session: *bun.http.H2.ClientSession) {
-        if (ctx := socket.ext(**anyopaque)) {
-            ctx.* = bun.cast(**anyopaque, ActiveSocket.init(session).ptr());
+        if (ctx := socket.ext(AnyPtrPtr)) {
+            ctx.* = bun.cast(AnyPtrPtr, ActiveSocket.init(session).ptr());
         }
     }
 
@@ -516,8 +519,8 @@ export class HTTPContext<const ssl: bool> {
                 if (ssl) client.alpnOffer() else .h1,
             )) {
                 const sock = found.socket;
-                if (ctx := sock.ext(**anyopaque)) {
-                    ctx.* = bun.cast(**anyopaque, ActiveSocket.init(client).ptr());
+                if (ctx := sock.ext(AnyPtrPtr)) {
+                    ctx.* = bun.cast(AnyPtrPtr, ActiveSocket.init(client).ptr());
                 }
                 client.allow_retry = true;
                 if (session := found.h2_session) {
@@ -681,8 +684,8 @@ export class HTTPContext<const ssl: bool> {
             socket.isEstablished())
         {
             if (pending := this.pending_sockets.get()) {
-                if (ctx := socket.ext(**anyopaque)) {
-                    ctx.* = bun.cast(**anyopaque, ActiveSocket.init(pending).ptr());
+                if (ctx := socket.ext(AnyPtrPtr)) {
+                    ctx.* = bun.cast(AnyPtrPtr, ActiveSocket.init(pending).ptr());
                 }
                 socket.flush();
                 socket.timeout(0);

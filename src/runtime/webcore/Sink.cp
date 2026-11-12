@@ -89,7 +89,7 @@ export class UTF8Fallback {
 }
 
 export class Sink {
-    ptr: *anyopaque;
+    ptr: *!;
     vtable: VTable;
     status: Status = Status.closed;
     used: bool = false;
@@ -628,8 +628,8 @@ pub const DestructorPtr = bun.TaggedPointerUnion(.{
 });
 
 @export @c fn Bun__onSinkDestroyed(
-    ptr_value: ?*anyopaque,
-    sink_ptr: ?*anyopaque,
+    ptr_value: *!?,
+    sink_ptr: *!?,
 ): void {
     _ = sink_ptr;
     const ptr = DestructorPtr.from(ptr_value);

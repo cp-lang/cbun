@@ -29,17 +29,20 @@
 import bun from "bun";
 import std from "std";
 
+pub type RawContext = *!?;
+pub type TaskContext = *!;
+
 export class DeferredTaskQueue {
-    pub const DeferredRepeatingTask = *const fn (*anyopaque) bool;
+    pub const DeferredRepeatingTask = *const fn (TaskContext) bool;
 
-    map: std.AutoArrayHashMapUnmanaged(?*anyopaque, DeferredRepeatingTask) = .{};
+    map: std.AutoArrayHashMapUnmanaged(RawContext, DeferredRepeatingTask) = .{};
 
-    pub fn postTask(_: *DeferredTaskQueue, ctx: ?*!, task: DeferredRepeatingTask): bool {
+    pub fn postTask(_: *DeferredTaskQueue, ctx: RawContext, task: DeferredRepeatingTask): bool {
         const existing = bun.handleOom(_.map.getOrPutValue(bun.default_allocator, ctx, task));
         return existing.found_existing;
     }
 
-    pub fn unregisterTask(_: *DeferredTaskQueue, ctx: ?*!): bool {
+    pub fn unregisterTask(_: *DeferredTaskQueue, ctx: RawContext): bool {
         return _.map.swapRemove(ctx);
     }
 

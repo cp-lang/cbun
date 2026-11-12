@@ -4,7 +4,6 @@ const string = []const u8;
 
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const bun = @import("bun");
-const AnyPtrPtr = (&anyopaque);
 const MAX_KEEPALIVE_HOSTNAME: usize = 128;
 const pool_size: usize = 64;
 pub var dead_socket_instance: DeadSocket = DeadSocket{  };
@@ -39,9 +38,9 @@ pub fn markTaggedSocketAsDead(socket: HTTPSocket, tagged: ActiveSocket) void {
                 if (tagged.is(PooledSocket)) {
                     _ = Handler.addMemoryBackToPool(tagged.as(PooledSocket));
                 }
-                if (socket.ext((&anyopaque))) |ctx| {
+                if (socket.ext(AnyPtrPtr)) |ctx| {
                     _ = &ctx;
-                    ctx.* = bun.cast((&anyopaque), ActiveSocket.init(dead_socket).ptr());
+                    ctx.* = bun.cast(AnyPtrPtr, ActiveSocket.init(dead_socket).ptr());
                 }
         }
 
@@ -59,12 +58,12 @@ pub fn closeSocket(socket: HTTPSocket) void {
                 _ = socket.close(.normal);
         }
 
-pub fn getTagged(ptr: *anyopaque) ActiveSocket {
+pub fn getTagged(ptr: AnyPtr) ActiveSocket {
                 return ActiveSocket.from(ptr);
         }
 
 pub fn getTaggedFromSocket(socket: HTTPSocket) ActiveSocket {
-                if (socket.ext((&anyopaque))) |slot| {
+                if (socket.ext(AnyPtr)) |slot| {
                     _ = &slot;
                     return getTagged(slot.*);
                 }
@@ -133,9 +132,9 @@ pub fn unregisterH2(self: *@This(), session: *bun.http.H2.ClientSession) void {
         }
 
 pub fn tagAsH2(socket: HTTPSocket, session: *bun.http.H2.ClientSession) void {
-                if (socket.ext((&anyopaque))) |ctx| {
+                if (socket.ext(AnyPtrPtr)) |ctx| {
                     _ = &ctx;
-                    ctx.* = bun.cast((&anyopaque), ActiveSocket.init(session).ptr());
+                    ctx.* = bun.cast(AnyPtrPtr, ActiveSocket.init(session).ptr());
                 }
         }
 
@@ -251,9 +250,9 @@ pub fn connect(self: *@This(), client: *bun.http, hostname_: []const u8, port: u
                     if (self.existingSocket(client.flags.reject_unauthorized, hostname, port, bun.api.server.ServerConfig.SSLConfig.rawPtr(client.tls_props), want_tunnel, target_hostname, target_port, proxy_auth_hash, (if (ssl) client.alpnOffer() else .h1))) |found| {
                         _ = &found;
                         const sock = found.socket;
-                        if (sock.ext((&anyopaque))) |ctx| {
+                        if (sock.ext(AnyPtrPtr)) |ctx| {
                             _ = &ctx;
-                            ctx.* = bun.cast((&anyopaque), ActiveSocket.init(client).ptr());
+                            ctx.* = bun.cast(AnyPtrPtr, ActiveSocket.init(client).ptr());
                         }
                         client.allow_retry = true;
                         if (found.h2_session) |session| {
@@ -405,9 +404,9 @@ pub fn releaseSocket(self: *@This(), socket: HTTPSocket, did_have_handshaking_er
                 if ((((hostname.len <= MAX_KEEPALIVE_HOSTNAME) and (!socket.isClosedOrHasError())) and socket.isEstablished())) {
                     if (self.pending_sockets.get()) |pending| {
                         _ = &pending;
-                        if (socket.ext((&anyopaque))) |ctx| {
+                        if (socket.ext(AnyPtrPtr)) |ctx| {
                             _ = &ctx;
-                            ctx.* = bun.cast((&anyopaque), ActiveSocket.init(pending).ptr());
+                            ctx.* = bun.cast(AnyPtrPtr, ActiveSocket.init(pending).ptr());
                         }
                         _ = socket.flush();
                         _ = socket.timeout(0);
@@ -482,7 +481,7 @@ pub fn releaseSocket(self: *@This(), socket: HTTPSocket, did_have_handshaking_er
         pub const PooledSocketHiveAllocator = bun.HiveArray(PooledSocket, pool_size);
         pub const Handler = struct {
                 pub fn onOpen(
-                    ptr: *anyopaque,
+                    ptr: AnyPtr,
                     socket: HTTPSocket,
                 ) void {
                     const active = getTagged(ptr);
@@ -498,7 +497,7 @@ pub fn releaseSocket(self: *@This(), socket: HTTPSocket, did_have_handshaking_er
                     terminateSocket(socket);
                 }
                 pub fn onHandshake(
-                    ptr: *anyopaque,
+                    ptr: AnyPtr,
                     socket: HTTPSocket,
                     success: i32,
                     ssl_error: bun.uws.us_bun_verify_error_t,
@@ -554,10 +553,10 @@ pub fn releaseSocket(self: *@This(), socket: HTTPSocket, did_have_handshaking_er
                     terminateSocket(socket);
                 }
                 pub fn onClose(
-                    ptr: *anyopaque,
+                    ptr: AnyPtr,
                     socket: HTTPSocket,
                     _: c_int,
-                    _: ?*anyopaque,
+                    _: OptionalAnyPtr,
                 ) void {
                     const tagged = getTagged(ptr);
                     markSocketAsDead(socket);
@@ -587,7 +586,7 @@ pub fn releaseSocket(self: *@This(), socket: HTTPSocket, did_have_handshaking_er
                 }
         
                 pub fn onData(
-                    ptr: *anyopaque,
+                    ptr: AnyPtr,
                     socket: HTTPSocket,
                     buf: []const u8,
                 ) void {
@@ -623,7 +622,7 @@ pub fn releaseSocket(self: *@This(), socket: HTTPSocket, did_have_handshaking_er
                     terminateSocket(socket);
                 }
                 pub fn onWritable(
-                    ptr: *anyopaque,
+                    ptr: AnyPtr,
                     socket: HTTPSocket,
                 ) void {
                     const tagged = getTagged(ptr);
@@ -642,7 +641,7 @@ pub fn releaseSocket(self: *@This(), socket: HTTPSocket, did_have_handshaking_er
                     }
                 }
                 pub fn onLongTimeout(
-                    ptr: *anyopaque,
+                    ptr: AnyPtr,
                     socket: HTTPSocket,
                 ) void {
                     const tagged = getTagged(ptr);
@@ -657,13 +656,13 @@ pub fn releaseSocket(self: *@This(), socket: HTTPSocket, did_have_handshaking_er
                     terminateSocket(socket);
                 }
                 pub fn onTimeout(
-                    ptr: *anyopaque,
+                    ptr: AnyPtr,
                     socket: HTTPSocket,
                 ) void {
                     onLongTimeout(ptr, socket);
                 }
                 pub fn onConnectError(
-                    ptr: *anyopaque,
+                    ptr: AnyPtr,
                     socket: HTTPSocket,
                     _: c_int,
                 ) void {
@@ -674,7 +673,7 @@ pub fn releaseSocket(self: *@This(), socket: HTTPSocket, did_have_handshaking_er
                     }
                 }
                 pub fn onEnd(
-                    ptr: *anyopaque,
+                    ptr: AnyPtr,
                     socket: HTTPSocket,
                 ) void {
                     const tagged = getTagged(ptr);
@@ -699,3 +698,6 @@ pub fn releaseSocket(self: *@This(), socket: HTTPSocket, did_have_handshaking_er
     };
 }
 
+pub const AnyPtr = *anyopaque;
+pub const AnyPtrPtr = **anyopaque;
+pub const OptionalAnyPtr = ?*anyopaque;

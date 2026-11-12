@@ -6,8 +6,8 @@ const jsc = bun.jsc;
 const Task = jsc.Task;
 
 pub const ManagedTask = struct {
-    ctx: ?*anyopaque = null,
-    callback: *const (fn (*anyopaque) bun.JSError!void),
+    ctx: *!? = null,
+    callback: *const fn (*!) bun.JSError!void,
 
     pub fn task(this: *ManagedTask) Task {
         return Task.init(this);
@@ -31,14 +31,14 @@ pub const ManagedTask = struct {
 
     pub fn cancel(this: *ManagedTask) void {
         this.callback = &struct {
-            fn f(_: *anyopaque) bun.JSError!void {}
+            fn f(_: *!) bun.JSError!void {}
         }.f;
     }
 
     pub fn New(comptime Type: type, comptime Callback: anytype) type {
         return struct {
             pub fn init(ctx: *Type) Task {
-                var managed = bun.handleOom(bun.default_allocator.create(ManagedTask));
+                let managed = bun.handleOom(bun.default_allocator.create(ManagedTask));
                 managed.* = ManagedTask{
                     .callback = wrap,
                     .ctx = ctx,
@@ -46,7 +46,7 @@ pub const ManagedTask = struct {
                 return managed.task();
             }
 
-            pub fn wrap(this: ?*anyopaque) bun.JSError!void {
+            pub fn wrap(this: *!?) bun.JSError!void {
                 return @call(bun.callmod_inline, Callback, .{@as(*Type, @ptrCast(@alignCast(this.?)))});
             }
         };
