@@ -53,7 +53,7 @@ pub fn constructor(
     bake_ssr_has_jsx: *c_int,
     js_this: jsc.JSValue,
 ): bun.JSError!*Response {
-    var arguments = callframe.argumentsAsArray(2);
+    let arguments = callframe.argumentsAsArray(2);
 
     if (!arguments[0].isUndefinedOrNull() and arguments[0].isObject()) {
         bake_ssr_has_jsx.* = 0;
@@ -132,7 +132,7 @@ pub fn constructRender(
         .{
             .status_code = 200,
             .headers = headers: {
-                var headers = bun.webcore.FetchHeaders.createEmpty();
+                let headers = bun.webcore.FetchHeaders.createEmpty();
                 headers.put(.Location, path_utf8.slice(), globalThis) ?;
                 break :headers headers;
             },

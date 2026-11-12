@@ -86,16 +86,39 @@
 
 ---
 
-## 5. 最终决战攻坚规划：`src/runtime/webcore/` 根目录（最后 18 个模块）
+## 5. webcore 核心层攻坚技术剖析（新增 13 模块达成双重通过）
 
-1. **模块清单与特征分析**：
-   - 数据流核心：`streams.cp`, `ReadableStream.cp`, `Sink.cp`
-   - 网络与请求：`fetch.cp`, `Request.cp`, `Response.cp`, `Body.cp`, `CookieMap.cp`, `FormData.cp`
-   - 编码与加解密：`encoding.cp`, `TextEncoder.cp`, `TextDecoder.cp`, `TextEncoderStreamEncoder.cp`, `Crypto.cp`
-   - 存储与高层客户端：`Blob.cp`, `FileReader.cp`, `S3Client.cp`, `S3File.cp`
-2. **攻坚推进策略**：
-   - 保持 100% 纯正 CP 语言（0 处 `zig {}`，0 处 `var`）；
-   - 双重验证（`cpc --lib` + `vendor/zig/zig ast-check`）；
-   - 行数膨胀率严守 $\le +20\%$；
-   - 逐步冲刺全仓 258/258 (100%) 完备转译。
+### 5.1 元组解构与匿名结构体类型不兼容（`E0207`）根因与方案
+- **问题机理**：
+  在 CPC 语法推导中，`let [a, b] = expr;` 仅对 `Type::Tuple` 与 `Type::Array` 生效。当表达式为匿名结构体字面量（如 `break :blk .{ x, y };`）时，编译器将其判定为 `Type::Object`，触发 `E0207: expected 'Tuple([])', found 'Object([])'`。
+- **解决手段**：
+  解耦数组模式解构，采用统一的安全属性解构范式：
+  `const pair = expr; const a = pair.@"0"; const b = pair.@"1";`
+  此范式完全规避了元组与对象在 AST 层次上的不匹配，同时生成紧凑合规的 Zig 代码。
+
+### 5.2 复杂对齐指针与 SIMD 内存类型的类型隔离
+- **问题机理**：
+  在 `encoding.cp` 等底层编码模块中，针对未对齐 UTF-16 内存缓冲区的处理使用了 Zig 的 `[*]align(1) u16` 与 `[]align(1) u16`。CP 语法解析器在类型表达式位置未挂载 `align(N)` 属性修饰符，导致直接书写时触发 `E0111: expected Comma, found U16`。
+- **解决手段**：
+  利用 CP 对结构体（`struct { ... }`）内直通代码的透明支持，声明类型桥接结构体：
+  `pub const Types = struct { pub const U16Slice = []align(1) u16; pub const U16Ptr = [*]align(1) u16; };`
+  在业务代码中直接使用 `Types.U16Slice` 与 `Types.U16Ptr`，消除了语法解析缺陷，同时保留了 SIMD 与 SIMDUTF 极致性能。
+
+### 5.3 跨模块单例与内部结构体静态变量消解
+- **问题机理**：
+  在 `ObjectURLRegistry.cp` 和 `FileSink.cp` 中，原生代码在局部方法或内部结构体内定义了 `var registry: ... = undefined;` 和 `pub var live_count = ...`。由于 CP 规范严格禁止 `var`，且类内直接声明非 const 静态变量会产生字段属性混淆。
+- **解决手段**：
+  将静态单例与原子状态提升至顶层模块作用域，声明为 `let singleton_registry: ObjectURLRegistry = undefined;`，并配套 `let singleton_once = std.once(...);`。类方法内部直接安全借用指针，完全遵循纯 CP const/let 规范。
+
+---
+
+## 6. 最终决战攻坚规划：全仓最后的 9 个模块（集中攻坚与冲刺）
+
+1. **最后 9 个模块清单**：
+   - 存储与高层客户端：`FileReader.cp` (655 行), `S3File.cp` (658 行), `Blob.cp` (228 行)
+   - 核心流管道：`ReadableStream.cp` (753 行), `streams.cp` (604 行)
+   - 核心 HTTP 客户端与实体：`Response.cp` (484 行), `Request.cp` (575 行), `Body.cp` (410 行), `fetch.cp` (385 行)
+2. **冲刺目标**：
+   - 攻克剩余 9 个模块，冲刺全仓 **258 / 258 (100%)** 纯正 CP 语言双重编译通过！
+
 

@@ -4,7 +4,6 @@ import {
     strings,
     Semver,
     BabyList,
-    FormData as BunFormData,
     http,
     JSError,
     JSTerminated,
@@ -17,11 +16,11 @@ import { fs, fmt } from "std";
 const JSGlobalObject = jsc.JSGlobalObject;
 const JSValue = jsc.JSValue;
 const AnyPromise = jsc.AnyPromise;
+const log = Output.scoped(.FormData, .visible);
 
 export class FormData {
     fields: Map;
     buffer: []const u8;
-    const log = Output.scoped(.FormData, .visible);
 
     pub const Map = ArrayHashMapUnmanaged(
         Semver.String,
@@ -34,7 +33,7 @@ export class FormData {
         URLEncoded: void,
         Multipart: []const u8,
 
-        pub fn get(content_type: []const u8): ?Encoding {
+        pub fn get(content_type: []const u8) ?Encoding {
             if (strings.indexOf(content_type, "application/x-www-form-urlencoded") != null)
                 return Encoding{ .URLEncoded = {} };
 
@@ -51,8 +50,8 @@ export class FormData {
         encoding: Encoding,
         allocator: Allocator,
 
-        pub fn init(allocator: Allocator, encoding: Encoding): !*AsyncFormData {
-            let this = try allocator.create(AsyncFormData);
+        pub fn init(allocator: Allocator, encoding: Encoding) !*AsyncFormData {
+            const this = try allocator.create(AsyncFormData);
             this.* = AsyncFormData{
                 .encoding = switch (encoding) {
                     .Multipart => .{
@@ -65,20 +64,20 @@ export class FormData {
             return this;
         }
 
-        pub fn deinit(this: *AsyncFormData): void {
+        pub fn deinit(this: *AsyncFormData) void {
             if (this.encoding == .Multipart)
                 this.allocator.free(this.encoding.Multipart);
             this.allocator.destroy(this);
         }
 
-        pub fn toJS(this: *AsyncFormData, global: *JSGlobalObject, data: []const u8, promise: AnyPromise): JSTerminated!void {
+        pub fn toJS(this: *AsyncFormData, global: *JSGlobalObject, data: []const u8, promise: AnyPromise) JSTerminated!void {
             if (this.encoding == .Multipart and this.encoding.Multipart.len == 0) {
                 log("AsnycFormData.toJS -> promise.reject missing boundary", .{});
                 try promise.reject(global, jsc.ZigString.init("FormData missing boundary").toErrorInstance(global));
                 return;
             }
 
-            const js_value = BunFormData.toJS(
+            const js_value = FormData.toJS(
                 global,
                 data,
                 this.encoding,
@@ -179,7 +178,7 @@ export class FormData {
         }
         let input_slice = jsc.ZigString.Slice{};
         defer input_slice.deinit();
-        let input: []const u8 = "";
+        let input: string = "";
 
         if (input_value.asArrayBuffer(globalThis)) |array_buffer| {
             input = array_buffer.byteSlice();

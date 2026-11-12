@@ -16,6 +16,8 @@ import {
 import { meta, mem, fmt } from "std";
 import { ArrayBufferSink } from "./ArrayBufferSink";
 
+const bun = @import("bun");
+
 const Syscall = sys;
 const Subprocess = api.Subprocess;
 const JSGlobalObject = jsc.JSGlobalObject;
@@ -23,16 +25,77 @@ const JSValue = jsc.JSValue;
 const Blob = webcore.Blob;
 const streams = webcore.streams;
 
+const stack_size = 1024;
+
+export class UTF8Fallback {
+    pub fn writeLatin1(comptime Ctx: type, ctx: *Ctx, input: streams.Result, comptime writeFn: anytype): streams.Result.Writable {
+        const str = input.slice();
+        if (strings.isAllASCII(str)) {
+            return writeFn(
+                ctx,
+                input,
+            );
+        }
+
+        if (stack_size >= str.len) {
+            let buf: [stack_size]u8 = undefined;
+            @memcpy(buf[0..str.len], str);
+
+            strings.replaceLatin1WithUTF8(buf[0..str.len]);
+            if (input.isDone()) {
+                return writeFn(ctx, .{ .temporary_and_done = ByteList.fromBorrowedSliceDangerous(buf[0..str.len]) });
+            } else {
+                return writeFn(ctx, .{ .temporary = ByteList.fromBorrowedSliceDangerous(buf[0..str.len]) });
+            }
+        }
+
+        {
+            let slice = default_allocator.alloc(u8, str.len) catch return .{ .err = Syscall.Error.oom };
+            @memcpy(slice[0..str.len], str);
+
+            strings.replaceLatin1WithUTF8(slice[0..str.len]);
+            if (input.isDone()) {
+                return writeFn(ctx, .{ .owned_and_done = ByteList.fromOwnedSlice(slice) });
+            } else {
+                return writeFn(ctx, .{ .owned = ByteList.fromOwnedSlice(slice) });
+            }
+        }
+    }
+
+    pub fn writeUTF16(comptime Ctx: type, ctx: *Ctx, input: streams.Result, comptime writeFn: anytype): streams.Result.Writable {
+        const str: []const u16 = mem.bytesAsSlice(u16, input.slice());
+
+        if (stack_size >= str.len * 2) {
+            let buf: [stack_size]u8 = undefined;
+            const copied = strings.copyUTF16IntoUTF8Impl(&buf, str, true);
+            assert(copied.written <= stack_size);
+            assert(copied.read <= stack_size);
+            if (input.isDone()) {
+                return writeFn(ctx, .{ .temporary_and_done = ByteList.fromBorrowedSliceDangerous(buf[0..copied.written]) });
+            } else {
+                return writeFn(ctx, .{ .temporary = ByteList.fromBorrowedSliceDangerous(buf[0..copied.written]) });
+            }
+        }
+
+        {
+            const allocated = strings.toUTF8Alloc(default_allocator, str) catch return .{ .err = Syscall.Error.oom };
+            if (input.isDone()) {
+                return writeFn(ctx, .{ .owned_and_done = ByteList.fromOwnedSlice(allocated) });
+            } else {
+                return writeFn(ctx, .{ .owned = ByteList.fromOwnedSlice(allocated) });
+            }
+        }
+    }
+}
+
 export class Sink {
-    ptr: *!;
+    ptr: *anyopaque;
     vtable: VTable;
     status: Status = Status.closed;
     used: bool = false;
 
-    pub const ArrayBufferSink = ArrayBufferSink;
-
     pub const pending = Sink{
-        .ptr = @as(*!, @ptrFromInt(0xaaaaaaaa)),
+        .ptr = @as(*anyopaque, @ptrFromInt(0xaaaaaaaa)),
         .vtable = undefined,
     };
 
@@ -47,9 +110,9 @@ export class Sink {
         bytes: streams.Result,
     };
 
-    pub fn initWithType(@comptime Type: type, handler: *Type): Sink {
+    pub fn initWithType(comptime Type: type, handler: *Type): Sink {
         return .{
-            .ptr = handler as *!,
+            .ptr = @ptrCast(handler),
             .vtable = VTable.wrap(Type),
             .status = .ready,
             .used = false,
@@ -60,74 +123,12 @@ export class Sink {
         return initWithType(meta.Child(@TypeOf(handler)), handler);
     }
 
-    pub const UTF8Fallback = struct {
-        const stack_size = 1024;
-        pub fn writeLatin1(@comptime Ctx: type, ctx: *Ctx, input: streams.Result, @comptime writeFn: anytype): streams.Result.Writable {
-            const str = input.slice();
-            if (strings.isAllASCII(str)) {
-                return writeFn(
-                    ctx,
-                    input,
-                );
-            }
-
-            if (stack_size >= str.len) {
-                let buf: [stack_size]u8 = undefined;
-                @memcpy(buf[0..str.len], str);
-
-                strings.replaceLatin1WithUTF8(buf[0..str.len]);
-                if (input.isDone()) {
-                    return writeFn(ctx, .{ .temporary_and_done = ByteList.fromBorrowedSliceDangerous(buf[0..str.len]) });
-                } else {
-                    return writeFn(ctx, .{ .temporary = ByteList.fromBorrowedSliceDangerous(buf[0..str.len]) });
-                }
-            }
-
-            {
-                let slice = default_allocator.alloc(u8, str.len) catch return .{ .err = Syscall.Error.oom };
-                @memcpy(slice[0..str.len], str);
-
-                strings.replaceLatin1WithUTF8(slice[0..str.len]);
-                if (input.isDone()) {
-                    return writeFn(ctx, .{ .owned_and_done = ByteList.fromOwnedSlice(slice) });
-                } else {
-                    return writeFn(ctx, .{ .owned = ByteList.fromOwnedSlice(slice) });
-                }
-            }
-        }
-
-        pub fn writeUTF16(@comptime Ctx: type, ctx: *Ctx, input: streams.Result, @comptime writeFn: anytype): streams.Result.Writable {
-            const str: []const u16 = mem.bytesAsSlice(u16, input.slice());
-
-            if (stack_size >= str.len * 2) {
-                let buf: [stack_size]u8 = undefined;
-                const copied = strings.copyUTF16IntoUTF8Impl(&buf, str, true);
-                assert(copied.written <= stack_size);
-                assert(copied.read <= stack_size);
-                if (input.isDone()) {
-                    return writeFn(ctx, .{ .temporary_and_done = ByteList.fromBorrowedSliceDangerous(buf[0..copied.written]) });
-                } else {
-                    return writeFn(ctx, .{ .temporary = ByteList.fromBorrowedSliceDangerous(buf[0..copied.written]) });
-                }
-            }
-
-            {
-                const allocated = strings.toUTF8Alloc(default_allocator, str) catch return .{ .err = Syscall.Error.oom };
-                if (input.isDone()) {
-                    return writeFn(ctx, .{ .owned_and_done = ByteList.fromOwnedSlice(allocated) });
-                } else {
-                    return writeFn(ctx, .{ .owned = ByteList.fromOwnedSlice(allocated) });
-                }
-            }
-        }
-    };
-
     pub const VTable = struct {
-        pub const WriteUTF16Fn = *const (fn (this: *!, data: streams.Result): streams.Result.Writable);
-        pub const WriteUTF8Fn = *const (fn (this: *!, data: streams.Result): streams.Result.Writable);
-        pub const WriteLatin1Fn = *const (fn (this: *!, data: streams.Result): streams.Result.Writable);
-        pub const EndFn = *const (fn (this: *!, err: ?Syscall.Error): sys.Maybe(void));
-        pub const ConnectFn = *const (fn (this: *!, signal: streams.Signal): sys.Maybe(void));
+        pub const WriteUTF16Fn = *const fn (this: *anyopaque, data: streams.Result) streams.Result.Writable;
+        pub const WriteUTF8Fn = *const fn (this: *anyopaque, data: streams.Result) streams.Result.Writable;
+        pub const WriteLatin1Fn = *const fn (this: *anyopaque, data: streams.Result) streams.Result.Writable;
+        pub const EndFn = *const fn (this: *anyopaque, err: ?Syscall.Error) sys.Maybe(void);
+        pub const ConnectFn = *const fn (this: *anyopaque, signal: streams.Signal) sys.Maybe(void);
 
         connect: ConnectFn,
         write: WriteUTF8Fn,
@@ -136,22 +137,22 @@ export class Sink {
         end: EndFn,
 
         pub fn wrap(
-            @comptime Wrapped: type,
-        ): VTable {
+            comptime Wrapped: type,
+        ) VTable {
             const Functions = struct {
-                pub fn onWrite(this: *!, data: streams.Result): streams.Result.Writable {
+                pub fn onWrite(this: *anyopaque, data: streams.Result) streams.Result.Writable {
                     return Wrapped.write(cast(*Wrapped, this), data);
                 }
-                pub fn onConnect(this: *!, signal: streams.Signal): sys.Maybe(void) {
+                pub fn onConnect(this: *anyopaque, signal: streams.Signal) sys.Maybe(void) {
                     return Wrapped.connect(cast(*Wrapped, this), signal);
                 }
-                pub fn onWriteLatin1(this: *!, data: streams.Result): streams.Result.Writable {
+                pub fn onWriteLatin1(this: *anyopaque, data: streams.Result) streams.Result.Writable {
                     return Wrapped.writeLatin1(cast(*Wrapped, this), data);
                 }
-                pub fn onWriteUTF16(this: *!, data: streams.Result): streams.Result.Writable {
+                pub fn onWriteUTF16(this: *anyopaque, data: streams.Result) streams.Result.Writable {
                     return Wrapped.writeUTF16(cast(*Wrapped, this), data);
                 }
-                pub fn onEnd(this: *!, err: ?Syscall.Error): sys.Maybe(void) {
+                pub fn onEnd(this: *anyopaque, err: ?Syscall.Error) sys.Maybe(void) {
                     return Wrapped.end(cast(*Wrapped, this), err);
                 }
             };
@@ -232,7 +233,7 @@ export class Sink {
     }
 }
 
-pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
+pub fn JSSink(comptime SinkType: type, comptime abi_name: []const u8): type {
     return struct {
         sink: SinkType,
 
@@ -260,11 +261,11 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
             return @sizeOf(ThisSink) + SinkType.memoryCost(&this.sink);
         }
 
-        const AssignToStreamFn = *const fn (*JSGlobalObject, JSValue, *!, **!) callconv(.c) JSValue;
+        const AssignToStreamFn = *const fn (*JSGlobalObject, JSValue, *anyopaque, **anyopaque) callconv(.c) JSValue;
         const OnCloseFn = *const fn (JSValue, JSValue) callconv(.c) void;
         const OnReadyFn = *const fn (JSValue, JSValue, JSValue) callconv(.c) void;
         const OnStartFn = *const fn (JSValue, *JSGlobalObject) callconv(.c) void;
-        const CreateObjectFn = *const fn (*JSGlobalObject, *!, usize) callconv(.c) JSValue;
+        const CreateObjectFn = *const fn (*JSGlobalObject, *anyopaque, usize) callconv(.c) JSValue;
         const SetDestroyCallbackFn = *const fn (JSValue, usize) callconv(.c) void;
         const DetachPtrFn = *const fn (JSValue) callconv(.c) void;
 
@@ -276,7 +277,7 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
         const setDestroyCallbackExtern = @extern(SetDestroyCallbackFn, .{ .name = abi_name ++ "__setDestroyCallback" });
         const detachPtrExtern = @extern(DetachPtrFn, .{ .name = abi_name ++ "__detachPtr" }).*;
 
-        pub fn assignToStream(globalThis: *JSGlobalObject, stream: JSValue, ptr: *!, jsvalue_ptr: **!): JSValue {
+        pub fn assignToStream(globalThis: *JSGlobalObject, stream: JSValue, ptr: *anyopaque, jsvalue_ptr: **anyopaque): JSValue {
             return assignToStreamExtern(globalThis, stream, ptr, jsvalue_ptr);
         }
 
@@ -296,7 +297,7 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
             return onStartExtern(ptr, globalThis);
         }
 
-        pub fn createObject(globalThis: *JSGlobalObject, object: *!, destructor: usize): JSValue {
+        pub fn createObject(globalThis: *JSGlobalObject, object: *anyopaque, destructor: usize): JSValue {
             jsc.markBinding(@src());
             return createObjectExtern(globalThis, object, destructor);
         }
@@ -313,7 +314,7 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
         pub fn construct(globalThis: *JSGlobalObject, _: *jsc.CallFrame): JSError!JSValue {
             jsc.markBinding(@src());
 
-            if (@comptime !@hasDecl(SinkType, "construct")) {
+            if (comptime !@hasDecl(SinkType, "construct")) {
                 const Static = struct {
                     pub const message = fmt.comptimePrint("{s} is not constructable", .{SinkType.name});
                 };
@@ -326,16 +327,16 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
 
             let this = new(SinkType, undefined);
             this.construct(default_allocator);
-            return createObject(globalThis, this as *!, 0);
+            return createObject(globalThis, @ptrCast(this), 0);
         }
 
-        pub fn finalize(ptr: *!) callconv(.c) void {
+        pub fn finalize(ptr: *anyopaque) callconv(.c) void {
             let this = cast(*ThisSink, ptr);
             this.sink.finalize();
         }
 
         pub fn detach(this: *ThisSink, globalThis: *JSGlobalObject): void {
-            if (@comptime !@hasField(SinkType, "signal"))
+            if (comptime !@hasField(SinkType, "signal"))
                 return;
 
             const ptr = this.sink.signal.ptr;
@@ -380,7 +381,7 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
             jsc.markBinding(@src());
             const this = try getThis(globalThis, callframe);
 
-            if (@comptime @hasDecl(SinkType, "getPendingError")) {
+            if (comptime @hasDecl(SinkType, "getPendingError")) {
                 if (this.sink.getPendingError()) |err| {
                     return globalThis.throwValue(err);
                 }
@@ -439,7 +440,7 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
             jsc.markBinding(@src());
             const this = try getThis(globalThis, callframe);
 
-            if (@comptime @hasDecl(SinkType, "getPendingError")) {
+            if (comptime @hasDecl(SinkType, "getPendingError")) {
                 if (this.sink.getPendingError()) |err| {
                     return globalThis.throwValue(err);
                 }
@@ -475,11 +476,11 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
             return this.sink.writeLatin1(.{ .temporary = view.slice() }).toJS(globalThis);
         }
 
-        pub fn close(globalThis: *JSGlobalObject, sink_ptr: *!?) callconv(.c) JSValue {
+        pub fn close(globalThis: *JSGlobalObject, sink_ptr: ?*anyopaque) callconv(.c) JSValue {
             jsc.markBinding(@src());
             const this: *ThisSink = cast(*ThisSink, sink_ptr orelse return .js_undefined);
 
-            if (@comptime @hasDecl(SinkType, "getPendingError")) {
+            if (comptime @hasDecl(SinkType, "getPendingError")) {
                 if (this.sink.getPendingError()) |err| {
                     return globalThis.vm().throwError(globalThis, err) catch .zero;
                 }
@@ -492,19 +493,19 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
             jsc.markBinding(@src());
             const this = try getThis(globalThis, callframe);
 
-            if (@comptime @hasDecl(SinkType, "getPendingError")) {
+            if (comptime @hasDecl(SinkType, "getPendingError")) {
                 if (this.sink.getPendingError()) |err| {
                     return globalThis.throwValue(err);
                 }
             }
 
             defer {
-                if ((@comptime @hasField(SinkType, "done")) and this.sink.done) {
+                if ((comptime @hasField(SinkType, "done")) and this.sink.done) {
                     this.unprotect();
                 }
             }
 
-            if (@comptime @hasDecl(SinkType, "flushFromJS")) {
+            if (comptime @hasDecl(SinkType, "flushFromJS")) {
                 const wait = callframe.argumentsCount() > 0 and callframe.argument(0).isBoolean() and callframe.argument(0).asBoolean();
                 const maybe_value: sys.Maybe(JSValue) = this.sink.flushFromJS(globalThis, wait);
                 return switch (maybe_value) {
@@ -520,19 +521,19 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
             jsc.markBinding(@src());
             const this = try getThis(globalThis, callframe);
 
-            if (@comptime @hasDecl(SinkType, "getPendingError")) {
+            if (comptime @hasDecl(SinkType, "getPendingError")) {
                 if (this.sink.getPendingError()) |err| {
                     return globalThis.throwValue(err);
                 }
             }
 
-            if (@comptime @hasField(streams.Start, abi_name)) {
+            if (comptime @hasField(streams.Start, abi_name)) {
                 return this.sink.start(
                     if (callframe.argumentsCount() > 0)
                         try streams.Start.fromJSWithTag(
                             globalThis,
                             callframe.argument(0),
-                            @comptime @field(streams.Start, abi_name),
+                            comptime @field(streams.Start, abi_name),
                         )
                     else
                         .{ .empty = {} },
@@ -551,7 +552,7 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
             jsc.markBinding(@src());
             const this = try getThis(globalThis, callframe);
 
-            if (@comptime @hasDecl(SinkType, "getPendingError")) {
+            if (comptime @hasDecl(SinkType, "getPendingError")) {
                 if (this.sink.getPendingError()) |err| {
                     return globalThis.throwValue(err);
                 }
@@ -559,7 +560,7 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
 
             const result = this.sink.endFromJS(globalThis).toJS(globalThis);
 
-            if (@comptime @hasDecl(SinkType, "protectJSWrapper")) {
+            if (comptime @hasDecl(SinkType, "protectJSWrapper")) {
                 if (this.sink.pending.state == .pending) {
                     this.sink.protectJSWrapper(globalThis, callframe.this());
                 }
@@ -568,11 +569,11 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
             return result;
         }
 
-        pub fn endWithSink(ptr: *!, globalThis: *JSGlobalObject) callconv(jsc.conv) JSValue {
+        pub fn endWithSink(ptr: *anyopaque, globalThis: *JSGlobalObject) callconv(jsc.conv) JSValue {
             jsc.markBinding(@src());
             let this = cast(*ThisSink, ptr);
 
-            if (@comptime @hasDecl(SinkType, "getPendingError")) {
+            if (comptime @hasDecl(SinkType, "getPendingError")) {
                 if (this.sink.getPendingError()) |err| {
                     return globalThis.throwValue(err);
                 }
@@ -581,10 +582,10 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
             return this.sink.endFromJS(globalThis).toJS(globalThis) catch .zero;
         }
 
-        pub fn updateRef(ptr: *!, value: bool) callconv(.c) void {
+        pub fn updateRef(ptr: *anyopaque, value: bool) callconv(.c) void {
             jsc.markBinding(@src());
             let this = cast(*ThisSink, ptr);
-            if (@comptime @hasDecl(SinkType, "updateRef"))
+            if (comptime @hasDecl(SinkType, "updateRef"))
                 this.sink.updateRef(value);
         }
 
@@ -594,9 +595,9 @@ pub fn JSSink(@comptime SinkType: type, @comptime abi_name: []const u8): type {
         const jsEnd = jsc.toJSHostFn(@This().end);
         const jsConstruct = jsc.toJSHostFn(construct);
 
-        fn jsGetInternalFd(ptr: *!) callconv(.c) JSValue {
+        fn jsGetInternalFd(ptr: *anyopaque) callconv(.c) JSValue {
             let this = cast(*ThisSink, ptr);
-            if (@comptime @hasDecl(SinkType, "getFd")) {
+            if (comptime @hasDecl(SinkType, "getFd")) {
                 return JSValue.jsNumber(this.sink.getFd());
             }
             return .null;
@@ -627,8 +628,8 @@ pub const DestructorPtr = bun.TaggedPointerUnion(.{
 });
 
 @export @c fn Bun__onSinkDestroyed(
-    ptr_value: *!?,
-    sink_ptr: *!?,
+    ptr_value: ?*anyopaque,
+    sink_ptr: ?*anyopaque,
 ): void {
     _ = sink_ptr;
     const ptr = DestructorPtr.from(ptr_value);

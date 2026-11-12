@@ -27,7 +27,7 @@ export class S3Stat {
         lastModified: []const u8,
         globalThis: *jsc.JSGlobalObject,
     ): bun.JSError!*S3Stat {
-        var date_str = bun.String.init(lastModified);
+        let date_str = bun.String.init(lastModified);
         defer date_str.deref();
         const last_modified = try date_str.parseDate(globalThis);
 

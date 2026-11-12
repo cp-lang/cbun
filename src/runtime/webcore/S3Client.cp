@@ -30,7 +30,7 @@ pub fn writeFormatCredentials(
         const Writer = @TypeOf(writer);
 
         formatter.indent += 1;
-        defer formatter.indent -|= 1;
+        defer formatter.indent = if (formatter.indent > 0) formatter.indent - 1 else 0;
 
         const endpoint = if (credentials.endpoint.len > 0) credentials.endpoint else (if (credentials.virtual_hosted_style) "https://<bucket>.s3.<region>.amazonaws.com" else "https://s3.<region>.amazonaws.com");
 
@@ -146,7 +146,7 @@ export class S3Client {
         const arguments = callframe.arguments_old(2).slice();
         let args = jsc.CallFrame.ArgumentsSlice.init(globalThis.bunVM(), arguments);
         defer args.deinit();
-        const path: jsc.Node.PathLike = try jsc.Node.PathLike.fromJS(globalThis, &args) orelse {
+        const path = (try jsc.Node.PathLike.fromJS(globalThis, &args)) orelse {
             if (args.len() == 0) {
                 return globalThis.ERR(.MISSING_ARGS, "Expected a path ", .{}).throw();
             }
@@ -162,7 +162,7 @@ export class S3Client {
         const arguments = callframe.arguments_old(2).slice();
         let args = jsc.CallFrame.ArgumentsSlice.init(globalThis.bunVM(), arguments);
         defer args.deinit();
-        const path: jsc.Node.PathLike = try jsc.Node.PathLike.fromJS(globalThis, &args) orelse {
+        const path = (try jsc.Node.PathLike.fromJS(globalThis, &args)) orelse {
             if (args.len() == 0) {
                 return globalThis.ERR(.MISSING_ARGS, "Expected a path to presign", .{}).throw();
             }
@@ -180,7 +180,7 @@ export class S3Client {
         const arguments = callframe.arguments_old(2).slice();
         let args = jsc.CallFrame.ArgumentsSlice.init(globalThis.bunVM(), arguments);
         defer args.deinit();
-        const path: jsc.Node.PathLike = try jsc.Node.PathLike.fromJS(globalThis, &args) orelse {
+        const path = (try jsc.Node.PathLike.fromJS(globalThis, &args)) orelse {
             if (args.len() == 0) {
                 return globalThis.ERR(.MISSING_ARGS, "Expected a path to check if it exists", .{}).throw();
             }
@@ -197,7 +197,7 @@ export class S3Client {
         const arguments = callframe.arguments_old(2).slice();
         let args = jsc.CallFrame.ArgumentsSlice.init(globalThis.bunVM(), arguments);
         defer args.deinit();
-        const path: jsc.Node.PathLike = try jsc.Node.PathLike.fromJS(globalThis, &args) orelse {
+        const path = (try jsc.Node.PathLike.fromJS(globalThis, &args)) orelse {
             if (args.len() == 0) {
                 return globalThis.ERR(.MISSING_ARGS, "Expected a path to check the size of", .{}).throw();
             }
@@ -214,7 +214,7 @@ export class S3Client {
         const arguments = callframe.arguments_old(2).slice();
         let args = jsc.CallFrame.ArgumentsSlice.init(globalThis.bunVM(), arguments);
         defer args.deinit();
-        const path: jsc.Node.PathLike = try jsc.Node.PathLike.fromJS(globalThis, &args) orelse {
+        const path = (try jsc.Node.PathLike.fromJS(globalThis, &args)) orelse {
             if (args.len() == 0) {
                 return globalThis.ERR(.MISSING_ARGS, "Expected a path to check the stat of", .{}).throw();
             }
@@ -231,7 +231,7 @@ export class S3Client {
         const arguments = callframe.arguments_old(3).slice();
         let args = jsc.CallFrame.ArgumentsSlice.init(globalThis.bunVM(), arguments);
         defer args.deinit();
-        const path: jsc.Node.PathLike = try jsc.Node.PathLike.fromJS(globalThis, &args) orelse {
+        const path = (try jsc.Node.PathLike.fromJS(globalThis, &args)) orelse {
             return globalThis.ERR(.MISSING_ARGS, "Expected a path to write to", .{}).throw();
         };
         errdefer path.deinit();
@@ -264,7 +264,7 @@ export class S3Client {
         const arguments = callframe.arguments_old(2).slice();
         let args = jsc.CallFrame.ArgumentsSlice.init(globalThis.bunVM(), arguments);
         defer args.deinit();
-        const path: jsc.Node.PathLike = try jsc.Node.PathLike.fromJS(globalThis, &args) orelse {
+        const path = (try jsc.Node.PathLike.fromJS(globalThis, &args)) orelse {
             return globalThis.ERR(.MISSING_ARGS, "Expected a path to unlink", .{}).throw();
         };
         errdefer path.deinit();

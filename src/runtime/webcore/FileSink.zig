@@ -4,6 +4,7 @@ const string = []const u8;
 
 fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const log = Output.scoped(.FileSink, .visible);
+pub var live_count = std.atomic.Value(i32).init(0);
 fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
 fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
 fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
@@ -104,7 +105,7 @@ pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try al
 
 pub fn fileSinkLiveCount(self: *TestingAPIs) JSError!JSValue {
         _ = &self;
-            return JSValue.jsNumber(FileSink.live_count.load(.monotonic));
+            return JSValue.jsNumber(live_count.load(.monotonic));
     }
 };
 
@@ -291,7 +292,7 @@ pub fn createWithPipe(self: *const FileSink, event_loop_: anytype, pipe: *uv.Pip
             _ = &evtloop;
             var this_sink = sys.new(FileSink, .{ .ref_count = .init, .event_loop_handle = EventLoopHandle.init(evtloop), .fd = pipe.fd() });
             _ = &this_sink;
-            _ = FileSink.live_count.fetchAdd(1, .monotonic);
+            _ = live_count.fetchAdd(1, .monotonic);
             _ = this_sink.writer.setPipe(pipe);
             _ = this_sink.writer.setParent(this_sink);
             return this_sink;
@@ -303,7 +304,7 @@ pub fn create(self: *const FileSink, event_loop_: anytype, fd: FD) *FileSink {
             _ = &evtloop;
             var this_sink = sys.new(FileSink, .{ .ref_count = .init, .event_loop_handle = EventLoopHandle.init(evtloop), .fd = fd });
             _ = &this_sink;
-            _ = FileSink.live_count.fetchAdd(1, .monotonic);
+            _ = live_count.fetchAdd(1, .monotonic);
             _ = this_sink.writer.setParent(this_sink);
             return this_sink;
     }
@@ -503,14 +504,14 @@ pub fn init(self: *FileSink, fd: FD, event_loop_handle: anytype) *FileSink {
         _ = &self;
             var this_sink = sys.new(FileSink, .{ .ref_count = .init, .writer = .{}, .fd = fd, .event_loop_handle = EventLoopHandle.init(event_loop_handle) });
             _ = &this_sink;
-            _ = FileSink.live_count.fetchAdd(1, .monotonic);
+            _ = live_count.fetchAdd(1, .monotonic);
             _ = this_sink.writer.setParent(this_sink);
             return this_sink;
     }
 
 pub fn construct(self: *FileSink) void {
             self.* = FileSink{ .ref_count = .init, .event_loop_handle = EventLoopHandle.init((VirtualMachine.get()).?.eventLoop()) };
-            _ = FileSink.live_count.fetchAdd(1, .monotonic);
+            _ = live_count.fetchAdd(1, .monotonic);
     }
 
 pub fn write(self: *FileSink, data: streams.Result) streams.Result.Writable {
@@ -566,7 +567,7 @@ self.written = (self.written + @as(usize, @truncate(w)));
     }
 
 pub fn deinit(self: *FileSink) void {
-            _ = FileSink.live_count.fetchSub(1, .monotonic);
+            _ = live_count.fetchSub(1, .monotonic);
             _ = self.pending.deinit();
             _ = self.writer.deinit();
             _ = self.readable_stream.deinit();
@@ -742,7 +743,6 @@ _ = self.handleRejectStream(globalThis, promise.result(globalThis.vm()));
     pub const RefCount = sys.RefCount(FileSink, "ref_count", deinit, .{});
     pub const ref = RefCount.ref;
     pub const deref = RefCount.deref;
-    pub var live_count = std.atomic.Value(i32).init(0);
     pub const IOWriter = io.StreamingWriter(FileSink, opaque {
             pub const onClose = FileSink.onClose;
             pub const onWritable = FileSink.onReady;

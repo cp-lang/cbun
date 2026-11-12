@@ -16,6 +16,11 @@ const JSGlobalObject = jsc.JSGlobalObject;
 const JSValue = jsc.JSValue;
 const Encoding = jsc.Node.Encoding;
 
+pub const Types = struct {
+    pub const U16Slice = []align(1) u16;
+    pub const U16Ptr = [*]align(1) u16;
+};
+
 @export @c fn Bun__encoding__writeLatin1(input: [*]const u8, len: usize, to: [*]u8, to_len: usize, encoding: u8): usize {
     return switch (@as(Encoding, @enumFromInt(encoding))) {
         .utf8 => writeU8(input, len, to, to_len, .utf8),
@@ -106,7 +111,9 @@ pub fn toBunStringFromOwnedSlice(input: []u8, encoding: Encoding): BunString {
                 return BunString.createExternalGloballyAllocated(.latin1, input);
             }
 
-            let str, const chars = BunString.createUninitialized(.latin1, input.len);
+            const pair = BunString.createUninitialized(.latin1, input.len);
+            let str = pair.@"0";
+            const chars = pair.@"1";
             defer default_allocator.free(input);
             if (str.tag == .Dead) {
                 return str;
@@ -144,7 +151,9 @@ pub fn toBunStringFromOwnedSlice(input: []u8, encoding: Encoding): BunString {
 
         .hex => {
             defer default_allocator.free(input);
-            let str, const chars = BunString.createUninitialized(.latin1, input.len * 2);
+            const pair = BunString.createUninitialized(.latin1, input.len * 2);
+            let str = pair.@"0";
+            const chars = pair.@"1";
 
             if (str.tag == .Dead) {
                 return str;
@@ -162,7 +171,9 @@ pub fn toBunStringFromOwnedSlice(input: []u8, encoding: Encoding): BunString {
 
         .base64url => {
             defer default_allocator.free(input);
-            const out, const chars = BunString.createUninitialized(.latin1, base64.urlSafeEncodeLen(input));
+            const pair = BunString.createUninitialized(.latin1, base64.urlSafeEncodeLen(input));
+            const out = pair.@"0";
+            const chars = pair.@"1";
             if (out.tag != .Dead) {
                 _ = base64.encodeURLSafe(chars, input);
             }
@@ -194,9 +205,11 @@ pub fn toBunStringComptime(input: []const u8, comptime encoding: Encoding): BunS
     if (input.len == 0)
         return BunString.empty;
 
-    switch (@comptime encoding) {
+    switch (encoding) {
         .ascii => {
-            let str, const chars = BunString.createUninitialized(.latin1, input.len);
+            const pair = BunString.createUninitialized(.latin1, input.len);
+            let str = pair.@"0";
+            const chars = pair.@"1";
             if (str.tag == .Dead) {
                 return str;
             }
@@ -204,7 +217,9 @@ pub fn toBunStringComptime(input: []const u8, comptime encoding: Encoding): BunS
             return str;
         },
         .latin1 => {
-            let str, const chars = BunString.createUninitialized(.latin1, input.len);
+            const pair = BunString.createUninitialized(.latin1, input.len);
+            let str = pair.@"0";
+            const chars = pair.@"1";
             if (str.tag == .Dead) {
                 return str;
             }
@@ -222,7 +237,9 @@ pub fn toBunStringComptime(input: []const u8, comptime encoding: Encoding): BunS
         .ucs2, .utf16le => {
             if (input.len / 2 == 0) return BunString.empty;
 
-            let str, const chars = BunString.createUninitialized(.utf16, input.len / 2);
+            const pair = BunString.createUninitialized(.utf16, input.len / 2);
+            let str = pair.@"0";
+            const chars = pair.@"1";
             if (str.tag == .Dead) {
                 return str;
             }
@@ -234,7 +251,9 @@ pub fn toBunStringComptime(input: []const u8, comptime encoding: Encoding): BunS
         },
 
         .hex => {
-            let str, const chars = BunString.createUninitialized(.latin1, input.len * 2);
+            const pair = BunString.createUninitialized(.latin1, input.len * 2);
+            let str = pair.@"0";
+            const chars = pair.@"1";
             if (str.tag == .Dead) {
                 return str;
             }
@@ -264,7 +283,7 @@ pub fn writeU8(input: [*]const u8, len: usize, to_ptr: [*]u8, to_len: usize, com
     if (len == 0 or to_len == 0)
         return 0;
 
-    switch (@comptime encoding) {
+    switch (encoding) {
         .buffer, .latin1 => {
             const written = @min(len, to_len);
             @memcpy(to_ptr[0..written], input[0..written]);
@@ -292,13 +311,13 @@ pub fn writeU8(input: [*]const u8, len: usize, to_ptr: [*]u8, to_len: usize, com
 
             if (mem.isAligned(@intFromPtr(to_ptr), @alignOf([*]u16))) {
                 const buf = input[0..len];
-                const output = @as([*]u16, @ptrCast(@alignCast(to_ptr)))[0 .. to_len / 2];
+                const output = @as([*]u16, to_ptr)[0 .. to_len / 2];
                 const written = strings.copyLatin1IntoUTF16([]u16, output, buf).written;
                 return written * 2;
             } else {
                 const buf = input[0..len];
-                const output = @as([*]align(1) u16, @ptrCast(to_ptr))[0 .. to_len / 2];
-                const written = strings.copyLatin1IntoUTF16([]align(1) u16, output, buf).written;
+                const output = @as(Types.U16Ptr, to_ptr)[0 .. to_len / 2];
+                const written = strings.copyLatin1IntoUTF16(Types.U16Slice, output, buf).written;
                 return written * 2;
             }
         },
@@ -317,7 +336,7 @@ pub fn byteLengthU8(input: [*]const u8, len: usize, comptime encoding: Encoding)
     if (len == 0)
         return 0;
 
-    switch (@comptime encoding) {
+    switch (encoding) {
         .utf8 => {
             return strings.elementLengthLatin1IntoUTF8(input[0..len]);
         },
@@ -348,7 +367,7 @@ pub fn writeU16(input: [*]const u16, len: usize, to: [*]u8, to_len: usize, compt
     if (len == 0)
         return 0;
 
-    switch (@comptime encoding) {
+    switch (encoding) {
         .utf8 => {
             return strings.copyUTF16IntoUTF8Impl(
                 to[0..to_len],
@@ -365,7 +384,7 @@ pub fn writeU16(input: [*]const u16, len: usize, to: [*]u8, to_len: usize, compt
             if (allow_partial_write) {
                 const bytes_input_len = len * 2;
                 const written = @min(bytes_input_len, to_len);
-                const input_u8 = @as([*]const u8, @ptrCast(input));
+                const input_u8 = @as([*]const u8, input);
                 memmove(to[0..written], input_u8[0..written]);
                 return written;
             } else {
@@ -374,7 +393,7 @@ pub fn writeU16(input: [*]const u16, len: usize, to: [*]u8, to_len: usize, compt
                 if (written < 2) return 0;
 
                 const fixed_len = (written / 2) * 2;
-                const input_u8 = @as([*]const u8, @ptrCast(input));
+                const input_u8 = @as([*]const u8, input);
                 memmove(to[0..written], input_u8[0..fixed_len]);
                 return fixed_len;
             }
@@ -395,56 +414,58 @@ pub fn writeU16(input: [*]const u16, len: usize, to: [*]u8, to_len: usize, compt
     }
 }
 
-pub fn constructFrom(@comptime T: type, input: []const T, allocator: Allocator, comptime encoding: Encoding): []u8 {
-    return switch (@comptime T) {
-        u16 => constructFromU16(input.ptr, input.len, allocator, encoding),
-        u8 => constructFromU8(input.ptr, input.len, allocator, encoding),
-        else => @compileError("Unsupported type for constructFrom: " ++ @typeName(T)),
-    };
+pub fn constructFrom(comptime T: type, input: []const T, allocator: Allocator, comptime encoding: Encoding): []u8 {
+    if (T == u16) {
+        return constructFromU16(input.ptr, input.len, allocator, encoding);
+    } else if (T == u8) {
+        return constructFromU8(input.ptr, input.len, allocator, encoding);
+    } else {
+        @compileError("Unsupported type for constructFrom");
+    }
 }
 
 pub fn constructFromU8(input: [*]const u8, len: usize, allocator: Allocator, comptime encoding: Encoding): []u8 {
-    if (len == 0) return &[_]u8{};
+    if (len == 0) return &.{};
 
-    switch (@comptime encoding) {
+    switch (encoding) {
         .buffer, .latin1, .ascii => {
-            let to = allocator.alloc(u8, len) catch return &[_]u8{};
+            let to = allocator.alloc(u8, len) catch return &.{};
             @memcpy(to[0..len], input[0..len]);
             return to;
         },
         .utf8 => {
-            return strings.allocateLatin1IntoUTF8(allocator, input[0..len]) catch return &[_]u8{};
+            return strings.allocateLatin1IntoUTF8(allocator, input[0..len]) catch return &.{};
         },
         .ucs2, .utf16le => {
-            let to = allocator.alloc(u16, len) catch return &[_]u8{};
+            let to = allocator.alloc(u16, len) catch return &.{};
             _ = strings.copyLatin1IntoUTF16([]u16, to, input[0..len]);
             return mem.sliceAsBytes(to[0..len]);
         },
 
         .hex => {
             if (len < 2)
-                return &[_]u8{};
+                return &.{};
 
-            let to = allocator.alloc(u8, len / 2) catch return &[_]u8{};
+            let to = allocator.alloc(u8, len / 2) catch return &.{};
             const wrote = strings.decodeHexToBytesTruncate(to, u8, input[0..len]);
             if (wrote == 0) {
                 allocator.free(to);
-                return &[_]u8{};
+                return &.{};
             }
             return to[0..wrote];
         },
 
         .base64, .base64url => {
-            const slice = strings.trim(input[0..len], "\r\n\t " ++ [_]u8{ascii.control_code.vt});
-            if (slice.len == 0) return &[_]u8{};
+            const slice = strings.trim(input[0..len], "\r\n\t \x0b");
+            if (slice.len == 0) return &.{};
 
             const outlen = base64.decodeLen(slice);
-            const to = allocator.alloc(u8, outlen) catch return &[_]u8{};
+            const to = allocator.alloc(u8, outlen) catch return &.{};
 
             const wrote = base64.decode(to[0..outlen], slice).count;
             if (wrote == 0) {
                 allocator.free(to);
-                return &[_]u8{};
+                return &.{};
             }
             return to[0..wrote];
         },
@@ -452,19 +473,19 @@ pub fn constructFromU8(input: [*]const u8, len: usize, allocator: Allocator, com
 }
 
 pub fn constructFromU16(input: [*]const u16, len: usize, allocator: Allocator, comptime encoding: Encoding): []u8 {
-    if (len == 0) return &[_]u8{};
+    if (len == 0) return &.{};
 
-    switch (@comptime encoding) {
+    switch (encoding) {
         .utf8 => {
-            return strings.toUTF8AllocWithType(allocator, input[0..len]) catch return &[_]u8{};
+            return strings.toUTF8AllocWithType(allocator, input[0..len]) catch return &.{};
         },
         .latin1, .buffer, .ascii => {
-            let to = allocator.alloc(u8, len) catch return &[_]u8{};
+            let to = allocator.alloc(u8, len) catch return &.{};
             strings.copyU16IntoU8(to[0..len], input[0..len]);
             return to;
         },
         .ucs2, .utf16le => {
-            let to = mem.sliceAsBytes(allocator.alloc(u16, len) catch return &[_]u8{});
+            let to = mem.sliceAsBytes(allocator.alloc(u16, len) catch return &.{});
             const bytes = mem.sliceAsBytes(input[0..len]);
             @memcpy(to[0..bytes.len], bytes);
             return to;
@@ -472,19 +493,19 @@ pub fn constructFromU16(input: [*]const u16, len: usize, allocator: Allocator, c
 
         .hex => {
             if (len < 2)
-                return &[_]u8{};
+                return &.{};
 
-            let to = allocator.alloc(u8, len / 2) catch return &[_]u8{};
+            let to = allocator.alloc(u8, len / 2) catch return &.{};
             const wrote = strings.decodeHexToBytesTruncate(to, u16, input[0..len]);
             if (wrote == 0) {
                 allocator.free(to);
-                return &[_]u8{};
+                return &.{};
             }
             return to[0..wrote];
         },
 
         .base64, .base64url => {
-            const transcoded = strings.toUTF8Alloc(allocator, input[0..len]) catch return &[_]u8{};
+            const transcoded = strings.toUTF8Alloc(allocator, input[0..len]) catch return &.{};
             defer allocator.free(transcoded);
             return constructFromU8(transcoded.ptr, transcoded.len, allocator, encoding);
         },

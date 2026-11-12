@@ -1,265 +1,210 @@
-const TextEncoder = @This();
-
-pub export fn TextEncoder__encode8(
-    globalThis: *JSGlobalObject,
-    ptr: [*]const u8,
-    len: usize,
-) JSValue {
-    // as much as possible, rely on jsc to own the memory
-    // their code is more battle-tested than bun's code
-    // so we do a stack allocation here
-    // and then copy into jsc memory
-    // unless it's huge
-    // JSC will GC Uint8Array that occupy less than 512 bytes
-    // so it's extra good for that case
-    // this also means there won't be reallocations for small strings
-    var buf: [2048]u8 = undefined;
-    const slice = ptr[0..len];
-
-    if (slice.len <= buf.len / 2) {
-        const result = strings.copyLatin1IntoUTF8(&buf, slice);
-        const uint8array = jsc.JSValue.createUninitializedUint8Array(globalThis, result.written) catch return .zero;
-        bun.assert(result.written <= buf.len);
-        bun.assert(result.read == slice.len);
-        const array_buffer = uint8array.asArrayBuffer(globalThis) orelse return .zero;
-        bun.assert(result.written == array_buffer.len);
-        @memcpy(array_buffer.byteSlice()[0..result.written], buf[0..result.written]);
-        return uint8array;
-    } else {
-        const bytes = strings.allocateLatin1IntoUTF8(globalThis.bunVM().allocator, slice) catch {
-            return globalThis.throwOutOfMemoryValue();
-        };
-        bun.assert(bytes.len >= slice.len);
-        return ArrayBuffer.fromBytes(bytes, .Uint8Array).toJSUnchecked(globalThis) catch .zero;
-    }
-}
-
-pub export fn TextEncoder__encode16(
-    globalThis: *JSGlobalObject,
-    ptr: [*]const u16,
-    len: usize,
-) JSValue {
-    // as much as possible, rely on jsc to own the memory
-    // their code is more battle-tested than bun's code
-    // so we do a stack allocation here
-    // and then copy into jsc memory
-    // unless it's huge
-    // JSC will GC Uint8Array that occupy less than 512 bytes
-    // so it's extra good for that case
-    // this also means there won't be reallocations for small strings
-    var buf: [2048]u8 = undefined;
-
-    const slice = ptr[0..len];
-
-    // max utf16 -> utf8 length
-    if (slice.len <= buf.len / 4) {
-        const result = strings.copyUTF16IntoUTF8(&buf, slice);
-        if (result.read == 0 or result.written == 0) {
-            const uint8array = jsc.JSValue.createUninitializedUint8Array(globalThis, 3) catch return .zero;
-            const array_buffer = uint8array.asArrayBuffer(globalThis).?;
-            const replacement_char = [_]u8{ 239, 191, 189 };
-            @memcpy(array_buffer.slice()[0..replacement_char.len], &replacement_char);
-            return uint8array;
-        }
-        const uint8array = jsc.JSValue.createUninitializedUint8Array(globalThis, result.written) catch return .zero;
-        bun.assert(result.written <= buf.len);
-        bun.assert(result.read == slice.len);
-        const array_buffer = uint8array.asArrayBuffer(globalThis).?;
-        bun.assert(result.written == array_buffer.len);
-        @memcpy(array_buffer.slice()[0..result.written], buf[0..result.written]);
-        return uint8array;
-    } else {
-        const bytes = strings.toUTF8AllocWithType(
-            bun.default_allocator,
-            slice,
-        ) catch {
-            return globalThis.toInvalidArguments("Out of memory", .{});
-        };
-        return ArrayBuffer.fromBytes(bytes, .Uint8Array).toJSUnchecked(globalThis) catch .zero;
-    }
-}
-
-pub export fn c(
-    globalThis: *JSGlobalObject,
-    ptr: [*]const u16,
-    len: usize,
-) JSValue {
-    // as much as possible, rely on jsc to own the memory
-    // their code is more battle-tested than bun's code
-    // so we do a stack allocation here
-    // and then copy into jsc memory
-    // unless it's huge
-    // JSC will GC Uint8Array that occupy less than 512 bytes
-    // so it's extra good for that case
-    // this also means there won't be reallocations for small strings
-    var buf: [2048]u8 = undefined;
-
-    const slice = ptr[0..len];
-
-    // max utf16 -> utf8 length
-    if (slice.len <= buf.len / 4) {
-        const result = strings.copyUTF16IntoUTF8(&buf, slice);
-        if (result.read == 0 or result.written == 0) {
-            const uint8array = jsc.JSValue.createUninitializedUint8Array(globalThis, 3) catch return .zero;
-            const array_buffer = uint8array.asArrayBuffer(globalThis).?;
-            const replacement_char = [_]u8{ 239, 191, 189 };
-            @memcpy(array_buffer.slice()[0..replacement_char.len], &replacement_char);
-            return uint8array;
-        }
-        const uint8array = jsc.JSValue.createUninitializedUint8Array(globalThis, result.written) catch return .zero;
-        bun.assert(result.written <= buf.len);
-        bun.assert(result.read == slice.len);
-        const array_buffer = uint8array.asArrayBuffer(globalThis).?;
-        bun.assert(result.written == array_buffer.len);
-        @memcpy(array_buffer.slice()[0..result.written], buf[0..result.written]);
-        return uint8array;
-    } else {
-        const bytes = strings.toUTF8AllocWithType(
-            bun.default_allocator,
-            slice,
-        ) catch {
-            return globalThis.throwOutOfMemoryValue();
-        };
-        return ArrayBuffer.fromBytes(bytes, .Uint8Array).toJSUnchecked(globalThis) catch .zero;
-    }
-}
-
-// This is a fast path for copying a Rope string into a Uint8Array.
-// This keeps us from an extra string temporary allocation
-const RopeStringEncoder = struct {
-    globalThis: *JSGlobalObject,
-    buf: []u8,
-    tail: usize = 0,
-    any_non_ascii: bool = false,
-
-    pub fn append8(it: *jsc.JSString.Iterator, ptr: [*]const u8, len: u32) callconv(.c) void {
-        var this = bun.cast(*RopeStringEncoder, it.data.?);
-        const result = strings.copyLatin1IntoUTF8StopOnNonASCII(this.buf[this.tail..], ptr[0..len], true);
-        if (result.read == std.math.maxInt(u32) and result.written == std.math.maxInt(u32)) {
-            it.stop = 1;
-            this.any_non_ascii = true;
-        } else {
-            this.tail += result.written;
-        }
-    }
-    pub fn append16(it: *jsc.JSString.Iterator, _: [*]const u16, _: u32) callconv(.c) void {
-        var this = bun.cast(*RopeStringEncoder, it.data.?);
-        this.any_non_ascii = true;
-        it.stop = 1;
-    }
-    pub fn write8(it: *jsc.JSString.Iterator, ptr: [*]const u8, len: u32, offset: u32) callconv(.c) void {
-        var this = bun.cast(*RopeStringEncoder, it.data.?);
-        const result = strings.copyLatin1IntoUTF8StopOnNonASCII(this.buf[offset..], ptr[0..len], true);
-        if (result.read == std.math.maxInt(u32) and result.written == std.math.maxInt(u32)) {
-            it.stop = 1;
-            this.any_non_ascii = true;
-        }
-    }
-    pub fn write16(it: *jsc.JSString.Iterator, _: [*]const u16, _: u32, _: u32) callconv(.c) void {
-        var this = bun.cast(*RopeStringEncoder, it.data.?);
-        this.any_non_ascii = true;
-        it.stop = 1;
-    }
-
-    pub fn iter(this: *RopeStringEncoder) jsc.JSString.Iterator {
-        return .{
-            .data = this,
-            .stop = 0,
-            .append8 = append8,
-            .append16 = append16,
-            .write8 = write8,
-            .write16 = write16,
-        };
-    }
-};
-
-// This fast path is only suitable for ASCII strings
-// It's not suitable for UTF-16 strings, because getting the byteLength is unpredictable
-// It also isn't usable for latin1 strings which contain non-ascii characters
-pub export fn TextEncoder__encodeRopeString(
-    globalThis: *JSGlobalObject,
-    rope_str: *jsc.JSString,
-) JSValue {
-    if (comptime Environment.allow_assert) bun.assert(rope_str.is8Bit());
-    var stack_buf: [2048]u8 = undefined;
-    var buf_to_use: []u8 = &stack_buf;
-    const length = rope_str.length();
-    var array: JSValue = .zero;
-    if (length > stack_buf.len / 2) {
-        array = jsc.JSValue.createUninitializedUint8Array(globalThis, length) catch return .zero;
-        array.ensureStillAlive();
-        buf_to_use = array.asArrayBuffer(globalThis).?.slice();
-    }
-    var encoder = RopeStringEncoder{
-        .globalThis = globalThis,
-        .buf = buf_to_use,
-    };
-    var iter = encoder.iter();
-    array.ensureStillAlive();
-    rope_str.iterator(globalThis, &iter);
-    array.ensureStillAlive();
-
-    if (encoder.any_non_ascii) {
-        return .js_undefined;
-    }
-
-    if (array == .zero) {
-        array = jsc.JSValue.createUninitializedUint8Array(globalThis, length) catch return .zero;
-        array.ensureStillAlive();
-        @memcpy(array.asArrayBuffer(globalThis).?.byteSlice(), buf_to_use[0..length]);
-    }
-
-    return array;
-}
-
-pub export fn TextEncoder__encodeInto16(
-    input_ptr: [*]const u16,
-    input_len: usize,
-    buf_ptr: [*]u8,
-    buf_len: usize,
-) u64 {
-    const output = buf_ptr[0..buf_len];
-    const input = input_ptr[0..input_len];
-    var result: strings.EncodeIntoResult = strings.copyUTF16IntoUTF8(output, input);
-    if (output.len >= 3 and (result.read == 0 or result.written == 0)) {
-        const replacement_char = [_]u8{ 239, 191, 189 };
-        @memcpy(buf_ptr[0..replacement_char.len], &replacement_char);
-        result.read = 1;
-        result.written = 3;
-    }
-    const sized: [2]u32 = .{ result.read, result.written };
-    return @bitCast(sized);
-}
-
-pub export fn TextEncoder__encodeInto8(
-    input_ptr: [*]const u8,
-    input_len: usize,
-    buf_ptr: [*]u8,
-    buf_len: usize,
-) u64 {
-    const output = buf_ptr[0..buf_len];
-    const input = input_ptr[0..input_len];
-    const result: strings.EncodeIntoResult =
-        strings.copyLatin1IntoUTF8(output, input);
-    const sized: [2]u32 = .{ result.read, result.written };
-    return @bitCast(sized);
-}
-
-comptime {
-    _ = &TextEncoder.TextEncoder__encode8;
-    _ = &TextEncoder.TextEncoder__encode16;
-    _ = &TextEncoder.TextEncoder__encodeInto8;
-    _ = &TextEncoder.TextEncoder__encodeInto16;
-    _ = &TextEncoder.TextEncoder__encodeRopeString;
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const bun = @import("bun");
-const Environment = bun.Environment;
-const strings = bun.strings;
-
-const jsc = bun.jsc;
 const ArrayBuffer = jsc.ArrayBuffer;
 const JSGlobalObject = jsc.JSGlobalObject;
 const JSValue = jsc.JSValue;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const default_allocator = @import("bun").default_allocator;
+pub const assert = @import("bun").assert;
+pub const Environment = @import("bun").Environment;
+pub const strings = @import("bun").strings;
+pub const cast = @import("bun").cast;
+pub const jsc = @import("bun").jsc;
+pub const math = @import("std").math;
+pub const RopeStringEncoder = struct {
+    globalThis: *JSGlobalObject,
+    buf: []const u8,
+    tail: usize = 0,
+    any_non_ascii: bool = false,
+    
+pub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }
+
+pub fn init(self: *RopeStringEncoder, globalThis: *JSGlobalObject, buf: []const u8, tail: usize, any_non_ascii: bool) void {
+            self.globalThis = globalThis;
+            self.buf = buf;
+            self.tail = tail;
+            self.any_non_ascii = any_non_ascii;
+    }
+
+pub export fn append8(self: *const RopeStringEncoder, it: *jsc.JSString.Iterator, ptr: [*]const u8, len: u32) callconv(.c) void {
+        _ = &self;
+            var enc = cast(*RopeStringEncoder, it.data.?);
+            _ = &enc;
+            const result = strings.copyLatin1IntoUTF8StopOnNonASCII(enc.buf[enc.tail..], ptr[0..len], true);
+            if (((result.read == math.maxInt(u32)) and (result.written == math.maxInt(u32)))) {
+                it.stop = 1;
+                enc.any_non_ascii = true;
+            } else {
+                enc.tail = (enc.tail + result.written);
+            }
+    }
+
+pub export fn append16(self: *const RopeStringEncoder, it: *jsc.JSString.Iterator) callconv(.c) void {
+        _ = &self;
+            var enc = cast(*RopeStringEncoder, it.data.?);
+            _ = &enc;
+            enc.any_non_ascii = true;
+            it.stop = 1;
+    }
+
+pub export fn write8(self: *const RopeStringEncoder, it: *jsc.JSString.Iterator, ptr: [*]const u8, len: u32, offset: u32) callconv(.c) void {
+        _ = &self;
+            var enc = cast(*RopeStringEncoder, it.data.?);
+            _ = &enc;
+            const result = strings.copyLatin1IntoUTF8StopOnNonASCII(enc.buf[offset..], ptr[0..len], true);
+            if (((result.read == math.maxInt(u32)) and (result.written == math.maxInt(u32)))) {
+                it.stop = 1;
+                enc.any_non_ascii = true;
+            }
+    }
+
+pub export fn write16(self: *const RopeStringEncoder, it: *jsc.JSString.Iterator) callconv(.c) void {
+        _ = &self;
+            var enc = cast(*RopeStringEncoder, it.data.?);
+            _ = &enc;
+            enc.any_non_ascii = true;
+            it.stop = 1;
+    }
+
+pub fn iter(self: *RopeStringEncoder) jsc.JSString.Iterator {
+            return .{ .data = self, .stop = 0, .append8 = append8, .append16 = append16, .write8 = write8, .write16 = write16 };
+    }
+};
+
+
+pub export fn TextEncoder__encode8(globalThis: *JSGlobalObject, ptr: [*]const u8, len: usize) callconv(.c) JSValue {
+        var buf: [2048]u8 = undefined;
+        _ = &buf;
+        const slice = ptr[0..len];
+        if ((slice.len <= (buf.len / 2))) {
+            const result = strings.copyLatin1IntoUTF8((&buf), slice);
+            const uint8array = (blk_catch_0: { break :blk_catch_0 ((jsc.JSValue.createUninitializedUint8Array(globalThis, result.written)) catch |__ce_0| { _ = &__ce_0; return .zero; }); });
+            _ = assert((result.written <= buf.len));
+            _ = assert((result.read == slice.len));
+            const array_buffer = ((uint8array.asArrayBuffer(globalThis)) orelse { return .zero; });
+            _ = assert((result.written == array_buffer.len));
+            _ = @memcpy(array_buffer.byteSlice()[0..result.written], buf[0..result.written]);
+            return uint8array;
+        } else {
+            const bytes = (blk_catch_1: { break :blk_catch_1 ((strings.allocateLatin1IntoUTF8(globalThis.bunVM().allocator, slice)) catch |__ce_1| { _ = &__ce_1; return globalThis.throwOutOfMemoryValue(); }); });
+            _ = assert((bytes.len >= slice.len));
+            return (blk_catch_2: { break :blk_catch_2 ((ArrayBuffer.fromBytes(bytes, .Uint8Array).toJSUnchecked(globalThis)) catch |__ce_2| { _ = &__ce_2; break :blk_catch_2 .zero; }); });
+        }
+}
+
+pub export fn TextEncoder__encode16(globalThis: *JSGlobalObject, ptr: [*]const u16, len: usize) callconv(.c) JSValue {
+        var buf: [2048]u8 = undefined;
+        _ = &buf;
+        const slice = ptr[0..len];
+        if ((slice.len <= (buf.len / 4))) {
+            const result = strings.copyUTF16IntoUTF8((&buf), slice);
+            if (((result.read == 0) or (result.written == 0))) {
+                const uint8array = (blk_catch_3: { break :blk_catch_3 ((jsc.JSValue.createUninitializedUint8Array(globalThis, 3)) catch |__ce_3| { _ = &__ce_3; return .zero; }); });
+                const array_buffer = (uint8array.asArrayBuffer(globalThis)).?;
+                const replacement_char: [3]u8 = .{ 239, 191, 189 };
+                _ = @memcpy(array_buffer.slice()[0..replacement_char.len], (&replacement_char));
+                return uint8array;
+            }
+            const uint8array = (blk_catch_4: { break :blk_catch_4 ((jsc.JSValue.createUninitializedUint8Array(globalThis, result.written)) catch |__ce_4| { _ = &__ce_4; return .zero; }); });
+            _ = assert((result.written <= buf.len));
+            _ = assert((result.read == slice.len));
+            const array_buffer = (uint8array.asArrayBuffer(globalThis)).?;
+            _ = assert((result.written == array_buffer.len));
+            _ = @memcpy(array_buffer.slice()[0..result.written], buf[0..result.written]);
+            return uint8array;
+        } else {
+            const bytes = (blk_catch_5: { break :blk_catch_5 ((strings.toUTF8AllocWithType(default_allocator, slice)) catch |__ce_5| { _ = &__ce_5; return globalThis.toInvalidArguments("Out of memory", .{}); }); });
+            return (blk_catch_6: { break :blk_catch_6 ((ArrayBuffer.fromBytes(bytes, .Uint8Array).toJSUnchecked(globalThis)) catch |__ce_6| { _ = &__ce_6; break :blk_catch_6 .zero; }); });
+        }
+}
+
+pub export fn c(globalThis: *JSGlobalObject, ptr: [*]const u16, len: usize) callconv(.c) JSValue {
+        var buf: [2048]u8 = undefined;
+        _ = &buf;
+        const slice = ptr[0..len];
+        if ((slice.len <= (buf.len / 4))) {
+            const result = strings.copyUTF16IntoUTF8((&buf), slice);
+            if (((result.read == 0) or (result.written == 0))) {
+                const uint8array = (blk_catch_7: { break :blk_catch_7 ((jsc.JSValue.createUninitializedUint8Array(globalThis, 3)) catch |__ce_7| { _ = &__ce_7; return .zero; }); });
+                const array_buffer = (uint8array.asArrayBuffer(globalThis)).?;
+                const replacement_char: [3]u8 = .{ 239, 191, 189 };
+                _ = @memcpy(array_buffer.slice()[0..replacement_char.len], (&replacement_char));
+                return uint8array;
+            }
+            const uint8array = (blk_catch_8: { break :blk_catch_8 ((jsc.JSValue.createUninitializedUint8Array(globalThis, result.written)) catch |__ce_8| { _ = &__ce_8; return .zero; }); });
+            _ = assert((result.written <= buf.len));
+            _ = assert((result.read == slice.len));
+            const array_buffer = (uint8array.asArrayBuffer(globalThis)).?;
+            _ = assert((result.written == array_buffer.len));
+            _ = @memcpy(array_buffer.slice()[0..result.written], buf[0..result.written]);
+            return uint8array;
+        } else {
+            const bytes = (blk_catch_9: { break :blk_catch_9 ((strings.toUTF8AllocWithType(default_allocator, slice)) catch |__ce_9| { _ = &__ce_9; return globalThis.throwOutOfMemoryValue(); }); });
+            return (blk_catch_10: { break :blk_catch_10 ((ArrayBuffer.fromBytes(bytes, .Uint8Array).toJSUnchecked(globalThis)) catch |__ce_10| { _ = &__ce_10; break :blk_catch_10 .zero; }); });
+        }
+}
+
+pub export fn TextEncoder__encodeRopeString(globalThis: *JSGlobalObject, rope_str: *jsc.JSString) callconv(.c) JSValue {
+        if (comptime Environment.allow_assert) {
+            _ = assert(rope_str.is8Bit());
+        }
+        var stack_buf: [2048]u8 = undefined;
+        _ = &stack_buf;
+        var buf_to_use: []const u8 = stack_buf[0..];
+        _ = &buf_to_use;
+        const length = rope_str.length();
+        var array: JSValue = .zero;
+        _ = &array;
+        if ((length > (stack_buf.len / 2))) {
+            array = (blk_catch_11: { break :blk_catch_11 ((jsc.JSValue.createUninitializedUint8Array(globalThis, length)) catch |__ce_11| { _ = &__ce_11; return .zero; }); });
+            _ = array.ensureStillAlive();
+            buf_to_use = (array.asArrayBuffer(globalThis)).?.slice();
+        }
+        var encoder = RopeStringEncoder{ .globalThis = globalThis, .buf = buf_to_use };
+        _ = &encoder;
+        var iter = encoder.iter();
+        _ = &iter;
+        _ = array.ensureStillAlive();
+        _ = rope_str.iterator(globalThis, (&iter));
+        _ = array.ensureStillAlive();
+        if (encoder.any_non_ascii) {
+            return .js_undefined;
+        }
+        if ((array == .zero)) {
+            array = (blk_catch_12: { break :blk_catch_12 ((jsc.JSValue.createUninitializedUint8Array(globalThis, length)) catch |__ce_12| { _ = &__ce_12; return .zero; }); });
+            _ = array.ensureStillAlive();
+            _ = @memcpy((array.asArrayBuffer(globalThis)).?.byteSlice(), buf_to_use[0..length]);
+        }
+        return array;
+}
+
+pub export fn TextEncoder__encodeInto16(input_ptr: [*]const u16, input_len: usize, buf_ptr: [*]u8, buf_len: usize) callconv(.c) u64 {
+        const output = buf_ptr[0..buf_len];
+        const input = input_ptr[0..input_len];
+        var result: strings.EncodeIntoResult = strings.copyUTF16IntoUTF8(output, input);
+        _ = &result;
+        if (((output.len >= 3) and ((result.read == 0) or (result.written == 0)))) {
+            const replacement_char: [3]u8 = .{ 239, 191, 189 };
+            _ = @memcpy(buf_ptr[0..replacement_char.len], (&replacement_char));
+            result.read = 1;
+            result.written = 3;
+        }
+        const sized: [2]u32 = .{ result.read, result.written };
+        return @bitCast(sized);
+}
+
+pub export fn TextEncoder__encodeInto8(input_ptr: [*]const u8, input_len: usize, buf_ptr: [*]u8, buf_len: usize) callconv(.c) u64 {
+        const output = buf_ptr[0..buf_len];
+        const input = input_ptr[0..input_len];
+        const result: strings.EncodeIntoResult = strings.copyLatin1IntoUTF8(output, input);
+        const sized: [2]u32 = .{ result.read, result.written };
+        return @bitCast(sized);
+}

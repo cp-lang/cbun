@@ -5,6 +5,8 @@ const string = []const u8;
 const bun = @import("bun");
 const UUID = bun.UUID;
 const jsc = bun.jsc;
+var singleton_registry: ObjectURLRegistry = undefined;
+var singleton_once = std.once(singleton_get);
 pub const ObjectURLRegistry = struct {
     lock: bun.Mutex = .{},
     map: std.AutoHashMap(UUID, *Entry) = std.AutoHashMap(UUID, *Entry).init(bun.default_allocator),
@@ -40,17 +42,8 @@ pub const ObjectURLRegistry = struct {
     }
 
     pub fn singleton() *ObjectURLRegistry {
-        const Singleton = struct {
-            pub var registry: ObjectURLRegistry = undefined;
-            pub var once = std.once(get);
-
-            fn get() void {
-                registry = .{};
-            }
-        };
-
-        Singleton.once.call();
-        return &Singleton.registry;
+        singleton_once.call();
+        return &singleton_registry;
     }
 
     fn getDupedBlob(this: *ObjectURLRegistry, uuid: *const UUID) ?jsc.WebCore.Blob {
@@ -115,6 +108,10 @@ fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (compti
 fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
 pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
 
+
+pub fn singleton_get() void {
+        singleton_registry = .{};
+}
 
 pub fn isBlobURL(url: []const u8) bool {
         return ((url.len >= specifier_len) and bun.strings.hasPrefixComptime(url, "blob:"));

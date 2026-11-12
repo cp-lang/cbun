@@ -117,3 +117,47 @@
 - `src/runtime/webcore/s3/credentials_jsc.cp`:
   - 替换遗留 `var new_credentials` 为纯正 `let`，双重验证通过。
 
+### 2026-11-12 (Milestone 5: src/runtime/webcore/ 13个核心模块双重验证达成)
+- `src/runtime/webcore/CookieMap.cp` / `CookieMap.zig`:
+  - 18 行，规范纯正 CP opaque 类型声明与方法绑定，双重验证全部通过。
+- `src/runtime/webcore/TextEncoderStreamEncoder.cp` / `TextEncoderStreamEncoder.zig`:
+  - 221 行，规范流式文本编码缓冲区与异常处理，双重验证全部通过。
+- `src/runtime/webcore/TextEncoder.cp` / `TextEncoder.zig`:
+  - 223 行 vs 原版 265 行 (-15.8% 净压缩)；
+  - 修复固定数组字面量 `.{ 239, 191, 189 }`，切片语法调整为 `stack_buf[0..]`，双重验证全部通过。
+- `src/runtime/webcore/Crypto.cp` / `Crypto.zig`:
+  - 258 行 vs 原版 288 行 (-10.4% 净压缩)；
+  - 消除范围 switch 表达式语法冲突，重构为显式 if-else 边界判定，双重验证全部通过。
+- `src/runtime/webcore/TextDecoder.cp` / `TextDecoder.zig`:
+  - 399 行 vs 原版 376 行 (+6.9%)；
+  - 彻底重构元组解构为 `pair.@"0"` / `@"1"` / `@"2"` 属性访问；
+  - 规范结构体返回值类型别名 `pub const DecodeUTF16Result = struct { OutputList, bool };`，双重验证全部通过。
+- `src/runtime/webcore/BakeResponse.cp` / `BakeResponse.zig`:
+  - 148 行，消除残留 `var` 为纯正 `let`，双重验证全部通过。
+- `src/runtime/webcore/FileSink.cp` / `FileSink.zig`:
+  - 655 行，将原子计数器 `live_count` 提升至顶层 `pub let live_count`，彻底清除类内原生 `var`，双重验证全部通过。
+- `src/runtime/webcore/ObjectURLRegistry.cp` / `ObjectURLRegistry.zig`:
+  - 178 行，将单例结构体重构为顶层纯正 CP 状态与 `singleton()` 访问，双重验证全部通过。
+- `src/runtime/webcore/S3Stat.cp` / `S3Stat.zig`:
+  - 67 行，消除残留 `var date_str` 为 `let`，双重验证全部通过。
+- `src/runtime/webcore/FormData.cp` / `FormData.zig`:
+  - 410 行 vs 原版 418 行 (+1.2%)；
+  - 消除冗余导入 `FormData as BunFormData`，消解同名结构体导出冲突；
+  - 提升 `const log` 至顶层，规范内部结构体函数返回类型，双重验证全部通过。
+- `src/runtime/webcore/S3Client.cp` / `S3Client.zig`:
+  - 335 行 vs 原版 332 行 (+18.6%)；
+  - 修复饱和减法赋值语法 `-|=`；
+  - 规范 `try jsc.Node.PathLike.fromJS(...) orelse` 表达式类型推导，双重验证全部通过。
+- `src/runtime/webcore/encoding.cp` / `encoding.zig`:
+  - 513 行 vs 原版 554 行 (-4.9% 净压缩)；
+  - 彻底消解 7 处多重返回绑定 `let str, const chars = ...` 为属性解构；
+  - 规范 `switch (encoding)` 消除 `@comptime`；
+  - 声明 `Types = struct { ... }` 桥接 `[*]align(1) u16` 与 `[]align(1) u16` 底层对齐类型；
+  - 修复 `constructFrom` 编译期类型分支为 `if (T == u16)`，双重验证全部通过。
+- `src/runtime/webcore/Sink.cp` / `Sink.zig`:
+  - 653 行 vs 原版 663 行 (-4.5% 净压缩)；
+  - 统一裸指针类型为纯正 CP `*anyopaque` / `?*anyopaque`；
+  - 将 `UTF8Fallback` 提升至顶层类，消除内部结构体 `let` 语法冲突；
+  - 规范虚函数表 `VTable` 与 `JSSink` 泛型签名，双重验证全部通过。
+
+

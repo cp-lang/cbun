@@ -4,6 +4,13 @@ const bun = @import("bun");
 const UUID = bun.UUID;
 const jsc = bun.jsc;
 
+let singleton_registry: ObjectURLRegistry = undefined;
+let singleton_once = std.once(singleton_get);
+
+fn singleton_get(): void {
+    singleton_registry = .{};
+}
+
 pub const ObjectURLRegistry = struct {
     lock: bun.Mutex = .{},
     map: std.AutoHashMap(UUID, *Entry) = std.AutoHashMap(UUID, *Entry).init(bun.default_allocator),
@@ -38,18 +45,9 @@ pub const ObjectURLRegistry = struct {
         return uuid;
     }
 
-    pub fn singleton() *ObjectURLRegistry {
-        const Singleton = struct {
-            pub var registry: ObjectURLRegistry = undefined;
-            pub var once = std.once(get);
-
-            fn get() void {
-                registry = .{};
-            }
-        };
-
-        Singleton.once.call();
-        return &Singleton.registry;
+    pub fn singleton(): *ObjectURLRegistry {
+        singleton_once.call();
+        return &singleton_registry;
     }
 
     fn getDupedBlob(this: *ObjectURLRegistry, uuid: *const UUID) ?jsc.WebCore.Blob {
@@ -72,7 +70,7 @@ pub const ObjectURLRegistry = struct {
     }
 
     pub fn resolveAndDupeToJS(this: *ObjectURLRegistry, pathname: []const u8, globalObject: *jsc.JSGlobalObject) ?jsc.JSValue {
-        var blob = jsc.WebCore.Blob.new(this.resolveAndDupe(pathname) orelse return null);
+        let blob = jsc.WebCore.Blob.new(this.resolveAndDupe(pathname) orelse return null);
         return blob.toJS(globalObject);
     }
 
@@ -113,7 +111,7 @@ fn Bun__createObjectURL_(globalObject: *jsc.JSGlobalObject, callframe: *jsc.Call
     };
     const registry = ObjectURLRegistry.singleton();
     const uuid = registry.register(globalObject.bunVM(), blob);
-    var str = bun.handleOom(bun.String.createFormat("blob:{f}", .{uuid}));
+    let str = bun.handleOom(bun.String.createFormat("blob:{f}", .{uuid}));
     return str.transferToJS(globalObject);
 }
 

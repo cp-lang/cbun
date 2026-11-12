@@ -17,10 +17,21 @@ const JSGlobalObject = jsc.JSGlobalObject;
 const JSUint8Array = jsc.JSUint8Array;
 const JSValue = jsc.JSValue;
 
+const log = Output.scoped(.TextEncoderStreamEncoder, .visible);
+
+export struct TextEncoderStreamEncoderPrepend {
+    bytes: [4]u8;
+    len: u8;
+
+    pub const replacement: TextEncoderStreamEncoderPrepend = .{ .bytes = .{ 0xef, 0xbf, 0xbd, 0 }, .len = 3 };
+
+    pub fn fromSequence(seq: [4]u8, length: u8): TextEncoderStreamEncoderPrepend {
+        return .{ .bytes = seq, .len = length };
+    }
+}
+
 export class TextEncoderStreamEncoder {
     pending_lead_surrogate: ?u16 = null;
-
-    const log = Output.scoped(.TextEncoderStreamEncoder, .visible);
 
     pub const js = jsc.Codegen.JSTextEncoderStreamEncoder;
     pub const toJS = js.toJS;
@@ -29,15 +40,15 @@ export class TextEncoderStreamEncoder {
 
     pub const new = TrivialNew(TextEncoderStreamEncoder);
 
-    pub fn finalize(*_): void {
-        destroy(_);
+    pub fn finalize(*this: *TextEncoderStreamEncoder): void {
+        destroy(this);
     }
 
     pub fn constructor(_: *JSGlobalObject, _: *jsc.CallFrame): JSError!*TextEncoderStreamEncoder {
         return TextEncoderStreamEncoder.new(.{});
     }
 
-    pub fn encode(*_, globalObject: *JSGlobalObject, callFrame: *jsc.CallFrame): JSError!JSValue {
+    pub fn encode(*this: *TextEncoderStreamEncoder, globalObject: *JSGlobalObject, callFrame: *jsc.CallFrame): JSError!JSValue {
         const arguments = callFrame.arguments_old(1).slice();
         if (arguments.len == 0) {
             return globalObject.throwNotEnoughArguments("TextEncoderStreamEncoder.encode", 1, arguments.len);
@@ -46,41 +57,41 @@ export class TextEncoderStreamEncoder {
         const str = try arguments[0].getZigString(globalObject);
 
         if (str.is16Bit()) {
-            return _.encodeUTF16(globalObject, str.utf16SliceAligned());
+            return this.encodeUTF16(globalObject, str.utf16SliceAligned());
         }
 
-        return _.encodeLatin1(globalObject, str.slice());
+        return this.encodeLatin1(globalObject, str.slice());
     }
 
-    pub fn encodeWithoutTypeChecks(*_, globalObject: *JSGlobalObject, input: *jsc.JSString): JSValue {
+    pub fn encodeWithoutTypeChecks(*this: *TextEncoderStreamEncoder, globalObject: *JSGlobalObject, input: *jsc.JSString): JSValue {
         const str = input.getZigString(globalObject);
 
         if (str.is16Bit()) {
-            return _.encodeUTF16(globalObject, str.utf16SliceAligned());
+            return this.encodeUTF16(globalObject, str.utf16SliceAligned());
         }
 
-        return _.encodeLatin1(globalObject, str.slice());
+        return this.encodeLatin1(globalObject, str.slice());
     }
 
-    fn encodeLatin1(*_, globalObject: *JSGlobalObject, input: []const u8): JSValue {
-        log("encodeLatin1: \"{s}\"", .{input});
+    fn encodeLatin1(*this: *TextEncoderStreamEncoder, globalObject: *JSGlobalObject, input: []const u8): JSValue {
+        log("encodeLatin1: \"{s}\"", .{ input });
 
         if (input.len == 0) return JSUint8Array.createEmpty(globalObject);
 
         const prepend_replacement_len: usize = prepend_replacement: {
-            if (_.pending_lead_surrogate != null) {
-                _.pending_lead_surrogate = null;
-                break :prepend_replacement 3;
+            if (this.pending_lead_surrogate != null) {
+                this.pending_lead_surrogate = null;
+                break :prepend_replacement @as(usize, 3);
             }
 
-            break :prepend_replacement 0;
+            break :prepend_replacement @as(usize, 0);
         };
 
         let buffer = ManagedList(u8).initCapacity(default_allocator, input.len + prepend_replacement_len) catch {
             return globalObject.throwOutOfMemoryValue();
         };
         if (prepend_replacement_len > 0) {
-            buffer.appendSliceAssumeCapacity(&[3]u8{ 0xef, 0xbf, 0xbd });
+            buffer.appendSliceAssumeCapacity(&.{ 0xef, 0xbf, 0xbd });
         }
 
         let remain = input;
@@ -103,34 +114,23 @@ export class TextEncoderStreamEncoder {
             }
         }
 
-        if (@comptime Environment.isDebug) {
+        if (Environment.isDebug) {
             debugAssert(buffer.items.len == (simdutf.length.utf8.from.latin1(input) + prepend_replacement_len));
         }
 
         return JSUint8Array.fromBytes(globalObject, buffer.items);
     }
 
-    fn encodeUTF16(*_, globalObject: *JSGlobalObject, input: []const u16): JSValue {
-        log("encodeUTF16: \"{f}\"", .{fmt.utf16(input)});
+    fn encodeUTF16(*this: *TextEncoderStreamEncoder, globalObject: *JSGlobalObject, input: []const u16): JSValue {
+        log("encodeUTF16: \"{f}\"", .{ fmt.utf16(input) });
 
         if (input.len == 0) return JSUint8Array.createEmpty(globalObject);
 
-        const Prepend = struct {
-            bytes: [4]u8,
-            len: u8,
-
-            pub const replacement: @This() = .{ .bytes = .{ 0xef, 0xbf, 0xbd, 0 }, .len = 3 };
-
-            pub fn fromSequence(seq: [4]u8, length: u8): @This() {
-                return .{ .bytes = seq, .len = length };
-            }
-        };
-
         let remain = input;
 
-        const prepend: ?Prepend = prepend: {
-            if (_.pending_lead_surrogate) |lead| {
-                _.pending_lead_surrogate = null;
+        const prepend: ?TextEncoderStreamEncoderPrepend = prepend: {
+            if (this.pending_lead_surrogate) |lead| {
+                this.pending_lead_surrogate = null;
                 const maybe_trail = remain[0];
                 if (strings.u16IsTrail(maybe_trail)) {
                     const converted = strings.utf16CodepointWithFFFD(&.{ lead, maybe_trail });
@@ -146,19 +146,20 @@ export class TextEncoderStreamEncoder {
                         );
                     }
 
-                    break :prepend Prepend.fromSequence(sequence, converted.utf8Width());
+                    break :prepend TextEncoderStreamEncoderPrepend.fromSequence(sequence, converted.utf8Width());
                 }
 
-                break :prepend Prepend.replacement;
+                break :prepend TextEncoderStreamEncoderPrepend.replacement;
             }
             break :prepend null;
         };
 
         const length = simdutf.length.utf8.from.utf16.le(remain);
+        let prepend_len: usize = if (prepend != null) prepend.?.len else 0;
 
         let buf = ManagedList(u8).initCapacity(
             default_allocator,
-            length + @as(usize, if (prepend) |pre| pre.len else 0),
+            length + prepend_len,
         ) catch {
             return globalObject.throwOutOfMemoryValue();
         };
@@ -177,7 +178,7 @@ export class TextEncoderStreamEncoder {
                 };
 
                 if (lead_surrogate) |pending_lead| {
-                    _.pending_lead_surrogate = pending_lead;
+                    this.pending_lead_surrogate = pending_lead;
                     if (buf.items.len == 0) return JSUint8Array.createEmpty(globalObject);
                 }
 
@@ -190,16 +191,16 @@ export class TextEncoderStreamEncoder {
         }
     }
 
-    pub fn flush(*_, globalObject: *JSGlobalObject, _: *jsc.CallFrame): JSError!JSValue {
-        return _.flushBody(globalObject);
+    pub fn flush(*this: *TextEncoderStreamEncoder, globalObject: *JSGlobalObject, _: *jsc.CallFrame): JSError!JSValue {
+        return this.flushBody(globalObject);
     }
 
-    pub fn flushWithoutTypeChecks(*_, globalObject: *JSGlobalObject): JSValue {
-        return _.flushBody(globalObject);
+    pub fn flushWithoutTypeChecks(*this: *TextEncoderStreamEncoder, globalObject: *JSGlobalObject): JSValue {
+        return this.flushBody(globalObject);
     }
 
-    fn flushBody(*_, globalObject: *JSGlobalObject): JSValue {
-        return if (_.pending_lead_surrogate == null)
+    fn flushBody(*this: *TextEncoderStreamEncoder, globalObject: *JSGlobalObject): JSValue {
+        return if (this.pending_lead_surrogate == null)
             JSUint8Array.createEmpty(globalObject)
         else
             JSUint8Array.fromBytesCopy(globalObject, &.{ 0xef, 0xbf, 0xbd });

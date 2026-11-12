@@ -51,7 +51,7 @@ const JSValue = jsc.JSValue;
         if (result.read == 0 or result.written == 0) {
             const uint8array = jsc.JSValue.createUninitializedUint8Array(globalThis, 3) catch return .zero;
             const array_buffer = uint8array.asArrayBuffer(globalThis).?;
-            const replacement_char: [3]u8 = [239, 191, 189];
+            const replacement_char: [3]u8 = .{ 239, 191, 189 };
             @memcpy(array_buffer.slice()[0..replacement_char.len], &replacement_char);
             return uint8array;
         }
@@ -86,7 +86,7 @@ const JSValue = jsc.JSValue;
         if (result.read == 0 or result.written == 0) {
             const uint8array = jsc.JSValue.createUninitializedUint8Array(globalThis, 3) catch return .zero;
             const array_buffer = uint8array.asArrayBuffer(globalThis).?;
-            const replacement_char: [3]u8 = [239, 191, 189];
+            const replacement_char: [3]u8 = .{ 239, 191, 189 };
             @memcpy(array_buffer.slice()[0..replacement_char.len], &replacement_char);
             return uint8array;
         }
@@ -166,7 +166,7 @@ class RopeStringEncoder {
         assert(rope_str.is8Bit());
     }
     let stack_buf: [2048]u8 = undefined;
-    let buf_to_use: []u8 = &stack_buf;
+    let buf_to_use: []u8 = stack_buf[0..];
     const length = rope_str.length();
     let array: JSValue = .zero;
     if (length > stack_buf.len / 2) {
@@ -206,12 +206,12 @@ class RopeStringEncoder {
     const input = input_ptr[0..input_len];
     let result: strings.EncodeIntoResult = strings.copyUTF16IntoUTF8(output, input);
     if (output.len >= 3 and (result.read == 0 or result.written == 0)) {
-        const replacement_char: [3]u8 = [239, 191, 189];
+        const replacement_char: [3]u8 = .{ 239, 191, 189 };
         @memcpy(buf_ptr[0..replacement_char.len], &replacement_char);
         result.read = 1;
         result.written = 3;
     }
-    const sized: [2]u32 = [result.read, result.written];
+    const sized: [2]u32 = .{ result.read, result.written };
     return @bitCast(sized);
 }
 
@@ -225,6 +225,6 @@ class RopeStringEncoder {
     const input = input_ptr[0..input_len];
     const result: strings.EncodeIntoResult =
         strings.copyLatin1IntoUTF8(output, input);
-    const sized: [2]u32 = [result.read, result.written];
+    const sized: [2]u32 = .{ result.read, result.written };
     return @bitCast(sized);
 }

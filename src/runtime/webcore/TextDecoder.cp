@@ -23,9 +23,10 @@ const EncodingLabel = jsc.WebCore.EncodingLabel;
 const Vector16 = meta.Vector(16, u16);
 const max_16_ascii: Vector16 = @splat(@as(u16, 127));
 type OutputList = ArrayListUnmanaged(u16);
+pub const DecodeUTF16Result = struct { OutputList, bool };
 
 export class Buffered {
-    buf: [3]u8 = [0, 0, 0];
+    buf: [3]u8 = .{ 0, 0, 0 };
     len: u2 = 0;
 
     pub fn slice(this: &Buffered): []const u8 {
@@ -87,7 +88,7 @@ export class TextDecoder {
             if (strings.u16IsTrail(code_unit)) {
                 output.appendSlice(
                     default_allocator,
-                    &[lead_surrogate, code_unit],
+                    &.{ lead_surrogate, code_unit },
                 )?;
                 return;
             }
@@ -126,7 +127,7 @@ export class TextDecoder {
         bytes: []const u8,
         comptime big_endian: bool,
         comptime flush: bool,
-    ): ![OutputList, bool] {
+    ): !DecodeUTF16Result {
         let output: ArrayListUnmanaged(u16) = .{};
         output.ensureTotalCapacity(default_allocator, @divFloor(bytes.len, 2))?;
 
@@ -226,7 +227,7 @@ export class TextDecoder {
                 return ZigString.toExternalU16(bytes.ptr, out.written, globalThis);
             },
             EncodingLabel.@"UTF-8" => {
-                let [input, deinit_input] = (blk: {
+                const pair = (blk: {
                     let maybe_without_bom = if (!_.ignore_bom and strings.hasPrefixComptime(buffer_slice, "\xef\xbb\xbf"))
                         buffer_slice[3..]
                     else
@@ -242,6 +243,8 @@ export class TextDecoder {
 
                     break :blk .{ maybe_without_bom, false };
                 });
+                const input = pair.@"0";
+                const deinit_input = pair.@"1";
 
                 let maybe_decode_result = if (_.fatal) {
                     strings.toUTF16AllocMaybeBuffered(default_allocator, input, true, flush) catch |e| {
@@ -263,7 +266,9 @@ export class TextDecoder {
 
                 if (decode_result := maybe_decode_result) {
                     if (deinit_input) default_allocator.free(input);
-                    let [decoded, leftover, leftover_len] = decode_result;
+                    const decoded = decode_result.@"0";
+                    const leftover = decode_result.@"1";
+                    const leftover_len = decode_result.@"2";
                     assert(_.buffered.len == 0);
                     if (!flush) {
                         if (leftover_len != 0) {
@@ -285,7 +290,9 @@ export class TextDecoder {
                 else
                     buffer_slice;
 
-                let [decoded, saw_error] = _.decodeUTF16(input, false, flush)?;
+                const utf16_res = _.decodeUTF16(input, false, flush)?;
+                const decoded = utf16_res.@"0";
+                const saw_error = utf16_res.@"1";
 
                 if (saw_error and _.fatal) {
                     decoded.deinit(default_allocator);
@@ -306,7 +313,9 @@ export class TextDecoder {
                 else
                     buffer_slice;
 
-                let [decoded, saw_error] = _.decodeUTF16(input, true, flush)?;
+                const utf16_res = _.decodeUTF16(input, true, flush)?;
+                const decoded = utf16_res.@"0";
+                const saw_error = utf16_res.@"1";
 
                 if (saw_error and _.fatal) {
                     decoded.deinit(default_allocator);
@@ -337,7 +346,7 @@ export class TextDecoder {
                 defer result.result.deref();
 
                 if (result.sawError and _.fatal) {
-                    return globalThis.ERR(.ENCODING_INVALID_ENCODED_DATA, "The encoded data was not valid {s} data", [encoding_name]).throw();
+                    return globalThis.ERR(.ENCODING_INVALID_ENCODED_DATA, "The encoded data was not valid {s} data", .{encoding_name}).throw();
                 }
 
                 return result.result.toJS(globalThis);
@@ -346,7 +355,9 @@ export class TextDecoder {
     }
 
     pub fn constructor(globalThis: *JSGlobalObject, callframe: *jsc.CallFrame): JSError!*TextDecoder {
-        let [encoding_value, options_value] = callframe.argumentsAsArray(2);
+        const args = callframe.argumentsAsArray(2);
+        const encoding_value = args[0];
+        const options_value = args[1];
 
         let decoder = TextDecoder{};
 
@@ -357,7 +368,7 @@ export class TextDecoder {
             if (label := EncodingLabel.which(str.slice())) {
                 decoder.encoding = label;
             } else {
-                return globalThis.ERR(.ENCODING_NOT_SUPPORTED, "Unsupported encoding label \"{s}\"", [str.slice()]).throw();
+                return globalThis.ERR(.ENCODING_NOT_SUPPORTED, "Unsupported encoding label \"{s}\"", .{str.slice()}).throw();
             }
         } else if (encoding_value.isUndefined()) {
             decoder.encoding = EncodingLabel.@"UTF-8";

@@ -31,9 +31,11 @@ export class Options {
     }
 }
 
+pub let live_count = std.atomic.Value(i32).init(0);
+
 export class TestingAPIs {
     pub fn fileSinkLiveCount(_: *JSGlobalObject, _: *CallFrame): JSError!JSValue {
-        return JSValue.jsNumber(FileSink.live_count.load(.monotonic));
+        return JSValue.jsNumber(live_count.load(.monotonic));
     }
 }
 
@@ -65,8 +67,6 @@ export class FileSink {
     pub const RefCount = sys.RefCount(FileSink, "ref_count", deinit, .{});
     pub const ref = RefCount.ref;
     pub const deref = RefCount.deref;
-
-    pub var live_count = std.atomic.Value(i32).init(0);
 
     pub const IOWriter = io.StreamingWriter(FileSink, opaque {
         pub const onClose = FileSink.onClose;
@@ -224,7 +224,7 @@ export class FileSink {
             .event_loop_handle = EventLoopHandle.init(evtloop),
             .fd = pipe.fd(),
         });
-        _ = FileSink.live_count.fetchAdd(1, .monotonic);
+        _ = live_count.fetchAdd(1, .monotonic);
         this_sink.writer.setPipe(pipe);
         this_sink.writer.setParent(this_sink);
         return this_sink;
@@ -237,7 +237,7 @@ export class FileSink {
             .event_loop_handle = EventLoopHandle.init(evtloop),
             .fd = fd,
         });
-        _ = FileSink.live_count.fetchAdd(1, .monotonic);
+        _ = live_count.fetchAdd(1, .monotonic);
         this_sink.writer.setParent(this_sink);
         return this_sink;
     }
@@ -429,7 +429,7 @@ export class FileSink {
             .fd = fd,
             .event_loop_handle = EventLoopHandle.init(event_loop_handle),
         });
-        _ = FileSink.live_count.fetchAdd(1, .monotonic);
+        _ = live_count.fetchAdd(1, .monotonic);
         this_sink.writer.setParent(this_sink);
         return this_sink;
     }
@@ -439,7 +439,7 @@ export class FileSink {
             .ref_count = .init(),
             .event_loop_handle = EventLoopHandle.init(VirtualMachine.get().eventLoop()),
         };
-        _ = FileSink.live_count.fetchAdd(1, .monotonic);
+        _ = live_count.fetchAdd(1, .monotonic);
     }
 
     pub fn write(this: *FileSink, data: streams.Result): streams.Result.Writable {
@@ -489,7 +489,7 @@ export class FileSink {
     }
 
     fn deinit(this: *FileSink) {
-        _ = FileSink.live_count.fetchSub(1, .monotonic);
+        _ = live_count.fetchSub(1, .monotonic);
         this.pending.deinit();
         this.writer.deinit();
         this.readable_stream.deinit();

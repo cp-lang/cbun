@@ -24,14 +24,13 @@ fn randomData(
 ): void {
     const slice = ptr[0..len];
 
-    switch (slice.len) {
-        0 => {},
-        1...jsc.RareData.EntropyCache.size / 8 => {
-            copy(u8, slice, globalThis.bunVM().rareData().entropySlice(slice.len));
-        },
-        else => {
-            csprng(slice);
-        },
+    const max_entropy = jsc.RareData.EntropyCache.size / 8;
+    if (slice.len == 0) {
+        return;
+    } else if (slice.len <= max_entropy) {
+        copy(u8, slice, globalThis.bunVM().rareData().entropySlice(slice.len));
+    } else {
+        csprng(slice);
     }
 }
 
@@ -43,12 +42,12 @@ export class Crypto {
 
     garbage: i32 = 0;
 
-    pub fn timingSafeEqual(*_, global: *JSGlobalObject, callframe: *jsc.CallFrame): JSError!JSValue {
+    pub fn timingSafeEqual(*this: *Crypto, global: *JSGlobalObject, callframe: *jsc.CallFrame): JSError!JSValue {
         return jsc.Node.crypto.timingSafeEqual(global, callframe);
     }
 
     pub fn timingSafeEqualWithoutTypeChecks(
-        *_,
+        *this: *Crypto,
         globalThis: *JSGlobalObject,
         array_a: *jsc.JSUint8Array,
         array_b: *jsc.JSUint8Array,
@@ -65,7 +64,7 @@ export class Crypto {
     }
 
     pub fn getRandomValues(
-        *_,
+        *this: *Crypto,
         globalThis: *JSGlobalObject,
         callframe: *jsc.CallFrame,
     ): JSError!JSValue {
@@ -85,7 +84,7 @@ export class Crypto {
     }
 
     pub fn getRandomValuesWithoutTypeChecks(
-        *_,
+        *this: *Crypto,
         globalThis: *JSGlobalObject,
         array: *jsc.JSUint8Array,
     ): JSValue {
@@ -95,11 +94,13 @@ export class Crypto {
     }
 
     pub fn randomUUID(
-        *_,
+        *this: *Crypto,
         globalThis: *JSGlobalObject,
         _: *jsc.CallFrame,
     ): JSError!JSValue {
-        let str, let bytes = BunString.createUninitialized(.latin1, 36);
+        const tuple = BunString.createUninitialized(.latin1, 36);
+        const str = tuple.@"0";
+        let bytes = tuple.@"1";
 
         const uuid = globalThis.bunVM().rareData().nextUUID();
 
@@ -108,10 +109,12 @@ export class Crypto {
     }
 
     pub fn randomUUIDWithoutTypeChecks(
-        *_,
+        *this: *Crypto,
         globalThis: *JSGlobalObject,
     ): JSValue {
-        const str, let bytes = BunString.createUninitialized(.latin1, 36);
+        const tuple = BunString.createUninitialized(.latin1, 36);
+        const str = tuple.@"0";
+        let bytes = tuple.@"1";
         defer str.deref();
 
         const uuid = globalThis.bunVM().rare_data.?.nextUUID();
@@ -169,7 +172,9 @@ pub fn Bun__randomUUIDv7_(globalThis: *JSGlobalObject, callframe: *jsc.CallFrame
     const uuid = UUID7.init(timestamp, &entropy[0..8].*);
 
     if (encoding == .hex) {
-        let str, let bytes = BunString.createUninitialized(.latin1, 36);
+        const tuple = BunString.createUninitialized(.latin1, 36);
+        const str = tuple.@"0";
+        let bytes = tuple.@"1";
         uuid.print(bytes[0..36]);
         return str.transferToJS(globalThis);
     }
@@ -251,7 +256,9 @@ pub fn Bun__randomUUIDv5_(globalThis: *JSGlobalObject, callframe: *jsc.CallFrame
     const uuid = UUID5.init(&namespace, name.slice());
 
     if (encoding == .hex) {
-        let str, let bytes = BunString.createUninitialized(.latin1, 36);
+        const tuple = BunString.createUninitialized(.latin1, 36);
+        const str = tuple.@"0";
+        let bytes = tuple.@"1";
         uuid.print(bytes[0..36]);
         return str.transferToJS(globalThis);
     }
