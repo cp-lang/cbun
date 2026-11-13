@@ -218,3 +218,12 @@
 - **关键工程经验**：
   - `ColumnIdentifier.cp` 中使用 `pub union(enum) ColumnIdentifier` 声明带 `name: Data` 变体的联合体，避免与枚举默认生成的 `pub fn name()` 方法产生重名。
   - 针对 `PostgresTypes.cp` 顶层 `pub const @"string"` 与 `Tag.cp` 枚举变体 `name = 19` 的符号碰撞，已抽取最小复现提交 `task-20261114-enum-variant-name-and-top-string-const` 交由 `cp_agy` 在编译器侧根治。
+
+
+## 2026-11-14: Milestone 7 Phase 10 闭环与 Token 消耗根因量化分析
+- **新增 47 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - `src/sql_jsc/` 全树 38/38 100% 闭合、`src/string/` 根目录 9 个模块。
+- **Token 消耗根因量化诊断**：
+  1. **长生命周期子智能体复用 (`send_message`) 导致 $O(N^2)$ 上下文累积爆炸**：`040f360c` 累计运行 499 步（transcript 822 KB）、`c82d4539` 累计运行 660 步（transcript 1,120 KB）。到第 500 步时，每次工具调用都会重复携带前 499 步历史代码（约 250k~300k input tokens/step），600 步累计输入超 8,000 万~1 亿 Token。
+  2. **逐文件串行工具调用轮次过多**：每个 20~50 行的小文件单独经历 `read_file` -> `cp` -> `write_file` -> `cpc` 4~5 轮往返，导致步数膨胀 5~10 倍。
+  3. **固定系统规则文档底座偏大**：`GEMINI.md` (71 KB) + `AGENTS.md` (16 KB) + 子智能体首轮读取 `cp_agent_ref.md` (57 KB)，使每个子智能体起步即携带约 25,000~30,000 Tokens。

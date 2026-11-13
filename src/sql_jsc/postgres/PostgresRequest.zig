@@ -1,416 +1,350 @@
-pub fn writeBind(
-    name: []const u8,
-    cursor_name: bun.String,
-    globalObject: *jsc.JSGlobalObject,
-    values_array: JSValue,
-    columns_value: JSValue,
-    parameter_fields: []const int4,
-    result_fields: []const protocol.FieldDescription,
-    comptime Context: type,
-    writer: protocol.NewWriter(Context),
-) !void {
-    try writer.write("B");
-    const length = try writer.length();
-
-    try writer.String(cursor_name);
-    try writer.string(name);
-
-    if (parameter_fields.len > max_parameters) {
-        return error.TooManyParameters;
-    }
-
-    const len: u16 = @intCast(parameter_fields.len);
-
-    // The number of parameter format codes that follow (denoted C
-    // below). This can be zero to indicate that there are no
-    // parameters or that the parameters all use the default format
-    // (text); or one, in which case the specified format code is
-    // applied to all parameters; or it can equal the actual number
-    // of parameters.
-    try writer.short(len);
-
-    var iter = try QueryBindingIterator.init(values_array, columns_value, globalObject);
-    for (0..len) |i| {
-        const parameter_field = parameter_fields[i];
-        const is_custom_type = std.math.maxInt(short) < parameter_field;
-        const tag: types.Tag = if (is_custom_type) .text else @enumFromInt(@as(short, @intCast(parameter_field)));
-
-        const force_text = is_custom_type or (tag.isBinaryFormatSupported() and brk: {
-            iter.to(@truncate(i));
-            if (try iter.next()) |value| {
-                break :brk value.isString();
-            }
-            if (iter.anyFailed()) {
-                return error.InvalidQueryBinding;
-            }
-            break :brk false;
-        });
-
-        if (force_text) {
-            // If they pass a value as a string, let's avoid attempting to
-            // convert it to the binary representation. This minimizes the room
-            // for mistakes on our end, such as stripping the timezone
-            // differently than what Postgres does when given a timestamp with
-            // timezone.
-            try writer.short(0);
-            continue;
-        }
-
-        try writer.short(
-            tag.formatCode(),
-        );
-    }
-
-    // The number of parameter values that follow (possibly zero). This
-    // must match the number of parameters needed by the query.
-    try writer.short(len);
-
-    debug("Bind: {f} ({d} args)", .{ bun.fmt.quote(name), len });
-    iter.to(0);
-    var i: usize = 0;
-    while (try iter.next()) |value| : (i += 1) {
-        const tag: types.Tag = brk: {
-            if (i >= len) {
-                // parameter in array but not in parameter_fields
-                // this is probably a bug a bug in bun lets return .text here so the server will send a error 08P01
-                // with will describe better the error saying exactly how many parameters are missing and are expected
-                // Example:
-                // SQL error: PostgresError: bind message supplies 0 parameters, but prepared statement "PSELECT * FROM test_table WHERE id=$1 .in$0" requires 1
-                // errno: "08P01",
-                // code: "ERR_POSTGRES_SERVER_ERROR"
-                break :brk .text;
-            }
-            const parameter_field = parameter_fields[i];
-            const is_custom_type = std.math.maxInt(short) < parameter_field;
-            break :brk if (is_custom_type) .text else @enumFromInt(@as(short, @intCast(parameter_field)));
-        };
-        if (value.isEmptyOrUndefinedOrNull()) {
-            debug("  -> NULL", .{});
-            //  As a special case, -1 indicates a
-            // NULL parameter value. No value bytes follow in the NULL case.
-            try writer.int4(@bitCast(@as(i32, -1)));
-            continue;
-        }
-        if (comptime bun.Environment.enable_logs) {
-            debug("  -> {s}", .{tag.tagName() orelse "(unknown)"});
-        }
-
-        switch (
-        // If they pass a value as a string, let's avoid attempting to
-        // convert it to the binary representation. This minimizes the room
-        // for mistakes on our end, such as stripping the timezone
-        // differently than what Postgres does when given a timestamp with
-        // timezone.
-        if (tag.isBinaryFormatSupported() and value.isString()) .text else tag) {
-            .jsonb, .json => {
-                var str = bun.String.empty;
-                defer str.deref();
-                // Use jsonStringifyFast for SIMD-optimized serialization
-                try value.jsonStringifyFast(globalObject, &str);
-                const slice = str.toUTF8WithoutRef(bun.default_allocator);
-                defer slice.deinit();
-                const l = try writer.length();
-                try writer.write(slice.slice());
-                try l.writeExcludingSelf();
-            },
-            .bool => {
-                const l = try writer.length();
-                try writer.write(&[1]u8{@intFromBool(value.toBoolean())});
-                try l.writeExcludingSelf();
-            },
-            .timestamp, .timestamptz => {
-                const l = try writer.length();
-                try writer.int8(try types.date.fromJS(globalObject, value));
-                try l.writeExcludingSelf();
-            },
-            .bytea => {
-                var bytes: []const u8 = "";
-                if (value.asArrayBuffer(globalObject)) |buf| {
-                    bytes = buf.byteSlice();
-                }
-                const l = try writer.length();
-                debug("    {d} bytes", .{bytes.len});
-
-                try writer.write(bytes);
-                try l.writeExcludingSelf();
-            },
-            .int4 => {
-                const l = try writer.length();
-                try writer.int4(@bitCast(try value.coerceToInt32(globalObject)));
-                try l.writeExcludingSelf();
-            },
-            .int4_array => {
-                const l = try writer.length();
-                try writer.int4(@bitCast(try value.coerceToInt32(globalObject)));
-                try l.writeExcludingSelf();
-            },
-            .float8 => {
-                const l = try writer.length();
-                try writer.f64(@bitCast(try value.toNumber(globalObject)));
-                try l.writeExcludingSelf();
-            },
-
-            else => {
-                const str = try String.fromJS(value, globalObject);
-                if (str.tag == .Dead) return error.OutOfMemory;
-                defer str.deref();
-                const slice = str.toUTF8WithoutRef(bun.default_allocator);
-                defer slice.deinit();
-                const l = try writer.length();
-                try writer.write(slice.slice());
-                try l.writeExcludingSelf();
-            },
-        }
-    }
-
-    var any_non_text_fields: bool = false;
-    for (result_fields) |field| {
-        if (field.typeTag().isBinaryFormatSupported()) {
-            any_non_text_fields = true;
-            break;
-        }
-    }
-
-    if (any_non_text_fields) {
-        if (result_fields.len > max_parameters) {
-            return error.TooManyParameters;
-        }
-        try writer.short(result_fields.len);
-        for (result_fields) |field| {
-            try writer.short(
-                field.typeTag().formatCode(),
-            );
-        }
-    } else {
-        try writer.short(0);
-    }
-
-    try length.write();
-}
-
-pub fn writeQuery(
-    query: []const u8,
-    name: []const u8,
-    params: []const int4,
-    comptime Context: type,
-    writer: protocol.NewWriter(Context),
-) AnyPostgresError!void {
-    {
-        var q = protocol.Parse{
-            .name = name,
-            .params = params,
-            .query = query,
-        };
-        try q.writeInternal(Context, writer);
-        debug("Parse: {f}", .{bun.fmt.quote(query)});
-    }
-
-    {
-        var d = protocol.Describe{
-            .p = .{
-                .prepared_statement = name,
-            },
-        };
-        try d.writeInternal(Context, writer);
-        debug("Describe: {f}", .{bun.fmt.quote(name)});
-    }
-}
-
-pub fn prepareAndQueryWithSignature(
-    globalObject: *jsc.JSGlobalObject,
-    query: []const u8,
-    array_value: JSValue,
-    comptime Context: type,
-    writer: protocol.NewWriter(Context),
-    signature: *Signature,
-) AnyPostgresError!void {
-    try writeQuery(query, signature.prepared_statement_name, signature.fields, Context, writer);
-    try writeBind(signature.prepared_statement_name, bun.String.empty, globalObject, array_value, .zero, &.{}, &.{}, Context, writer);
-    var exec = protocol.Execute{
-        .p = .{
-            .prepared_statement = signature.prepared_statement_name,
-        },
-    };
-    try exec.writeInternal(Context, writer);
-
-    try writer.write(&protocol.Flush);
-    try writer.write(&protocol.Sync);
-}
-
-pub fn bindAndExecute(
-    globalObject: *jsc.JSGlobalObject,
-    statement: *PostgresSQLStatement,
-    array_value: JSValue,
-    columns_value: JSValue,
-    comptime Context: type,
-    writer: protocol.NewWriter(Context),
-) !void {
-    try writeBind(statement.signature.prepared_statement_name, bun.String.empty, globalObject, array_value, columns_value, statement.parameters, statement.fields, Context, writer);
-    var exec = protocol.Execute{
-        .p = .{
-            .prepared_statement = statement.signature.prepared_statement_name,
-        },
-    };
-    try exec.writeInternal(Context, writer);
-
-    try writer.write(&protocol.Flush);
-    try writer.write(&protocol.Sync);
-}
-
-/// Atomically sends Parse + [Describe] + Bind + Execute + Flush + Sync as a single message batch.
-/// This is required for unnamed prepared statements to work correctly with connection poolers
-/// like PgBouncer in transaction mode, which may reassign server connections between protocol
-/// round-trips. Without this, Parse and Bind+Execute could be routed to different backend
-/// connections, causing queries to execute against the wrong prepared statement.
-pub fn parseAndBindAndExecute(
-    globalObject: *jsc.JSGlobalObject,
-    query: []const u8,
-    statement: *PostgresSQLStatement,
-    array_value: JSValue,
-    columns_value: JSValue,
-    include_describe: bool,
-    comptime Context: type,
-    writer: protocol.NewWriter(Context),
-) AnyPostgresError!void {
-    const name = statement.signature.prepared_statement_name;
-
-    // Parse
-    {
-        var q = protocol.Parse{
-            .name = name,
-            .params = statement.signature.fields,
-            .query = query,
-        };
-        try q.writeInternal(Context, writer);
-        debug("Parse: {f}", .{bun.fmt.quote(query)});
-    }
-
-    // Describe (needed on first execution to learn parameter/result types for caching)
-    if (include_describe) {
-        var d = protocol.Describe{
-            .p = .{
-                .prepared_statement = name,
-            },
-        };
-        try d.writeInternal(Context, writer);
-        debug("Describe: {f}", .{bun.fmt.quote(name)});
-    }
-
-    // Bind — use server-provided types if available (binary format), otherwise
-    // fall back to signature types (text format for unknowns). The server will
-    // handle text-to-type conversion based on the parameter types from Parse.
-    const param_fields = if (statement.parameters.len > 0) statement.parameters else statement.signature.fields;
-    const result_fields = statement.fields;
-
-    try writeBind(name, bun.String.empty, globalObject, array_value, columns_value, param_fields, result_fields, Context, writer);
-
-    // Execute
-    var exec = protocol.Execute{
-        .p = .{
-            .prepared_statement = name,
-        },
-    };
-    try exec.writeInternal(Context, writer);
-
-    try writer.write(&protocol.Flush);
-    try writer.write(&protocol.Sync);
-}
-
-pub fn executeQuery(
-    query: []const u8,
-    comptime Context: type,
-    writer: protocol.NewWriter(Context),
-) !void {
-    try protocol.writeQuery(query, Context, writer);
-    try writer.write(&protocol.Flush);
-    try writer.write(&protocol.Sync);
-}
-
-pub fn onData(
-    connection: *PostgresSQLConnection,
-    comptime Context: type,
-    reader: protocol.NewReader(Context),
-) !void {
-    while (true) {
-        reader.markMessageStart();
-        const c = try reader.int(u8);
-        debug("read: {c}", .{c});
-        switch (c) {
-            'D' => try connection.on(.DataRow, Context, reader),
-            'd' => try connection.on(.CopyData, Context, reader),
-            'S' => {
-                if (connection.tls_status == .message_sent) {
-                    bun.debugAssert(connection.tls_status.message_sent == 8);
-                    connection.tls_status = .ssl_ok;
-                    connection.setupTLS();
-                    return;
-                }
-
-                try connection.on(.ParameterStatus, Context, reader);
-            },
-            'Z' => try connection.on(.ReadyForQuery, Context, reader),
-            'C' => try connection.on(.CommandComplete, Context, reader),
-            '2' => try connection.on(.BindComplete, Context, reader),
-            '1' => try connection.on(.ParseComplete, Context, reader),
-            't' => try connection.on(.ParameterDescription, Context, reader),
-            'T' => try connection.on(.RowDescription, Context, reader),
-            'R' => try connection.on(.Authentication, Context, reader),
-            'n' => try connection.on(.NoData, Context, reader),
-            'K' => try connection.on(.BackendKeyData, Context, reader),
-            'E' => try connection.on(.ErrorResponse, Context, reader),
-            's' => try connection.on(.PortalSuspended, Context, reader),
-            '3' => try connection.on(.CloseComplete, Context, reader),
-            'G' => try connection.on(.CopyInResponse, Context, reader),
-            'N' => {
-                if (connection.tls_status == .message_sent) {
-                    connection.tls_status = .ssl_not_available;
-                    debug("Server does not support SSL", .{});
-                    if (connection.ssl_mode == .require) {
-                        connection.fail("Server does not support SSL", error.TLSNotAvailable);
-                        return;
-                    }
-                    continue;
-                }
-
-                try connection.on(.NoticeResponse, Context, reader);
-            },
-            'I' => try connection.on(.EmptyQueryResponse, Context, reader),
-            'H' => try connection.on(.CopyOutResponse, Context, reader),
-            'c' => try connection.on(.CopyDone, Context, reader),
-            'W' => try connection.on(.CopyBothResponse, Context, reader),
-
-            else => {
-                debug("Unknown message: {c}", .{c});
-                const to_skip = try reader.length() -| 1;
-                debug("to_skip: {d}", .{to_skip});
-                try reader.skip(@intCast(@max(to_skip, 0)));
-            },
-        }
-    }
-}
-
-pub const Queue = bun.LinearFifo(*PostgresSQLQuery, .Dynamic);
-
-const debug = bun.Output.scoped(.Postgres, .visible);
-
-/// The PostgreSQL wire protocol uses 16-bit integers for parameter and column counts.
-const max_parameters = std.math.maxInt(u16);
-
-const PostgresSQLConnection = @import("./PostgresSQLConnection.zig");
-const PostgresSQLQuery = @import("./PostgresSQLQuery.zig");
-const PostgresSQLStatement = @import("./PostgresSQLStatement.zig");
-const Signature = @import("../../sql_jsc/postgres/Signature.zig");
-const protocol = @import("../../sql/postgres/PostgresProtocol.zig");
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
-const QueryBindingIterator = @import("../../sql_jsc/shared/QueryBindingIterator.zig").QueryBindingIterator;
+const string = []const u8;
 
-const types = @import("../../sql/postgres/PostgresTypes.zig");
-const AnyPostgresError = @import("../../sql/postgres/PostgresTypes.zig").AnyPostgresError;
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const AnyPostgresError = types.AnyPostgresError;
 const int4 = types.int4;
 const short = types.short;
-
-const bun = @import("bun");
 const String = bun.String;
-
 const jsc = bun.jsc;
 const JSValue = jsc.JSValue;
+const debug = bun.Output.scoped(.Postgres, .visible);
+const max_parameters = std.math.maxInt(u16);
+pub const Queue = bun.LinearFifo(*PostgresSQLQuery, .Dynamic);
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const PostgresSQLConnection = @import("./PostgresSQLConnection.zig");
+pub const PostgresSQLQuery = @import("./PostgresSQLQuery.zig");
+pub const PostgresSQLStatement = @import("./PostgresSQLStatement.zig");
+pub const Signature = @import("../../sql_jsc/postgres/Signature.zig");
+pub const protocol = @import("../../sql/postgres/PostgresProtocol.zig");
+pub const QueryBindingIterator = @import("../../sql_jsc/shared/QueryBindingIterator.zig").QueryBindingIterator;
+pub const types = @import("../../sql/postgres/PostgresTypes.zig");
+pub const bun = @import("bun");
+
+pub fn writeBind(name: []const u8, cursor_name: bun.String, globalObject: *jsc.JSGlobalObject, values_array: JSValue, columns_value: JSValue, parameter_fields: []const int4, result_fields: []const protocol.FieldDescription, comptime Context: type, writer: protocol.NewWriter(Context)) !void {
+        _ = try writer.write("B");
+        const length = try writer.length();
+        _ = try writer.String(cursor_name);
+        _ = try writer.@"string"(name);
+        if ((parameter_fields.len > max_parameters)) {
+            return error.TooManyParameters;
+        }
+        const len: u16 = @intCast(parameter_fields.len);
+        _ = try writer.short(len);
+        var iter = try QueryBindingIterator.init(values_array, columns_value, globalObject);
+        _ = &iter;
+        {
+            var i: i32 = 0;
+            _ = &i;
+            const __end_0 = len;
+            while (i < __end_0) : (i += 1) {
+                const parameter_field = parameter_fields[@as(usize, @intCast(i))];
+                const is_custom_type = (std.math.maxInt(short) < parameter_field);
+                const tag: types.Tag = (if (is_custom_type) .text else @enumFromInt(@as(short, @intCast(parameter_field))));
+                const force_text = (is_custom_type or (tag.isBinaryFormatSupported() and brk: {
+                _ = iter.to(@truncate(i));
+                if (try iter.next()) |value| {
+                    _ = &value;
+                    break :brk value.isString();
+                }
+                if (iter.anyFailed()) {
+                    return error.InvalidQueryBinding;
+                }
+                break :brk false;
+}));
+                if (force_text) {
+                    _ = try writer.short(0);
+                    continue;
+                }
+                _ = try writer.short(tag.formatCode());
+            }
+        }
+        _ = try writer.short(len);
+        _ = debug("Bind: {f} ({d} args)", .{ bun.fmt.quote(name), len });
+        _ = iter.to(0);
+        var i: usize = 0;
+        _ = &i;
+        while (try iter.next()) |value| {
+            defer {
+            i = (i + 1);
+            }
+            const tag: types.Tag = brk: {
+            if ((i >= len)) {
+                break :brk .text;
+            }
+            const parameter_field = parameter_fields[@as(usize, @intCast(i))];
+            const is_custom_type = (std.math.maxInt(short) < parameter_field);
+            break :brk (if (is_custom_type) .text else @enumFromInt(@as(short, @intCast(parameter_field))));
+};
+            if (value.isEmptyOrUndefinedOrNull()) {
+                _ = debug("  -> NULL", .{});
+                _ = try writer.int4(@bitCast((if (comptime @typeInfo(@TypeOf(-1)) == .@"enum") cp_cast_int(i32, @intFromEnum(-1)) else cp_cast_int(i32, -1))));
+                continue;
+            }
+            if (comptime bun.Environment.enable_logs) {
+                _ = debug("  -> {s}", .{ ((tag.tagName()) orelse ("(unknown)")) });
+            }
+            switch ((if ((tag.isBinaryFormatSupported() and value.isString())) .text else tag)) {
+.jsonb, .json => {
+var str = bun.String.empty;
+            _ = &str;
+            defer {
+            _ = str.deref();
+            }
+            _ = try value.jsonStringifyFast(globalObject, (&str));
+            const slice = str.toUTF8WithoutRef(bun.default_allocator);
+            defer {
+            _ = slice.deinit();
+            }
+            const l = try writer.length();
+            _ = try writer.write(slice.slice());
+            _ = try l.writeExcludingSelf();
+},
+.@"bool" => {
+const l = try writer.length();
+            const b: [1]u8 = .{ @intFromBool(value.toBoolean()) };
+            _ = try writer.write((&b));
+            _ = try l.writeExcludingSelf();
+},
+.timestamp, .timestamptz => {
+const l = try writer.length();
+            _ = try writer.int8(try types.date.fromJS(globalObject, value));
+            _ = try l.writeExcludingSelf();
+},
+.bytea => {
+var bytes: []const u8 = "";
+            _ = &bytes;
+            if (value.asArrayBuffer(globalObject)) |buf| {
+                _ = &buf;
+                bytes = buf.byteSlice();
+            }
+            const l = try writer.length();
+            _ = debug("    {d} bytes", .{ bytes.len });
+            _ = try writer.write(bytes);
+            _ = try l.writeExcludingSelf();
+},
+.int4 => {
+const l = try writer.length();
+            _ = try writer.int4(@bitCast(try value.coerceToInt32(globalObject)));
+            _ = try l.writeExcludingSelf();
+},
+.int4_array => {
+const l = try writer.length();
+            _ = try writer.int4(@bitCast(try value.coerceToInt32(globalObject)));
+            _ = try l.writeExcludingSelf();
+},
+.float8 => {
+const l = try writer.length();
+            _ = try writer.@"f64"(@bitCast(try value.toNumber(globalObject)));
+            _ = try l.writeExcludingSelf();
+},
+else => {
+const str = try String.fromJS(value, globalObject);
+            if ((str.tag == .Dead)) {
+                return error.OutOfMemory;
+            }
+            defer {
+            _ = str.deref();
+            }
+            const slice = str.toUTF8WithoutRef(bun.default_allocator);
+            defer {
+            _ = slice.deinit();
+            }
+            const l = try writer.length();
+            _ = try writer.write(slice.slice());
+            _ = try l.writeExcludingSelf();
+},
+}
+        }
+        var any_non_text_fields: bool = false;
+        _ = &any_non_text_fields;
+        for (cp_iter_slice(result_fields)) |field| {
+            _ = &field;
+            if (field.typeTag().isBinaryFormatSupported()) {
+                any_non_text_fields = true;
+                break;
+            }
+        }
+        if (any_non_text_fields) {
+            if ((result_fields.len > max_parameters)) {
+                return error.TooManyParameters;
+            }
+            _ = try writer.short(result_fields.len);
+            for (cp_iter_slice(result_fields)) |field| {
+                _ = &field;
+                _ = try writer.short(field.typeTag().formatCode());
+            }
+        } else {
+            _ = try writer.short(0);
+        }
+        _ = try length.write();
+}
+
+pub fn writeQuery(query: []const u8, name: []const u8, params: []const int4, comptime Context: type, writer: protocol.NewWriter(Context)) AnyPostgresError!void {
+        {
+            var q = protocol.Parse{ .name = name, .params = params, .query = query };
+            _ = &q;
+            _ = try q.writeInternal(Context, writer);
+            _ = debug("Parse: {f}", .{ bun.fmt.quote(query) });
+        }
+        {
+            var d = protocol.Describe{ .p = .{ .prepared_statement = name } };
+            _ = &d;
+            _ = try d.writeInternal(Context, writer);
+            _ = debug("Describe: {f}", .{ bun.fmt.quote(name) });
+        }
+}
+
+pub fn prepareAndQueryWithSignature(globalObject: *jsc.JSGlobalObject, query: []const u8, array_value: JSValue, comptime Context: type, writer: protocol.NewWriter(Context), signature: *Signature) AnyPostgresError!void {
+        _ = try writeQuery(query, signature.prepared_statement_name, signature.fields, Context, writer);
+        const empty_params: [0]int4 = .{  };
+        const empty_fields: [0]protocol.FieldDescription = .{  };
+        _ = try writeBind(signature.prepared_statement_name, bun.String.empty, globalObject, array_value, .zero, (&empty_params), (&empty_fields), Context, writer);
+        var exec = protocol.Execute{ .p = .{ .prepared_statement = signature.prepared_statement_name } };
+        _ = &exec;
+        _ = try exec.writeInternal(Context, writer);
+        _ = try writer.write(*const protocol.Flush);
+        _ = try writer.write(*const protocol.Sync);
+}
+
+pub fn bindAndExecute(globalObject: *jsc.JSGlobalObject, statement: *PostgresSQLStatement, array_value: JSValue, columns_value: JSValue, comptime Context: type, writer: protocol.NewWriter(Context)) !void {
+        _ = try writeBind(statement.signature.prepared_statement_name, bun.String.empty, globalObject, array_value, columns_value, statement.parameters, statement.fields, Context, writer);
+        var exec = protocol.Execute{ .p = .{ .prepared_statement = statement.signature.prepared_statement_name } };
+        _ = &exec;
+        _ = try exec.writeInternal(Context, writer);
+        _ = try writer.write(*const protocol.Flush);
+        _ = try writer.write(*const protocol.Sync);
+}
+
+pub fn parseAndBindAndExecute(globalObject: *jsc.JSGlobalObject, query: []const u8, statement: *PostgresSQLStatement, array_value: JSValue, columns_value: JSValue, include_describe: bool, comptime Context: type, writer: protocol.NewWriter(Context)) AnyPostgresError!void {
+        const name = statement.signature.prepared_statement_name;
+        {
+            var q = protocol.Parse{ .name = name, .params = statement.signature.fields, .query = query };
+            _ = &q;
+            _ = try q.writeInternal(Context, writer);
+            _ = debug("Parse: {f}", .{ bun.fmt.quote(query) });
+        }
+        if (include_describe) {
+            var d = protocol.Describe{ .p = .{ .prepared_statement = name } };
+            _ = &d;
+            _ = try d.writeInternal(Context, writer);
+            _ = debug("Describe: {f}", .{ bun.fmt.quote(name) });
+        }
+        const param_fields = (if ((statement.parameters.len > 0)) statement.parameters else statement.signature.fields);
+        const result_fields = statement.fields;
+        _ = try writeBind(name, bun.String.empty, globalObject, array_value, columns_value, param_fields, result_fields, Context, writer);
+        var exec = protocol.Execute{ .p = .{ .prepared_statement = name } };
+        _ = &exec;
+        _ = try exec.writeInternal(Context, writer);
+        _ = try writer.write(*const protocol.Flush);
+        _ = try writer.write(*const protocol.Sync);
+}
+
+pub fn executeQuery(query: []const u8, comptime Context: type, writer: protocol.NewWriter(Context)) !void {
+        _ = try protocol.writeQuery(query, Context, writer);
+        _ = try writer.write(*const protocol.Flush);
+        _ = try writer.write(*const protocol.Sync);
+}
+
+pub fn onData(connection: *PostgresSQLConnection, comptime Context: type, reader: protocol.NewReader(Context)) !void {
+        while (true) {
+            _ = reader.markMessageStart();
+            const c = try reader.int(u8);
+            _ = debug("read: {c}", .{ c });
+            switch (c) {
+'D' => {
+_ = try connection.on(.DataRow, Context, reader);
+},
+'d' => {
+_ = try connection.on(.CopyData, Context, reader);
+},
+'S' => {
+if ((connection.tls_status == .message_sent)) {
+                _ = bun.debugAssert((connection.tls_status.message_sent == 8));
+                connection.tls_status = .ssl_ok;
+                _ = connection.setupTLS();
+                return;
+            }
+            _ = try connection.on(.ParameterStatus, Context, reader);
+},
+'Z' => {
+_ = try connection.on(.ReadyForQuery, Context, reader);
+},
+'C' => {
+_ = try connection.on(.CommandComplete, Context, reader);
+},
+'2' => {
+_ = try connection.on(.BindComplete, Context, reader);
+},
+'1' => {
+_ = try connection.on(.ParseComplete, Context, reader);
+},
+'t' => {
+_ = try connection.on(.ParameterDescription, Context, reader);
+},
+'T' => {
+_ = try connection.on(.RowDescription, Context, reader);
+},
+'R' => {
+_ = try connection.on(.Authentication, Context, reader);
+},
+'n' => {
+_ = try connection.on(.NoData, Context, reader);
+},
+'K' => {
+_ = try connection.on(.BackendKeyData, Context, reader);
+},
+'E' => {
+_ = try connection.on(.ErrorResponse, Context, reader);
+},
+'s' => {
+_ = try connection.on(.PortalSuspended, Context, reader);
+},
+'3' => {
+_ = try connection.on(.CloseComplete, Context, reader);
+},
+'G' => {
+_ = try connection.on(.CopyInResponse, Context, reader);
+},
+'N' => {
+if ((connection.tls_status == .message_sent)) {
+                connection.tls_status = .ssl_not_available;
+                _ = debug("Server does not support SSL", .{});
+                if ((connection.ssl_mode == .require)) {
+                    _ = connection.fail("Server does not support SSL", error.TLSNotAvailable);
+                    return;
+                }
+                continue;
+            }
+            _ = try connection.on(.NoticeResponse, Context, reader);
+},
+'I' => {
+_ = try connection.on(.EmptyQueryResponse, Context, reader);
+},
+'H' => {
+_ = try connection.on(.CopyOutResponse, Context, reader);
+},
+'c' => {
+_ = try connection.on(.CopyDone, Context, reader);
+},
+'W' => {
+_ = try connection.on(.CopyBothResponse, Context, reader);
+},
+else => {
+_ = debug("Unknown message: {c}", .{ c });
+            const to_skip = (try reader.length() -| 1);
+            _ = debug("to_skip: {d}", .{ to_skip });
+            _ = try reader.skip(@intCast(@max(to_skip, 0)));
+},
+}
+        }
+}

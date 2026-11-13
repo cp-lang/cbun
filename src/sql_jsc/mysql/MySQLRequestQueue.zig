@@ -1,227 +1,226 @@
-pub const MySQLRequestQueue = @This();
-
-#requests: Queue,
-
-#pipelined_requests: u32 = 0,
-#nonpipelinable_requests: u32 = 0,
-// TODO: refactor to ENUM
-#waiting_to_prepare: bool = false,
-#is_ready_for_query: bool = true,
-
-pub inline fn canExecuteQuery(this: *const @This(), connection: *const MySQLConnection) bool {
-    return connection.isAbleToWrite() and
-        this.#is_ready_for_query and
-        this.#nonpipelinable_requests == 0 and
-        this.#pipelined_requests == 0;
-}
-pub inline fn canPrepareQuery(this: *const @This(), connection: *const MySQLConnection) bool {
-    return connection.isAbleToWrite() and
-        this.#is_ready_for_query and
-        !this.#waiting_to_prepare and
-        this.#pipelined_requests == 0;
-}
-
-pub inline fn markAsReadyForQuery(this: *@This()) void {
-    this.#is_ready_for_query = true;
-}
-pub inline fn markAsPrepared(this: *@This()) void {
-    this.#waiting_to_prepare = false;
-    if (this.current()) |request| {
-        debug("markAsPrepared markAsPrepared", .{});
-        request.markAsPrepared();
-    }
-}
-pub inline fn canPipeline(this: *@This(), connection: *MySQLConnection) bool {
-    if (bun.feature_flag.BUN_FEATURE_FLAG_DISABLE_SQL_AUTO_PIPELINING.get()) {
-        @branchHint(.unlikely);
-        return false;
-    }
-
-    return this.#is_ready_for_query and
-        this.#nonpipelinable_requests == 0 and // need to wait for non pipelinable requests to finish
-        !this.#waiting_to_prepare and
-        connection.isAbleToWrite();
-}
-
-pub fn markCurrentRequestAsFinished(this: *@This(), item: *JSMySQLQuery) void {
-    this.#waiting_to_prepare = false;
-    if (item.isBeingPrepared()) {
-        debug("markCurrentRequestAsFinished markAsPrepared", .{});
-        item.markAsPrepared();
-    } else if (item.isRunning()) {
-        if (item.isPipelined()) {
-            this.#pipelined_requests -= 1;
-        } else {
-            this.#nonpipelinable_requests -= 1;
-        }
-    }
-}
-
-pub fn advance(this: *@This(), connection: *MySQLConnection) void {
-    var offset: usize = 0;
-    defer {
-        while (this.#requests.readableLength() > 0) {
-            const request = this.#requests.peekItem(0);
-            // An item may be in the success or failed state and still be inside the queue (see deinit later comments)
-            // so we do the cleanup her
-            if (request.isCompleted()) {
-                debug("isCompleted discard after advance", .{});
-                this.#requests.discard(1);
-                request.deref();
-                continue;
-            }
-            break;
-        }
-    }
-
-    while (this.#requests.readableLength() > offset and connection.isAbleToWrite()) {
-        var request: *JSMySQLQuery = this.#requests.peekItem(offset);
-
-        if (request.isCompleted()) {
-            if (offset > 0) {
-                // discard later
-                offset += 1;
-                continue;
-            }
-            debug("isCompleted", .{});
-            this.#requests.discard(1);
-            request.deref();
-            continue;
-        }
-
-        if (request.isBeingPrepared()) {
-            debug("isBeingPrepared", .{});
-            this.#waiting_to_prepare = true;
-            // cannot continue the queue until the current request is marked as prepared
-            return;
-        }
-        if (request.isRunning()) {
-            debug("isRunning", .{});
-            const total_requests_running = this.#pipelined_requests + this.#nonpipelinable_requests;
-            if (offset < total_requests_running) {
-                offset += total_requests_running;
-            } else {
-                offset += 1;
-            }
-            continue;
-        }
-
-        request.run(connection) catch |err| {
-            debug("run failed", .{});
-            connection.onError(request, err);
-            if (offset == 0) {
-                this.#requests.discard(1);
-                request.deref();
-            }
-            offset += 1;
-            continue;
-        };
-        if (request.isBeingPrepared()) {
-            debug("isBeingPrepared", .{});
-            connection.resetConnectionTimeout();
-            this.#is_ready_for_query = false;
-            this.#waiting_to_prepare = true;
-            return;
-        } else if (request.isRunning()) {
-            connection.resetConnectionTimeout();
-            debug("isRunning after run", .{});
-            this.#is_ready_for_query = false;
-
-            if (request.isPipelined()) {
-                this.#pipelined_requests += 1;
-                if (this.canPipeline(connection)) {
-                    debug("pipelined requests", .{});
-                    offset += 1;
-                    continue;
-                }
-                return;
-            }
-            debug("nonpipelinable requests", .{});
-            this.#nonpipelinable_requests += 1;
-        }
-        return;
-    }
-}
-
-pub fn init() @This() {
-    return .{ .#requests = Queue.init(bun.default_allocator) };
-}
-
-pub fn isEmpty(this: *@This()) bool {
-    return this.#requests.readableLength() == 0;
-}
-
-pub fn add(this: *@This(), request: *JSMySQLQuery) void {
-    debug("add", .{});
-    if (request.isBeingPrepared()) {
-        this.#is_ready_for_query = false;
-        this.#waiting_to_prepare = true;
-    } else if (request.isRunning()) {
-        this.#is_ready_for_query = false;
-
-        if (request.isPipelined()) {
-            this.#pipelined_requests += 1;
-        } else {
-            this.#nonpipelinable_requests += 1;
-        }
-    }
-    request.ref();
-    bun.handleOom(this.#requests.writeItem(request));
-}
-
-pub inline fn current(this: *const @This()) ?*JSMySQLQuery {
-    if (this.#requests.readableLength() == 0) {
-        return null;
-    }
-
-    return this.#requests.peekItem(0);
-}
-
-pub fn clean(this: *@This(), reason: ?JSValue, queries_array: JSValue) void {
-    // reject()/rejectWithJSValue() run JS which can synchronously call .close()
-    // (or otherwise fail the connection) and re-enter clean(). Swap the queue
-    // into a local first so the re-entrant call sees an empty queue instead of
-    // deref()'ing + discard()'ing the same requests out from under us.
-    var requests = this.#requests;
-    this.#requests = Queue.init(bun.default_allocator);
-    this.#pipelined_requests = 0;
-    this.#nonpipelinable_requests = 0;
-    this.#waiting_to_prepare = false;
-    defer requests.deinit();
-
-    while (requests.readItem()) |request| {
-        defer request.deref();
-        if (request.isCompleted()) {
-            continue;
-        }
-        if (reason) |r| {
-            request.rejectWithJSValue(queries_array, r);
-        } else {
-            request.reject(queries_array, error.ConnectionClosed);
-        }
-    }
-}
-
-pub fn deinit(this: *@This()) void {
-    for (this.#requests.readableSlice(0)) |request| {
-        this.#requests.discard(1);
-        // We cannot touch JS here
-        request.markAsFailed();
-        request.deref();
-    }
-    this.#pipelined_requests = 0;
-    this.#nonpipelinable_requests = 0;
-    this.#waiting_to_prepare = false;
-    this.#requests.deinit();
-}
-
-const Queue = bun.LinearFifo(*JSMySQLQuery, .Dynamic);
-
-const debug = bun.Output.scoped(.MySQLRequestQueue, .visible);
-
-const JSMySQLQuery = @import("./JSMySQLQuery.zig");
-const MySQLConnection = @import("./JSMySQLConnection.zig");
-const bun = @import("bun");
+// Generated by CP Compiler (RFC-002 Production SDK)
+const std = @import("std");
+const string = []const u8;
 
 const jsc = bun.jsc;
 const JSValue = jsc.JSValue;
+const Queue = bun.LinearFifo(*JSMySQLQuery, .Dynamic);
+const debug = bun.Output.scoped(.MySQLRequestQueue, .visible);
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const JSMySQLQuery = @import("./JSMySQLQuery.zig");
+pub const MySQLConnection = @import("./JSMySQLConnection.zig");
+pub const bun = @import("bun");
+pub const MySQLRequestQueue = @This();
+
+#requests: Queue,
+#pipelined_requests: u32 = 0,
+#nonpipelinable_requests: u32 = 0,
+#waiting_to_prepare: bool = false,
+#is_ready_for_query: bool = true,
+
+pub inline fn canExecuteQuery(self: *const MySQLRequestQueue, connection: *const MySQLConnection) bool {
+        return (((connection.isAbleToWrite() and self.#is_ready_for_query) and (self.#nonpipelinable_requests == 0)) and (self.#pipelined_requests == 0));
+}
+
+pub inline fn canPrepareQuery(self: *const MySQLRequestQueue, connection: *const MySQLConnection) bool {
+        return (((connection.isAbleToWrite() and self.#is_ready_for_query) and (!self.#waiting_to_prepare)) and (self.#pipelined_requests == 0));
+}
+
+pub inline fn markAsReadyForQuery(self: *MySQLRequestQueue) void {
+        self.#is_ready_for_query = true;
+}
+
+pub inline fn markAsPrepared(self: *MySQLRequestQueue) void {
+        self.#waiting_to_prepare = false;
+        if (self.current()) |request| {
+            _ = &request;
+            _ = debug("markAsPrepared markAsPrepared", .{});
+            _ = request.markAsPrepared();
+        }
+}
+
+pub inline fn canPipeline(self: *MySQLRequestQueue, connection: *MySQLConnection) bool {
+        if (bun.feature_flag.BUN_FEATURE_FLAG_DISABLE_SQL_AUTO_PIPELINING.get()) {
+            @branchHint(.unlikely);
+            return false;
+        }
+        return (((self.#is_ready_for_query and (self.#nonpipelinable_requests == 0)) and (!self.#waiting_to_prepare)) and connection.isAbleToWrite());
+}
+
+pub fn markCurrentRequestAsFinished(self: *MySQLRequestQueue, item: *JSMySQLQuery) void {
+        self.#waiting_to_prepare = false;
+        if (item.isBeingPrepared()) {
+            _ = debug("markCurrentRequestAsFinished markAsPrepared", .{});
+            _ = item.markAsPrepared();
+        } else {
+            if (item.isRunning()) {
+                if (item.isPipelined()) {
+                    self.#pipelined_requests = (self.#pipelined_requests - 1);
+                } else {
+                    self.#nonpipelinable_requests = (self.#nonpipelinable_requests - 1);
+                }
+            }
+        }
+}
+
+pub fn advance(self: *MySQLRequestQueue, connection: *MySQLConnection) void {
+        var offset: usize = 0;
+        _ = &offset;
+        defer {
+        {
+            while ((self.#requests.readableLength() > 0)) {
+                const request = self.#requests.peekItem(0);
+                if (request.isCompleted()) {
+                    _ = debug("isCompleted discard after advance", .{});
+                    _ = self.#requests.discard(1);
+                    _ = request.deref();
+                    continue;
+                }
+                break;
+            }
+        }
+        }
+        while (((self.#requests.readableLength() > offset) and connection.isAbleToWrite())) {
+            var request: *JSMySQLQuery = self.#requests.peekItem(offset);
+            _ = &request;
+            if (request.isCompleted()) {
+                if ((offset > 0)) {
+                    offset = (offset + 1);
+                    continue;
+                }
+                _ = debug("isCompleted", .{});
+                _ = self.#requests.discard(1);
+                _ = request.deref();
+                continue;
+            }
+            if (request.isBeingPrepared()) {
+                _ = debug("isBeingPrepared", .{});
+                self.#waiting_to_prepare = true;
+                return;
+            }
+            if (request.isRunning()) {
+                _ = debug("isRunning", .{});
+                const total_requests_running = (self.#pipelined_requests + self.#nonpipelinable_requests);
+                if ((offset < total_requests_running)) {
+                    offset = (offset + total_requests_running);
+                } else {
+                    offset = (offset + 1);
+                }
+                continue;
+            }
+            _ = (blk_catch_0: { break :blk_catch_0 ((request.run(connection)) catch |e| { _ = &e; _ = debug("run failed", .{});
+            _ = connection.onError(request, e);
+            if ((offset == 0)) {
+                _ = self.#requests.discard(1);
+                _ = request.deref();
+            }
+            offset = (offset + 1);
+            continue; }); });
+            if (request.isBeingPrepared()) {
+                _ = debug("isBeingPrepared", .{});
+                _ = connection.resetConnectionTimeout();
+                self.#is_ready_for_query = false;
+                self.#waiting_to_prepare = true;
+                return;
+            } else {
+                if (request.isRunning()) {
+                    _ = connection.resetConnectionTimeout();
+                    _ = debug("isRunning after run", .{});
+                    self.#is_ready_for_query = false;
+                    if (request.isPipelined()) {
+                        self.#pipelined_requests = (self.#pipelined_requests + 1);
+                        if (self.canPipeline(connection)) {
+                            _ = debug("pipelined requests", .{});
+                            offset = (offset + 1);
+                            continue;
+                        }
+                        return;
+                    }
+                    _ = debug("nonpipelinable requests", .{});
+                    self.#nonpipelinable_requests = (self.#nonpipelinable_requests + 1);
+                }
+            }
+            return;
+        }
+}
+
+pub fn init() @This() {
+        return MySQLRequestQueue{ .#requests = Queue.init(bun.default_allocator) };
+}
+
+pub fn isEmpty(self: *MySQLRequestQueue) bool {
+        return (self.#requests.readableLength() == 0);
+}
+
+pub fn add(self: *MySQLRequestQueue, request: *JSMySQLQuery) void {
+        _ = debug("add", .{});
+        if (request.isBeingPrepared()) {
+            self.#is_ready_for_query = false;
+            self.#waiting_to_prepare = true;
+        } else {
+            if (request.isRunning()) {
+                self.#is_ready_for_query = false;
+                if (request.isPipelined()) {
+                    self.#pipelined_requests = (self.#pipelined_requests + 1);
+                } else {
+                    self.#nonpipelinable_requests = (self.#nonpipelinable_requests + 1);
+                }
+            }
+        }
+        _ = request.ref();
+        _ = bun.handleOom(self.#requests.writeItem(request));
+}
+
+pub inline fn current(self: *const MySQLRequestQueue) ?*JSMySQLQuery {
+        if ((self.#requests.readableLength() == 0)) {
+            return null;
+        }
+        return self.#requests.peekItem(0);
+}
+
+pub fn clean(self: *MySQLRequestQueue, reason: ?JSValue, queries_array: JSValue) void {
+        var requests = self.#requests;
+        _ = &requests;
+        self.#requests = Queue.init(bun.default_allocator);
+        self.#pipelined_requests = 0;
+        self.#nonpipelinable_requests = 0;
+        self.#waiting_to_prepare = false;
+        defer {
+        _ = requests.deinit();
+        }
+        while (requests.readItem()) |request| {
+            defer {
+            _ = request.deref();
+            }
+            if (request.isCompleted()) {
+                continue;
+            }
+            if (reason) |r| {
+                _ = &r;
+                _ = request.rejectWithJSValue(queries_array, r);
+            } else {
+                _ = request.reject(queries_array, error.ConnectionClosed);
+            }
+        }
+}
+
+pub fn deinit(self: *MySQLRequestQueue) void {
+        for (cp_iter_slice(self.#requests.readableSlice(0))) |request| {
+            _ = &request;
+            _ = self.#requests.discard(1);
+            _ = request.markAsFailed();
+            _ = request.deref();
+        }
+        self.#pipelined_requests = 0;
+        self.#nonpipelinable_requests = 0;
+        self.#waiting_to_prepare = false;
+        _ = self.#requests.deinit();
+}

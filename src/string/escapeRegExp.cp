@@ -1,72 +1,57 @@
-// src/string/escapeRegExp.cp
-// Bun escapeRegExp module ported to CP (Concurrent Plus) language
+import std from "std";
+import bun from "bun";
+import { jsEscapeRegExp, jsEscapeRegExpForPackageNameMatching } from "../jsc/bun_string_jsc.zig";
 
-const bun = @import("bun");
 const Environment = bun.Environment;
 const strings = bun.strings;
 
-pub const jsEscapeRegExp = @import("../jsc/bun_string_jsc.zig").jsEscapeRegExp;
-pub const jsEscapeRegExpForPackageNameMatching = @import("../jsc/bun_string_jsc.zig").jsEscapeRegExpForPackageNameMatching;
+const special_characters = "|\\{}()[]^$+*?.-";
 
-const special_characters: string = "|\\{}()[]^$+*?.-";
-
-pub fn escapeRegExp(input: string, writer: *std.Io.Writer): !void {
+export fn escapeRegExp(input: []const u8, writer: *std.Io.Writer): std.Io.Writer.Error!void {
     let remain = input;
 
-    while (true) {
-        let i_opt = strings.indexOfAny(remain, special_characters);
-        if (i_opt == null) {
-            break;
-        }
-        let i = (i_opt ?? 0) as usize;
+    while (i := strings.indexOfAny(remain, special_characters)) {
         writer.writeAll(remain[0..i])?;
-        let c = remain[i];
-        switch (c) {
-            '|' | '\\' | '{' | '}' | '(' | ')' | '[' | ']' | '^' | '$' | '+' | '*' | '?' | '.' => {
-                writer.writeByte('\\')?;
+        switch (remain[i]) {
+            '|', '\\', '{', '}', '(', ')', '[', ']', '^', '$', '+', '*', '?', '.' => |c| {
+                const esc: [2]u8 = ['\\', c];
+                writer.writeAll(&esc)?;
+            },
+            '-' => writer.writeAll("\\x2d")?,
+            else => |c| {
+                if (comptime Environment.isDebug) {
+                    unreachable;
+                }
                 writer.writeByte(c)?;
             },
-            '-' => {
-                writer.writeAll("\\x2d")?;
-            },
-            * => {
-                writer.writeByte(c)?;
-            }
         }
-        remain = remain[(i + 1)..];
+        remain = remain[i + 1 ..];
     }
 
     writer.writeAll(remain)?;
 }
 
 /// '*' becomes '.*' instead of '\\*'
-pub fn escapeRegExpForPackageNameMatching(input: string, writer: *std.Io.Writer): !void {
+export fn escapeRegExpForPackageNameMatching(input: []const u8, writer: *std.Io.Writer): std.Io.Writer.Error!void {
     let remain = input;
 
-    while (true) {
-        let i_opt = strings.indexOfAny(remain, special_characters);
-        if (i_opt == null) {
-            break;
-        }
-        let i = (i_opt ?? 0) as usize;
+    while (i := strings.indexOfAny(remain, special_characters)) {
         writer.writeAll(remain[0..i])?;
-        let c = remain[i];
-        switch (c) {
-            '|' | '\\' | '{' | '}' | '(' | ')' | '[' | ']' | '^' | '$' | '+' | '?' | '.' => {
-                writer.writeByte('\\')?;
+        switch (remain[i]) {
+            '|', '\\', '{', '}', '(', ')', '[', ']', '^', '$', '+', '?', '.' => |c| {
+                const esc: [2]u8 = ['\\', c];
+                writer.writeAll(&esc)?;
+            },
+            '*' => writer.writeAll(".*")?,
+            '-' => writer.writeAll("\\x2d")?,
+            else => |c| {
+                if (comptime Environment.isDebug) {
+                    unreachable;
+                }
                 writer.writeByte(c)?;
             },
-            '*' => {
-                writer.writeAll(".*")?;
-            },
-            '-' => {
-                writer.writeAll("\\x2d")?;
-            },
-            * => {
-                writer.writeByte(c)?;
-            }
         }
-        remain = remain[(i + 1)..];
+        remain = remain[i + 1 ..];
     }
 
     writer.writeAll(remain)?;
