@@ -210,3 +210,11 @@
 - **关键工程经验**：
   - `WebSocketUpgradeClient.cp` (1,310 vs 1,560 行，精简 16%) 与 `websocket_client.cp` (1,539 vs 1,792 行，精简 14.1%) 中将内部辅助结构体提升至顶层，使 `NewHTTPUpgradeClient(comptime ssl: bool): type` 等大型编译期泛型工厂函数内所有方法 100% 走纯 CP lowering。
   - `Watcher.cp` 中通过 `Watcher.indexOf(this, hash)` 显式限定关联函数调用，避免与内置切片 `.indexOf` 扩展方法产生签名冲突。
+
+
+## 2026-11-14: Milestone 7 Phase 9 闭环（`src/sql/` 85 个模块迁移完成，全仓突破 500 个纯 CP 模块）
+- **新增 85 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - `src/sql/shared/` (4/4)、`src/sql/mysql/` (11/11)、`src/sql/mysql/protocol/` (24/24)、`src/sql/postgres/protocol/` (36/36)、`src/sql/postgres/` (9/10)、`src/sql/postgres/types/int_types.cp` (1/2)。
+- **关键工程经验**：
+  - `ColumnIdentifier.cp` 中使用 `pub union(enum) ColumnIdentifier` 声明带 `name: Data` 变体的联合体，避免与枚举默认生成的 `pub fn name()` 方法产生重名。
+  - 针对 `PostgresTypes.cp` 顶层 `pub const @"string"` 与 `Tag.cp` 枚举变体 `name = 19` 的符号碰撞，已抽取最小复现提交 `task-20261114-enum-variant-name-and-top-string-const` 交由 `cp_agy` 在编译器侧根治。

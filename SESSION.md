@@ -449,3 +449,31 @@
 - **继续推进（严格 <= 2 路子智能体并发）**：
   - 子智能体 1 (`040f360c`)：迁移 `src/sql/mysql/protocol/` 全部 24 个模块
   - 子智能体 2 (`c82d4539`)：迁移 `src/sql/{shared,mysql,postgres,postgres/types}/` 27 个基础模块
+
+
+### 2026-11-14: 向 `cp_agy` 提交编译器修复任务 `task-20261114-enum-variant-name-and-top-string-const`
+- **Task ID**: `task-20261114-enum-variant-name-and-top-string-const`
+- **Repro (`temp/repro_enum_name_and_string.cp`)**:
+  ```cp
+  pub const @"string" = 1;
+  pub enum Tag: i16 {
+      name = 19,
+  }
+  ```
+- **Error / 根因**:
+  1. 顶层声明 `pub const @"string" = ...` 与 `cpc` 在 `codegen/mod.rs:682` 默认注入的 `const string = []const u8;` 重名冲突（`src/sql/postgres/PostgresTypes.cp`）。
+  2. `pub enum Tag: i16` 包含枚举变体 `name = 19` 时，与 `codegen/mod.rs:2504` 自动生成的 `pub fn name(self: @This())` 重名冲突，因为 `has_name` 仅检查了 `e.methods` 和 `e.extra_zig`，未检查 `e.variants`（`src/sql/postgres/types/Tag.cp`）。
+
+
+### 2026-11-14: Milestone 7 Phase 9 闭环提交（新增 85 个 `src/sql/` 纯 CP 模块，全仓突破 500 模块大关！）
+- **Milestone 7 Phase 9 闭环成果（新增 85 个 100% 纯 CP 模块，闭合 `src/sql/` 下 4 个子目录）**：
+  - `src/sql/shared/` (4/4 100% 闭合): `ColumnIdentifier.cp`, `ConnectionFlags.cp`, `Data.cp`, `SQLQueryResultMode.cp`
+  - `src/sql/mysql/` (11/11 100% 闭合): `AuthMethod.cp`, `Capabilities.cp`, `ConnectionState.cp`, `MySQLParam.cp`, `MySQLQueryResult.cp`, `MySQLRequest.cp`, `MySQLTypes.cp`, `QueryStatus.cp`, `SSLMode.cp`, `StatusFlags.cp`, `TLSStatus.cp`
+  - `src/sql/mysql/protocol/` (24/24 100% 闭合): `AnyMySQLError.cp`, `Auth.cp`, `AuthSwitchRequest.cp`, `AuthSwitchResponse.cp`, `CharacterSet.cp`, `ColumnDefinition41.cp`, `CommandType.cp`, `EncodeInt.cp`, `EOFPacket.cp`, `ErrorPacket.cp`, `HandshakeResponse41.cp`, `HandshakeV10.cp`, `LocalInfileRequest.cp`, `NewReader.cp`, `NewWriter.cp`, `OKPacket.cp`, `PacketHeader.cp`, `PacketType.cp`, `PreparedStatement.cp`, `Query.cp`, `ResultSetHeader.cp`, `SSLRequest.cp`, `StackReader.cp`, `StmtPrepareOKPacket.cp`
+  - `src/sql/postgres/protocol/` (36/36 100% 闭合): `ArrayList.cp`, `Authentication.cp`, `BackendKeyData.cp`, `Close.cp`, `CommandComplete.cp`, `CopyData.cp`, `CopyFail.cp`, `CopyInResponse.cp`, `CopyOutResponse.cp`, `DataRow.cp`, `DecoderWrap.cp`, `Describe.cp`, `ErrorResponse.cp`, `Execute.cp`, `FieldDescription.cp`, `FieldMessage.cp`, `FieldType.cp`, `NegotiateProtocolVersion.cp`, `NewReader.cp`, `NewWriter.cp`, `NoticeResponse.cp`, `NotificationResponse.cp`, `ParameterDescription.cp`, `ParameterStatus.cp`, `Parse.cp`, `PasswordMessage.cp`, `PortalOrPreparedStatement.cp`, `ReadyForQuery.cp`, `RowDescription.cp`, `SASLInitialResponse.cp`, `SASLResponse.cp`, `StackReader.cp`, `StartupMessage.cp`, `TransactionStatusIndicator.cp`, `WriteWrap.cp`, `zHelpers.cp`
+  - `src/sql/postgres/` (9/10): `AnyPostgresError.cp`, `CommandTag.cp`, `DebugSocketMonitorReader.cp`, `DebugSocketMonitorWriter.cp`, `PostgresProtocol.cp`, `SocketMonitor.cp`, `SSLMode.cp`, `Status.cp`, `TLSStatus.cp`
+  - `src/sql/postgres/types/` (1/2): `int_types.cp`
+- **全仓累计进度**：**506 个纯 `.cp` 模块**（正式突破 **500 模块** 里程碑！），**77 个子目录 100% 闭合**；全部通过 `cpc --lib` + `vendor/zig/zig ast-check` + 0 违例静态门禁。
+- **继续推进（严格 <= 2 路子智能体并发）**：
+  - 子智能体 1 (`040f360c`)：迁移 `src/sql_jsc/` 19 个基础/协议模块
+  - 子智能体 2 (`c82d4539`)：迁移 `src/sql_jsc/{mysql,postgres}/` 16 个核心连接与查询模块

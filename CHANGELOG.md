@@ -259,3 +259,13 @@
   - `src/http_jsc/websocket_client/{CppWebSocket,WebSocketDeflate,WebSocketProxy,WebSocketProxyTunnel,WebSocketUpgradeClient}.cp` (9/9 100% 闭合)
   - `src/resolver/fs/stat_hash.cp` (1/1 100% 闭合)
   - `src/resolver/{node_fallbacks,dir_info,data_url,tsconfig_json}.cp` (5/8)
+
+
+## 2026-11-14 (Milestone 7 Phase 9: 新增 85 个 src/sql/ 纯 CP 模块，闭合 sql/shared, sql/mysql, sql/mysql/protocol, sql/postgres/protocol)
+- **新增 85 个 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/sql/shared/{ColumnIdentifier,ConnectionFlags,Data,SQLQueryResultMode}.cp` (4/4 100% 闭合)
+  - `src/sql/mysql/{AuthMethod,Capabilities,ConnectionState,MySQLParam,MySQLQueryResult,MySQLRequest,MySQLTypes,QueryStatus,SSLMode,StatusFlags,TLSStatus}.cp` (11/11 100% 闭合)
+  - `src/sql/mysql/protocol/*.cp` (24/24 100% 闭合)
+  - `src/sql/postgres/protocol/*.cp` (36/36 100% 闭合)
+  - `src/sql/postgres/{AnyPostgresError,CommandTag,DebugSocketMonitorReader,DebugSocketMonitorWriter,PostgresProtocol,SocketMonitor,SSLMode,Status,TLSStatus}.cp` (9/10)
+  - `src/sql/postgres/types/int_types.cp` (1/2)
