@@ -281,3 +281,16 @@
   - `src/sql_jsc/postgres/protocol/{error_response_jsc,notice_response_jsc}.cp` (2/2 100% 闭合)
   - `src/sql_jsc/postgres/types/{bool,bytea,date,json,PostgresString,tag_jsc}.cp` (6/6 100% 闭合)
   - `src/string/{HashedString,PathString,escapeRegExp,StringJoiner,StringBuilder,wtf,SmolStr,MutableString,string}.cp` (9/17)
+
+
+## 2026-11-14 (Milestone 7 Phase 11: 闭合整个 src/unicode/ 树 18 模块、src/string/immutable/ 5 模块及省 Token 架构升级)
+- **常驻规则与预转换脚本**：
+  - `GEMINI.md`（精炼常驻版）、`GEMINI_H.md`、`AGENTS_H.md`、`scripts/zig2cp_prep.py`
+- **新增 23 个 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/unicode/uucode/{uucode_config,grapheme_gen,lut}.cp` (3/3 100% 闭合)
+  - `src/unicode/uucode_lib/build.cp` (1/1 100% 闭合)
+  - `src/unicode/uucode_lib/src/{ascii,config,get,grapheme,root,types,utf8}.cp` (7/7 100% 闭合)
+  - `src/unicode/uucode_lib/src/x/{config.x,grapheme,root,types.x}.cp` (4/4 100% 闭合)
+  - `src/unicode/uucode_lib/src/x/config_x/{grapheme_break,wcwidth}.cp` (2/2 100% 闭合)
+  - `src/unicode/uucode_lib/src/x/types_x/grapheme.cp` (1/1 100% 闭合)
+  - `src/string/immutable/{exact_size_matcher,grapheme,paths,escapeHTML,visible}.cp` (5/7)

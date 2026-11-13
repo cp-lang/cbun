@@ -485,3 +485,17 @@
   - `src/sql_jsc/` 树 (38/38 100% 闭合，含 `sql_jsc/` 2/2, `sql_jsc/shared/` 4/4, `sql_jsc/mysql/` 8/8, `sql_jsc/mysql/protocol/` 5/5, `sql_jsc/postgres/` 11/11, `sql_jsc/postgres/protocol/` 2/2, `sql_jsc/postgres/types/` 6/6)
   - `src/string/` 根目录 9 个模块 (`HashedString.cp`, `PathString.cp`, `escapeRegExp.cp`, `StringJoiner.cp`, `StringBuilder.cp`, `wtf.cp`, `SmolStr.cp`, `MutableString.cp`, `string.cp`)
 - **全仓累计进度**：**553 个纯 `.cp` 模块**，**84 个子目录 100% 闭合**；全部通过 `cpc --lib` + `vendor/zig/zig ast-check` + 0 违例静态门禁。
+
+
+### 2026-11-14: 用户指令「精简 GEMINI.md、归档 AGENTS_H.md、启用省 Token 批处理工作流」与 Milestone 7 Phase 11 闭环提交
+- **用户指令**：「1. 修改精简 GEMINI.md 并将省 Token 规则写入 GEMINI.md；2. 将 AGENTS.md 更名为 AGENTS_H.md；3. 保留与 cp agy 的常驻双向通信；4. 斟酌保留跨会话高效规则」
+- **常驻规则与工具链升级**：
+  - `GEMINI.md` 精炼至 `13.3 KB`（原 `71.1 KB` 归档至 `GEMINI_H.md`），`AGENTS.md` 归档为 `AGENTS_H.md`（立省 `16 KB`），子智能体每步基础上下文直降 **91%**。
+  - 新增 `scripts/zig2cp_prep.py` 机械语法预转换脚本，实测子智能体迁移 13 个文件仅耗 30 步（原需 200+ 步）。
+- **Milestone 7 Phase 11 闭环成果（新增 23 个 100% 纯 CP 模块，闭合整个 `src/unicode/` 树 6 个子目录）**：
+  - `src/unicode/` 全树 (18/18 100% 闭合，含 `uucode/` 3/3, `uucode_lib/` 1/1, `uucode_lib/src/` 7/7, `uucode_lib/src/x/` 4/4, `uucode_lib/src/x/config_x/` 2/2, `uucode_lib/src/x/types_x/` 1/1)
+  - `src/string/immutable/` 首批 5 个模块 (`exact_size_matcher.cp`, `grapheme.cp`, `paths.cp`, `escapeHTML.cp`, `visible.cp`)
+- **全仓累计进度**：**576 个纯 `.cp` 模块**，**90 个子目录 100% 闭合**；全部通过 `cpc --lib` + `vendor/zig/zig ast-check` + 0 违例静态门禁。
+- **继续推进（严格 <= 2 路短平快批处理子智能体并发）**：
+  - 子智能体 1 (`c812c12f`)：收尾 `src/string/immutable/unicode.zig` 与 `src/string/immutable.zig`
+  - 子智能体 2：批量迁移 `src/md/` 首批 9 个模块 (`root`, `render_blocks`, `containers`, `parser`, `autolinks`, `ref_defs`, `types`, `unicode`, `helpers`)

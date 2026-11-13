@@ -1,636 +1,10 @@
-pub fn escapeHTMLForLatin1Input(allocator: std.mem.Allocator, latin1: []const u8) !Escaped(u8) {
-    const Scalar = struct {
-        pub const lengths: [std.math.maxInt(u8) + 1]u4 = brk: {
-            var values: [std.math.maxInt(u8) + 1]u4 = undefined;
-            for (values, 0..) |_, i| {
-                switch (i) {
-                    '"' => {
-                        values[i] = "&quot;".len;
-                    },
-                    '&' => {
-                        values[i] = "&amp;".len;
-                    },
-                    '\'' => {
-                        values[i] = "&#x27;".len;
-                    },
-                    '<' => {
-                        values[i] = "&lt;".len;
-                    },
-                    '>' => {
-                        values[i] = "&gt;".len;
-                    },
-                    else => {
-                        values[i] = 1;
-                    },
-                }
-            }
-
-            break :brk values;
-        };
-
-        fn appendString(buf: [*]u8, comptime str: []const u8) callconv(bun.callconv_inline) usize {
-            buf[0..str.len].* = str[0..str.len].*;
-            return str.len;
-        }
-
-        pub fn append(buf: [*]u8, char: u8) callconv(bun.callconv_inline) usize {
-            if (lengths[char] == 1) {
-                buf[0] = char;
-                return 1;
-            }
-
-            return switch (char) {
-                '"' => appendString(buf, "&quot;"),
-                '&' => appendString(buf, "&amp;"),
-                '\'' => appendString(buf, "&#x27;"),
-                '<' => appendString(buf, "&lt;"),
-                '>' => appendString(buf, "&gt;"),
-                else => unreachable,
-            };
-        }
-
-        pub fn push(comptime len: anytype, chars_: *const [len]u8, allo: std.mem.Allocator) callconv(bun.callconv_inline) Escaped(u8) {
-            const chars = chars_.*;
-            var total: usize = 0;
-
-            comptime var remain_to_comp = len;
-            comptime var comp_i = 0;
-
-            inline while (remain_to_comp > 0) : (remain_to_comp -= 1) {
-                total += lengths[chars[comp_i]];
-                comp_i += 1;
-            }
-
-            if (total == len) {
-                return .{ .original = {} };
-            }
-
-            const output = allo.alloc(u8, total) catch unreachable;
-            var head = output.ptr;
-            inline for (comptime bun.range(0, len)) |i| {
-                head += @This().append(head, chars[i]);
-            }
-
-            return Escaped(u8){ .allocated = output };
-        }
-    };
-    @setEvalBranchQuota(5000);
-    switch (latin1.len) {
-        0 => return Escaped(u8){ .static = "" },
-        1 => return switch (latin1[0]) {
-            '"' => Escaped(u8){ .static = "&quot;" },
-            '&' => Escaped(u8){ .static = "&amp;" },
-            '\'' => Escaped(u8){ .static = "&#x27;" },
-            '<' => Escaped(u8){ .static = "&lt;" },
-            '>' => Escaped(u8){ .static = "&gt;" },
-            else => Escaped(u8){ .original = {} },
-        },
-        2 => {
-            const first: []const u8 = switch (latin1[0]) {
-                '"' => "&quot;",
-                '&' => "&amp;",
-                '\'' => "&#x27;",
-                '<' => "&lt;",
-                '>' => "&gt;",
-                else => latin1[0..1],
-            };
-            const second: []const u8 = switch (latin1[1]) {
-                '"' => "&quot;",
-                '&' => "&amp;",
-                '\'' => "&#x27;",
-                '<' => "&lt;",
-                '>' => "&gt;",
-                else => latin1[1..2],
-            };
-            if (first.len == 1 and second.len == 1) {
-                return Escaped(u8){ .original = {} };
-            }
-
-            return Escaped(u8){ .allocated = strings.append(allocator, first, second) catch unreachable };
-        },
-
-        // The simd implementation is slower for inputs less than 32 bytes.
-        3 => return Scalar.push(3, latin1[0..3], allocator),
-        4 => return Scalar.push(4, latin1[0..4], allocator),
-        5 => return Scalar.push(5, latin1[0..5], allocator),
-        6 => return Scalar.push(6, latin1[0..6], allocator),
-        7 => return Scalar.push(7, latin1[0..7], allocator),
-        8 => return Scalar.push(8, latin1[0..8], allocator),
-        9 => return Scalar.push(9, latin1[0..9], allocator),
-        10 => return Scalar.push(10, latin1[0..10], allocator),
-        11 => return Scalar.push(11, latin1[0..11], allocator),
-        12 => return Scalar.push(12, latin1[0..12], allocator),
-        13 => return Scalar.push(13, latin1[0..13], allocator),
-        14 => return Scalar.push(14, latin1[0..14], allocator),
-        15 => return Scalar.push(15, latin1[0..15], allocator),
-        16 => return Scalar.push(16, latin1[0..16], allocator),
-        17 => return Scalar.push(17, latin1[0..17], allocator),
-        18 => return Scalar.push(18, latin1[0..18], allocator),
-        19 => return Scalar.push(19, latin1[0..19], allocator),
-        20 => return Scalar.push(20, latin1[0..20], allocator),
-        21 => return Scalar.push(21, latin1[0..21], allocator),
-        22 => return Scalar.push(22, latin1[0..22], allocator),
-        23 => return Scalar.push(23, latin1[0..23], allocator),
-        24 => return Scalar.push(24, latin1[0..24], allocator),
-        25 => return Scalar.push(25, latin1[0..25], allocator),
-        26 => return Scalar.push(26, latin1[0..26], allocator),
-        27 => return Scalar.push(27, latin1[0..27], allocator),
-        28 => return Scalar.push(28, latin1[0..28], allocator),
-        29 => return Scalar.push(29, latin1[0..29], allocator),
-        30 => return Scalar.push(30, latin1[0..30], allocator),
-        31 => return Scalar.push(31, latin1[0..31], allocator),
-        32 => return Scalar.push(32, latin1[0..32], allocator),
-
-        else => {
-            var remaining = latin1;
-
-            const vec_chars = "\"&'<>";
-            const vecs: [vec_chars.len]AsciiVector = comptime brk: {
-                var _vecs: [vec_chars.len]AsciiVector = undefined;
-                for (vec_chars, 0..) |c, i| {
-                    _vecs[i] = @splat(c);
-                }
-                break :brk _vecs;
-            };
-
-            var any_needs_escape = false;
-            var buf: std.array_list.Managed(u8) = std.array_list.Managed(u8){
-                .items = &.{},
-                .capacity = 0,
-                .allocator = allocator,
-            };
-
-            if (comptime Environment.enableSIMD) {
-                // pass #1: scan for any characters that need escaping
-                // assume most strings won't need any escaping, so don't actually allocate the buffer
-                scan_and_allocate_lazily: while (remaining.len >= ascii_vector_size) {
-                    if (comptime Environment.allow_assert) assert(!any_needs_escape);
-                    const vec: AsciiVector = remaining[0..ascii_vector_size].*;
-                    if (@reduce(.Max, @as(AsciiVectorU1, @bitCast((vec == vecs[0]))) |
-                        @as(AsciiVectorU1, @bitCast((vec == vecs[1]))) |
-                        @as(AsciiVectorU1, @bitCast((vec == vecs[2]))) |
-                        @as(AsciiVectorU1, @bitCast((vec == vecs[3]))) |
-                        @as(AsciiVectorU1, @bitCast((vec == vecs[4])))) == 1)
-                    {
-                        if (comptime Environment.allow_assert) assert(buf.capacity == 0);
-
-                        buf = try std.array_list.Managed(u8).initCapacity(allocator, latin1.len + 6);
-                        const copy_len = @intFromPtr(remaining.ptr) - @intFromPtr(latin1.ptr);
-                        buf.appendSliceAssumeCapacity(latin1[0..copy_len]);
-                        any_needs_escape = true;
-                        inline for (0..ascii_vector_size) |i| {
-                            switch (vec[i]) {
-                                '"' => {
-                                    buf.ensureUnusedCapacity((ascii_vector_size - i) + "&quot;".len) catch unreachable;
-                                    buf.items.ptr[buf.items.len .. buf.items.len + "&quot;".len][0.."&quot;".len].* = "&quot;".*;
-                                    buf.items.len += "&quot;".len;
-                                },
-                                '&' => {
-                                    buf.ensureUnusedCapacity((ascii_vector_size - i) + "&amp;".len) catch unreachable;
-                                    buf.items.ptr[buf.items.len .. buf.items.len + "&amp;".len][0.."&amp;".len].* = "&amp;".*;
-                                    buf.items.len += "&amp;".len;
-                                },
-                                '\'' => {
-                                    buf.ensureUnusedCapacity((ascii_vector_size - i) + "&#x27;".len) catch unreachable;
-                                    buf.items.ptr[buf.items.len .. buf.items.len + "&#x27;".len][0.."&#x27;".len].* = "&#x27;".*;
-                                    buf.items.len += "&#x27;".len;
-                                },
-                                '<' => {
-                                    buf.ensureUnusedCapacity((ascii_vector_size - i) + "&lt;".len) catch unreachable;
-                                    buf.items.ptr[buf.items.len .. buf.items.len + "&lt;".len][0.."&lt;".len].* = "&lt;".*;
-                                    buf.items.len += "&lt;".len;
-                                },
-                                '>' => {
-                                    buf.ensureUnusedCapacity((ascii_vector_size - i) + "&gt;".len) catch unreachable;
-                                    buf.items.ptr[buf.items.len .. buf.items.len + "&gt;".len][0.."&gt;".len].* = "&gt;".*;
-                                    buf.items.len += "&gt;".len;
-                                },
-                                else => |c| {
-                                    buf.appendAssumeCapacity(c);
-                                },
-                            }
-                        }
-
-                        remaining = remaining[ascii_vector_size..];
-                        break :scan_and_allocate_lazily;
-                    }
-
-                    remaining = remaining[ascii_vector_size..];
-                }
-            }
-
-            if (any_needs_escape) {
-                // pass #2: we found something that needed an escape
-                // so we'll go ahead and copy the buffer into a new buffer
-                while (remaining.len >= ascii_vector_size) {
-                    const vec: AsciiVector = remaining[0..ascii_vector_size].*;
-                    if (@reduce(.Max, @as(AsciiVectorU1, @bitCast((vec == vecs[0]))) |
-                        @as(AsciiVectorU1, @bitCast((vec == vecs[1]))) |
-                        @as(AsciiVectorU1, @bitCast((vec == vecs[2]))) |
-                        @as(AsciiVectorU1, @bitCast((vec == vecs[3]))) |
-                        @as(AsciiVectorU1, @bitCast((vec == vecs[4])))) == 1)
-                    {
-                        buf.ensureUnusedCapacity(ascii_vector_size + 6) catch unreachable;
-                        inline for (0..ascii_vector_size) |i| {
-                            switch (vec[i]) {
-                                '"' => {
-                                    buf.ensureUnusedCapacity((ascii_vector_size - i) + "&quot;".len) catch unreachable;
-                                    buf.items.ptr[buf.items.len .. buf.items.len + "&quot;".len][0.."&quot;".len].* = "&quot;".*;
-                                    buf.items.len += "&quot;".len;
-                                },
-                                '&' => {
-                                    buf.ensureUnusedCapacity((ascii_vector_size - i) + "&amp;".len) catch unreachable;
-                                    buf.items.ptr[buf.items.len .. buf.items.len + "&amp;".len][0.."&amp;".len].* = "&amp;".*;
-                                    buf.items.len += "&amp;".len;
-                                },
-                                '\'' => {
-                                    buf.ensureUnusedCapacity((ascii_vector_size - i) + "&#x27;".len) catch unreachable;
-                                    buf.items.ptr[buf.items.len .. buf.items.len + "&#x27;".len][0.."&#x27;".len].* = "&#x27;".*;
-                                    buf.items.len += "&#x27;".len;
-                                },
-                                '<' => {
-                                    buf.ensureUnusedCapacity((ascii_vector_size - i) + "&lt;".len) catch unreachable;
-                                    buf.items.ptr[buf.items.len .. buf.items.len + "&lt;".len][0.."&lt;".len].* = "&lt;".*;
-                                    buf.items.len += "&lt;".len;
-                                },
-                                '>' => {
-                                    buf.ensureUnusedCapacity((ascii_vector_size - i) + "&gt;".len) catch unreachable;
-                                    buf.items.ptr[buf.items.len .. buf.items.len + "&gt;".len][0.."&gt;".len].* = "&gt;".*;
-                                    buf.items.len += "&gt;".len;
-                                },
-                                else => |c| {
-                                    buf.appendAssumeCapacity(c);
-                                },
-                            }
-                        }
-
-                        remaining = remaining[ascii_vector_size..];
-                        continue;
-                    }
-
-                    try buf.ensureUnusedCapacity(ascii_vector_size);
-                    buf.items.ptr[buf.items.len .. buf.items.len + ascii_vector_size][0..ascii_vector_size].* = remaining[0..ascii_vector_size].*;
-                    buf.items.len += ascii_vector_size;
-                    remaining = remaining[ascii_vector_size..];
-                }
-            }
-
-            var ptr = remaining.ptr;
-            const end = remaining.ptr + remaining.len;
-
-            if (!any_needs_escape) {
-                scan_and_allocate_lazily: while (ptr != end) : (ptr += 1) {
-                    switch (ptr[0]) {
-                        '"', '&', '\'', '<', '>' => |c| {
-                            if (comptime Environment.allow_assert) assert(buf.capacity == 0);
-
-                            buf = try std.array_list.Managed(u8).initCapacity(allocator, latin1.len + @as(usize, Scalar.lengths[c]));
-                            const copy_len = @intFromPtr(ptr) - @intFromPtr(latin1.ptr);
-                            if (comptime Environment.allow_assert) assert(copy_len <= buf.capacity);
-                            buf.items.len = copy_len;
-                            @memcpy(buf.items[0..copy_len], latin1[0..copy_len]);
-                            any_needs_escape = true;
-                            break :scan_and_allocate_lazily;
-                        },
-                        else => {},
-                    }
-                }
-            }
-
-            while (ptr != end) : (ptr += 1) {
-                switch (ptr[0]) {
-                    '"' => {
-                        buf.appendSlice("&quot;") catch unreachable;
-                    },
-                    '&' => {
-                        buf.appendSlice("&amp;") catch unreachable;
-                    },
-                    '\'' => {
-                        buf.appendSlice("&#x27;") catch unreachable; // modified from escape-html; used to be '&#39'
-                    },
-                    '<' => {
-                        buf.appendSlice("&lt;") catch unreachable;
-                    },
-                    '>' => {
-                        buf.appendSlice("&gt;") catch unreachable;
-                    },
-                    else => |c| {
-                        buf.append(c) catch unreachable;
-                    },
-                }
-            }
-
-            if (!any_needs_escape) {
-                if (comptime Environment.allow_assert) assert(buf.capacity == 0);
-                return Escaped(u8){ .original = {} };
-            }
-
-            return Escaped(u8){ .allocated = try buf.toOwnedSlice() };
-        },
-    }
-}
-
-fn Escaped(comptime T: type) type {
-    return union(enum) {
-        static: []const u8,
-        original: void,
-        allocated: []T,
-    };
-}
-
-pub fn escapeHTMLForUTF16Input(allocator: std.mem.Allocator, utf16: []const u16) !Escaped(u16) {
-    const Scalar = struct {
-        pub const lengths: [std.math.maxInt(u8) + 1]u4 = brk: {
-            var values: [std.math.maxInt(u8) + 1]u4 = undefined;
-            for (values, 0..) |_, i| {
-                values[i] = switch (i) {
-                    '"' => "&quot;".len,
-                    '&' => "&amp;".len,
-                    '\'' => "&#x27;".len,
-                    '<' => "&lt;".len,
-                    '>' => "&gt;".len,
-                    else => 1,
-                };
-            }
-
-            break :brk values;
-        };
-    };
-    switch (utf16.len) {
-        0 => return Escaped(u16){ .static = &[_]u8{} },
-        1 => {
-            switch (utf16[0]) {
-                '"' => return Escaped(u16){ .static = "&quot;" },
-                '&' => return Escaped(u16){ .static = "&amp;" },
-                '\'' => return Escaped(u16){ .static = "&#x27;" },
-                '<' => return Escaped(u16){ .static = "&lt;" },
-                '>' => return Escaped(u16){ .static = "&gt;" },
-                else => return Escaped(u16){ .original = {} },
-            }
-        },
-        2 => {
-            const first_16 = switch (utf16[0]) {
-                '"' => toUTF16Literal("&quot;"),
-                '&' => toUTF16Literal("&amp;"),
-                '\'' => toUTF16Literal("&#x27;"),
-                '<' => toUTF16Literal("&lt;"),
-                '>' => toUTF16Literal("&gt;"),
-                else => @as([]const u16, utf16[0..1]),
-            };
-
-            const second_16 = switch (utf16[1]) {
-                '"' => toUTF16Literal("&quot;"),
-                '&' => toUTF16Literal("&amp;"),
-                '\'' => toUTF16Literal("&#x27;"),
-                '<' => toUTF16Literal("&lt;"),
-                '>' => toUTF16Literal("&gt;"),
-                else => @as([]const u16, utf16[1..2]),
-            };
-
-            if (first_16.ptr == utf16.ptr and second_16.ptr == utf16.ptr + 1) {
-                return Escaped(u16){ .original = {} };
-            }
-
-            var buf = allocator.alloc(u16, first_16.len + second_16.len) catch unreachable;
-            bun.copy(u16, buf, first_16);
-            bun.copy(u16, buf[first_16.len..], second_16);
-            return Escaped(u16){ .allocated = buf };
-        },
-
-        else => {
-            var remaining = utf16;
-
-            var any_needs_escape = false;
-            var buf: std.array_list.Managed(u16) = undefined;
-
-            if (comptime Environment.enableSIMD) {
-                const vec_chars = "\"&'<>";
-                const vecs: [vec_chars.len]AsciiU16Vector = brk: {
-                    var _vecs: [vec_chars.len]AsciiU16Vector = undefined;
-                    for (vec_chars, 0..) |c, i| {
-                        _vecs[i] = @splat(@as(u16, c));
-                    }
-                    break :brk _vecs;
-                };
-                // pass #1: scan for any characters that need escaping
-                // assume most strings won't need any escaping, so don't actually allocate the buffer
-                scan_and_allocate_lazily: while (remaining.len >= ascii_u16_vector_size) {
-                    if (comptime Environment.allow_assert) assert(!any_needs_escape);
-                    const vec: AsciiU16Vector = remaining[0..ascii_u16_vector_size].*;
-                    if (@reduce(.Max, @as(AsciiVectorU16U1, @bitCast(vec > @as(AsciiU16Vector, @splat(@as(u16, 127))))) |
-                        @as(AsciiVectorU16U1, @bitCast((vec == vecs[0]))) |
-                        @as(AsciiVectorU16U1, @bitCast((vec == vecs[1]))) |
-                        @as(AsciiVectorU16U1, @bitCast((vec == vecs[2]))) |
-                        @as(AsciiVectorU16U1, @bitCast((vec == vecs[3]))) |
-                        @as(AsciiVectorU16U1, @bitCast((vec == vecs[4])))) == 1)
-                    {
-                        var i: u16 = 0;
-                        lazy: {
-                            while (i < ascii_u16_vector_size) {
-                                switch (remaining[i]) {
-                                    '"', '&', '\'', '<', '>' => {
-                                        any_needs_escape = true;
-                                        break :lazy;
-                                    },
-                                    128...std.math.maxInt(u16) => {
-                                        const cp = utf16Codepoint(remaining[i..]);
-                                        i += @as(u16, cp.len);
-                                    },
-                                    else => {
-                                        i += 1;
-                                    },
-                                }
-                            }
-                        }
-
-                        if (!any_needs_escape) {
-                            remaining = remaining[i..];
-                            continue :scan_and_allocate_lazily;
-                        }
-
-                        if (comptime Environment.allow_assert) assert(@intFromPtr(remaining.ptr + i) >= @intFromPtr(utf16.ptr));
-                        const to_copy = std.mem.sliceAsBytes(utf16)[0 .. @intFromPtr(remaining.ptr + i) - @intFromPtr(utf16.ptr)];
-                        const to_copy_16 = std.mem.bytesAsSlice(u16, to_copy);
-                        buf = try std.array_list.Managed(u16).initCapacity(allocator, utf16.len + 6);
-                        try buf.appendSlice(to_copy_16);
-
-                        while (i < ascii_u16_vector_size) {
-                            switch (remaining[i]) {
-                                '"', '&', '\'', '<', '>' => |c| {
-                                    const result = switch (c) {
-                                        '"' => toUTF16Literal("&quot;"),
-                                        '&' => toUTF16Literal("&amp;"),
-                                        '\'' => toUTF16Literal("&#x27;"),
-                                        '<' => toUTF16Literal("&lt;"),
-                                        '>' => toUTF16Literal("&gt;"),
-                                        else => unreachable,
-                                    };
-
-                                    buf.appendSlice(result) catch unreachable;
-                                    i += 1;
-                                },
-                                128...std.math.maxInt(u16) => {
-                                    const cp = utf16Codepoint(remaining[i..]);
-
-                                    buf.appendSlice(remaining[i..][0..@as(usize, cp.len)]) catch unreachable;
-                                    i += @as(u16, cp.len);
-                                },
-                                else => |c| {
-                                    i += 1;
-                                    buf.append(c) catch unreachable;
-                                },
-                            }
-                        }
-
-                        // edgecase: code point width could exceed asdcii_u16_vector_size
-                        remaining = remaining[i..];
-                        break :scan_and_allocate_lazily;
-                    }
-
-                    remaining = remaining[ascii_u16_vector_size..];
-                }
-
-                if (any_needs_escape) {
-                    // pass #2: we found something that needed an escape
-                    // but there's still some more text to
-                    // so we'll go ahead and copy the buffer into a new buffer
-                    while (remaining.len >= ascii_u16_vector_size) {
-                        const vec: AsciiU16Vector = remaining[0..ascii_u16_vector_size].*;
-                        if (@reduce(.Max, @as(AsciiVectorU16U1, @bitCast(vec > @as(AsciiU16Vector, @splat(@as(u16, 127))))) |
-                            @as(AsciiVectorU16U1, @bitCast((vec == vecs[0]))) |
-                            @as(AsciiVectorU16U1, @bitCast((vec == vecs[1]))) |
-                            @as(AsciiVectorU16U1, @bitCast((vec == vecs[2]))) |
-                            @as(AsciiVectorU16U1, @bitCast((vec == vecs[3]))) |
-                            @as(AsciiVectorU16U1, @bitCast((vec == vecs[4])))) == 1)
-                        {
-                            buf.ensureUnusedCapacity(ascii_u16_vector_size) catch unreachable;
-                            var i: u16 = 0;
-                            while (i < ascii_u16_vector_size) {
-                                switch (remaining[i]) {
-                                    '"' => {
-                                        buf.appendSlice(toUTF16Literal("&quot;")) catch unreachable;
-                                        i += 1;
-                                    },
-                                    '&' => {
-                                        buf.appendSlice(toUTF16Literal("&amp;")) catch unreachable;
-                                        i += 1;
-                                    },
-                                    '\'' => {
-                                        buf.appendSlice(toUTF16Literal("&#x27;")) catch unreachable; // modified from escape-html; used to be '&#39'
-                                        i += 1;
-                                    },
-                                    '<' => {
-                                        buf.appendSlice(toUTF16Literal("&lt;")) catch unreachable;
-                                        i += 1;
-                                    },
-                                    '>' => {
-                                        buf.appendSlice(toUTF16Literal("&gt;")) catch unreachable;
-                                        i += 1;
-                                    },
-                                    128...std.math.maxInt(u16) => {
-                                        const cp = utf16Codepoint(remaining[i..]);
-
-                                        buf.appendSlice(remaining[i..][0..@as(usize, cp.len)]) catch unreachable;
-                                        i += @as(u16, cp.len);
-                                    },
-                                    else => |c| {
-                                        buf.append(c) catch unreachable;
-                                        i += 1;
-                                    },
-                                }
-                            }
-
-                            remaining = remaining[i..];
-                            continue;
-                        }
-
-                        try buf.ensureUnusedCapacity(ascii_u16_vector_size);
-                        buf.items.ptr[buf.items.len .. buf.items.len + ascii_u16_vector_size][0..ascii_u16_vector_size].* = remaining[0..ascii_u16_vector_size].*;
-                        buf.items.len += ascii_u16_vector_size;
-                        remaining = remaining[ascii_u16_vector_size..];
-                    }
-                }
-            }
-
-            var ptr = remaining.ptr;
-            const end = remaining.ptr + remaining.len;
-
-            if (!any_needs_escape) {
-                scan_and_allocate_lazily: while (ptr != end) {
-                    switch (ptr[0]) {
-                        '"', '&', '\'', '<', '>' => |c| {
-                            buf = try std.array_list.Managed(u16).initCapacity(allocator, utf16.len + @as(usize, Scalar.lengths[c]));
-                            if (comptime Environment.allow_assert) assert(@intFromPtr(ptr) >= @intFromPtr(utf16.ptr));
-
-                            const to_copy = std.mem.sliceAsBytes(utf16)[0 .. @intFromPtr(ptr) - @intFromPtr(utf16.ptr)];
-                            const to_copy_16 = std.mem.bytesAsSlice(u16, to_copy);
-                            try buf.appendSlice(to_copy_16);
-                            any_needs_escape = true;
-                            break :scan_and_allocate_lazily;
-                        },
-                        128...std.math.maxInt(u16) => {
-                            const cp = utf16Codepoint(ptr[0..if (ptr + 1 == end) 1 else 2]);
-
-                            ptr += @as(u16, cp.len);
-                        },
-                        else => {
-                            ptr += 1;
-                        },
-                    }
-                }
-            }
-
-            while (ptr != end) {
-                switch (ptr[0]) {
-                    '"' => {
-                        buf.appendSlice(toUTF16Literal("&quot;")) catch unreachable;
-                        ptr += 1;
-                    },
-                    '&' => {
-                        buf.appendSlice(toUTF16Literal("&amp;")) catch unreachable;
-                        ptr += 1;
-                    },
-                    '\'' => {
-                        buf.appendSlice(toUTF16Literal("&#x27;")) catch unreachable; // modified from escape-html; used to be '&#39'
-                        ptr += 1;
-                    },
-                    '<' => {
-                        buf.appendSlice(toUTF16Literal("&lt;")) catch unreachable;
-                        ptr += 1;
-                    },
-                    '>' => {
-                        buf.appendSlice(toUTF16Literal("&gt;")) catch unreachable;
-                        ptr += 1;
-                    },
-                    128...std.math.maxInt(u16) => {
-                        const cp = utf16Codepoint(ptr[0..if (ptr + 1 == end) 1 else 2]);
-
-                        buf.appendSlice(ptr[0..@as(usize, cp.len)]) catch unreachable;
-                        ptr += @as(u16, cp.len);
-                    },
-
-                    else => |c| {
-                        buf.append(c) catch unreachable;
-                        ptr += 1;
-                    },
-                }
-            }
-
-            if (!any_needs_escape) {
-                return Escaped(u16){ .original = {} };
-            }
-
-            return Escaped(u16){ .allocated = try buf.toOwnedSlice() };
-        },
-    }
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const Environment = bun.Environment;
 const assert = bun.assert;
-
 const strings = bun.strings;
 const AsciiU16Vector = strings.AsciiU16Vector;
 const AsciiVector = strings.AsciiVector;
@@ -640,3 +14,653 @@ const ascii_u16_vector_size = strings.ascii_u16_vector_size;
 const ascii_vector_size = strings.ascii_vector_size;
 const toUTF16Literal = strings.toUTF16Literal;
 const utf16Codepoint = strings.utf16Codepoint;
+var empty_u8: [0]u8 = .{  };
+const ByteList = std.array_list.Managed(u8);
+const ScalarLengths = [256]u4;
+const scalar_lengths: ScalarLengths = initScalarLengths();
+pub const EscapedU8 = Escaped(u8);
+pub const EscapedU16 = Escaped(u16);
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_array_lit(comptime Elem: type, init_slice: []const Elem) []const Elem { const buf = std.heap.page_allocator.alloc(Elem, init_slice.len) catch unreachable; if (init_slice.len > 0) @memcpy(buf, init_slice); return buf; }
+fn CpArrayElemType(comptime PtrT: type) type { const S0 = @typeInfo(PtrT).pointer.child; const S1 = if (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one) @typeInfo(S0).pointer.child else S0; return @typeInfo(S1).pointer.child; }
+fn cp_array_push(arr_ptr: anytype, item: anytype) void { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const SliceT = @TypeOf(target_ptr.*); const Elem = @typeInfo(SliceT).pointer.child; const old_slice = target_ptr.*; const new_slice = std.heap.page_allocator.alloc(Elem, old_slice.len + 1) catch unreachable; if (old_slice.len > 0) @memcpy(new_slice[0..old_slice.len], old_slice); new_slice[old_slice.len] = @as(Elem, cp_val(item)); target_ptr.* = new_slice; }
+fn cp_array_pop(arr_ptr: anytype) ?CpArrayElemType(@TypeOf(arr_ptr)) { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const s = target_ptr.*; if (s.len == 0) return null; const last = s[s.len - 1]; target_ptr.* = s[0 .. s.len - 1]; return last; }
+fn cp_container_clear(ptr: anytype) void { const S0 = @TypeOf(ptr.*); if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one and @typeInfo(@typeInfo(S0).pointer.child) == .@"struct" and @hasDecl(@typeInfo(S0).pointer.child, "clear"))) { ptr.*.clear(); } else { const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) ptr.* else ptr; target_ptr.* = target_ptr.*[0..0]; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const Scalar = struct {
+
+pub inline fn appendString(buf: [*]u8, comptime str: []const u8) usize {
+            {
+                (buf[0..str.len]).* = (str[0..str.len]).*;
+            }
+            return str.len;
+    }
+
+pub inline fn append(buf: [*]u8, char: u8) usize {
+            if ((scalar_lengths[@as(usize, @intCast(char))] == 1)) {
+                {
+                    buf[cp_cast_int(usize, 0)] = char;
+                }
+                return 1;
+            }
+            return (switch (char) {
+'"' => appendString(buf, "&quot;"),
+'&' => appendString(buf, "&amp;"),
+'\'' => appendString(buf, "&#x27;"),
+'<' => appendString(buf, "&lt;"),
+'>' => appendString(buf, "&gt;"),
+else => unreachable,
+});
+    }
+
+pub inline fn push(comptime len: anytype, chars_: *const [len]u8, allo: std.mem.Allocator) EscapedU8 {
+            {
+                const chars = chars_.*;
+                var total: usize = 0;
+                _ = &total;
+                inline for (comptime bun.range(0, len)) |i| {
+                    total = (total + scalar_lengths[@as(usize, @intCast(chars[@as(usize, @intCast(i))]))]);
+                }
+                if ((total == len)) {
+                    return .original;
+                }
+                const output = ((allo.alloc(u8, total)) catch unreachable);
+                var head = output.ptr;
+                _ = &head;
+                inline for (comptime bun.range(0, len)) |i| {
+                    head = (head + Scalar.append(head, chars[@as(usize, @intCast(i))]));
+                }
+                return EscapedU8{ .allocated = output };
+            }
+    }
+    pub const lengths: ScalarLengths = scalar_lengths;
+};
+
+
+pub fn initScalarLengths() ScalarLengths {
+        var values: ScalarLengths = undefined;
+        _ = &values;
+        for (values, 0..) |_, i| {
+            values[cp_cast_int(usize, i)] = (switch (i) {
+'"' => "&quot;".len,
+'&' => "&amp;".len,
+'\'' => "&#x27;".len,
+'<' => "&lt;".len,
+'>' => "&gt;".len,
+else => 1,
+});
+        }
+        return values;
+}
+
+pub fn initLatin1Vecs() [5]AsciiVector {
+        const vec_chars: []const u8 = "\"&'<>";
+        var _vecs: [5]AsciiVector = undefined;
+        _ = &_vecs;
+        for (vec_chars, 0..) |c, i| {
+            _vecs[cp_cast_int(usize, i)] = @splat(c);
+        }
+        return _vecs;
+}
+
+pub fn initUTF16Vecs() [5]AsciiU16Vector {
+        const vec_chars: []const u8 = "\"&'<>";
+        var _vecs: [5]AsciiU16Vector = undefined;
+        _ = &_vecs;
+        for (vec_chars, 0..) |c, i| {
+            _vecs[cp_cast_int(usize, i)] = @splat((if (comptime @typeInfo(@TypeOf(c)) == .@"enum") cp_cast_int(u16, @intFromEnum(c)) else cp_cast_int(u16, c)));
+        }
+        return _vecs;
+}
+
+pub fn escapeHTMLForLatin1Input(allocator: std.mem.Allocator, latin1: []const u8) EscapedU8!void {
+        _ = @setEvalBranchQuota(5000);
+        switch (latin1.len) {
+0 => {
+return EscapedU8{ .static = "" };
+},
+1 => {
+return (switch (latin1[0]) {
+'"' => EscapedU8{ .static = "&quot;" },
+'&' => EscapedU8{ .static = "&amp;" },
+'\'' => EscapedU8{ .static = "&#x27;" },
+'<' => EscapedU8{ .static = "&lt;" },
+'>' => EscapedU8{ .static = "&gt;" },
+else => .original,
+});
+},
+2 => {
+const first: []const u8 = (switch (latin1[0]) {
+'"' => "&quot;",
+'&' => "&amp;",
+'\'' => "&#x27;",
+'<' => "&lt;",
+'>' => "&gt;",
+else => latin1[0..1],
+});
+        const second: []const u8 = (switch (latin1[1]) {
+'"' => "&quot;",
+'&' => "&amp;",
+'\'' => "&#x27;",
+'<' => "&lt;",
+'>' => "&gt;",
+else => latin1[1..2],
+});
+        if (((first.len == 1) and (second.len == 1))) {
+            return error.original;
+        }
+        return EscapedU8{ .allocated = ((strings.append(allocator, first, second)) catch unreachable) };
+},
+3 => {
+return Scalar.push(3, latin1[0..3], allocator);
+},
+4 => {
+return Scalar.push(4, latin1[0..4], allocator);
+},
+5 => {
+return Scalar.push(5, latin1[0..5], allocator);
+},
+6 => {
+return Scalar.push(6, latin1[0..6], allocator);
+},
+7 => {
+return Scalar.push(7, latin1[0..7], allocator);
+},
+8 => {
+return Scalar.push(8, latin1[0..8], allocator);
+},
+9 => {
+return Scalar.push(9, latin1[0..9], allocator);
+},
+10 => {
+return Scalar.push(10, latin1[0..10], allocator);
+},
+11 => {
+return Scalar.push(11, latin1[0..11], allocator);
+},
+12 => {
+return Scalar.push(12, latin1[0..12], allocator);
+},
+13 => {
+return Scalar.push(13, latin1[0..13], allocator);
+},
+14 => {
+return Scalar.push(14, latin1[0..14], allocator);
+},
+15 => {
+return Scalar.push(15, latin1[0..15], allocator);
+},
+16 => {
+return Scalar.push(16, latin1[0..16], allocator);
+},
+17 => {
+return Scalar.push(17, latin1[0..17], allocator);
+},
+18 => {
+return Scalar.push(18, latin1[0..18], allocator);
+},
+19 => {
+return Scalar.push(19, latin1[0..19], allocator);
+},
+20 => {
+return Scalar.push(20, latin1[0..20], allocator);
+},
+21 => {
+return Scalar.push(21, latin1[0..21], allocator);
+},
+22 => {
+return Scalar.push(22, latin1[0..22], allocator);
+},
+23 => {
+return Scalar.push(23, latin1[0..23], allocator);
+},
+24 => {
+return Scalar.push(24, latin1[0..24], allocator);
+},
+25 => {
+return Scalar.push(25, latin1[0..25], allocator);
+},
+26 => {
+return Scalar.push(26, latin1[0..26], allocator);
+},
+27 => {
+return Scalar.push(27, latin1[0..27], allocator);
+},
+28 => {
+return Scalar.push(28, latin1[0..28], allocator);
+},
+29 => {
+return Scalar.push(29, latin1[0..29], allocator);
+},
+30 => {
+return Scalar.push(30, latin1[0..30], allocator);
+},
+31 => {
+return Scalar.push(31, latin1[0..31], allocator);
+},
+' ' => {
+return Scalar.push(32, latin1[0..32], allocator);
+},
+else => {
+{
+            var remaining = latin1;
+            _ = &remaining;
+            const vecs: [5]AsciiVector = (comptime initLatin1Vecs());
+            var any_needs_escape = false;
+            _ = &any_needs_escape;
+            var buf: ByteList = ByteList{ .items = empty_u8[0..0], .capacity = 0, .allocator = allocator };
+            _ = &buf;
+            if (comptime Environment.enableSIMD) {
+                scan_and_allocate_lazily: while ((remaining.len >= ascii_vector_size)) {
+                    if (comptime Environment.allow_assert) {
+                        _ = assert((!any_needs_escape));
+                    }
+                    const vec: AsciiVector = (if (comptime @typeInfo(AsciiVector) == .@"enum") @as(AsciiVector, @enumFromInt((remaining[0..ascii_vector_size]).*)) else @as(AsciiVector, (remaining[0..ascii_vector_size]).*));
+                    if ((@reduce(.Max, ((((@as(AsciiVectorU1, @bitCast((vec == vecs[0]))) | @as(AsciiVectorU1, @bitCast((vec == vecs[1])))) | @as(AsciiVectorU1, @bitCast((vec == vecs[2])))) | @as(AsciiVectorU1, @bitCast((vec == vecs[3])))) | @as(AsciiVectorU1, @bitCast((vec == vecs[4]))))) == 1)) {
+                        if (comptime Environment.allow_assert) {
+                            _ = assert((buf.capacity == 0));
+                        }
+                        buf = try std.array_list.Managed(u8).initCapacity(allocator, (latin1.len + 6));
+                        const copy_len = (@intFromPtr(remaining.ptr) - @intFromPtr(latin1.ptr));
+                        _ = buf.appendSliceAssumeCapacity(latin1[0..copy_len]);
+                        any_needs_escape = true;
+                        inline for (0..ascii_vector_size) |i| {
+                            switch (vec[@as(usize, @intCast(i))]) {
+'"' => {
+_ = ((buf.ensureUnusedCapacity(((ascii_vector_size - i) + "&quot;".len))) catch unreachable);
+                            buf.items.len = (buf.items.len + Scalar.appendString((buf.items.ptr + buf.items.len), "&quot;"));
+},
+'&' => {
+_ = ((buf.ensureUnusedCapacity(((ascii_vector_size - i) + "&amp;".len))) catch unreachable);
+                            buf.items.len = (buf.items.len + Scalar.appendString((buf.items.ptr + buf.items.len), "&amp;"));
+},
+'\'' => {
+_ = ((buf.ensureUnusedCapacity(((ascii_vector_size - i) + "&#x27;".len))) catch unreachable);
+                            buf.items.len = (buf.items.len + Scalar.appendString((buf.items.ptr + buf.items.len), "&#x27;"));
+},
+'<' => {
+_ = ((buf.ensureUnusedCapacity(((ascii_vector_size - i) + "&lt;".len))) catch unreachable);
+                            buf.items.len = (buf.items.len + Scalar.appendString((buf.items.ptr + buf.items.len), "&lt;"));
+},
+'>' => {
+_ = ((buf.ensureUnusedCapacity(((ascii_vector_size - i) + "&gt;".len))) catch unreachable);
+                            buf.items.len = (buf.items.len + Scalar.appendString((buf.items.ptr + buf.items.len), "&gt;"));
+},
+else => |c| {
+_ = buf.appendAssumeCapacity(c);
+},
+}
+                        }
+                        remaining = remaining[ascii_vector_size..];
+                        break :scan_and_allocate_lazily;
+                    }
+                    remaining = remaining[ascii_vector_size..];
+                }
+            }
+            if (any_needs_escape) {
+                while ((remaining.len >= ascii_vector_size)) {
+                    const vec: AsciiVector = (if (comptime @typeInfo(AsciiVector) == .@"enum") @as(AsciiVector, @enumFromInt((remaining[0..ascii_vector_size]).*)) else @as(AsciiVector, (remaining[0..ascii_vector_size]).*));
+                    if ((@reduce(.Max, ((((@as(AsciiVectorU1, @bitCast((vec == vecs[0]))) | @as(AsciiVectorU1, @bitCast((vec == vecs[1])))) | @as(AsciiVectorU1, @bitCast((vec == vecs[2])))) | @as(AsciiVectorU1, @bitCast((vec == vecs[3])))) | @as(AsciiVectorU1, @bitCast((vec == vecs[4]))))) == 1)) {
+                        _ = ((buf.ensureUnusedCapacity((ascii_vector_size + 6))) catch unreachable);
+                        inline for (0..ascii_vector_size) |i| {
+                            switch (vec[@as(usize, @intCast(i))]) {
+'"' => {
+_ = ((buf.ensureUnusedCapacity(((ascii_vector_size - i) + "&quot;".len))) catch unreachable);
+                            buf.items.len = (buf.items.len + Scalar.appendString((buf.items.ptr + buf.items.len), "&quot;"));
+},
+'&' => {
+_ = ((buf.ensureUnusedCapacity(((ascii_vector_size - i) + "&amp;".len))) catch unreachable);
+                            buf.items.len = (buf.items.len + Scalar.appendString((buf.items.ptr + buf.items.len), "&amp;"));
+},
+'\'' => {
+_ = ((buf.ensureUnusedCapacity(((ascii_vector_size - i) + "&#x27;".len))) catch unreachable);
+                            buf.items.len = (buf.items.len + Scalar.appendString((buf.items.ptr + buf.items.len), "&#x27;"));
+},
+'<' => {
+_ = ((buf.ensureUnusedCapacity(((ascii_vector_size - i) + "&lt;".len))) catch unreachable);
+                            buf.items.len = (buf.items.len + Scalar.appendString((buf.items.ptr + buf.items.len), "&lt;"));
+},
+'>' => {
+_ = ((buf.ensureUnusedCapacity(((ascii_vector_size - i) + "&gt;".len))) catch unreachable);
+                            buf.items.len = (buf.items.len + Scalar.appendString((buf.items.ptr + buf.items.len), "&gt;"));
+},
+else => |c| {
+_ = buf.appendAssumeCapacity(c);
+},
+}
+                        }
+                        remaining = remaining[ascii_vector_size..];
+                        continue;
+                    }
+                    _ = try buf.ensureUnusedCapacity(ascii_vector_size);
+                    (buf.items.ptr[buf.items.len..(buf.items.len + ascii_vector_size)][0..ascii_vector_size]).* = (remaining[0..ascii_vector_size]).*;
+                    buf.items.len = (buf.items.len + ascii_vector_size);
+                    remaining = remaining[ascii_vector_size..];
+                }
+            }
+            var ptr = remaining.ptr;
+            _ = &ptr;
+            const end = (remaining.ptr + remaining.len);
+            if ((!any_needs_escape)) {
+                scan_and_allocate_lazily: while ((ptr != end)) : (ptr = (ptr + 1)) {
+                    switch (ptr[0]) {
+'"', '&', '\'', '<', '>' => |c| {
+if (comptime Environment.allow_assert) {
+                        _ = assert((buf.capacity == 0));
+                    }
+                    buf = try std.array_list.Managed(u8).initCapacity(allocator, (latin1.len + (if (comptime @typeInfo(@TypeOf(Scalar.lengths[@as(usize, @intCast(c))])) == .@"enum") cp_cast_int(usize, @intFromEnum(Scalar.lengths[@as(usize, @intCast(c))])) else cp_cast_int(usize, Scalar.lengths[@as(usize, @intCast(c))]))));
+                    const copy_len = (@intFromPtr(ptr) - @intFromPtr(latin1.ptr));
+                    if (comptime Environment.allow_assert) {
+                        _ = assert((copy_len <= buf.capacity));
+                    }
+                    buf.items.len = copy_len;
+                    _ = @memcpy(buf.items[0..copy_len], latin1[0..copy_len]);
+                    any_needs_escape = true;
+                    break :scan_and_allocate_lazily;
+},
+else => {
+
+},
+}
+                }
+            }
+            while ((ptr != end)) : (ptr = (ptr + 1)) {
+                switch (ptr[0]) {
+'"' => {
+_ = ((buf.appendSlice("&quot;")) catch unreachable);
+},
+'&' => {
+_ = ((buf.appendSlice("&amp;")) catch unreachable);
+},
+'\'' => {
+_ = ((buf.appendSlice("&#x27;")) catch unreachable);
+},
+'<' => {
+_ = ((buf.appendSlice("&lt;")) catch unreachable);
+},
+'>' => {
+_ = ((buf.appendSlice("&gt;")) catch unreachable);
+},
+else => |c| {
+_ = ((buf.append(c)) catch unreachable);
+},
+}
+            }
+            if ((!any_needs_escape)) {
+                if (comptime Environment.allow_assert) {
+                    _ = assert((buf.capacity == 0));
+                }
+                return error.original;
+            }
+            return EscapedU8{ .allocated = try buf.toOwnedSlice() };
+        }
+},
+}
+}
+
+pub fn Escaped(comptime T: type) type {
+        return union(enum) {
+    static: []const u8,
+    original: void,
+    allocated: []T,
+};
+}
+
+pub fn escapeHTMLForUTF16Input(allocator: std.mem.Allocator, utf16: []const u16) EscapedU16!void {
+        switch (utf16.len) {
+0 => {
+return EscapedU16{ .static = "" };
+},
+1 => {
+switch (utf16[0]) {
+'"' => {
+return EscapedU16{ .static = "&quot;" };
+},
+'&' => {
+return EscapedU16{ .static = "&amp;" };
+},
+'\'' => {
+return EscapedU16{ .static = "&#x27;" };
+},
+'<' => {
+return EscapedU16{ .static = "&lt;" };
+},
+'>' => {
+return EscapedU16{ .static = "&gt;" };
+},
+else => {
+return error.original;
+},
+}
+},
+2 => {
+const first_16 = (switch (utf16[0]) {
+'"' => toUTF16Literal("&quot;"),
+'&' => toUTF16Literal("&amp;"),
+'\'' => toUTF16Literal("&#x27;"),
+'<' => toUTF16Literal("&lt;"),
+'>' => toUTF16Literal("&gt;"),
+else => @as([]const u16, @ptrCast(&(utf16[0..1]))),
+});
+        const second_16 = (switch (utf16[1]) {
+'"' => toUTF16Literal("&quot;"),
+'&' => toUTF16Literal("&amp;"),
+'\'' => toUTF16Literal("&#x27;"),
+'<' => toUTF16Literal("&lt;"),
+'>' => toUTF16Literal("&gt;"),
+else => @as([]const u16, @ptrCast(&(utf16[1..2]))),
+});
+        {
+            if (((first_16.ptr == utf16.ptr) and (second_16.ptr == (utf16.ptr + 1)))) {
+                return error.original;
+            }
+        }
+        var buf = ((allocator.alloc(u16, (first_16.len + second_16.len))) catch unreachable);
+        _ = &buf;
+        _ = bun.copy(u16, buf, first_16);
+        _ = bun.copy(u16, buf[first_16.len..], second_16);
+        return EscapedU16{ .allocated = buf };
+},
+else => {
+{
+            var remaining = utf16;
+            _ = &remaining;
+            var any_needs_escape = false;
+            _ = &any_needs_escape;
+            var buf: std.array_list.Managed(u16) = undefined;
+            _ = &buf;
+            if (comptime Environment.enableSIMD) {
+                const vecs: [5]AsciiU16Vector = (comptime initUTF16Vecs());
+                const vec_127: AsciiU16Vector = @splat((if (comptime @typeInfo(@TypeOf(127)) == .@"enum") cp_cast_int(u16, @intFromEnum(127)) else cp_cast_int(u16, 127)));
+                scan_and_allocate_lazily: while ((remaining.len >= ascii_u16_vector_size)) {
+                    if (comptime Environment.allow_assert) {
+                        _ = assert((!any_needs_escape));
+                    }
+                    const vec: AsciiU16Vector = (if (comptime @typeInfo(AsciiU16Vector) == .@"enum") @as(AsciiU16Vector, @enumFromInt((remaining[0..ascii_u16_vector_size]).*)) else @as(AsciiU16Vector, (remaining[0..ascii_u16_vector_size]).*));
+                    if ((@reduce(.Max, (((((@as(AsciiVectorU16U1, @bitCast((vec > vec_127))) | @as(AsciiVectorU16U1, @bitCast((vec == vecs[0])))) | @as(AsciiVectorU16U1, @bitCast((vec == vecs[1])))) | @as(AsciiVectorU16U1, @bitCast((vec == vecs[2])))) | @as(AsciiVectorU16U1, @bitCast((vec == vecs[3])))) | @as(AsciiVectorU16U1, @bitCast((vec == vecs[4]))))) == 1)) {
+                        var i: u16 = 0;
+                        _ = &i;
+                        lazy: while ((i < ascii_u16_vector_size)) {
+                            switch (remaining[@as(usize, @intCast(i))]) {
+'"', '&', '\'', '<', '>' => {
+any_needs_escape = true;
+                            break :lazy;
+},
+128...65535 => {
+const cp = utf16Codepoint(remaining[i..]);
+                            i = (i + (if (comptime @typeInfo(@TypeOf(cp.len)) == .@"enum") cp_cast_int(u16, @intFromEnum(cp.len)) else cp_cast_int(u16, cp.len)));
+},
+else => {
+i = (i + 1);
+},
+}
+                        }
+                        if ((!any_needs_escape)) {
+                            remaining = remaining[i..];
+                            continue :scan_and_allocate_lazily;
+                        }
+                        if (comptime Environment.allow_assert) {
+                            _ = assert((@intFromPtr((remaining.ptr + i)) >= @intFromPtr(utf16.ptr)));
+                        }
+                        const to_copy = std.mem.sliceAsBytes(utf16)[0..(@intFromPtr((remaining.ptr + i)) - @intFromPtr(utf16.ptr))];
+                        const to_copy_16 = std.mem.bytesAsSlice(u16, to_copy);
+                        buf = try std.array_list.Managed(u16).initCapacity(allocator, (utf16.len + 6));
+                        _ = try buf.appendSlice(to_copy_16);
+                        while ((i < ascii_u16_vector_size)) {
+                            switch (remaining[@as(usize, @intCast(i))]) {
+'"', '&', '\'', '<', '>' => |c| {
+const result = (switch (c) {
+'"' => toUTF16Literal("&quot;"),
+'&' => toUTF16Literal("&amp;"),
+'\'' => toUTF16Literal("&#x27;"),
+'<' => toUTF16Literal("&lt;"),
+'>' => toUTF16Literal("&gt;"),
+else => unreachable,
+});
+                            _ = ((buf.appendSlice(result)) catch unreachable);
+                            i = (i + 1);
+},
+128...65535 => {
+const cp = utf16Codepoint(remaining[i..]);
+                            _ = ((buf.appendSlice(remaining[i..][0..(if (comptime @typeInfo(@TypeOf(cp.len)) == .@"enum") cp_cast_int(usize, @intFromEnum(cp.len)) else cp_cast_int(usize, cp.len))])) catch unreachable);
+                            i = (i + (if (comptime @typeInfo(@TypeOf(cp.len)) == .@"enum") cp_cast_int(u16, @intFromEnum(cp.len)) else cp_cast_int(u16, cp.len)));
+},
+else => |c| {
+i = (i + 1);
+                            _ = ((buf.append(c)) catch unreachable);
+},
+}
+                        }
+                        remaining = remaining[i..];
+                        break :scan_and_allocate_lazily;
+                    }
+                    remaining = remaining[ascii_u16_vector_size..];
+                }
+                if (any_needs_escape) {
+                    while ((remaining.len >= ascii_u16_vector_size)) {
+                        const vec: AsciiU16Vector = (if (comptime @typeInfo(AsciiU16Vector) == .@"enum") @as(AsciiU16Vector, @enumFromInt((remaining[0..ascii_u16_vector_size]).*)) else @as(AsciiU16Vector, (remaining[0..ascii_u16_vector_size]).*));
+                        if ((@reduce(.Max, (((((@as(AsciiVectorU16U1, @bitCast((vec > vec_127))) | @as(AsciiVectorU16U1, @bitCast((vec == vecs[0])))) | @as(AsciiVectorU16U1, @bitCast((vec == vecs[1])))) | @as(AsciiVectorU16U1, @bitCast((vec == vecs[2])))) | @as(AsciiVectorU16U1, @bitCast((vec == vecs[3])))) | @as(AsciiVectorU16U1, @bitCast((vec == vecs[4]))))) == 1)) {
+                            _ = ((buf.ensureUnusedCapacity(ascii_u16_vector_size)) catch unreachable);
+                            var i: u16 = 0;
+                            _ = &i;
+                            while ((i < ascii_u16_vector_size)) {
+                                switch (remaining[@as(usize, @intCast(i))]) {
+'"' => {
+_ = ((buf.appendSlice(toUTF16Literal("&quot;"))) catch unreachable);
+                                i = (i + 1);
+},
+'&' => {
+_ = ((buf.appendSlice(toUTF16Literal("&amp;"))) catch unreachable);
+                                i = (i + 1);
+},
+'\'' => {
+_ = ((buf.appendSlice(toUTF16Literal("&#x27;"))) catch unreachable);
+                                i = (i + 1);
+},
+'<' => {
+_ = ((buf.appendSlice(toUTF16Literal("&lt;"))) catch unreachable);
+                                i = (i + 1);
+},
+'>' => {
+_ = ((buf.appendSlice(toUTF16Literal("&gt;"))) catch unreachable);
+                                i = (i + 1);
+},
+128...65535 => {
+const cp = utf16Codepoint(remaining[i..]);
+                                _ = ((buf.appendSlice(remaining[i..][0..(if (comptime @typeInfo(@TypeOf(cp.len)) == .@"enum") cp_cast_int(usize, @intFromEnum(cp.len)) else cp_cast_int(usize, cp.len))])) catch unreachable);
+                                i = (i + (if (comptime @typeInfo(@TypeOf(cp.len)) == .@"enum") cp_cast_int(u16, @intFromEnum(cp.len)) else cp_cast_int(u16, cp.len)));
+},
+else => |c| {
+_ = ((buf.append(c)) catch unreachable);
+                                i = (i + 1);
+},
+}
+                            }
+                            remaining = remaining[i..];
+                            continue;
+                        }
+                        _ = try buf.ensureUnusedCapacity(ascii_u16_vector_size);
+                        (buf.items.ptr[buf.items.len..(buf.items.len + ascii_u16_vector_size)][0..ascii_u16_vector_size]).* = (remaining[0..ascii_u16_vector_size]).*;
+                        buf.items.len = (buf.items.len + ascii_u16_vector_size);
+                        remaining = remaining[ascii_u16_vector_size..];
+                    }
+                }
+            }
+            var ptr = remaining.ptr;
+            _ = &ptr;
+            const end = (remaining.ptr + remaining.len);
+            if ((!any_needs_escape)) {
+                scan_and_allocate_lazily: while ((ptr != end)) {
+                    switch (ptr[0]) {
+'"', '&', '\'', '<', '>' => |c| {
+buf = try std.array_list.Managed(u16).initCapacity(allocator, (utf16.len + (if (comptime @typeInfo(@TypeOf(Scalar.lengths[@as(usize, @intCast(c))])) == .@"enum") cp_cast_int(usize, @intFromEnum(Scalar.lengths[@as(usize, @intCast(c))])) else cp_cast_int(usize, Scalar.lengths[@as(usize, @intCast(c))]))));
+                    if (comptime Environment.allow_assert) {
+                        _ = assert((@intFromPtr(ptr) >= @intFromPtr(utf16.ptr)));
+                    }
+                    const to_copy = std.mem.sliceAsBytes(utf16)[0..(@intFromPtr(ptr) - @intFromPtr(utf16.ptr))];
+                    const to_copy_16 = std.mem.bytesAsSlice(u16, to_copy);
+                    _ = try buf.appendSlice(to_copy_16);
+                    any_needs_escape = true;
+                    break :scan_and_allocate_lazily;
+},
+128...65535 => {
+const slice_len: usize = (if (((ptr + 1) == end)) (if (comptime @typeInfo(@TypeOf(1)) == .@"enum") cp_cast_int(usize, @intFromEnum(1)) else cp_cast_int(usize, 1)) else (if (comptime @typeInfo(@TypeOf(2)) == .@"enum") cp_cast_int(usize, @intFromEnum(2)) else cp_cast_int(usize, 2)));
+                    const cp = utf16Codepoint(ptr[0..slice_len]);
+                    ptr = (ptr + (if (comptime @typeInfo(@TypeOf(cp.len)) == .@"enum") cp_cast_int(u16, @intFromEnum(cp.len)) else cp_cast_int(u16, cp.len)));
+},
+else => {
+ptr = (ptr + 1);
+},
+}
+                }
+            }
+            while ((ptr != end)) {
+                switch (ptr[0]) {
+'"' => {
+_ = ((buf.appendSlice(toUTF16Literal("&quot;"))) catch unreachable);
+                ptr = (ptr + 1);
+},
+'&' => {
+_ = ((buf.appendSlice(toUTF16Literal("&amp;"))) catch unreachable);
+                ptr = (ptr + 1);
+},
+'\'' => {
+_ = ((buf.appendSlice(toUTF16Literal("&#x27;"))) catch unreachable);
+                ptr = (ptr + 1);
+},
+'<' => {
+_ = ((buf.appendSlice(toUTF16Literal("&lt;"))) catch unreachable);
+                ptr = (ptr + 1);
+},
+'>' => {
+_ = ((buf.appendSlice(toUTF16Literal("&gt;"))) catch unreachable);
+                ptr = (ptr + 1);
+},
+128...65535 => {
+const slice_len: usize = (if (((ptr + 1) == end)) (if (comptime @typeInfo(@TypeOf(1)) == .@"enum") cp_cast_int(usize, @intFromEnum(1)) else cp_cast_int(usize, 1)) else (if (comptime @typeInfo(@TypeOf(2)) == .@"enum") cp_cast_int(usize, @intFromEnum(2)) else cp_cast_int(usize, 2)));
+                const cp = utf16Codepoint(ptr[0..slice_len]);
+                _ = ((buf.appendSlice(ptr[0..(if (comptime @typeInfo(@TypeOf(cp.len)) == .@"enum") cp_cast_int(usize, @intFromEnum(cp.len)) else cp_cast_int(usize, cp.len))])) catch unreachable);
+                ptr = (ptr + (if (comptime @typeInfo(@TypeOf(cp.len)) == .@"enum") cp_cast_int(u16, @intFromEnum(cp.len)) else cp_cast_int(u16, cp.len)));
+},
+else => |c| {
+_ = ((buf.append(c)) catch unreachable);
+                ptr = (ptr + 1);
+},
+}
+            }
+            if ((!any_needs_escape)) {
+                return error.original;
+            }
+            return EscapedU16{ .allocated = try buf.toOwnedSlice() };
+        }
+},
+}
+}

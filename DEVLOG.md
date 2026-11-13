@@ -227,3 +227,10 @@
   1. **长生命周期子智能体复用 (`send_message`) 导致 $O(N^2)$ 上下文累积爆炸**：`040f360c` 累计运行 499 步（transcript 822 KB）、`c82d4539` 累计运行 660 步（transcript 1,120 KB）。到第 500 步时，每次工具调用都会重复携带前 499 步历史代码（约 250k~300k input tokens/step），600 步累计输入超 8,000 万~1 亿 Token。
   2. **逐文件串行工具调用轮次过多**：每个 20~50 行的小文件单独经历 `read_file` -> `cp` -> `write_file` -> `cpc` 4~5 轮往返，导致步数膨胀 5~10 倍。
   3. **固定系统规则文档底座偏大**：`GEMINI.md` (71 KB) + `AGENTS.md` (16 KB) + 子智能体首轮读取 `cp_agent_ref.md` (57 KB)，使每个子智能体起步即携带约 25,000~30,000 Tokens。
+
+
+## 2026-11-14: Milestone 7 Phase 11 闭环与 `zig2cp_prep.py` 批处理提速验证
+- **新增 23 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - `src/unicode/` 全树 18/18 100% 闭合、`src/string/immutable/` 首批 5 个模块。
+- **省 Token 批处理模式实测成效**：
+  - 结合 `GEMINI.md` 瘦身（13.3 KB）、`AGENTS_H.md` 归档与 `scripts/zig2cp_prep.py` 机械语法预转换，子智能体 `11dfb5e3` 仅用 ~30 步即完成 13 个 `unicode` 模块迁移，子智能体 `aa37a18c` 仅用 ~44 步即完成 5 个大型 `uucode_lib` 模块（4,526 行），单模块 Token 消耗下降约 **85%**。
