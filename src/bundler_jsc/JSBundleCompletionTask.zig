@@ -1,611 +1,10 @@
-//! `JSBundleCompletionTask` and the JS-facing entrypoints for `Bun.build()`.
-//! Moved from inside `BundleV2` so `bundler/` is free of JSC types. Aliased
-//! back as `BundleV2.JSBundleCompletionTask` etc.
-
-pub const BuildResult = bv2.BundleV2.BuildResult;
-pub const Result = bv2.BundleV2.Result;
-
-pub const JSBundleThread = BundleThread(JSBundleCompletionTask);
-
-pub fn createAndScheduleCompletionTask(
-    config: bun.jsc.API.JSBundler.Config,
-    plugins: ?*bun.jsc.API.JSBundler.Plugin,
-    globalThis: *jsc.JSGlobalObject,
-    event_loop: *bun.jsc.EventLoop,
-    _: std.mem.Allocator,
-) OOM!*JSBundleCompletionTask {
-    const completion = bun.new(JSBundleCompletionTask, .{
-        .ref_count = .init(),
-        .config = config,
-        .jsc_event_loop = event_loop,
-        .globalThis = globalThis,
-        .poll_ref = Async.KeepAlive.init(),
-        .env = globalThis.bunVM().transpiler.env,
-        .plugins = plugins,
-        .log = Logger.Log.init(bun.default_allocator),
-        .task = undefined,
-    });
-    completion.task = JSBundleCompletionTask.TaskCompletion.init(completion);
-
-    if (plugins) |plugin| {
-        plugin.setConfig(completion);
-    }
-
-    // Ensure this exists before we spawn the thread to prevent any race
-    // conditions from creating two
-    _ = jsc.WorkPool.get();
-
-    JSBundleThread.singleton.enqueue(completion);
-
-    completion.poll_ref.ref(globalThis.bunVM());
-
-    return completion;
-}
-
-pub fn generateFromJavaScript(
-    config: bun.jsc.API.JSBundler.Config,
-    plugins: ?*bun.jsc.API.JSBundler.Plugin,
-    globalThis: *jsc.JSGlobalObject,
-    event_loop: *bun.jsc.EventLoop,
-    alloc: std.mem.Allocator,
-) OOM!bun.jsc.JSValue {
-    const completion = try createAndScheduleCompletionTask(config, plugins, globalThis, event_loop, alloc);
-    completion.promise = jsc.JSPromise.Strong.init(globalThis);
-    return completion.promise.value();
-}
-
-pub const JSBundleCompletionTask = struct {
-    pub const RefCount = bun.ptr.ThreadSafeRefCount(@This(), "ref_count", @This().deinit, .{});
-    pub const ref = RefCount.ref;
-    pub const deref = RefCount.deref;
-
-    ref_count: RefCount,
-    config: bun.jsc.API.JSBundler.Config,
-    jsc_event_loop: *bun.jsc.EventLoop,
-    task: bun.jsc.AnyTask,
-    globalThis: *jsc.JSGlobalObject,
-    promise: jsc.JSPromise.Strong = .{},
-    poll_ref: Async.KeepAlive = Async.KeepAlive.init(),
-    env: *bun.DotEnv.Loader,
-    log: Logger.Log,
-    cancelled: bool = false,
-
-    html_build_task: ?*jsc.API.HTMLBundle.HTMLBundleRoute = null,
-
-    result: Result = .{ .pending = {} },
-
-    next: ?*JSBundleCompletionTask = null,
-    transpiler: *BundleV2 = undefined,
-    plugins: ?*bun.jsc.API.JSBundler.Plugin = null,
-    started_at_ns: u64 = 0,
-
-    pub fn configureBundler(
-        completion: *JSBundleCompletionTask,
-        transpiler: *Transpiler,
-        alloc: std.mem.Allocator,
-    ) !void {
-        const config = &completion.config;
-
-        // JSX config is already in API format
-        const jsx_api = config.jsx;
-
-        transpiler.* = try bun.Transpiler.init(
-            alloc,
-            &completion.log,
-            api.TransformOptions{
-                .define = if (config.define.count() > 0) config.define.toAPI() else null,
-                .entry_points = config.entry_points.keys(),
-                .target = config.target.toAPI(),
-                .absolute_working_dir = if (config.dir.list.items.len > 0)
-                    config.dir.sliceWithSentinel()
-                else
-                    null,
-                .inject = &.{},
-                .external = config.external.keys(),
-                .main_fields = &.{},
-                .extension_order = &.{},
-                .env_files = &.{},
-                .conditions = config.conditions.map.keys(),
-                .ignore_dce_annotations = transpiler.options.ignore_dce_annotations,
-                .drop = config.drop.map.keys(),
-                .bunfig_path = transpiler.options.bunfig_path,
-                .jsx = jsx_api,
-            },
-            completion.env,
-        );
-        transpiler.options.env.behavior = config.env_behavior;
-        transpiler.options.env.prefix = config.env_prefix.slice();
-        // Use the StringSet directly instead of the slice passed through TransformOptions
-        transpiler.options.bundler_feature_flags = &config.features;
-        if (config.force_node_env != .unspecified) {
-            transpiler.options.force_node_env = config.force_node_env;
-        }
-
-        transpiler.options.entry_points = config.entry_points.keys();
-        // Convert API JSX config back to options.JSX.Pragma
-        transpiler.options.jsx = options.JSX.Pragma{
-            .factory = if (config.jsx.factory.len > 0)
-                try options.JSX.Pragma.memberListToComponentsIfDifferent(alloc, &.{}, config.jsx.factory)
-            else
-                options.JSX.Pragma.Defaults.Factory,
-            .fragment = if (config.jsx.fragment.len > 0)
-                try options.JSX.Pragma.memberListToComponentsIfDifferent(alloc, &.{}, config.jsx.fragment)
-            else
-                options.JSX.Pragma.Defaults.Fragment,
-            .runtime = config.jsx.runtime,
-            .development = config.jsx.development,
-            .package_name = if (config.jsx.import_source.len > 0) config.jsx.import_source else "react",
-            .classic_import_source = if (config.jsx.import_source.len > 0) config.jsx.import_source else "react",
-            .side_effects = config.jsx.side_effects,
-            .parse = true,
-            .import_source = .{
-                .development = if (config.jsx.import_source.len > 0)
-                    try std.fmt.allocPrint(alloc, "{s}/jsx-dev-runtime", .{config.jsx.import_source})
-                else
-                    "react/jsx-dev-runtime",
-                .production = if (config.jsx.import_source.len > 0)
-                    try std.fmt.allocPrint(alloc, "{s}/jsx-runtime", .{config.jsx.import_source})
-                else
-                    "react/jsx-runtime",
-            },
-        };
-        transpiler.options.no_macros = config.no_macros;
-        transpiler.options.loaders = try options.loadersFromTransformOptions(alloc, config.loaders, config.target);
-        transpiler.options.entry_naming = config.names.entry_point.data;
-        transpiler.options.chunk_naming = config.names.chunk.data;
-        transpiler.options.asset_naming = config.names.asset.data;
-
-        transpiler.options.output_format = config.format;
-        transpiler.options.bytecode = config.bytecode;
-        transpiler.options.compile = config.compile != null;
-
-        // For compile mode, set the public_path to the target-specific base path
-        // This ensures embedded resources like yoga.wasm are correctly found
-        if (config.compile) |compile_opts| {
-            const base_public_path = bun.StandaloneModuleGraph.targetBasePublicPath(compile_opts.compile_target.os, "root/");
-            transpiler.options.public_path = base_public_path;
-        } else {
-            transpiler.options.public_path = config.public_path.list.items;
-        }
-
-        transpiler.options.output_dir = config.outdir.slice();
-        transpiler.options.root_dir = config.rootdir.slice();
-        transpiler.options.minify_syntax = config.minify.syntax;
-        transpiler.options.minify_whitespace = config.minify.whitespace;
-        transpiler.options.minify_identifiers = config.minify.identifiers;
-        transpiler.options.keep_names = config.minify.keep_names;
-        transpiler.options.inlining = config.minify.syntax;
-        transpiler.options.source_map = config.source_map;
-        transpiler.options.packages = config.packages;
-        transpiler.options.allow_unresolved = if (config.allow_unresolved) |*a| options.AllowUnresolved.fromStrings(a.keys()) else .all;
-        transpiler.options.code_splitting = config.code_splitting;
-        transpiler.options.emit_dce_annotations = config.emit_dce_annotations orelse !config.minify.whitespace;
-        transpiler.options.ignore_dce_annotations = config.ignore_dce_annotations;
-        transpiler.options.css_chunking = config.css_chunking;
-        transpiler.options.compile_to_standalone_html = brk: {
-            if (config.compile == null or config.target != .browser) break :brk false;
-            // Only activate standalone HTML when all entrypoints are HTML files
-            for (config.entry_points.keys()) |ep| {
-                if (!bun.strings.hasSuffixComptime(ep, ".html")) break :brk false;
-            }
-            break :brk config.entry_points.count() > 0;
-        };
-        // When compiling to standalone HTML, don't use the bun executable compile path
-        if (transpiler.options.compile_to_standalone_html) {
-            transpiler.options.compile = false;
-            config.compile = null;
-        }
-        transpiler.options.banner = config.banner.slice();
-        transpiler.options.footer = config.footer.slice();
-        transpiler.options.react_fast_refresh = config.react_fast_refresh;
-        transpiler.options.metafile = config.metafile;
-        transpiler.options.metafile_json_path = config.metafile_json_path.slice();
-        transpiler.options.metafile_markdown_path = config.metafile_markdown_path.slice();
-        if (config.optimize_imports.count() > 0) {
-            transpiler.options.optimize_imports = &config.optimize_imports;
-        }
-
-        if (transpiler.options.compile) {
-            // Emitting DCE annotations is nonsensical in --compile.
-            transpiler.options.emit_dce_annotations = false;
-        }
-
-        transpiler.configureLinker();
-        try transpiler.configureDefines();
-
-        if (!transpiler.options.production) {
-            try transpiler.options.conditions.appendSlice(&.{"development"});
-        }
-        transpiler.resolver.env_loader = transpiler.env;
-        transpiler.resolver.opts = transpiler.options;
-    }
-
-    pub fn completeOnBundleThread(completion: *JSBundleCompletionTask) void {
-        completion.jsc_event_loop.enqueueTaskConcurrent(jsc.ConcurrentTask.create(completion.task.task()));
-    }
-
-    pub const TaskCompletion = bun.jsc.AnyTask.New(JSBundleCompletionTask, onComplete);
-
-    fn deinit(this: *JSBundleCompletionTask) void {
-        this.result.deinit();
-        this.log.deinit();
-        this.poll_ref.disable();
-        if (this.plugins) |plugin| {
-            plugin.deinit();
-        }
-        this.config.deinit(bun.default_allocator);
-        this.promise.deinit();
-        bun.destroy(this);
-    }
-
-    fn doCompilation(this: *JSBundleCompletionTask, output_files: *std.array_list.Managed(options.OutputFile)) bun.StandaloneModuleGraph.CompileResult {
-        const compile_options = &(this.config.compile orelse @panic("Unexpected: No compile options provided"));
-
-        const entry_point_index: usize = brk: {
-            for (output_files.items, 0..) |*output_file, i| {
-                if (output_file.output_kind == .@"entry-point" and (output_file.side orelse .server) == .server) {
-                    break :brk i;
-                }
-            }
-            return bun.StandaloneModuleGraph.CompileResult.fail(.no_entry_point);
-        };
-
-        const output_file = &output_files.items[entry_point_index];
-        const outbuf = bun.path_buffer_pool.get();
-        defer bun.path_buffer_pool.put(outbuf);
-
-        // Always get an absolute path for the outfile to ensure it works correctly with PE metadata operations
-        var full_outfile_path = if (this.config.outdir.slice().len > 0) brk: {
-            const outdir_slice = this.config.outdir.slice();
-            const top_level_dir = bun.fs.FileSystem.instance.top_level_dir;
-            break :brk bun.path.joinAbsStringBuf(top_level_dir, outbuf, &[_][]const u8{ outdir_slice, compile_options.outfile.slice() }, .auto);
-        } else if (std.fs.path.isAbsolute(compile_options.outfile.slice()))
-            compile_options.outfile.slice()
-        else brk: {
-            // For relative paths, ensure we make them absolute relative to the current working directory
-            const top_level_dir = bun.fs.FileSystem.instance.top_level_dir;
-            break :brk bun.path.joinAbsStringBuf(top_level_dir, outbuf, &[_][]const u8{compile_options.outfile.slice()}, .auto);
-        };
-
-        // Add .exe extension for Windows targets if not already present
-        if (compile_options.compile_target.os == .windows and !strings.hasSuffixComptime(full_outfile_path, ".exe")) {
-            full_outfile_path = std.fmt.allocPrint(bun.default_allocator, "{s}.exe", .{full_outfile_path}) catch |err| bun.handleOom(err);
-        } else {
-            full_outfile_path = bun.handleOom(bun.default_allocator.dupe(u8, full_outfile_path));
-        }
-
-        const dirname = std.fs.path.dirname(full_outfile_path) orelse ".";
-        const basename = std.fs.path.basename(full_outfile_path);
-
-        var root_dir = bun.FD.cwd().stdDir();
-        defer {
-            if (bun.FD.fromStdDir(root_dir) != bun.FD.cwd()) {
-                root_dir.close();
-            }
-        }
-
-        // On Windows, don't change root_dir, just pass the full relative path
-        // On POSIX, change root_dir to the target directory and pass basename
-        const outfile_for_executable = if (Environment.isWindows) full_outfile_path else basename;
-
-        if (Environment.isPosix and !(dirname.len == 0 or strings.eqlComptime(dirname, "."))) {
-            // On POSIX, makeOpenPath and change root_dir
-            root_dir = root_dir.makeOpenPath(dirname, .{}) catch |err| {
-                return bun.StandaloneModuleGraph.CompileResult.failFmt("Failed to open output directory {s}: {s}", .{ dirname, @errorName(err) });
-            };
-        } else if (Environment.isWindows and !(dirname.len == 0 or strings.eqlComptime(dirname, "."))) {
-            // On Windows, ensure directories exist but don't change root_dir
-            _ = bun.makePath(root_dir, dirname) catch |err| {
-                return bun.StandaloneModuleGraph.CompileResult.failFmt("Failed to create output directory {s}: {s}", .{ dirname, @errorName(err) });
-            };
-        }
-
-        // Use the target-specific base path for compile mode, not the user-configured public_path
-        const module_prefix = bun.StandaloneModuleGraph.targetBasePublicPath(compile_options.compile_target.os, "root/");
-
-        const result = bun.StandaloneModuleGraph.toExecutable(
-            &compile_options.compile_target,
-            bun.default_allocator,
-            output_files.items,
-            root_dir,
-            module_prefix,
-            outfile_for_executable,
-            this.env,
-            this.config.format,
-            .{
-                .hide_console = compile_options.windows_hide_console,
-                .icon = if (compile_options.windows_icon_path.slice().len > 0)
-                    compile_options.windows_icon_path.slice()
-                else
-                    null,
-                .title = if (compile_options.windows_title.slice().len > 0)
-                    compile_options.windows_title.slice()
-                else
-                    null,
-                .publisher = if (compile_options.windows_publisher.slice().len > 0)
-                    compile_options.windows_publisher.slice()
-                else
-                    null,
-                .version = if (compile_options.windows_version.slice().len > 0)
-                    compile_options.windows_version.slice()
-                else
-                    null,
-                .description = if (compile_options.windows_description.slice().len > 0)
-                    compile_options.windows_description.slice()
-                else
-                    null,
-                .copyright = if (compile_options.windows_copyright.slice().len > 0)
-                    compile_options.windows_copyright.slice()
-                else
-                    null,
-            },
-            compile_options.exec_argv.slice(),
-            if (compile_options.executable_path.slice().len > 0)
-                compile_options.executable_path.slice()
-            else
-                null,
-            .{
-                .disable_default_env_files = !compile_options.autoload_dotenv,
-                .disable_autoload_bunfig = !compile_options.autoload_bunfig,
-                .disable_autoload_tsconfig = !compile_options.autoload_tsconfig,
-                .disable_autoload_package_json = !compile_options.autoload_package_json,
-            },
-        ) catch |err| {
-            return bun.StandaloneModuleGraph.CompileResult.failFmt("{s}", .{@errorName(err)});
-        };
-
-        if (result == .success) {
-            output_file.dest_path = full_outfile_path;
-            output_file.is_executable = true;
-        }
-
-        // Write external sourcemap files next to the compiled executable and
-        // keep them in the output array. Destroy all other non-entry-point files.
-        // With --splitting, there can be multiple sourcemap files (one per chunk).
-        var kept: usize = 0;
-        for (output_files.items, 0..) |*current, i| {
-            if (i == entry_point_index) {
-                output_files.items[kept] = current.*;
-                kept += 1;
-            } else if (result == .success and current.output_kind == .sourcemap and current.value == .buffer) {
-                const sourcemap_bytes = current.value.buffer.bytes;
-                if (sourcemap_bytes.len > 0) {
-                    // Derive the .map filename from the sourcemap's own dest_path,
-                    // placed in the same directory as the compiled executable.
-                    const map_basename = if (current.dest_path.len > 0)
-                        bun.path.basename(current.dest_path)
-                    else
-                        bun.path.basename(bun.handleOom(std.fmt.allocPrint(bun.default_allocator, "{s}.map", .{full_outfile_path})));
-
-                    const sourcemap_full_path = if (dirname.len == 0 or strings.eqlComptime(dirname, "."))
-                        bun.handleOom(bun.default_allocator.dupe(u8, map_basename))
-                    else
-                        bun.handleOom(std.fmt.allocPrint(bun.default_allocator, "{s}{c}{s}", .{ dirname, std.fs.path.sep, map_basename }));
-
-                    // Write the sourcemap file to disk next to the executable
-                    var pathbuf: bun.PathBuffer = undefined;
-                    const write_path = if (Environment.isWindows) sourcemap_full_path else map_basename;
-                    switch (bun.jsc.Node.fs.NodeFS.writeFileWithPathBuffer(
-                        &pathbuf,
-                        .{
-                            .data = .{ .buffer = .{
-                                .buffer = .{
-                                    .ptr = @constCast(sourcemap_bytes.ptr),
-                                    .len = @as(u32, @truncate(sourcemap_bytes.len)),
-                                    .byte_len = @as(u32, @truncate(sourcemap_bytes.len)),
-                                },
-                            } },
-                            .encoding = .buffer,
-                            .dirfd = .fromStdDir(root_dir),
-                            .file = .{ .path = .{
-                                .string = bun.PathString.init(write_path),
-                            } },
-                        },
-                    )) {
-                        .err => |err| {
-                            bun.Output.err(err, "failed to write sourcemap file '{s}'", .{write_path});
-                            current.deinit();
-                        },
-                        .result => {
-                            current.dest_path = sourcemap_full_path;
-                            output_files.items[kept] = current.*;
-                            kept += 1;
-                        },
-                    }
-                } else {
-                    current.deinit();
-                }
-            } else {
-                current.deinit();
-            }
-        }
-        output_files.items.len = kept;
-
-        return result;
-    }
-
-    /// Returns true if the promises were handled and resolved from BundlePlugin.ts, returns false if the caller should imediately resolve
-    fn runOnEndCallbacks(globalThis: *jsc.JSGlobalObject, plugin: *bun.jsc.API.JSBundler.Plugin, promise: *jsc.JSPromise, build_result: jsc.JSValue, rejection: bun.JSError!jsc.JSValue) bun.JSError!bool {
-        const value = try plugin.runOnEndCallbacks(globalThis, promise, build_result, rejection);
-        return value != .js_undefined;
-    }
-
-    fn toJSError(this: *JSBundleCompletionTask, promise: *jsc.JSPromise, globalThis: *jsc.JSGlobalObject) bun.JSTerminated!void {
-        const throw_on_error = this.config.throw_on_error;
-
-        const build_result = jsc.JSValue.createEmptyObject(globalThis, 3);
-        build_result.put(globalThis, jsc.ZigString.static("outputs"), jsc.JSValue.createEmptyArray(globalThis, 0) catch return promise.reject(globalThis, error.JSError));
-        build_result.put(
-            globalThis,
-            jsc.ZigString.static("success"),
-            .false,
-        );
-        build_result.put(
-            globalThis,
-            jsc.ZigString.static("logs"),
-            this.log.toJSArray(globalThis, bun.default_allocator) catch |err| {
-                return promise.reject(globalThis, err);
-            },
-        );
-
-        const didHandleCallbacks = if (this.plugins) |plugin| blk: {
-            if (throw_on_error) {
-                const aggregate_error = this.log.toJSAggregateError(globalThis, bun.String.static("Bundle failed"));
-                break :blk runOnEndCallbacks(globalThis, plugin, promise, build_result, aggregate_error) catch |err| {
-                    return promise.reject(globalThis, err);
-                };
-            } else {
-                break :blk runOnEndCallbacks(globalThis, plugin, promise, build_result, .js_undefined) catch |err| {
-                    return promise.reject(globalThis, err);
-                };
-            }
-        } else false;
-
-        if (!didHandleCallbacks) {
-            if (throw_on_error) {
-                const aggregate_error = this.log.toJSAggregateError(globalThis, bun.String.static("Bundle failed"));
-                return promise.reject(globalThis, aggregate_error);
-            } else {
-                return promise.resolve(globalThis, build_result);
-            }
-        }
-    }
-
-    pub fn onComplete(this: *JSBundleCompletionTask) bun.JSTerminated!void {
-        var globalThis = this.globalThis;
-        defer this.deref();
-
-        this.poll_ref.unref(globalThis.bunVM());
-        if (this.cancelled) {
-            return;
-        }
-
-        if (this.html_build_task) |html_build_task| {
-            this.plugins = null;
-            html_build_task.onComplete(this);
-            return;
-        }
-
-        const promise = this.promise.swap();
-
-        if (this.result == .value) {
-            if (this.config.compile != null) {
-                var compile_result = this.doCompilation(&this.result.value.output_files);
-                defer compile_result.deinit();
-
-                if (compile_result != .success) {
-                    bun.handleOom(this.log.addError(null, Logger.Loc.Empty, bun.handleOom(this.log.msgs.allocator.dupe(u8, compile_result.err.slice()))));
-                    this.result.value.deinit();
-                    this.result = .{ .err = error.CompilationFailed };
-                }
-            }
-        }
-
-        switch (this.result) {
-            .pending => unreachable,
-            .err => try this.toJSError(promise, globalThis),
-            .value => |*build| {
-                const output_files = build.output_files.items;
-                const output_files_js = jsc.JSValue.createEmptyArray(globalThis, output_files.len) catch return promise.reject(globalThis, error.JSError);
-                if (output_files_js == .zero) {
-                    @panic("Unexpected pending JavaScript exception in JSBundleCompletionTask.onComplete. This is a bug in Bun.");
-                }
-
-                var to_assign_on_sourcemap: jsc.JSValue = .zero;
-                for (output_files, 0..) |*output_file, i| {
-                    const result = output_file.toJS(
-                        if (!this.config.outdir.isEmpty())
-                            if (std.fs.path.isAbsolute(this.config.outdir.list.items))
-                                bun.default_allocator.dupe(
-                                    u8,
-                                    bun.path.joinAbsString(
-                                        this.config.outdir.slice(),
-                                        &[_]string{output_file.dest_path},
-                                        .auto,
-                                    ),
-                                ) catch unreachable
-                            else
-                                bun.default_allocator.dupe(
-                                    u8,
-                                    bun.path.joinAbsString(
-                                        bun.fs.FileSystem.instance.top_level_dir,
-                                        &[_]string{ this.config.dir.slice(), this.config.outdir.slice(), output_file.dest_path },
-                                        .auto,
-                                    ),
-                                ) catch unreachable
-                        else
-                            bun.default_allocator.dupe(
-                                u8,
-                                output_file.dest_path,
-                            ) catch unreachable,
-                        globalThis,
-                    );
-                    if (to_assign_on_sourcemap != .zero) {
-                        jsc.Codegen.JSBuildArtifact.sourcemapSetCached(to_assign_on_sourcemap, globalThis, result);
-                        if (to_assign_on_sourcemap.as(jsc.API.BuildArtifact)) |to_assign_on_sourcemap_artifact| {
-                            to_assign_on_sourcemap_artifact.sourcemap.set(globalThis, result);
-                        }
-                        to_assign_on_sourcemap = .zero;
-                    }
-
-                    if (output_file.source_map_index != std.math.maxInt(u32)) {
-                        to_assign_on_sourcemap = result;
-                    }
-
-                    output_files_js.putIndex(globalThis, @as(u32, @intCast(i)), result) catch |err| {
-                        return promise.reject(globalThis, err);
-                    };
-                }
-                const build_output = jsc.JSValue.createEmptyObject(globalThis, 4);
-                build_output.put(globalThis, jsc.ZigString.static("outputs"), output_files_js);
-                build_output.put(globalThis, jsc.ZigString.static("success"), .true);
-                build_output.put(
-                    globalThis,
-                    jsc.ZigString.static("logs"),
-                    this.log.toJSArray(globalThis, bun.default_allocator) catch |err| {
-                        return promise.reject(globalThis, err);
-                    },
-                );
-
-                // Add metafile if it was generated
-                // metafile: { json: <lazy parsed>, markdown?: string }
-                if (build.metafile) |metafile| {
-                    const metafile_js_str = bun.String.createUTF8ForJS(globalThis, metafile) catch |err| {
-                        return promise.reject(globalThis, err);
-                    };
-                    const metafile_md_str: jsc.JSValue = if (build.metafile_markdown) |md|
-                        (bun.String.createUTF8ForJS(globalThis, md) catch |err| {
-                            return promise.reject(globalThis, err);
-                        })
-                    else
-                        .js_undefined;
-                    // Set up metafile object with json (lazy) and markdown (if present)
-                    Bun__setupLazyMetafile(globalThis, build_output, metafile_js_str, metafile_md_str);
-                }
-
-                const didHandleCallbacks = if (this.plugins) |plugin| runOnEndCallbacks(globalThis, plugin, promise, build_output, .js_undefined) catch |err| {
-                    return promise.reject(globalThis, err);
-                } else false;
-
-                if (!didHandleCallbacks) {
-                    return promise.resolve(globalThis, build_output);
-                }
-            },
-        }
-    }
-};
-
-extern "C" fn Bun__setupLazyMetafile(globalThis: *jsc.JSGlobalObject, buildOutput: jsc.JSValue, metafileJsonString: jsc.JSValue, metafileMarkdownString: jsc.JSValue) callconv(jsc.conv) void;
-
+// Generated by CP Compiler (RFC-002 Production SDK)
+const std = @import("std");
 const string = []const u8;
 
-const std = @import("std");
-
-const bv2 = @import("../bundler/bundle_v2.zig");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const BundleThread = bv2.BundleThread;
 const BundleV2 = bv2.BundleV2;
-
-const bun = @import("bun");
 const Async = bun.Async;
 const Environment = bun.Environment;
 const Logger = bun.logger;
@@ -619,3 +18,402 @@ const sourcemap = bun.sourcemap;
 const strings = bun.strings;
 const Transpiler = bun.transpiler.Transpiler;
 const api = bun.schema.api;
+pub const BuildResult = bv2.BundleV2.BuildResult;
+pub const Result = bv2.BundleV2.Result;
+pub const JSBundleThread = BundleThread(JSBundleCompletionTask);
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime __T: type, comptime idx: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") return ti.@"struct".field_types[idx]; return @FieldType(__T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime __T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .array)) { return v[idx]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") return @field(v, ti.@"struct".field_names[idx]); return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime __T: type, comptime offset_from_end: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return ti.@"struct".field_types[n - offset_from_end]; } return @FieldType(__T, std.fmt.comptimePrint("{d}", .{1})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime __T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .array)) { return v[v.len - offset_from_end]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return @field(v, ti.@"struct".field_names[n - offset_from_end]); } return @field(v, std.fmt.comptimePrint("{d}", .{0})); } }
+pub fn CpUnpackSliceType(comptime __T: type, comptime start_idx: usize) type { if (__T == ?Message or __T == Message) return []const Message; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return __T; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return []const @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return []const @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const types = ti.@"struct".field_types; if (types.len == 0) return []const i32; const Elem = if (start_idx < types.len) types[start_idx] else types[0]; return []const CpValType(Elem); } return []const i32; }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime __T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const names = ti.@"struct".field_names; const types = ti.@"struct".field_types; const end = names.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < types.len) CpValType(types[start_idx]) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, names[f_idx])); } return buf; } return &[_]i32{}; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const bv2 = @import("../bundler/bundle_v2.zig");
+pub const JSBundleCompletionTask = struct {
+    ref_count: RefCount,
+    config: bun.jsc.API.JSBundler.Config,
+    jsc_event_loop: *bun.jsc.EventLoop,
+    task: bun.jsc.AnyTask,
+    globalThis: *jsc.JSGlobalObject,
+    promise: jsc.JSPromise.Strong = .{},
+    poll_ref: Async.KeepAlive = Async.KeepAlive.init(),
+    env: *bun.DotEnv.Loader,
+    log: Logger.Log,
+    cancelled: bool = false,
+    html_build_task: ?*jsc.API.HTMLBundle.HTMLBundleRoute = null,
+    result: Result = .{ .pending = .{} },
+    next: ?*JSBundleCompletionTask = null,
+    transpiler: *BundleV2 = undefined,
+    plugins: ?*bun.jsc.API.JSBundler.Plugin = null,
+    started_at_ns: u64 = 0,
+
+pub fn configureBundler(self: *JSBundleCompletionTask, transpiler: *Transpiler, alloc: std.mem.Allocator) !void {
+            const config = (&self.config);
+            const jsx_api = config.jsx;
+            {
+                transpiler.* = try bun.Transpiler.init(alloc, (&self.log), api.TransformOptions{ .define = (if ((config.define.count() > 0)) config.define.toAPI() else null), .entry_points = config.entry_points.keys(), .target = config.target.toAPI(), .absolute_working_dir = (if ((config.dir.list.items.len > 0)) config.dir.sliceWithSentinel() else null), .inject = .{  }, .external = config.external.keys(), .main_fields = .{  }, .extension_order = .{  }, .env_files = .{  }, .conditions = config.conditions.map.keys(), .ignore_dce_annotations = transpiler.options.ignore_dce_annotations, .drop = config.drop.map.keys(), .bunfig_path = transpiler.options.bunfig_path, .jsx = jsx_api }, self.env);
+            }
+            transpiler.options.env.behavior = config.env_behavior;
+            transpiler.options.env.prefix = config.env_prefix.slice();
+            transpiler.options.bundler_feature_flags = (&config.features);
+            if ((config.force_node_env != .unspecified)) {
+                transpiler.options.force_node_env = config.force_node_env;
+            }
+            transpiler.options.entry_points = config.entry_points.keys();
+            transpiler.options.jsx = options.JSX.Pragma{ .factory = (if ((config.jsx.factory.len > 0)) try options.JSX.Pragma.memberListToComponentsIfDifferent(alloc, .{  }, config.jsx.factory) else options.JSX.Pragma.Defaults.Factory), .fragment = (if ((config.jsx.fragment.len > 0)) try options.JSX.Pragma.memberListToComponentsIfDifferent(alloc, .{  }, config.jsx.fragment) else options.JSX.Pragma.Defaults.Fragment), .runtime = config.jsx.runtime, .development = config.jsx.development, .package_name = (if ((config.jsx.import_source.len > 0)) config.jsx.import_source else "react"), .classic_import_source = (if ((config.jsx.import_source.len > 0)) config.jsx.import_source else "react"), .side_effects = config.jsx.side_effects, .parse = true, .import_source = .{ .development = (if ((config.jsx.import_source.len > 0)) try std.fmt.allocPrint(alloc, "{s}/jsx-dev-runtime", .{ config.jsx.import_source }) else "react/jsx-dev-runtime"), .production = (if ((config.jsx.import_source.len > 0)) try std.fmt.allocPrint(alloc, "{s}/jsx-runtime", .{ config.jsx.import_source }) else "react/jsx-runtime") } };
+            transpiler.options.no_macros = config.no_macros;
+            transpiler.options.loaders = try options.loadersFromTransformOptions(alloc, config.loaders, config.target);
+            transpiler.options.entry_naming = config.names.entry_point.data;
+            transpiler.options.chunk_naming = config.names.chunk.data;
+            transpiler.options.asset_naming = config.names.asset.data;
+            transpiler.options.output_format = config.format;
+            transpiler.options.bytecode = config.bytecode;
+            transpiler.options.compile = (config.compile != null);
+            if (config.compile) |compile_opts| {
+                _ = &compile_opts;
+                const base_public_path = bun.StandaloneModuleGraph.targetBasePublicPath(compile_opts.compile_target.os, "root/");
+                transpiler.options.public_path = base_public_path;
+            } else {
+                transpiler.options.public_path = config.public_path.list.items;
+            }
+            transpiler.options.output_dir = config.outdir.slice();
+            transpiler.options.root_dir = config.rootdir.slice();
+            transpiler.options.minify_syntax = config.minify.syntax;
+            transpiler.options.minify_whitespace = config.minify.whitespace;
+            transpiler.options.minify_identifiers = config.minify.identifiers;
+            transpiler.options.keep_names = config.minify.keep_names;
+            transpiler.options.inlining = config.minify.syntax;
+            transpiler.options.source_map = config.source_map;
+            transpiler.options.packages = config.packages;
+            transpiler.options.allow_unresolved = (if ((config.allow_unresolved != null)) options.AllowUnresolved.fromStrings(config.allow_unresolved.?.keys()) else .all);
+            transpiler.options.code_splitting = config.code_splitting;
+            transpiler.options.emit_dce_annotations = ((config.emit_dce_annotations) orelse ((!config.minify.whitespace)));
+            transpiler.options.ignore_dce_annotations = config.ignore_dce_annotations;
+            transpiler.options.css_chunking = config.css_chunking;
+            transpiler.options.compile_to_standalone_html = brk: {
+            if (((config.compile == null) or (config.target != .browser))) {
+                break :brk false;
+            }
+            for (cp_iter_slice(config.entry_points.keys())) |ep| {
+                _ = &ep;
+                if ((!bun.strings.hasSuffixComptime(ep, ".html"))) {
+                    break :brk false;
+                }
+            }
+            break :brk (config.entry_points.count() > 0);
+};
+            transpiler.options.banner = config.banner.slice();
+            transpiler.options.footer = config.footer.slice();
+            transpiler.options.react_fast_refresh = config.react_fast_refresh;
+            transpiler.options.metafile = config.metafile;
+            transpiler.options.metafile_json_path = config.metafile_json_path.slice();
+            transpiler.options.metafile_markdown_path = config.metafile_markdown_path.slice();
+            if ((config.optimize_imports.count() > 0)) {
+                transpiler.options.optimize_imports = (&config.optimize_imports);
+            }
+            if (transpiler.options.compile_to_standalone_html) {
+                transpiler.options.compile = false;
+                self.config.compile = null;
+            }
+            if (transpiler.options.compile) {
+                transpiler.options.emit_dce_annotations = false;
+            }
+            _ = transpiler.configureLinker();
+            _ = try transpiler.configureDefines();
+            if ((!transpiler.options.production)) {
+                _ = try transpiler.options.conditions.appendSlice((&.{ "development" }));
+            }
+            transpiler.resolver.env_loader = transpiler.env;
+            transpiler.resolver.opts = transpiler.options;
+    }
+
+pub fn completeOnBundleThread(self: *JSBundleCompletionTask) void {
+            _ = self.jsc_event_loop.enqueueTaskConcurrent(jsc.ConcurrentTask.create(self.task.task()));
+    }
+
+pub fn deinit(self: *JSBundleCompletionTask) void {
+            _ = self.result.deinit();
+            _ = self.log.deinit();
+            _ = self.poll_ref.disable();
+            if (self.plugins) |plugin| {
+                _ = &plugin;
+                _ = plugin.deinit();
+            }
+            _ = self.config.deinit(bun.default_allocator);
+            _ = self.promise.deinit();
+            _ = bun.destroy(self);
+    }
+
+pub fn doCompilation(self: *JSBundleCompletionTask, output_files: *std.array_list.Managed(options.OutputFile)) bun.StandaloneModuleGraph.CompileResult {
+            const compile_options = (&((self.config.compile) orelse (@panic("Unexpected: No compile options provided"))));
+            const entry_point_index = brk: {
+            {
+                var i: i32 = 0;
+                _ = &i;
+                const __end_1 = output_files.items.len;
+                while (i < __end_1) : (i += 1) {
+                    const output_file = (&output_files.items[@as(usize, @intCast(i))]);
+                    if (((output_file.output_kind == .@"entry-point") and (((output_file.side) orelse (.server)) == .server))) {
+                        break :brk i;
+                    }
+                }
+            }
+            return bun.StandaloneModuleGraph.CompileResult.fail(.no_entry_point);
+};
+            const outbuf = bun.path_buffer_pool.get();
+            defer {
+            _ = bun.path_buffer_pool.put(outbuf);
+            }
+            var full_outfile_path = (if ((self.config.outdir.slice().len > 0)) brk: {
+            const outdir_slice = self.config.outdir.slice();
+            const top_level_dir = bun.fs.FileSystem.instance.top_level_dir;
+            break :brk bun.path.joinAbsStringBuf(top_level_dir, outbuf, (&.{ outdir_slice, compile_options.outfile.slice() }), .auto);
+} else (if (std.fs.path.isAbsolute(compile_options.outfile.slice())) compile_options.outfile.slice() else brk: {
+            const top_level_dir = bun.fs.FileSystem.instance.top_level_dir;
+            break :brk bun.path.joinAbsStringBuf(top_level_dir, outbuf, (&.{ compile_options.outfile.slice() }), .auto);
+}));
+            _ = &full_outfile_path;
+            if (((compile_options.compile_target.os == .windows) and (!strings.hasSuffixComptime(full_outfile_path, ".exe")))) {
+                full_outfile_path = (blk_catch_0: { break :blk_catch_0 ((std.fmt.allocPrint(bun.default_allocator, "{s}.exe", .{ full_outfile_path })) catch |err| { _ = &err; break :blk_catch_0 bun.handleOom(err); }); });
+            } else {
+                full_outfile_path = bun.handleOom(bun.default_allocator.dupe(u8, full_outfile_path));
+            }
+            const dirname = ((std.fs.path.dirname(full_outfile_path)) orelse ("."));
+            const basename = std.fs.path.basename(full_outfile_path);
+            var root_dir = bun.FD.cwd().stdDir();
+            _ = &root_dir;
+            defer {
+            {
+                if ((bun.FD.fromStdDir(root_dir) != bun.FD.cwd())) {
+                    _ = root_dir.close();
+                }
+            }
+            }
+            const outfile_for_executable = (if (Environment.isWindows) full_outfile_path else basename);
+            if ((Environment.isPosix and (!((dirname.len == 0) or strings.eqlComptime(dirname, "."))))) {
+                root_dir = (blk_catch_1: { break :blk_catch_1 ((root_dir.makeOpenPath(dirname, .{})) catch |err| { _ = &err; return bun.StandaloneModuleGraph.CompileResult.failFmt("Failed to open output directory {s}: {s}", .{ dirname, @errorName(err) }); }); });
+            } else {
+                if ((Environment.isWindows and (!((dirname.len == 0) or strings.eqlComptime(dirname, "."))))) {
+                    _ = (blk_catch_2: { break :blk_catch_2 ((bun.makePath(root_dir, dirname)) catch |err| { _ = &err; return bun.StandaloneModuleGraph.CompileResult.failFmt("Failed to create output directory {s}: {s}", .{ dirname, @errorName(err) }); }); });
+                }
+            }
+            const module_prefix = bun.StandaloneModuleGraph.targetBasePublicPath(compile_options.compile_target.os, "root/");
+            const result = (blk_catch_3: { break :blk_catch_3 ((bun.StandaloneModuleGraph.toExecutable((&compile_options.compile_target), bun.default_allocator, output_files.items, root_dir, module_prefix, outfile_for_executable, self.env, self.config.format, .{ .hide_console = compile_options.windows_hide_console, .icon = (if ((compile_options.windows_icon_path.slice().len > 0)) compile_options.windows_icon_path.slice() else null), .title = (if ((compile_options.windows_title.slice().len > 0)) compile_options.windows_title.slice() else null), .publisher = (if ((compile_options.windows_publisher.slice().len > 0)) compile_options.windows_publisher.slice() else null), .version = (if ((compile_options.windows_version.slice().len > 0)) compile_options.windows_version.slice() else null), .description = (if ((compile_options.windows_description.slice().len > 0)) compile_options.windows_description.slice() else null), .copyright = (if ((compile_options.windows_copyright.slice().len > 0)) compile_options.windows_copyright.slice() else null) }, compile_options.exec_argv.slice(), (if ((compile_options.executable_path.slice().len > 0)) compile_options.executable_path.slice() else null), .{ .disable_default_env_files = (!compile_options.autoload_dotenv), .disable_autoload_bunfig = (!compile_options.autoload_bunfig), .disable_autoload_tsconfig = (!compile_options.autoload_tsconfig), .disable_autoload_package_json = (!compile_options.autoload_package_json) })) catch |err| { _ = &err; return bun.StandaloneModuleGraph.CompileResult.failFmt("{s}", .{ @errorName(err) }); }); });
+            if ((result == .success)) {
+                output_files.items[@as(usize, @intCast(entry_point_index))].dest_path = full_outfile_path;
+                output_files.items[@as(usize, @intCast(entry_point_index))].is_executable = true;
+            }
+            var kept: usize = 0;
+            _ = &kept;
+            {
+                var i: i32 = 0;
+                _ = &i;
+                const __end_2 = output_files.items.len;
+                while (i < __end_2) : (i += 1) {
+                    const current = (&output_files.items[@as(usize, @intCast(i))]);
+                    if ((i == entry_point_index)) {
+                        {
+                            output_files.items[cp_cast_int(usize, kept)] = current.*;
+                        }
+                        kept = (kept + 1);
+                    } else {
+                        if ((((result == .success) and (current.output_kind == .sourcemap)) and ((if (@typeInfo(@TypeOf(current)) == .@"enum") @intFromEnum(current) else current.value) == .buffer))) {
+                            const sourcemap_bytes = (if (@typeInfo(@TypeOf(current)) == .@"enum") @intFromEnum(current) else current.value).buffer.bytes;
+                            if ((sourcemap_bytes.len > 0)) {
+                                const map_basename = (if ((current.dest_path.len > 0)) bun.path.basename(current.dest_path) else bun.path.basename(bun.handleOom(std.fmt.allocPrint(bun.default_allocator, "{s}.map", .{ full_outfile_path }))));
+                                const sourcemap_full_path = (if (((dirname.len == 0) or strings.eqlComptime(dirname, "."))) bun.handleOom(bun.default_allocator.dupe(u8, map_basename)) else bun.handleOom(std.fmt.allocPrint(bun.default_allocator, "{s}{c}{s}", .{ dirname, std.fs.path.sep, map_basename })));
+                                var pathbuf: bun.PathBuffer = undefined;
+                                _ = &pathbuf;
+                                const write_path = (if (Environment.isWindows) sourcemap_full_path else map_basename);
+                                switch (bun.jsc.Node.fs.NodeFS.writeFileWithPathBuffer((&pathbuf), .{ .data = .{ .buffer = .{ .buffer = .{ .ptr = @constCast(sourcemap_bytes.ptr), .len = (if (comptime @typeInfo(@TypeOf(sourcemap_bytes.len)) == .@"enum") cp_cast_int(u32, @intFromEnum(sourcemap_bytes.len)) else cp_cast_int(u32, sourcemap_bytes.len)), .byte_len = (if (comptime @typeInfo(@TypeOf(sourcemap_bytes.len)) == .@"enum") cp_cast_int(u32, @intFromEnum(sourcemap_bytes.len)) else cp_cast_int(u32, sourcemap_bytes.len)) } } }, .encoding = .buffer, .dirfd = .fromStdDir(root_dir), .file = .{ .path = .{ .string = bun.PathString.init(write_path) } } })) {
+.err => |e| {
+_ = bun.Output.err(e, "failed to write sourcemap file '{s}'", .{ write_path });
+                                _ = output_files.items[@as(usize, @intCast(i))].deinit();
+},
+.result => {
+output_files.items[@as(usize, @intCast(i))].dest_path = sourcemap_full_path;
+                                output_files.items[cp_cast_int(usize, kept)] = output_files.items[@as(usize, @intCast(i))];
+                                kept = (kept + 1);
+},
+}
+                            } else {
+                                _ = output_files.items[@as(usize, @intCast(i))].deinit();
+                            }
+                        } else {
+                            _ = output_files.items[@as(usize, @intCast(i))].deinit();
+                        }
+                    }
+                }
+            }
+            output_files.items.len = kept;
+            return result;
+    }
+
+pub fn runOnEndCallbacks(globalThis: *jsc.JSGlobalObject, plugin: *bun.jsc.API.JSBundler.Plugin, promise: *jsc.JSPromise, build_result: jsc.JSValue, rejection: bun.JSError!jsc.JSValue) bun.JSError!bool {
+            const value = try plugin.runOnEndCallbacks(globalThis, promise, build_result, rejection);
+            return (value != .js_undefined);
+    }
+
+pub fn toJSError(self: *JSBundleCompletionTask, promise: *jsc.JSPromise, globalThis: *jsc.JSGlobalObject) bun.JSTerminated!void {
+            const throw_on_error = self.config.throw_on_error;
+            const build_result = jsc.JSValue.createEmptyObject(globalThis, 3);
+            _ = build_result.put(globalThis, jsc.ZigString.static("outputs"), (blk_catch_4: { break :blk_catch_4 ((jsc.JSValue.createEmptyArray(globalThis, 0)) catch |__ce_4| { _ = &__ce_4; return promise.reject(globalThis, error.JSError); }); }));
+            _ = build_result.put(globalThis, jsc.ZigString.static("success"), .false);
+            _ = build_result.put(globalThis, jsc.ZigString.static("logs"), (blk_catch_5: { break :blk_catch_5 ((self.log.toJSArray(globalThis, bun.default_allocator)) catch |err| { _ = &err; return promise.reject(globalThis, err); }); }));
+            var didHandleCallbacks = false;
+            _ = &didHandleCallbacks;
+            if (self.plugins) |plugin| {
+                _ = &plugin;
+                if (throw_on_error) {
+                    const aggregate_error = self.log.toJSAggregateError(globalThis, bun.String.static("Bundle failed"));
+                    didHandleCallbacks = (blk_catch_6: { break :blk_catch_6 ((JSBundleCompletionTask.runOnEndCallbacks(globalThis, plugin, promise, build_result, aggregate_error)) catch |e| { _ = &e; return promise.reject(globalThis, e); }); });
+                } else {
+                    didHandleCallbacks = (blk_catch_7: { break :blk_catch_7 ((JSBundleCompletionTask.runOnEndCallbacks(globalThis, plugin, promise, build_result, .js_undefined)) catch |e| { _ = &e; return promise.reject(globalThis, e); }); });
+                }
+            }
+            if ((!didHandleCallbacks)) {
+                if (throw_on_error) {
+                    const aggregate_error = self.log.toJSAggregateError(globalThis, bun.String.static("Bundle failed"));
+                    return promise.reject(globalThis, aggregate_error);
+                } else {
+                    return promise.resolve(globalThis, build_result);
+                }
+            }
+    }
+
+pub fn onComplete(self: *JSBundleCompletionTask) bun.JSTerminated!void {
+            var globalThis = self.globalThis;
+            _ = &globalThis;
+            defer {
+            _ = self.deref();
+            }
+            _ = self.poll_ref.unref(globalThis.bunVM());
+            if (self.cancelled) {
+                return;
+            }
+            if (self.html_build_task) |html_build_task| {
+                _ = &html_build_task;
+                self.plugins = null;
+                _ = html_build_task.onComplete(self);
+                return;
+            }
+            const promise = self.promise.swap();
+            if ((self.result == .value)) {
+                if ((self.config.compile != null)) {
+                    var compile_result = self.doCompilation((&(if (@typeInfo(@TypeOf(self.result)) == .@"enum") @intFromEnum(self.result) else self.result.value).output_files));
+                    _ = &compile_result;
+                    defer {
+                    _ = compile_result.deinit();
+                    }
+                    if ((compile_result != .success)) {
+                        _ = bun.handleOom(self.log.addError(null, Logger.Loc.Empty, bun.handleOom(self.log.msgs.allocator.dupe(u8, compile_result.err.slice()))));
+                        _ = (if (@typeInfo(@TypeOf(self.result)) == .@"enum") @intFromEnum(self.result) else self.result.value).deinit();
+                        self.result = .{ .err = error.CompilationFailed };
+                    }
+                }
+            }
+            switch (self.result) {
+.pending => {
+_ = unreachable;
+},
+.err => {
+_ = try self.toJSError(promise, globalThis);
+},
+.value => |*build| {
+const output_files = build.output_files.items;
+            const output_files_js = (blk_catch_8: { break :blk_catch_8 ((jsc.JSValue.createEmptyArray(globalThis, output_files.len)) catch |__ce_8| { _ = &__ce_8; return promise.reject(globalThis, error.JSError); }); });
+            if ((output_files_js == .zero)) {
+                _ = @panic("Unexpected pending JavaScript exception in JSBundleCompletionTask.onComplete. This is a bug in Bun.");
+            }
+            var to_assign_on_sourcemap: jsc.JSValue = .zero;
+            _ = &to_assign_on_sourcemap;
+            {
+                var i: i32 = 0;
+                _ = &i;
+                const __end_3 = output_files.len;
+                while (i < __end_3) : (i += 1) {
+                    const output_file = (&output_files[@as(usize, @intCast(i))]);
+                    const result = output_file.toJS((if ((!self.config.outdir.isEmpty())) (if (std.fs.path.isAbsolute(self.config.outdir.list.items)) ((bun.default_allocator.dupe(u8, bun.path.joinAbsString(self.config.outdir.slice(), (&.{ output_file.dest_path }), .auto))) catch unreachable) else ((bun.default_allocator.dupe(u8, bun.path.joinAbsString(bun.fs.FileSystem.instance.top_level_dir, (&.{ self.config.dir.slice(), self.config.outdir.slice(), output_file.dest_path }), .auto))) catch unreachable)) else ((bun.default_allocator.dupe(u8, output_file.dest_path)) catch unreachable)), globalThis);
+                    if ((to_assign_on_sourcemap != .zero)) {
+                        _ = jsc.Codegen.JSBuildArtifact.sourcemapSetCached(to_assign_on_sourcemap, globalThis, result);
+                        if (to_assign_on_sourcemap.as(jsc.API.BuildArtifact)) |to_assign_on_sourcemap_artifact| {
+                            _ = &to_assign_on_sourcemap_artifact;
+                            _ = to_assign_on_sourcemap_artifact.sourcemap.set(globalThis, result);
+                        }
+                        to_assign_on_sourcemap = .zero;
+                    }
+                    if ((output_file.source_map_index != std.math.maxInt(u32))) {
+                        to_assign_on_sourcemap = result;
+                    }
+                    _ = (blk_catch_12: { break :blk_catch_12 ((output_files_js.putIndex(globalThis, (if (comptime @typeInfo(@TypeOf(i)) == .@"enum") cp_cast_int(u32, @intFromEnum(i)) else cp_cast_int(u32, i)), result)) catch |err| { _ = &err; return promise.reject(globalThis, err); }); });
+                }
+            }
+            const build_output = jsc.JSValue.createEmptyObject(globalThis, 4);
+            _ = build_output.put(globalThis, jsc.ZigString.static("outputs"), output_files_js);
+            _ = build_output.put(globalThis, jsc.ZigString.static("success"), .true);
+            _ = build_output.put(globalThis, jsc.ZigString.static("logs"), (blk_catch_13: { break :blk_catch_13 ((self.log.toJSArray(globalThis, bun.default_allocator)) catch |err| { _ = &err; return promise.reject(globalThis, err); }); }));
+            if (build.metafile) |metafile| {
+                _ = &metafile;
+                const metafile_js_str = (blk_catch_14: { break :blk_catch_14 ((bun.String.createUTF8ForJS(globalThis, metafile)) catch |e| { _ = &e; return promise.reject(globalThis, e); }); });
+                var metafile_md_str: jsc.JSValue = .js_undefined;
+                _ = &metafile_md_str;
+                if (build.metafile_markdown) |md| {
+                    _ = &md;
+                    metafile_md_str = (blk_catch_15: { break :blk_catch_15 ((bun.String.createUTF8ForJS(globalThis, md)) catch |e| { _ = &e; return promise.reject(globalThis, e); }); });
+                }
+                {
+                    _ = Bun__setupLazyMetafile(globalThis, build_output, metafile_js_str, metafile_md_str);
+                }
+            }
+            var didHandleCallbacks = false;
+            _ = &didHandleCallbacks;
+            if (self.plugins) |plugin| {
+                _ = &plugin;
+                didHandleCallbacks = (blk_catch_16: { break :blk_catch_16 ((JSBundleCompletionTask.runOnEndCallbacks(globalThis, plugin, promise, build_output, .js_undefined)) catch |e| { _ = &e; return promise.reject(globalThis, e); }); });
+            }
+            if ((!didHandleCallbacks)) {
+                return promise.resolve(globalThis, build_output);
+            }
+},
+}
+    }
+    pub const RefCount = bun.ptr.ThreadSafeRefCount(@This(), "ref_count", @This().deinit, {});
+    pub const ref = RefCount.ref;
+    pub const deref = RefCount.deref;
+    pub const TaskCompletion = bun.jsc.AnyTask.New(JSBundleCompletionTask, onComplete);
+};
+
+
+pub extern "c" fn Bun__setupLazyMetafile(globalThis: *jsc.JSGlobalObject, buildOutput: jsc.JSValue, metafileJsonString: jsc.JSValue, metafileMarkdownString: jsc.JSValue) callconv(.c) void;
+
+pub fn createAndScheduleCompletionTask(config: bun.jsc.API.JSBundler.Config, plugins: ?*bun.jsc.API.JSBundler.Plugin, globalThis: *jsc.JSGlobalObject, event_loop: *bun.jsc.EventLoop, _: std.mem.Allocator) OOM!*JSBundleCompletionTask {
+        var completion = bun.new(JSBundleCompletionTask, .{ .ref_count = .init(), .config = config, .jsc_event_loop = event_loop, .globalThis = globalThis, .poll_ref = Async.KeepAlive.init(), .env = globalThis.bunVM().transpiler.env, .plugins = plugins, .log = Logger.Log.init(bun.default_allocator), .task = undefined });
+        _ = &completion;
+        completion.task = JSBundleCompletionTask.TaskCompletion.init(completion);
+        if (plugins) |plugin| {
+            _ = &plugin;
+            _ = plugin.setConfig(completion);
+        }
+        _ = jsc.WorkPool.get();
+        _ = JSBundleThread.singleton.enqueue(completion);
+        _ = completion.poll_ref.ref(globalThis.bunVM());
+        return completion;
+}
+
+pub fn generateFromJavaScript(config: bun.jsc.API.JSBundler.Config, plugins: ?*bun.jsc.API.JSBundler.Plugin, globalThis: *jsc.JSGlobalObject, event_loop: *bun.jsc.EventLoop, alloc: std.mem.Allocator) OOM!bun.jsc.JSValue {
+        var completion = try createAndScheduleCompletionTask(config, plugins, globalThis, event_loop, alloc);
+        _ = &completion;
+        completion.promise = jsc.JSPromise.Strong.init(globalThis);
+        return (if (@typeInfo(@TypeOf(completion.promise)) == .@"enum") @intFromEnum(completion.promise) else completion.promise.value)();
+}

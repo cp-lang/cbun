@@ -1,136 +1,148 @@
-//! JSC bridges for `bun.install.Dependency`. Aliased back into
-//! `src/install/dependency.zig` so call sites are unchanged.
-
-pub fn versionToJS(dep: *const Dependency.Version, buf: []const u8, globalThis: *jsc.JSGlobalObject) bun.JSError!jsc.JSValue {
-    const object = jsc.JSValue.createEmptyObject(globalThis, 0);
-    object.put(globalThis, "type", try bun.String.static(@tagName(dep.tag)).toJS(globalThis));
-
-    switch (dep.tag) {
-        .dist_tag => {
-            object.put(globalThis, "name", try dep.value.dist_tag.name.toJS(buf, globalThis));
-            object.put(globalThis, "tag", try dep.value.dist_tag.tag.toJS(buf, globalThis));
-        },
-        .folder => {
-            object.put(globalThis, "folder", try dep.value.folder.toJS(buf, globalThis));
-        },
-        .git => {
-            object.put(globalThis, "owner", try dep.value.git.owner.toJS(buf, globalThis));
-            object.put(globalThis, "repo", try dep.value.git.repo.toJS(buf, globalThis));
-            object.put(globalThis, "ref", try dep.value.git.committish.toJS(buf, globalThis));
-        },
-        .github => {
-            object.put(globalThis, "owner", try dep.value.github.owner.toJS(buf, globalThis));
-            object.put(globalThis, "repo", try dep.value.github.repo.toJS(buf, globalThis));
-            object.put(globalThis, "ref", try dep.value.github.committish.toJS(buf, globalThis));
-        },
-        .npm => {
-            object.put(globalThis, "name", try dep.value.npm.name.toJS(buf, globalThis));
-            var version_str = try bun.String.createFormat("{f}", .{dep.value.npm.version.fmt(buf)});
-            object.put(globalThis, "version", try version_str.transferToJS(globalThis));
-            object.put(globalThis, "alias", jsc.JSValue.jsBoolean(dep.value.npm.is_alias));
-        },
-        .symlink => {
-            object.put(globalThis, "path", try dep.value.symlink.toJS(buf, globalThis));
-        },
-        .workspace => {
-            object.put(globalThis, "name", try dep.value.workspace.toJS(buf, globalThis));
-        },
-        .tarball => {
-            object.put(globalThis, "name", try dep.value.tarball.package_name.toJS(buf, globalThis));
-            switch (dep.value.tarball.uri) {
-                .local => |*local| {
-                    object.put(globalThis, "path", try local.toJS(buf, globalThis));
-                },
-                .remote => |*remote| {
-                    object.put(globalThis, "url", try remote.toJS(buf, globalThis));
-                },
-            }
-        },
-        else => {
-            return globalThis.throwTODO("Unsupported dependency type");
-        },
-    }
-
-    return object;
-}
-
-pub fn tagInferFromJS(globalObject: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
-    const arguments = callframe.arguments_old(1).slice();
-    if (arguments.len == 0 or !arguments[0].isString()) {
-        return .js_undefined;
-    }
-
-    const dependency_str = try arguments[0].toBunString(globalObject);
-    defer dependency_str.deref();
-    var as_utf8 = dependency_str.toUTF8(bun.default_allocator);
-    defer as_utf8.deinit();
-
-    const tag = Dependency.Version.Tag.infer(as_utf8.slice());
-    var str = bun.String.init(@tagName(tag));
-    return str.transferToJS(globalObject);
-}
-
-pub fn dependencyFromJS(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
-    const arguments = callframe.arguments_old(2).slice();
-    if (arguments.len == 1) {
-        return try bun.install.PackageManager.UpdateRequest.fromJS(globalThis, arguments[0]);
-    }
-    var arena = std.heap.ArenaAllocator.init(bun.default_allocator);
-    defer arena.deinit();
-    var stack = std.heap.stackFallback(1024, arena.allocator());
-    const allocator = stack.get();
-
-    const alias_value: jsc.JSValue = if (arguments.len > 0) arguments[0] else .js_undefined;
-
-    if (!alias_value.isString()) {
-        return .js_undefined;
-    }
-    const alias_slice = try alias_value.toSlice(globalThis, allocator);
-    defer alias_slice.deinit();
-
-    if (alias_slice.len == 0) {
-        return .js_undefined;
-    }
-
-    const name_value: jsc.JSValue = if (arguments.len > 1) arguments[1] else .js_undefined;
-    const name_slice = try name_value.toSlice(globalThis, allocator);
-    defer name_slice.deinit();
-
-    var name = alias_slice.slice();
-    var alias = alias_slice.slice();
-
-    var buf = alias;
-
-    if (name_value.isString()) {
-        var builder = bun.handleOom(bun.StringBuilder.initCapacity(allocator, name_slice.len + alias_slice.len));
-        name = builder.append(name_slice.slice());
-        alias = builder.append(alias_slice.slice());
-        buf = builder.allocatedSlice();
-    }
-
-    var log = logger.Log.init(allocator);
-    const sliced = SlicedString.init(buf, name);
-
-    const dep: Dependency.Version = Dependency.parse(allocator, SlicedString.init(buf, alias).value(), null, buf, &sliced, &log, null) orelse {
-        if (log.msgs.items.len > 0) {
-            return globalThis.throwValue(try log.toJS(globalThis, bun.default_allocator, "Failed to parse dependency"));
-        }
-
-        return .js_undefined;
-    };
-
-    if (log.msgs.items.len > 0) {
-        return globalThis.throwValue(try log.toJS(globalThis, bun.default_allocator, "Failed to parse dependency"));
-    }
-    log.deinit();
-
-    return dep.toJS(buf, globalThis);
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const bun = @import("bun");
 const jsc = bun.jsc;
 const logger = bun.logger;
 const Dependency = bun.install.Dependency;
 const SlicedString = bun.Semver.SlicedString;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+
+pub fn versionToJS(dep: *const Dependency.Version, buf: []const u8, globalThis: *jsc.JSGlobalObject) bun.JSError!jsc.JSValue {
+        const object = jsc.JSValue.createEmptyObject(globalThis, 0);
+        _ = object.put(globalThis, "type", try bun.String.static(@tagName(dep.tag)).toJS(globalThis));
+        switch (dep.tag) {
+.dist_tag => {
+_ = object.put(globalThis, "name", try (if (@typeInfo(@TypeOf((if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).dist_tag)) == .@"enum" or @typeInfo(@TypeOf((if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).dist_tag)) == .@"union") @tagName((if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).dist_tag) else (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).dist_tag.name).toJS(buf, globalThis));
+        _ = object.put(globalThis, "tag", try (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).dist_tag.tag.toJS(buf, globalThis));
+},
+.folder => {
+_ = object.put(globalThis, "folder", try (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).folder.toJS(buf, globalThis));
+},
+.git => {
+_ = object.put(globalThis, "owner", try (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).git.owner.toJS(buf, globalThis));
+        _ = object.put(globalThis, "repo", try (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).git.repo.toJS(buf, globalThis));
+        _ = object.put(globalThis, "ref", try (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).git.committish.toJS(buf, globalThis));
+},
+.github => {
+_ = object.put(globalThis, "owner", try (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).github.owner.toJS(buf, globalThis));
+        _ = object.put(globalThis, "repo", try (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).github.repo.toJS(buf, globalThis));
+        _ = object.put(globalThis, "ref", try (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).github.committish.toJS(buf, globalThis));
+},
+.npm => {
+_ = object.put(globalThis, "name", try (if (@typeInfo(@TypeOf((if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).npm)) == .@"enum" or @typeInfo(@TypeOf((if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).npm)) == .@"union") @tagName((if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).npm) else (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).npm.name).toJS(buf, globalThis));
+        var version_str = try bun.String.createFormat("{f}", .{ (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).npm.version.fmt(buf) });
+        _ = &version_str;
+        _ = object.put(globalThis, "version", try version_str.transferToJS(globalThis));
+        _ = object.put(globalThis, "alias", jsc.JSValue.jsBoolean((if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).npm.is_alias));
+},
+.symlink => {
+_ = object.put(globalThis, "path", try (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).symlink.toJS(buf, globalThis));
+},
+.workspace => {
+_ = object.put(globalThis, "name", try (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).workspace.toJS(buf, globalThis));
+},
+.tarball => {
+_ = object.put(globalThis, "name", try (if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).tarball.package_name.toJS(buf, globalThis));
+        switch ((if (@typeInfo(@TypeOf(dep)) == .@"enum") @intFromEnum(dep) else dep.value).tarball.uri) {
+.local => |*local| {
+_ = object.put(globalThis, "path", try local.toJS(buf, globalThis));
+},
+.remote => |*remote| {
+_ = object.put(globalThis, "url", try remote.toJS(buf, globalThis));
+},
+}
+},
+else => {
+return globalThis.throwTODO("Unsupported dependency type");
+},
+}
+        return object;
+}
+
+pub fn tagInferFromJS(globalObject: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
+        const arguments = callframe.arguments_old(1).slice();
+        if (((arguments.len == 0) or (!arguments[0].isString()))) {
+            return error.js_undefined;
+        }
+        const dependency_str = try arguments[0].toBunString(globalObject);
+        defer {
+        _ = dependency_str.deref();
+        }
+        var as_utf8 = dependency_str.toUTF8(bun.default_allocator);
+        _ = &as_utf8;
+        defer {
+        _ = as_utf8.deinit();
+        }
+        const tag = Dependency.Version.Tag.infer(as_utf8.slice());
+        var str = bun.String.init(@tagName(tag));
+        _ = &str;
+        return str.transferToJS(globalObject);
+}
+
+pub fn dependencyFromJS(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
+        const arguments = callframe.arguments_old(2).slice();
+        if ((arguments.len == 1)) {
+            return try bun.install.PackageManager.UpdateRequest.fromJS(globalThis, arguments[0]);
+        }
+        var arena_alloc = std.heap.ArenaAllocator.init(bun.default_allocator);
+        _ = &arena_alloc;
+        defer {
+        _ = arena_alloc.deinit();
+        }
+        var stack = std.heap.stackFallback(1024, arena_alloc.allocator());
+        _ = &stack;
+        const allocator = stack.get();
+        const alias_value: jsc.JSValue = (if ((arguments.len > 0)) arguments[0] else .js_undefined);
+        if ((!alias_value.isString())) {
+            return error.js_undefined;
+        }
+        const alias_slice = try alias_value.toSlice(globalThis, allocator);
+        defer {
+        _ = alias_slice.deinit();
+        }
+        if ((alias_slice.len == 0)) {
+            return error.js_undefined;
+        }
+        const name_value: jsc.JSValue = (if ((arguments.len > 1)) arguments[1] else .js_undefined);
+        const name_slice = try name_value.toSlice(globalThis, allocator);
+        defer {
+        _ = name_slice.deinit();
+        }
+        var name = alias_slice.slice();
+        _ = &name;
+        var alias = alias_slice.slice();
+        _ = &alias;
+        var buf = alias;
+        _ = &buf;
+        if (name_value.isString()) {
+            var builder = bun.handleOom(bun.StringBuilder.initCapacity(allocator, (name_slice.len + alias_slice.len)));
+            _ = &builder;
+            name = builder.append(name_slice.slice());
+            alias = builder.append(alias_slice.slice());
+            buf = builder.allocatedSlice();
+        }
+        var log = logger.Log.init(allocator);
+        _ = &log;
+        const sliced = SlicedString.init(buf, name);
+        const maybe_dep = Dependency.parse(allocator, (if (@typeInfo(@TypeOf(SlicedString.init(buf, alias))) == .@"enum") @intFromEnum(SlicedString.init(buf, alias)) else SlicedString.init(buf, alias).value)(), null, buf, (&sliced), log, null);
+        if ((maybe_dep == null)) {
+            if ((log.msgs.items.len > 0)) {
+                return globalThis.throwValue(try log.toJS(globalThis, bun.default_allocator, "Failed to parse dependency"));
+            }
+            return error.js_undefined;
+        }
+        const dep: Dependency.Version = maybe_dep.?;
+        if ((log.msgs.items.len > 0)) {
+            return globalThis.throwValue(try log.toJS(globalThis, bun.default_allocator, "Failed to parse dependency"));
+        }
+        _ = log.deinit();
+        return dep.toJS(buf, globalThis);
+}

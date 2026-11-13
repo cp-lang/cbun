@@ -194,3 +194,11 @@
 - **关键工程经验**：
   - `CodeCoverage.cp` 中 `@tls pub let map` 属性修饰符需置于 `pub` 之前；嵌套在 `struct` 内部的二级子结构体（如 `ReportText` / `ReportLcov`）提升至模块顶层并通过 `pub const Text = ReportText;` 导出别名，确保方法内 CP 表达式完整经过 `cpc` lowering。
   - 单参数 `.slice(offset)` 方法在 `cpc` 中默认映射为切片语法，对自定义类型的单参 `slice` 方法可通过 `const sliceFn = Type.slice; sliceFn(obj, arg)` 显式调用。
+
+
+## 2026-11-14: Milestone 7 Phase 7 闭环与借用生命周期优化
+- **新增 16 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - `src/bundler_jsc/` (6/6)、`src/install_jsc/` (6/6)、`src/watcher/` (4/5)。
+- **关键工程经验**：
+  - `JSBundleCompletionTask.cp` 中利用 CP 的 NLL（Non-Lexical Lifetimes）借用释放特性，将对 `this.config.compile` 的可变修改调整至只读借用 `config` 最后一次读取之后，零开销消除 `E0202` 借用冲突。
+  - `WindowsWatcher.cp` 中使用 `type OptionalEventIterator = EventIterator?;` 类型别名传入 `bun.sys.Maybe(OptionalEventIterator)`，以及 `(*w.OVERLAPPED)?` 表示可空指针类型，确保生成的 Zig 类型签名 100% 精确。

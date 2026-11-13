@@ -1,241 +1,187 @@
-//! Runtime plugin host (JS-side `Bun.plugin()` resolve hooks). Moved from
-//! `bundler/transpiler.zig` so `bundler/` is free of `JSValue`/`JSGlobalObject`.
-
-pub const MacroJSCtx = jsc.JSValue;
-pub const default_macro_js_value = jsc.JSValue.zero;
-
-pub const PluginRunner = struct {
-    global_object: *jsc.JSGlobalObject,
-    allocator: std.mem.Allocator,
-
-    pub fn extractNamespace(specifier: string) string {
-        const colon = strings.indexOfChar(specifier, ':') orelse return "";
-        if (Environment.isWindows and
-            colon == 1 and
-            specifier.len > 3 and
-            bun.path.isSepAny(specifier[2]) and
-            ((specifier[0] > 'a' and specifier[0] < 'z') or (specifier[0] > 'A' and specifier[0] < 'Z')))
-            return "";
-        return specifier[0..colon];
-    }
-
-    pub fn couldBePlugin(specifier: string) bool {
-        if (strings.lastIndexOfChar(specifier, '.')) |last_dor| {
-            const ext = specifier[last_dor + 1 ..];
-            // '.' followed by either a letter or a non-ascii character
-            // maybe there are non-ascii file extensions?
-            // we mostly want to cheaply rule out "../" and ".." and "./"
-            if (ext.len > 0 and ((ext[0] >= 'a' and ext[0] <= 'z') or (ext[0] >= 'A' and ext[0] <= 'Z') or ext[0] > 127))
-                return true;
-        }
-        return (!std.fs.path.isAbsolute(specifier) and strings.containsChar(specifier, ':'));
-    }
-
-    pub fn onResolve(
-        this: *PluginRunner,
-        specifier: []const u8,
-        importer: []const u8,
-        log: *logger.Log,
-        loc: logger.Loc,
-        target: jsc.JSGlobalObject.BunPluginTarget,
-    ) bun.JSError!?Fs.Path {
-        var global = this.global_object;
-        const namespace_slice = extractNamespace(specifier);
-        const namespace = if (namespace_slice.len > 0 and !strings.eqlComptime(namespace_slice, "file"))
-            bun.String.init(namespace_slice)
-        else
-            bun.String.empty;
-        const on_resolve_plugin = try global.runOnResolvePlugins(
-            namespace,
-            bun.String.init(specifier).substring(if (namespace.length() > 0) namespace.length() + 1 else 0),
-            bun.String.init(importer),
-            target,
-        ) orelse return null;
-        const path_value = try on_resolve_plugin.get(global, "path") orelse return null;
-        if (path_value.isEmptyOrUndefinedOrNull()) return null;
-        if (!path_value.isString()) {
-            log.addError(null, loc, "Expected \"path\" to be a string") catch unreachable;
-            return null;
-        }
-
-        const file_path = try path_value.toBunString(global);
-        defer file_path.deref();
-
-        if (file_path.length() == 0) {
-            log.addError(
-                null,
-                loc,
-                "Expected \"path\" to be a non-empty string in onResolve plugin",
-            ) catch unreachable;
-            return null;
-        } else if
-        // TODO: validate this better
-        (file_path.eqlComptime(".") or
-            file_path.eqlComptime("..") or
-            file_path.eqlComptime("...") or
-            file_path.eqlComptime(" "))
-        {
-            log.addError(
-                null,
-                loc,
-                "Invalid file path from onResolve plugin",
-            ) catch unreachable;
-            return null;
-        }
-        var static_namespace = true;
-        const user_namespace: bun.String = brk: {
-            if (try on_resolve_plugin.get(global, "namespace")) |namespace_value| {
-                if (!namespace_value.isString()) {
-                    log.addError(null, loc, "Expected \"namespace\" to be a string") catch unreachable;
-                    return null;
-                }
-
-                const namespace_str = try namespace_value.toBunString(global);
-                if (namespace_str.length() == 0) {
-                    namespace_str.deref();
-                    break :brk bun.String.init("file");
-                }
-
-                if (namespace_str.eqlComptime("file")) {
-                    namespace_str.deref();
-                    break :brk bun.String.init("file");
-                }
-
-                if (namespace_str.eqlComptime("bun")) {
-                    namespace_str.deref();
-                    break :brk bun.String.init("bun");
-                }
-
-                if (namespace_str.eqlComptime("node")) {
-                    namespace_str.deref();
-                    break :brk bun.String.init("node");
-                }
-
-                static_namespace = false;
-
-                break :brk namespace_str;
-            }
-
-            break :brk bun.String.init("file");
-        };
-        defer user_namespace.deref();
-
-        if (static_namespace) {
-            return Fs.Path.initWithNamespace(
-                std.fmt.allocPrint(this.allocator, "{f}", .{file_path}) catch unreachable,
-                user_namespace.byteSlice(),
-            );
-        } else {
-            return Fs.Path.initWithNamespace(
-                std.fmt.allocPrint(this.allocator, "{f}", .{file_path}) catch unreachable,
-                std.fmt.allocPrint(this.allocator, "{f}", .{user_namespace}) catch unreachable,
-            );
-        }
-    }
-
-    pub fn onResolveJSC(this: *const PluginRunner, namespace: bun.String, specifier: bun.String, importer: bun.String, target: jsc.JSGlobalObject.BunPluginTarget) bun.JSError!?jsc.ErrorableString {
-        var global = this.global_object;
-        const on_resolve_plugin = try global.runOnResolvePlugins(
-            if (namespace.length() > 0 and !namespace.eqlComptime("file"))
-                namespace
-            else
-                bun.String.static(""),
-            specifier,
-            importer,
-            target,
-        ) orelse return null;
-        if (!on_resolve_plugin.isObject()) return null;
-        const path_value = try on_resolve_plugin.get(global, "path") orelse return null;
-        if (path_value.isEmptyOrUndefinedOrNull()) return null;
-        if (!path_value.isString()) {
-            return jsc.ErrorableString.err(
-                error.JSErrorObject,
-                bun.String.static("Expected \"path\" to be a string in onResolve plugin").toErrorInstance(this.global_object),
-            );
-        }
-
-        const file_path = try path_value.toBunString(global);
-
-        if (file_path.length() == 0) {
-            return jsc.ErrorableString.err(
-                error.JSErrorObject,
-                bun.String.static("Expected \"path\" to be a non-empty string in onResolve plugin").toErrorInstance(this.global_object),
-            );
-        } else if
-        // TODO: validate this better
-        (file_path.eqlComptime(".") or
-            file_path.eqlComptime("..") or
-            file_path.eqlComptime("...") or
-            file_path.eqlComptime(" "))
-        {
-            return jsc.ErrorableString.err(
-                error.JSErrorObject,
-                bun.String.static("\"path\" is invalid in onResolve plugin").toErrorInstance(this.global_object),
-            );
-        }
-        var static_namespace = true;
-        const user_namespace: bun.String = brk: {
-            if (try on_resolve_plugin.get(global, "namespace")) |namespace_value| {
-                if (!namespace_value.isString()) {
-                    return jsc.ErrorableString.err(
-                        error.JSErrorObject,
-                        bun.String.static("Expected \"namespace\" to be a string").toErrorInstance(this.global_object),
-                    );
-                }
-
-                const namespace_str = try namespace_value.toBunString(global);
-                if (namespace_str.length() == 0) {
-                    break :brk bun.String.static("file");
-                }
-
-                if (namespace_str.eqlComptime("file")) {
-                    defer namespace_str.deref();
-                    break :brk bun.String.static("file");
-                }
-
-                if (namespace_str.eqlComptime("bun")) {
-                    defer namespace_str.deref();
-                    break :brk bun.String.static("bun");
-                }
-
-                if (namespace_str.eqlComptime("node")) {
-                    defer namespace_str.deref();
-                    break :brk bun.String.static("node");
-                }
-
-                static_namespace = false;
-
-                break :brk namespace_str;
-            }
-
-            break :brk bun.String.static("file");
-        };
-        defer user_namespace.deref();
-
-        // Our super slow way of cloning the string into memory owned by jsc
-        const combined_string = std.fmt.allocPrint(this.allocator, "{f}:{f}", .{ user_namespace, file_path }) catch unreachable;
-        var out_ = bun.String.init(combined_string);
-        defer out_.deref();
-        const jsval = out_.toJS(this.global_object) catch |err| {
-            this.allocator.free(combined_string);
-            return jsc.ErrorableString.err(err, this.global_object.tryTakeException() orelse .js_undefined);
-        };
-        const out = jsval.toBunString(this.global_object) catch |err| {
-            this.allocator.free(combined_string);
-            return jsc.ErrorableString.err(err, this.global_object.tryTakeException() orelse .js_undefined);
-        };
-        this.allocator.free(combined_string);
-        return jsc.ErrorableString.ok(out);
-    }
-};
-
+// Generated by CP Compiler (RFC-002 Production SDK)
+const std = @import("std");
 const string = []const u8;
 
-const std = @import("std");
-
-const bun = @import("bun");
 const Environment = bun.Environment;
 const Fs = bun.fs;
 const jsc = bun.jsc;
 const logger = bun.logger;
 const strings = bun.strings;
+pub const MacroJSCtx = jsc.JSValue;
+pub const default_macro_js_value = jsc.JSValue.zero;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const PluginRunner = struct {
+    global_object: *jsc.JSGlobalObject,
+    allocator: std.mem.Allocator,
+
+pub fn extractNamespace(specifier: []const u8) []const u8 {
+            const colon = ((strings.indexOfChar(specifier, 58)) orelse { return ""; });
+            if (((((Environment.isWindows and (colon == 1)) and (specifier.len > 3)) and bun.path.isSepAny(specifier[2])) and (((specifier[0] > 97) and (specifier[0] < 122)) or ((specifier[0] > 65) and (specifier[0] < 90))))) {
+                return "";
+            }
+            return specifier[0..colon];
+    }
+
+pub fn couldBePlugin(specifier: []const u8) bool {
+            if (strings.lastIndexOfChar(specifier, 46)) |last_dor| {
+                _ = &last_dor;
+                const ext = specifier[(last_dor + 1)..];
+                if (((ext.len > 0) and ((((ext[0] >= 97) and (ext[0] <= 122)) or ((ext[0] >= 65) and (ext[0] <= 90))) or (ext[0] > 127)))) {
+                    return true;
+                }
+            }
+            return ((!std.fs.path.isAbsolute(specifier)) and strings.containsChar(specifier, 58));
+    }
+
+pub fn onResolve(self: *PluginRunner, specifier: []const u8, importer: []const u8, log: *logger.Log, loc: logger.Loc, target: jsc.JSGlobalObject.BunPluginTarget) bun.JSError!?Fs.Path {
+            var global = self.global_object;
+            _ = &global;
+            const namespace_slice = PluginRunner.extractNamespace(specifier);
+            const namespace = (if (((namespace_slice.len > 0) and (!strings.eqlComptime(namespace_slice, "file")))) bun.String.init(namespace_slice) else bun.String.empty);
+            const on_resolve_plugin = ((try global.runOnResolvePlugins(namespace, cp_iter_slice(bun.String.init(specifier))[@intCast((if ((namespace.length() > 0)) (namespace.length() + 1) else 0))..], bun.String.init(importer), target)) orelse { return .{ .ok = null }; });
+            const path_value = ((try on_resolve_plugin.get(global, "path")) orelse { return .{ .ok = null }; });
+            if (path_value.isEmptyOrUndefinedOrNull()) {
+                return null;
+            }
+            if ((!path_value.isString())) {
+                _ = ((log.addError(null, loc, "Expected \"path\" to be a string")) catch unreachable);
+                return null;
+            }
+            const file_path = try path_value.toBunString(global);
+            defer {
+            _ = file_path.deref();
+            }
+            if ((file_path.length() == 0)) {
+                _ = ((log.addError(null, loc, "Expected \"path\" to be a non-empty string in onResolve plugin")) catch unreachable);
+                return null;
+            } else {
+                if ((((file_path.eqlComptime(".") or file_path.eqlComptime("..")) or file_path.eqlComptime("...")) or file_path.eqlComptime(" "))) {
+                    _ = ((log.addError(null, loc, "Invalid file path from onResolve plugin")) catch unreachable);
+                    return null;
+                }
+            }
+            var static_namespace = true;
+            _ = &static_namespace;
+            const user_namespace: bun.String = brk: {
+            if (try on_resolve_plugin.get(global, "namespace")) |namespace_value| {
+                _ = &namespace_value;
+                if ((!namespace_value.isString())) {
+                    _ = ((log.addError(null, loc, "Expected \"namespace\" to be a string")) catch unreachable);
+                    return null;
+                }
+                const namespace_str = try namespace_value.toBunString(global);
+                if ((namespace_str.length() == 0)) {
+                    _ = namespace_str.deref();
+                    break :brk bun.String.init("file");
+                }
+                if (namespace_str.eqlComptime("file")) {
+                    _ = namespace_str.deref();
+                    break :brk bun.String.init("file");
+                }
+                if (namespace_str.eqlComptime("bun")) {
+                    _ = namespace_str.deref();
+                    break :brk bun.String.init("bun");
+                }
+                if (namespace_str.eqlComptime("node")) {
+                    _ = namespace_str.deref();
+                    break :brk bun.String.init("node");
+                }
+                static_namespace = false;
+                break :brk namespace_str;
+            }
+            break :brk bun.String.init("file");
+};
+            defer {
+            _ = user_namespace.deref();
+            }
+            if (static_namespace) {
+                return Fs.Path.initWithNamespace(((std.fmt.allocPrint(self.allocator, "{f}", .{ file_path })) catch unreachable), user_namespace.byteSlice());
+            } else {
+                return Fs.Path.initWithNamespace(((std.fmt.allocPrint(self.allocator, "{f}", .{ file_path })) catch unreachable), ((std.fmt.allocPrint(self.allocator, "{f}", .{ user_namespace })) catch unreachable));
+            }
+    }
+
+pub fn onResolveJSC(self: PluginRunner, namespace: bun.String, specifier: bun.String, importer: bun.String, target: jsc.JSGlobalObject.BunPluginTarget) bun.JSError!?jsc.ErrorableString {
+            var global = self.global_object;
+            _ = &global;
+            const on_resolve_plugin = ((try global.runOnResolvePlugins((if (((namespace.length() > 0) and (!namespace.eqlComptime("file")))) namespace else bun.String.static("")), specifier, importer, target)) orelse { return .{ .ok = null }; });
+            if ((!on_resolve_plugin.isObject())) {
+                return null;
+            }
+            const path_value = ((try on_resolve_plugin.get(global, "path")) orelse { return .{ .ok = null }; });
+            if (path_value.isEmptyOrUndefinedOrNull()) {
+                return null;
+            }
+            if ((!path_value.isString())) {
+                return jsc.ErrorableString.err(error.JSErrorObject, bun.String.static("Expected \"path\" to be a string in onResolve plugin").toErrorInstance(self.global_object));
+            }
+            const file_path = try path_value.toBunString(global);
+            if ((file_path.length() == 0)) {
+                return jsc.ErrorableString.err(error.JSErrorObject, bun.String.static("Expected \"path\" to be a non-empty string in onResolve plugin").toErrorInstance(self.global_object));
+            } else {
+                if ((((file_path.eqlComptime(".") or file_path.eqlComptime("..")) or file_path.eqlComptime("...")) or file_path.eqlComptime(" "))) {
+                    return jsc.ErrorableString.err(error.JSErrorObject, bun.String.static("\"path\" is invalid in onResolve plugin").toErrorInstance(self.global_object));
+                }
+            }
+            var static_namespace = true;
+            _ = &static_namespace;
+            const user_namespace: bun.String = brk: {
+            if (try on_resolve_plugin.get(global, "namespace")) |namespace_value| {
+                _ = &namespace_value;
+                if ((!namespace_value.isString())) {
+                    return jsc.ErrorableString.err(error.JSErrorObject, bun.String.static("Expected \"namespace\" to be a string").toErrorInstance(self.global_object));
+                }
+                const namespace_str = try namespace_value.toBunString(global);
+                if ((namespace_str.length() == 0)) {
+                    break :brk bun.String.static("file");
+                }
+                if (namespace_str.eqlComptime("file")) {
+                    defer {
+                    _ = namespace_str.deref();
+                    }
+                    break :brk bun.String.static("file");
+                }
+                if (namespace_str.eqlComptime("bun")) {
+                    defer {
+                    _ = namespace_str.deref();
+                    }
+                    break :brk bun.String.static("bun");
+                }
+                if (namespace_str.eqlComptime("node")) {
+                    defer {
+                    _ = namespace_str.deref();
+                    }
+                    break :brk bun.String.static("node");
+                }
+                static_namespace = false;
+                break :brk namespace_str;
+            }
+            break :brk bun.String.static("file");
+};
+            defer {
+            _ = user_namespace.deref();
+            }
+            const combined_string = ((std.fmt.allocPrint(self.allocator, "{f}:{f}", .{ user_namespace, file_path })) catch unreachable);
+            var out_ = bun.String.init(combined_string);
+            _ = &out_;
+            defer {
+            _ = out_.deref();
+            }
+            const jsval = (blk_catch_8: { break :blk_catch_8 ((out_.toJS(self.global_object)) catch |err| { _ = &err; _ = self.allocator.free(combined_string);
+            return jsc.ErrorableString.err(err, ((self.global_object.tryTakeException()) orelse (.js_undefined))); }); });
+            const out = (blk_catch_9: { break :blk_catch_9 ((jsval.toBunString(self.global_object)) catch |err| { _ = &err; _ = self.allocator.free(combined_string);
+            return jsc.ErrorableString.err(err, ((self.global_object.tryTakeException()) orelse (.js_undefined))); }); });
+            _ = self.allocator.free(combined_string);
+            return jsc.ErrorableString.ok(out);
+    }
+};
+
