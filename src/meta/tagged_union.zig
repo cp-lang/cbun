@@ -1,236 +1,264 @@
-fn deinitImpl(comptime Union: type, value: *Union) void {
-    switch (std.meta.activeTag(value.*)) {
-        inline else => |tag| bun.memory.deinit(&@field(value, @tagName(tag))),
-    }
-    value.* = undefined;
-}
-
-/// Creates a tagged union with fields corresponding to `field_types`. The fields are named
-/// @"0", @"1", @"2", etc.
-pub fn TaggedUnion(comptime field_types: []const type) type {
-    // Types created with @Type can't contain decls, so in order to have a `deinit` method, we
-    // have to do it this way...
-    return switch (comptime field_types.len) {
-        0 => @compileError("cannot create an empty tagged union"),
-        1 => union(enum) {
-            @"0": field_types[0],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        2 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        3 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        4 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            @"3": field_types[3],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        5 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            @"3": field_types[3],
-            @"4": field_types[4],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        6 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            @"3": field_types[3],
-            @"4": field_types[4],
-            @"5": field_types[5],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        7 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            @"3": field_types[3],
-            @"4": field_types[4],
-            @"5": field_types[5],
-            @"6": field_types[6],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        8 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            @"3": field_types[3],
-            @"4": field_types[4],
-            @"5": field_types[5],
-            @"6": field_types[6],
-            @"7": field_types[7],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        9 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            @"3": field_types[3],
-            @"4": field_types[4],
-            @"5": field_types[5],
-            @"6": field_types[6],
-            @"7": field_types[7],
-            @"8": field_types[8],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        10 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            @"3": field_types[3],
-            @"4": field_types[4],
-            @"5": field_types[5],
-            @"6": field_types[6],
-            @"7": field_types[7],
-            @"8": field_types[8],
-            @"9": field_types[9],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        11 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            @"3": field_types[3],
-            @"4": field_types[4],
-            @"5": field_types[5],
-            @"6": field_types[6],
-            @"7": field_types[7],
-            @"8": field_types[8],
-            @"9": field_types[9],
-            @"10": field_types[10],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        12 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            @"3": field_types[3],
-            @"4": field_types[4],
-            @"5": field_types[5],
-            @"6": field_types[6],
-            @"7": field_types[7],
-            @"8": field_types[8],
-            @"9": field_types[9],
-            @"10": field_types[10],
-            @"11": field_types[11],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        13 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            @"3": field_types[3],
-            @"4": field_types[4],
-            @"5": field_types[5],
-            @"6": field_types[6],
-            @"7": field_types[7],
-            @"8": field_types[8],
-            @"9": field_types[9],
-            @"10": field_types[10],
-            @"11": field_types[11],
-            @"12": field_types[12],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        14 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            @"3": field_types[3],
-            @"4": field_types[4],
-            @"5": field_types[5],
-            @"6": field_types[6],
-            @"7": field_types[7],
-            @"8": field_types[8],
-            @"9": field_types[9],
-            @"10": field_types[10],
-            @"11": field_types[11],
-            @"12": field_types[12],
-            @"13": field_types[13],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        15 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            @"3": field_types[3],
-            @"4": field_types[4],
-            @"5": field_types[5],
-            @"6": field_types[6],
-            @"7": field_types[7],
-            @"8": field_types[8],
-            @"9": field_types[9],
-            @"10": field_types[10],
-            @"11": field_types[11],
-            @"12": field_types[12],
-            @"13": field_types[13],
-            @"14": field_types[14],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        16 => union(enum) {
-            @"0": field_types[0],
-            @"1": field_types[1],
-            @"2": field_types[2],
-            @"3": field_types[3],
-            @"4": field_types[4],
-            @"5": field_types[5],
-            @"6": field_types[6],
-            @"7": field_types[7],
-            @"8": field_types[8],
-            @"9": field_types[9],
-            @"10": field_types[10],
-            @"11": field_types[11],
-            @"12": field_types[12],
-            @"13": field_types[13],
-            @"14": field_types[14],
-            @"15": field_types[15],
-            pub fn deinit(self: *@This()) void {
-                deinitImpl(@This(), self);
-            }
-        },
-        else => @compileError("too many union fields"),
-    };
-}
-
-const bun = @import("bun");
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
+
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+
+pub fn deinitImpl(comptime Union: type, value: *Union) void {
+        switch (std.meta.activeTag(value.*)) {
+inline else => |tag| {
+_ = bun.memory.deinit((&@field(value, @tagName(tag))));
+},
+}
+        value.* = undefined;
+}
+
+pub fn at(comptime field_types: []const type, comptime i: usize) type {
+        return field_types[@as(usize, @intCast(i))];
+}
+
+pub fn TaggedUnion(comptime field_types: []const type) type {
+        return (switch (field_types.len) {
+0 => @compileError("cannot create an empty tagged union"),
+1 => union(enum) {
+    @"0": at(field_types,0),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+2 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+3 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+4 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+    @"3": at(field_types,3),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+5 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+    @"3": at(field_types,3),
+    @"4": at(field_types,4),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+6 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+    @"3": at(field_types,3),
+    @"4": at(field_types,4),
+    @"5": at(field_types,5),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+7 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+    @"3": at(field_types,3),
+    @"4": at(field_types,4),
+    @"5": at(field_types,5),
+    @"6": at(field_types,6),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+8 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+    @"3": at(field_types,3),
+    @"4": at(field_types,4),
+    @"5": at(field_types,5),
+    @"6": at(field_types,6),
+    @"7": at(field_types,7),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+9 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+    @"3": at(field_types,3),
+    @"4": at(field_types,4),
+    @"5": at(field_types,5),
+    @"6": at(field_types,6),
+    @"7": at(field_types,7),
+    @"8": at(field_types,8),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+10 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+    @"3": at(field_types,3),
+    @"4": at(field_types,4),
+    @"5": at(field_types,5),
+    @"6": at(field_types,6),
+    @"7": at(field_types,7),
+    @"8": at(field_types,8),
+    @"9": at(field_types,9),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+11 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+    @"3": at(field_types,3),
+    @"4": at(field_types,4),
+    @"5": at(field_types,5),
+    @"6": at(field_types,6),
+    @"7": at(field_types,7),
+    @"8": at(field_types,8),
+    @"9": at(field_types,9),
+    @"10": at(field_types,10),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+12 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+    @"3": at(field_types,3),
+    @"4": at(field_types,4),
+    @"5": at(field_types,5),
+    @"6": at(field_types,6),
+    @"7": at(field_types,7),
+    @"8": at(field_types,8),
+    @"9": at(field_types,9),
+    @"10": at(field_types,10),
+    @"11": at(field_types,11),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+13 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+    @"3": at(field_types,3),
+    @"4": at(field_types,4),
+    @"5": at(field_types,5),
+    @"6": at(field_types,6),
+    @"7": at(field_types,7),
+    @"8": at(field_types,8),
+    @"9": at(field_types,9),
+    @"10": at(field_types,10),
+    @"11": at(field_types,11),
+    @"12": at(field_types,12),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+14 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+    @"3": at(field_types,3),
+    @"4": at(field_types,4),
+    @"5": at(field_types,5),
+    @"6": at(field_types,6),
+    @"7": at(field_types,7),
+    @"8": at(field_types,8),
+    @"9": at(field_types,9),
+    @"10": at(field_types,10),
+    @"11": at(field_types,11),
+    @"12": at(field_types,12),
+    @"13": at(field_types,13),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+15 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+    @"3": at(field_types,3),
+    @"4": at(field_types,4),
+    @"5": at(field_types,5),
+    @"6": at(field_types,6),
+    @"7": at(field_types,7),
+    @"8": at(field_types,8),
+    @"9": at(field_types,9),
+    @"10": at(field_types,10),
+    @"11": at(field_types,11),
+    @"12": at(field_types,12),
+    @"13": at(field_types,13),
+    @"14": at(field_types,14),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+16 => union(enum) {
+    @"0": at(field_types,0),
+    @"1": at(field_types,1),
+    @"2": at(field_types,2),
+    @"3": at(field_types,3),
+    @"4": at(field_types,4),
+    @"5": at(field_types,5),
+    @"6": at(field_types,6),
+    @"7": at(field_types,7),
+    @"8": at(field_types,8),
+    @"9": at(field_types,9),
+    @"10": at(field_types,10),
+    @"11": at(field_types,11),
+    @"12": at(field_types,12),
+    @"13": at(field_types,13),
+    @"14": at(field_types,14),
+    @"15": at(field_types,15),
+
+pub fn deinit(self: *@This()) void {
+            _ = deinitImpl(@This(), self);
+    }
+},
+else => @compileError("too many union fields"),
+});
+}

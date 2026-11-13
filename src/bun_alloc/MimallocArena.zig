@@ -1,291 +1,321 @@
-//! This type is a `GenericAllocator`; see `src/allocators.zig`.
-
-const Self = @This();
-
-#heap: if (safety_checks) Owned(*DebugHeap) else *mimalloc.Heap,
-
-/// Uses the default thread-local heap. This type is zero-sized.
-///
-/// This type is a `GenericAllocator`; see `src/allocators.zig`.
-pub const Default = struct {
-    pub fn allocator(_: Default) std.mem.Allocator {
-        return .{ .ptr = undefined, .vtable = &global_mimalloc_vtable };
-    }
-};
-
-/// Borrowed version of `MimallocArena`, returned by `MimallocArena.borrow`.
-/// Using this type makes it clear who actually owns the `MimallocArena`, and prevents
-/// `deinit` from being called twice.
-///
-/// This type is a `GenericAllocator`; see `src/allocators.zig`.
-pub const Borrowed = struct {
-    #heap: BorrowedHeap,
-
-    pub fn allocator(self: Borrowed) std.mem.Allocator {
-        return .{ .ptr = self.#heap, .vtable = &heap_allocator_vtable };
-    }
-
-    /// Prefer `Default.allocator()` / `getThreadLocalDefault()` for a thread-safe
-    /// global allocator. This returns the process-wide main heap so that
-    /// `gc()` / `ownsPtr()` on the result remain meaningful.
-    pub fn getDefault() Borrowed {
-        const heap = mimalloc.mi_heap_main();
-        if (comptime !safety_checks) return .{ .#heap = heap };
-        const S = struct {
-            threadlocal var dbg: ?DebugHeap = null;
-        };
-        if (S.dbg == null) S.dbg = .{ .inner = heap, .thread_lock = .initLocked() };
-        return .{ .#heap = &S.dbg.? };
-    }
-
-    pub fn gc(self: Borrowed) void {
-        mimalloc.mi_heap_collect(self.getMimallocHeap(), false);
-    }
-
-    pub fn helpCatchMemoryIssues(self: Borrowed) void {
-        if (comptime bun.FeatureFlags.help_catch_memory_issues) {
-            self.gc();
-            bun.mimalloc.mi_collect(false);
-        }
-    }
-
-    pub fn ownsPtr(self: Borrowed, ptr: *const anyopaque) bool {
-        return mimalloc.mi_heap_contains(self.getMimallocHeap(), ptr);
-    }
-
-    fn fromOpaque(ptr: *anyopaque) Borrowed {
-        return .{ .#heap = @ptrCast(@alignCast(ptr)) };
-    }
-
-    fn getMimallocHeap(self: Borrowed) *mimalloc.Heap {
-        return if (comptime safety_checks) self.#heap.inner else self.#heap;
-    }
-
-    fn assertThreadLock(self: Borrowed) void {
-        if (comptime safety_checks) self.#heap.thread_lock.assertLocked();
-    }
-
-    fn alignedAlloc(self: Borrowed, len: usize, alignment: Alignment) ?[*]u8 {
-        log("Malloc: {d}\n", .{len});
-
-        const heap = self.getMimallocHeap();
-        const ptr: ?*anyopaque = if (mimalloc.mustUseAlignedAlloc(alignment))
-            mimalloc.mi_heap_malloc_aligned(heap, len, alignment.toByteUnits())
-        else
-            mimalloc.mi_heap_malloc(heap, len);
-
-        if (comptime bun.Environment.isDebug) {
-            const usable = mimalloc.mi_malloc_usable_size(ptr);
-            if (usable < len) {
-                std.debug.panic("mimalloc: allocated size is too small: {d} < {d}", .{ usable, len });
-            }
-        }
-
-        return if (ptr) |p|
-            @as([*]u8, @ptrCast(p))
-        else
-            null;
-    }
-
-    pub fn downcast(std_alloc: std.mem.Allocator) Borrowed {
-        bun.assertf(
-            std_alloc.vtable == &heap_allocator_vtable,
-            "not an owned MimallocArena heap (vtable is {*})",
-            .{std_alloc.vtable},
-        );
-        return .fromOpaque(std_alloc.ptr);
-    }
-};
-
-const BorrowedHeap = if (safety_checks) *DebugHeap else *mimalloc.Heap;
-
-const DebugHeap = struct {
-    inner: *mimalloc.Heap,
-    thread_lock: bun.safety.ThreadLock,
-
-    pub const deinit = void;
-};
-
-const log = bun.Output.scoped(.mimalloc, .hidden);
-
-pub fn allocator(self: Self) std.mem.Allocator {
-    return self.borrow().allocator();
-}
-
-pub fn borrow(self: Self) Borrowed {
-    return .{ .#heap = if (comptime safety_checks) self.#heap.get() else self.#heap };
-}
-
-/// In v3, `mi_malloc`/`mi_free` are already thread-local-fast — there is no
-/// per-thread default heap to cache. Route through the global vtable.
-pub fn getThreadLocalDefault() std.mem.Allocator {
-    if (bun.Environment.enable_asan) return bun.default_allocator;
-    return .{ .ptr = undefined, .vtable = &global_mimalloc_vtable };
-}
-
-pub fn backingAllocator(_: Self) std.mem.Allocator {
-    return getThreadLocalDefault();
-}
-
-pub fn dumpThreadStats(_: Self) void {
-    const dump_fn = struct {
-        pub fn dump(textZ: [*:0]const u8, _: ?*anyopaque) callconv(.c) void {
-            const text = bun.span(textZ);
-            bun.Output.errorWriter().writeAll(text) catch {};
-        }
-    }.dump;
-    mimalloc.mi_thread_stats_print_out(dump_fn, null);
-    bun.Output.flush();
-}
-
-pub fn dumpStats(_: Self) void {
-    const dump_fn = struct {
-        pub fn dump(textZ: [*:0]const u8, _: ?*anyopaque) callconv(.c) void {
-            const text = bun.span(textZ);
-            bun.Output.errorWriter().writeAll(text) catch {};
-        }
-    }.dump;
-    mimalloc.mi_stats_print_out(dump_fn, null);
-    bun.Output.flush();
-}
-
-pub fn deinit(self: *Self) void {
-    const mimalloc_heap = self.borrow().getMimallocHeap();
-    if (comptime safety_checks) {
-        self.#heap.deinit();
-    }
-    mimalloc.mi_heap_destroy(mimalloc_heap);
-    self.* = undefined;
-}
-
-pub fn init() Self {
-    const mimalloc_heap = mimalloc.mi_heap_new() orelse bun.outOfMemory();
-    if (comptime !safety_checks) return .{ .#heap = mimalloc_heap };
-    const heap: Owned(*DebugHeap) = .new(.{
-        .inner = mimalloc_heap,
-        .thread_lock = .initLocked(),
-    });
-    return .{ .#heap = heap };
-}
-
-pub fn gc(self: Self) void {
-    self.borrow().gc();
-}
-
-pub fn helpCatchMemoryIssues(self: Self) void {
-    self.borrow().helpCatchMemoryIssues();
-}
-
-pub fn ownsPtr(self: Self, ptr: *const anyopaque) bool {
-    return self.borrow().ownsPtr(ptr);
-}
-
-fn alignedAllocSize(ptr: [*]u8) usize {
-    return mimalloc.mi_malloc_usable_size(ptr);
-}
-
-fn vtable_alloc(ptr: *anyopaque, len: usize, alignment: Alignment, _: usize) ?[*]u8 {
-    const self: Borrowed = .fromOpaque(ptr);
-    self.assertThreadLock();
-    return self.alignedAlloc(len, alignment);
-}
-
-fn vtable_resize(ptr: *anyopaque, buf: []u8, _: Alignment, new_len: usize, _: usize) bool {
-    const self: Borrowed = .fromOpaque(ptr);
-    self.assertThreadLock();
-    return mimalloc.mi_expand(buf.ptr, new_len) != null;
-}
-
-fn vtable_free(
-    _: *anyopaque,
-    buf: []u8,
-    alignment: Alignment,
-    _: usize,
-) void {
-    // mi_free_size internally just asserts the size
-    // so it's faster if we don't pass that value through
-    // but its good to have that assertion
-    if (comptime bun.Environment.isDebug) {
-        assert(mimalloc.mi_is_in_heap_region(buf.ptr));
-        if (mimalloc.mustUseAlignedAlloc(alignment))
-            mimalloc.mi_free_size_aligned(buf.ptr, buf.len, alignment.toByteUnits())
-        else
-            mimalloc.mi_free_size(buf.ptr, buf.len);
-    } else {
-        mimalloc.mi_free(buf.ptr);
-    }
-}
-
-/// Attempt to expand or shrink memory, allowing relocation.
-///
-/// `memory.len` must equal the length requested from the most recent
-/// successful call to `alloc`, `resize`, or `remap`. `alignment` must
-/// equal the same value that was passed as the `alignment` parameter to
-/// the original `alloc` call.
-///
-/// A non-`null` return value indicates the resize was successful. The
-/// allocation may have same address, or may have been relocated. In either
-/// case, the allocation now has size of `new_len`. A `null` return value
-/// indicates that the resize would be equivalent to allocating new memory,
-/// copying the bytes from the old memory, and then freeing the old memory.
-/// In such case, it is more efficient for the caller to perform the copy.
-///
-/// `new_len` must be greater than zero.
-///
-/// `ret_addr` is optionally provided as the first return address of the
-/// allocation call stack. If the value is `0` it means no return address
-/// has been provided.
-fn vtable_remap(ptr: *anyopaque, buf: []u8, alignment: Alignment, new_len: usize, _: usize) ?[*]u8 {
-    const self: Borrowed = .fromOpaque(ptr);
-    self.assertThreadLock();
-    const heap = self.getMimallocHeap();
-    const aligned_size = alignment.toByteUnits();
-    const value = mimalloc.mi_heap_realloc_aligned(heap, buf.ptr, new_len, aligned_size);
-    return @ptrCast(value);
-}
-
-fn global_vtable_alloc(_: *anyopaque, len: usize, alignment: Alignment, _: usize) ?[*]u8 {
-    log("Malloc: {d}\n", .{len});
-    const ptr: ?*anyopaque = if (mimalloc.mustUseAlignedAlloc(alignment))
-        mimalloc.mi_malloc_aligned(len, alignment.toByteUnits())
-    else
-        mimalloc.mi_malloc(len);
-    return if (ptr) |p| @ptrCast(p) else null;
-}
-
-fn global_vtable_resize(_: *anyopaque, buf: []u8, _: Alignment, new_len: usize, _: usize) bool {
-    return mimalloc.mi_expand(buf.ptr, new_len) != null;
-}
-
-fn global_vtable_remap(_: *anyopaque, buf: []u8, alignment: Alignment, new_len: usize, _: usize) ?[*]u8 {
-    return @ptrCast(mimalloc.mi_realloc_aligned(buf.ptr, new_len, alignment.toByteUnits()));
-}
-
-pub fn isInstance(alloc: std.mem.Allocator) bool {
-    return alloc.vtable == &heap_allocator_vtable or alloc.vtable == &global_mimalloc_vtable;
-}
-
-/// VTable for owned heaps created with `mi_heap_new`.
-const heap_allocator_vtable = std.mem.Allocator.VTable{
-    .alloc = vtable_alloc,
-    .resize = vtable_resize,
-    .remap = vtable_remap,
-    .free = vtable_free,
-};
-
-/// VTable for the process-wide default allocator (`mi_malloc`/`mi_free`).
-const global_mimalloc_vtable = std.mem.Allocator.VTable{
-    .alloc = global_vtable_alloc,
-    .resize = global_vtable_resize,
-    .remap = global_vtable_remap,
-    .free = vtable_free,
-};
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
-const Alignment = std.mem.Alignment;
+const string = []const u8;
 
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const Alignment = std.mem.Alignment;
 const assert = bun.assert;
 const mimalloc = bun.mimalloc;
 const Owned = bun.ptr.Owned;
 const safety_checks = bun.Environment.ci_assert;
+const log = bun.Output.scoped(.mimalloc, .hidden);
+const DebugHeap = struct {
+    inner: *mimalloc.Heap,
+    thread_lock: bun.safety.ThreadLock,
+    pub const deinit = void;
+};
+const heap_allocator_vtable = std.mem.Allocator.VTable{ .alloc = MimallocArena.vtable_alloc, .resize = MimallocArena.vtable_resize, .remap = MimallocArena.vtable_remap, .free = MimallocArena.vtable_free };
+const global_mimalloc_vtable = std.mem.Allocator.VTable{ .alloc = MimallocArena.global_vtable_alloc, .resize = MimallocArena.global_vtable_resize, .remap = MimallocArena.global_vtable_remap, .free = MimallocArena.vtable_free };
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const Default = struct {
+
+pub fn allocator(self: Default) std.mem.Allocator {
+            _ = self;
+            return std.mem.Allocator{ .ptr = undefined, .vtable = (&global_mimalloc_vtable) };
+    }
+};
+
+pub const Borrowed = struct {
+    _heap: BorrowedHeap,
+
+pub fn allocator(self: Borrowed) std.mem.Allocator {
+            return std.mem.Allocator{ .ptr = self._heap, .vtable = (&heap_allocator_vtable) };
+    }
+
+pub fn getDefault() Borrowed {
+            const heap = (blk: {
+            break :blk mimalloc.mi_heap_main();
+
+});
+            if (comptime (!safety_checks)) {
+                return Borrowed{ ._heap = heap };
+            }
+            const S = struct {
+    pub threadlocal var dbg: ?DebugHeap = null;
+};
+            if ((S.dbg == null)) {
+                S.dbg = DebugHeap{ .inner = heap, .thread_lock = bun.safety.ThreadLock.initLocked() };
+            }
+            {
+                return Borrowed{ ._heap = (&S.dbg.?) };
+            }
+    }
+
+pub fn gc(self: Borrowed) void {
+            {
+                _ = mimalloc.mi_heap_collect(self.getMimallocHeap(), false);
+            }
+    }
+
+pub fn helpCatchMemoryIssues(self: Borrowed) void {
+            if (comptime bun.FeatureFlags.help_catch_memory_issues) {
+                _ = self.gc();
+                {
+                    _ = bun.mimalloc.mi_collect(false);
+                }
+            }
+    }
+
+pub fn ownsPtr(self: Borrowed, ptr: *const anyopaque) bool {
+            {
+                return mimalloc.mi_heap_contains(self.getMimallocHeap(), ptr);
+            }
+    }
+
+pub fn fromOpaque(ptr: *anyopaque) Borrowed {
+            {
+                if (comptime safety_checks) {
+                    return Borrowed{ ._heap = @as(*DebugHeap, @ptrCast(@alignCast(ptr))) };
+                }
+                return Borrowed{ ._heap = @as(*mimalloc.Heap, @ptrCast(@alignCast(ptr))) };
+            }
+    }
+
+pub fn getMimallocHeap(self: Borrowed) *mimalloc.Heap {
+            if (comptime safety_checks) {
+                return self._heap.inner;
+            }
+            return self._heap;
+    }
+
+pub fn assertThreadLock(self: Borrowed) void {
+            if (comptime safety_checks) {
+                _ = self._heap.thread_lock.assertLocked();
+            }
+    }
+
+pub fn alignedAlloc(self: Borrowed, len: usize, alignment: Alignment) ?[*]u8 {
+            _ = log("Malloc: {d}\n", .{ len });
+            const heap = self.getMimallocHeap();
+            var ptr: ?*anyopaque = null;
+            _ = &ptr;
+            {
+                if (mimalloc.mustUseAlignedAlloc(alignment)) {
+                    ptr = mimalloc.mi_heap_malloc_aligned(heap, len, alignment.toByteUnits());
+                } else {
+                    ptr = mimalloc.mi_heap_malloc(heap, len);
+                }
+            }
+            if (comptime bun.Environment.isDebug) {
+                const usable = (blk: {
+                break :blk mimalloc.mi_malloc_usable_size(ptr);
+
+});
+                if ((usable < len)) {
+                    _ = std.debug.panic("mimalloc: allocated size is too small: {d} < {d}", .{ usable, len });
+                }
+            }
+            if (ptr) |p| {
+                _ = &p;
+                {
+                    return @as([*]u8, @ptrCast(@alignCast(p)));
+                }
+            }
+            return null;
+    }
+
+pub fn downcast(std_alloc: std.mem.Allocator) Borrowed {
+            _ = bun.assertf((std_alloc.vtable == (&heap_allocator_vtable)), "not an owned MimallocArena heap (vtable is {*})", .{ std_alloc.vtable });
+            return Borrowed.fromOpaque(std_alloc.ptr);
+    }
+};
+
+pub const MimallocArena = @This();
+
+_heap: ArenaHeap,
+
+pub fn allocator(self: MimallocArena) std.mem.Allocator {
+        return self.borrow().allocator();
+}
+
+pub fn borrow(self: MimallocArena) Borrowed {
+        if (comptime safety_checks) {
+            return Borrowed{ ._heap = self._heap.get() };
+        }
+        return Borrowed{ ._heap = self._heap };
+}
+
+pub fn getThreadLocalDefault() std.mem.Allocator {
+        if (bun.Environment.enable_asan) {
+            return bun.default_allocator;
+        }
+        return std.mem.Allocator{ .ptr = undefined, .vtable = (&global_mimalloc_vtable) };
+}
+
+pub fn backingAllocator(self: MimallocArena) std.mem.Allocator {
+        _ = self;
+        return MimallocArena.getThreadLocalDefault();
+}
+
+pub fn dumpThreadStats(self: MimallocArena) void {
+        _ = self;
+        {
+            _ = mimalloc.mi_thread_stats_print_out(miDumpCallback, null);
+        }
+        _ = bun.Output.flush();
+}
+
+pub fn dumpStats(self: MimallocArena) void {
+        _ = self;
+        {
+            _ = mimalloc.mi_stats_print_out(miDumpCallback, null);
+        }
+        _ = bun.Output.flush();
+}
+
+pub fn deinit(self: *MimallocArena) void {
+        const mimalloc_heap = self.borrow().getMimallocHeap();
+        if (comptime safety_checks) {
+            _ = self._heap.deinit();
+        }
+        {
+            _ = mimalloc.mi_heap_destroy(mimalloc_heap);
+            self.* = undefined;
+        }
+}
+
+pub fn init() MimallocArena {
+        const mimalloc_heap = (((blk: {
+        break :blk mimalloc.mi_heap_new();
+
+})) orelse (bun.outOfMemory()));
+        if (comptime (!safety_checks)) {
+            return MimallocArena{ ._heap = mimalloc_heap };
+        }
+        const heap = OwnedDebugHeap.new(DebugHeap{ .inner = mimalloc_heap, .thread_lock = bun.safety.ThreadLock.initLocked() });
+        return MimallocArena{ ._heap = heap };
+}
+
+pub fn gc(self: MimallocArena) void {
+        _ = self.borrow().gc();
+}
+
+pub fn helpCatchMemoryIssues(self: MimallocArena) void {
+        _ = self.borrow().helpCatchMemoryIssues();
+}
+
+pub fn ownsPtr(self: MimallocArena, ptr: *const anyopaque) bool {
+        return self.borrow().ownsPtr(ptr);
+}
+
+pub fn alignedAllocSize(ptr: [*]u8) usize {
+        {
+            return mimalloc.mi_malloc_usable_size(ptr);
+        }
+}
+
+pub fn vtable_alloc(ptr: *anyopaque, len: usize, alignment: Alignment, _: usize) ?[*]u8 {
+        const self = Borrowed.fromOpaque(ptr);
+        _ = self.assertThreadLock();
+        return self.alignedAlloc(len, alignment);
+}
+
+pub fn vtable_resize(ptr: *anyopaque, buf: []u8, _: Alignment, new_len: usize, _: usize) bool {
+        const self = Borrowed.fromOpaque(ptr);
+        _ = self.assertThreadLock();
+        {
+            return (mimalloc.mi_expand(buf.ptr, new_len) != null);
+        }
+}
+
+pub fn vtable_free(_: *anyopaque, buf: []u8, alignment: Alignment, _: usize) void {
+        {
+            if (comptime bun.Environment.isDebug) {
+                _ = assert(mimalloc.mi_is_in_heap_region(buf.ptr));
+                if (mimalloc.mustUseAlignedAlloc(alignment)) {
+                    _ = mimalloc.mi_free_size_aligned(buf.ptr, buf.len, alignment.toByteUnits());
+                } else {
+                    _ = mimalloc.mi_free_size(buf.ptr, buf.len);
+                }
+            } else {
+                _ = mimalloc.mi_free(buf.ptr);
+            }
+        }
+}
+
+pub fn vtable_remap(ptr: *anyopaque, buf: []u8, alignment: Alignment, new_len: usize, _: usize) ?[*]u8 {
+        const self = Borrowed.fromOpaque(ptr);
+        _ = self.assertThreadLock();
+        const heap = self.getMimallocHeap();
+        const aligned_size = alignment.toByteUnits();
+        const value = (blk: {
+        break :blk mimalloc.mi_heap_realloc_aligned(heap, buf.ptr, new_len, aligned_size);
+
+});
+        if (value) |p| {
+            _ = &p;
+            {
+                return @as([*]u8, @ptrCast(@alignCast(p)));
+            }
+        }
+        return null;
+}
+
+pub fn global_vtable_alloc(_: *anyopaque, len: usize, alignment: Alignment, _: usize) ?[*]u8 {
+        _ = log("Malloc: {d}\n", .{ len });
+        var ptr: ?*anyopaque = null;
+        _ = &ptr;
+        {
+            if (mimalloc.mustUseAlignedAlloc(alignment)) {
+                ptr = mimalloc.mi_malloc_aligned(len, alignment.toByteUnits());
+            } else {
+                ptr = mimalloc.mi_malloc(len);
+            }
+        }
+        if (ptr) |p| {
+            _ = &p;
+            {
+                return @as([*]u8, @ptrCast(@alignCast(p)));
+            }
+        }
+        return null;
+}
+
+pub fn global_vtable_resize(_: *anyopaque, buf: []u8, _: Alignment, new_len: usize, _: usize) bool {
+        {
+            return (mimalloc.mi_expand(buf.ptr, new_len) != null);
+        }
+}
+
+pub fn global_vtable_remap(_: *anyopaque, buf: []u8, alignment: Alignment, new_len: usize, _: usize) ?[*]u8 {
+        const value = (blk: {
+        break :blk mimalloc.mi_realloc_aligned(buf.ptr, new_len, alignment.toByteUnits());
+
+});
+        if (value) |p| {
+            _ = &p;
+            {
+                return @as([*]u8, @ptrCast(@alignCast(p)));
+            }
+        }
+        return null;
+}
+
+pub fn isInstance(alloc: std.mem.Allocator) bool {
+        return ((alloc.vtable == (&heap_allocator_vtable)) or (alloc.vtable == (&global_mimalloc_vtable)));
+}
+const BorrowedHeap = if (safety_checks) *DebugHeap else *mimalloc.Heap;
+const OwnedDebugHeap = Owned(*DebugHeap);
+const ArenaHeap = if (safety_checks) OwnedDebugHeap else *mimalloc.Heap;
+
+pub fn miDumpCallback(textZ: [*:0]const u8, _: ?*anyopaque) callconv(.c) void {
+        const text = bun.span(textZ);
+        _ = (blk_catch_0: { break :blk_catch_0 ((bun.Output.errorWriter().writeAll(text)) catch |__ce_0| { _ = &__ce_0;  }); });
+}

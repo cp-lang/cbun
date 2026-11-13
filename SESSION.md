@@ -263,3 +263,110 @@
    - 完成并验证 `src/bun_alloc` 前 7 个分配器核心模块（`fallback.cp`, `NullableAllocator.cp`, `MaxHeapAllocator.cp`, `BufferFallbackAllocator.cp`, `maybe_owned.cp`, `heap_breakdown.cp`, `basic.cp`）；
    - 7 个模块经 `cpc --lib` 转译出对应 `.zig` 文件，100% 通过 `vendor/zig/zig ast-check`；
    - 静态正则扫描 100% 干净，零违规语法。
+
+---
+
+### [2026-11-13 14:42] 双向协同实时记录：向 `cp_agy` 投递任务 `task-20261113-typefn-struct`
+- **关联模块**：`src/bun_alloc/bun_alloc.zig`（状态标记：`BLOCKED`，等待上游修复后即刻切回重编）
+- **投递任务 ID**：`task-20261113-typefn-struct`
+- **复现文件**：`/data/dev/bun/temp/repro_typefn_struct.cp`
+- **核心阻断描述**：
+  1. 类型构造函数内部 `return struct { ... }` 体内的 CP 语法（`*this`、`*Block!`、`[2]u32?`、`static let`、`expr?` 等）被原样直出为非法 Zig 源码，未经过 AST 降级转换；
+  2. `return .init(alloc);` 被错误生成为 `return .{ .init = alloc };`（结构体初始化）而非 `.init(alloc)` 枚举/静态函数调用；
+  3. `[8]*Block!` 与 `[2]u32?` 数组元素修饰符降级异常。
+- **异步策略**：遵循 `GEMINI.md` 规范，零绕过，立即并行推进其他无依赖模块。
+
+### [2026-11-13 14:44] 双向协同实时记录：向 `cp_agy` 投递任务 `task-20261113-memory-auto-unsafe`
+- **关联模块**：`src/bun_alloc/memory.cp`（状态标记：`BLOCKED`）
+- **投递任务 ID**：`task-20261113-memory-auto-unsafe`
+- **复现文件**：`/data/dev/bun/temp/repro_memory_unsafe.cp`
+- **核心阻断描述**：
+  1. 在 `fn deinit(ptr_or_slice: auto)` 内部执行 `unsafe { ptr_or_slice.* = undefined; }` 时，即使在 `unsafe` 块内，语义检查仍然拦截报 `E0201` 只读参数不可变操作（因 `auto` 同时接收 `*const T` 与 `*T`，无法改为 `*ptr_or_slice`）；
+  2. 表达式 `(comptime cond) && x` 解析器报 `E0111: expected token 'RParen', found 'Ident("cond")'`；
+  3. 带命名空间限定符的结构体初始化 `Allocator.VTable{ alloc: ... }` 错误发射为 `Allocator{ .VTable = .{ ... } }`（需临时别名绕过，报告供根治）。
+- **已验证通过并入库（Worker 1）**：`src/bun_alloc/fallback/z.cp` (47行) 与 `src/bun_alloc/LinuxMemFdAllocator.cp` (202行) 均已通过 `cpc --lib`、`zig ast-check` 与静态门禁！
+
+### [2026-11-13 14:49] 双向协同实时记录：向 `cp_agy` 投递任务 `task-20261113-const-ptr-mutate`
+- **关联模块**：`src/bun_alloc/MimallocArena.cp`、`src/bun_alloc/allocation_scope.cp`（均标记 `BLOCKED`）
+- **投递任务 ID**：`task-20261113-const-ptr-mutate`
+- **复现文件**：`/data/dev/bun/temp/repro_const_ptr_mutate.cp`
+- **核心阻断描述**：
+  1. 依据 `cp_agent_ref.md` 第 4.1 节正交解耦契约，`const allocation = ptr;`（`ptr` 为可变指针 `*Item` / `*Item!`）仅约束指针自身不可重新指向，目标内存允许通过 `allocation.extra = v;` 修改，但 `cpc` codegen 借用检查误报 `error[E0200]`；
+  2. 函数内部局部命名空间容器 `const S = struct { @tls let dbg: DebugHeap? = null; };` 中对静态 `@tls let` 字段 `S.dbg` 赋值时，`cpc` 误认为修改 `const S` 报 `E0200`。
+- **备注**：`MimallocArena.cp` (297行 vs 原291行) 与 `allocation_scope.cp` (574行 vs 原561行) 已完成纯正 CP 转译初稿且静态门禁 0 违规，待上游修复后即刻闭环编译。
+
+### [2026-11-13 14:51] 双向协同实时记录：向 `cp_agy` 投递任务 `task-20261113-comptime-name-and-union`
+- **关联模块**：`src/meta/meta.cp`、`src/meta/tagged_union.cp`（均已触发 5 轮熔断，标记 `BLOCKED`）
+- **投递任务 ID**：`task-20261113-comptime-name-and-union`
+- **复现文件**：`/data/dev/bun/temp/repro_comptime_name_union.cp`
+- **核心阻断描述**：
+  1. 在 `comptimePrint` 或编译期上下文中访问 `.name` 字段（如 `f.name`）时，`cpc` 强行注入 `if (comptime @typeInfo(...) ...)` 导致 Zig 报错 `redundant comptime keyword in already comptime scope`；
+  2. 类型构造函数返回 `return union(enum) { ... }` 时，内部的 `*this` 等 CP 语法未被降级直接原样透出；
+  3. 附加发现：`switch (T)` 匹配 `type` 值时各分支降级异常、数字字面量下划线分隔 `1_000_000` 词法拆分异常。
+- **已验证通过并入库（Worker C）**：`src/meta/bits.cp` (64行) 与 `src/meta/traits.cp` (89行) 均已通过 `cpc --lib`、`zig ast-check` 与静态门禁！
+
+### [2026-11-13 14:52] 双向协同实时记录：向 `cp_agy` 投递任务 `task-20261113-const-rawptr-cfunc`
+- **关联模块**：`src/safety/alloc.cp`、`src/safety/asan.cp`（均标记 `BLOCKED`）
+- **投递任务 ID**：`task-20261113-const-rawptr-cfunc`
+- **复现文件**：`/data/dev/bun/temp/repro_safety_constptr_cfunc.cp`
+- **核心阻断描述**：
+  1. 解析器拒绝 `*const !`（映射 Zig `*const anyopaque`）；
+  2. 表达式/编译期比较中的类型字面量 `T == *const u8` 触发解析失败（`E0111`）；
+  3. 条件结构体表达式 `if (cond) struct { ... } else struct { ... }` 内部 CP 语法原样直出；
+  4. 标签块 `blk: { ... }` 尾部 `@compileError(...)` 被自动添加 `break :blk` 导致 Zig `unreachable code` 报错；
+  5. 非导出的 `@c fn` 被无条件发射为 `pub export fn`（应仅发射 `callconv(.c)`，不带 `export`，否则无法配合 `@export` 做条件符号导出）。
+- **已验证通过并入库（Worker A）**：`src/safety/` 下 4 个模块（`thread_id.cp`, `safety.cp`, `ThreadLock.cp`, `CriticalSection.cp`）均已通过 `cpc --lib`、`zig ast-check` 与静态门禁！
+
+### [2026-11-13 14:55] 双向协同实时记录：收到 `cp_agy` 结单通知 `task-20261113-typefn-struct` & 投递新任务 `task-20261113-ffi-varargs-fnptr`
+1. **收到结单通知 (`task-20261113-typefn-struct`)**：
+   - **处理状态**：`resolved`（耗时 13 分钟极速闭环）
+   - **修复结论**：`parser.rs` 修正 `[N]T` 为 `Type::FixedArray`；`codegen/expr.rs` 修正 `.init(...)` 短路径发射为静态调用而非结构体字面量；类型构造函数内部的匿名 `return struct { ... }` 与 `return union(enum) { ... }` 现全量通过 CP AST 解析与降级生成，支持 `*this`、`static let`、`*Block!` 等。
+   - **本端复测结果**：`temp/repro_typefn_struct.cp` 通过 `cpc --lib` + `vendor/zig/zig ast-check` 零错误验证！已重新唤醒 Worker 3 复攻 `src/bun_alloc/bun_alloc.zig`（并顺带重启后台 `watch_task.py` 守护进程 `task-56686`）。
+2. **投递新任务 (`task-20261113-ffi-varargs-fnptr`)**：
+   - **关联模块**：`src/platform/darwin.cp`、`src/perf/tracy.cp`（均标记 `BLOCKED`）
+   - **复现文件**：`/data/dev/bun/temp/repro_ffi_varargs_fnptr.cp`
+   - **核心阻断描述**：`extern fn` 缺少 C 可变参数 `...` 支持；`@opaque struct` 嵌套 `static struct` 解析报错 `E0100`；函数指针别名 `@c ((): void)` 调用报 `E0216`；`@comptime Type: type` 泛型返回 `Type?` 报 `E0207`。
+3. **Worker B 阶段成果**：`src/platform/linux.cp` (97行)、`src/perf/generated_perf_trace_events.cp` (62行)、`src/perf/hw_timer.cp` (186行)、`src/perf/perf.cp` (159行)、`src/perf/system_timer.cp` (29行) 共 5 个模块全部通过双重检验与静态门禁！
+
+### [2026-11-13 15:02] 双向协同实时记录：向 `cp_agy` 投递任务 `task-20261113-align-ptr-typefn`
+- **关联模块**：`src/highway/highway.cp`、`src/tcc_sys/tcc.cp`（均已触发 5 轮熔断规范上报，标记 `BLOCKED`）
+- **投递任务 ID**：`task-20261113-align-ptr-typefn`
+- **复现文件**：`/data/dev/bun/temp/repro_align_fnptr_typefn.cp`
+- **核心阻断描述**：
+  1. 形参类型中的对齐指针/切片 `[*]align(1) const u16` / `[]align(1) const u16` 在 `cpc` 解析期被错误拆分为三个独立参数 `input: [*]align(1), const: *anyopaque, u16: *anyopaque`；
+  2. 类型函数体中 `return @c ((ctx: (*Ctx!)?, msg: cstr): void);` 返回 C-ABI 函数指针类型时解析器报 `E0111`；
+  3. 函数返回合并错误集 `! (Allocator.Error || Error)` 解析失败。
+- **已验证通过并入库（Worker F）**：`src/mimalloc_sys/mimalloc.cp` (234行)、`src/simdutf_sys/simdutf.cp` (413行)、`src/uws/uws.cp` (194行) 均已通过 `cpc --lib`、`zig ast-check` 与静态门禁！
+
+### [2026-11-13 15:06] 双向协同实时记录：向 `cp_agy` 投递任务 `task-20261113-zeroes-fixedarray-splat`
+- **关联模块**：`src/zlib/zlib.cp`、`src/zlib_sys/win32.cp`（均标记 `BLOCKED`；其中 `win32.cp` 的变长参数阻断同属于 `task-20261113-ffi-varargs-fnptr`）
+- **投递任务 ID**：`task-20261113-zeroes-fixedarray-splat`
+- **复现文件**：`/data/dev/bun/temp/repro_fixed_array_arg.cp`
+- **核心阻断描述**：
+  1. `std.mem.zeroes([N]u8)` 在调用实参中被错误发射为 `std.mem.zeroes(.{ N }, u8)`；
+  2. 泛型结构体 `GenericBuf<const buffer_size: usize>` 内部 `[0; buffer_size]` 字面量忽略 `[buffer_size]u8` 字段类型发射为 `[buffer_size]i32`，且结构体构造缺少泛型后缀/类型名绑定；
+  3. `[*]const u8?!` 被发射为 `[*]const ?u8` 而非 `?[*]const u8`。
+- **已验证通过并入库（Worker D）**：`src/zlib_sys/shared.cp` (52行)、`src/zlib_sys/posix.cp` (91行)、`src/libdeflate_sys/libdeflate.cp` (177行) 均已通过 `cpc --lib`、`zig ast-check`、`zig build-obj` 与静态门禁！
+
+### [2026-11-13 20:58] 双向协同实时记录：收到 `cp_agy` 批量 6 项任务结单通知！
+配额冷却期后，`watch_task.py` 成功唤醒主智能体，上游 `cp_agy` 已于 `20:57:38` 连续结单以下 **6 项** 编译器修复任务：
+1. **`task-20261113-memory-auto-unsafe`** (`resolved`)：修复 `unsafe` 块内 `auto` 参数字段变异、`comptime` 表达式分组与限定名结构体字面量，已用最新 `cpc` 本地复测 PASS；
+2. **`task-20261113-const-ptr-mutate`** (`resolved`)：修复 `const p = ptr` 指针解引用写字段与局部 `const S = struct { @tls let ... }` 赋值误报 `E0200`，本地复测 PASS；
+3. **`task-20261113-comptime-name-and-union`** (`resolved`)：修复编译期 `.name` 多余 `comptime` 注入、`return union(enum)` 语法降级、类型分支 `switch (T)` 与下划线数字字面量，本地复测 PASS；
+4. **`task-20261113-const-rawptr-cfunc`** (`resolved`)：修复 `*const !` 裸指针、`T == *const u8`、条件结构体表达式、标签块 `@compileError` 及非导出 `@c fn` 发射逻辑，本地复测 PASS；
+5. **`task-20261113-ffi-varargs-fnptr`** (`resolved`)：修复 `extern fn` 变长参数 `...`、`@opaque struct` 嵌套 `static struct`、C-ABI 函数指针调用与 `@comptime Type` 返回，本地复测 PASS；
+6. **`task-20261113-align-ptr-typefn`** (`resolved`)：修复 `[*]align(1) const u16` / `[]align(1) const u16` 对齐指针拆分、`@c ((...): void)` 类型返回及合并错误集，本地复测 PASS。
+
+- **当前队列剩余**：仅 1 项 Pending（`task-20261113-zeroes-fixedarray-splat`），已重启 `watch_task.py`（`task-56758`）保持持续监听！
+
+### [2026-11-13 21:03] 双向协同实时记录：收到 `cp_agy` 任务 `task-20261113-zeroes-fixedarray-splat` 结单通知！
+- **任务 ID**：`task-20261113-zeroes-fixedarray-splat`
+- **上游回执 (`cp_agy` @ `2026-11-13T21:03:54`)**：`Fixed [N]T in call args, generic struct @This()/expected_array_elem_type, and [*]const T?! optional wrapping.`
+- **复测与清理**：`cpc --lib temp/repro_fixed_array_arg.cp -o temp/repro_fixed_array_arg.zig && vendor/zig/zig ast-check temp/repro_fixed_array_arg.zig` **PASS**，已删除临时复现文件并重启 `watch_task.py`（`task-56790`）；当前上游任务队列待处理清零（Pending = 0）。
+- **立即动作**：分派 `cp_migrator` 完成已解阻的 `src/zlib/zlib.cp` / `src/zlib/zlib.zig`。
+
+### [2026-11-13 21:58] 指令「继续你的工作」— 配额中断恢复与阶段里程碑提交
+- 背景：6+ 路子智能体因 429 配额中断，随后服务重启；已重启 `watch_task.py`（task-56863），队列 Pending=0。
+- 全量复检 77 个已迁移 `.cp`：`cpc --lib` + `ast-check` + 静态门禁，71 PASS；其余 3 个门禁命中仅为注释中的版本号（Global/Progress/CompileTarget，实际合格），真实未完成 3 个：`bun_core/fmt.cp`、`bun_core/output.cp`、`collections/pool.cp`（不入本次提交）。
+- 本次入库目录闭环：bun_alloc(13/13)、meta、safety、platform、perf、ptr(11/11)、zlib、zlib_sys、brotli*、picohttp*、zstd、highway、tcc_sys、lolhtml_sys、libarchive*、collections 第1批(5)、options_types 基础4、sys_uv、bun_core 部分(Global/Progress/deprecated/env/env_var/feature_flags/result/tty/util)、hive_array。
+- cp_agy 回执：`task-20261113-zeroes-fixedarray-splat` resolved，复测 PASS。

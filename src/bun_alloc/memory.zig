@@ -1,210 +1,200 @@
-//! Basic utilities for working with memory and objects.
-
-/// Allocates memory for a value of type `T` using the provided allocator, and initializes the
-/// memory with `value`.
-///
-/// If `allocator` is `bun.default_allocator`, this will internally use `bun.tryNew` to benefit from
-/// the added assertions.
-pub fn create(comptime T: type, allocator: std.mem.Allocator, value: T) bun.OOM!*T {
-    if ((comptime Environment.allow_assert) and isDefault(allocator)) {
-        return bun.tryNew(T, value);
-    }
-    const ptr = try allocator.create(T);
-    ptr.* = value;
-    return ptr;
-}
-
-/// Frees memory previously allocated by `create`.
-///
-/// The memory must have been allocated by the `create` function in this namespace, not
-/// directly by `allocator.create`.
-pub fn destroy(allocator: std.mem.Allocator, ptr: anytype) void {
-    if ((comptime Environment.allow_assert) and isDefault(allocator)) {
-        bun.destroy(ptr);
-    } else {
-        allocator.destroy(ptr);
-    }
-}
-
-/// Default-initializes a value of type `T`.
-///
-/// This method tries the following, in order:
-///
-/// * `.initDefault()`, if a method with that name exists
-/// * `.init()`, if a method with that name exists
-/// * `.{}`, otherwise
-pub fn initDefault(comptime T: type) T {
-    return if (comptime std.meta.hasFn(T, "initDefault"))
-        .initDefault()
-    else if (comptime std.meta.hasFn(T, "init"))
-        .init()
-    else
-        .{};
-}
-
-/// Returns true if `T` should not be required to have a `deinit` method.
-///
-/// This method is primarily for external types where a `deinit` method can't be added.
-/// For other types, prefer adding a `deinit` method or adding `pub const deinit = void;` if
-/// possible.
-fn exemptedFromDeinit(comptime T: type) bool {
-    return switch (T) {
-        std.mem.Allocator => true,
-        else => {
-            _ = T.deinit; // no deinit method? add one, set to void, or add an exemption
-            return false;
-        },
-    };
-}
-
-fn deinitIsVoid(comptime T: type) bool {
-    return switch (@TypeOf(T.deinit)) {
-        type => T.deinit == void,
-        void => true,
-        else => false,
-    };
-}
-
-/// Calls `deinit` on `ptr_or_slice`, or on every element of `ptr_or_slice`, if the pointer points
-/// to a struct or tagged union.
-///
-/// This function first does the following:
-///
-/// * If `ptr_or_slice` is a single-item pointer of type `*T`:
-///   - If `T` is a struct or tagged union, calls `ptr_or_slice.deinit()`
-///   - If `T` is an optional, checks if `ptr_or_slice` points to a non-null value, and if so,
-///     calls `bun.memory.deinit` with a pointer to the payload.
-/// * If `ptr_or_slice` is a slice, for each element of the slice, calls `bun.memory.deinit` with
-///   a pointer to the element.
-///
-/// Then, if `ptr_or_slice` is non-const, this function also sets all memory referenced by the
-/// pointer to `undefined`.
-///
-/// This method does not free `ptr_or_slice` itself.
-pub fn deinit(ptr_or_slice: anytype) void {
-    const PtrType = @TypeOf(ptr_or_slice);
-    const ptr_info = @typeInfo(PtrType);
-    switch (comptime ptr_info.pointer.size) {
-        .slice => {
-            for (ptr_or_slice) |*elem| {
-                deinit(elem);
-            }
-            return;
-        },
-        .one => {},
-        else => @compileError("unsupported pointer type: " ++ @typeName(PtrType)),
-    }
-
-    const Child = ptr_info.pointer.child;
-    const mutable = !ptr_info.pointer.is_const;
-    defer {
-        if (comptime mutable) {
-            ptr_or_slice.* = undefined;
-        }
-    }
-
-    switch (comptime @typeInfo(Child)) {
-        .void, .bool, .int, .float, .pointer, .comptime_float, .comptime_int => return,
-        .undefined, .null, .error_set, .@"enum", .vector => return,
-        .array => {
-            for (ptr_or_slice) |*elem| {
-                deinit(elem);
-            }
-            return;
-        },
-        .@"struct" => {},
-        .optional => {
-            if (ptr_or_slice.*) |*payload| {
-                deinit(payload);
-            }
-            return;
-        },
-        .error_union => {
-            if (ptr_or_slice.*) |*payload| {
-                deinit(payload);
-            } else |_| {}
-            return;
-        },
-        .@"union" => |u| {
-            if (comptime u.tag_type == null) {
-                @compileError("cannot deinit an untagged union: " ++ @typeName(Child));
-            }
-        },
-        .type, .noreturn, .@"fn", .@"opaque", .frame, .@"anyframe", .enum_literal => {
-            @compileError("unsupported type for deinit: " ++ @typeName(Child));
-        },
-    }
-
-    if (comptime !exemptedFromDeinit(Child) and !deinitIsVoid(Child)) {
-        ptr_or_slice.deinit();
-    }
-}
-
-/// Rebase a slice from one memory buffer to another buffer.
-///
-/// Given a slice which points into a memory buffer with base `old_base`, return
-/// a slice which points to the same offset in a new memory buffer with base
-/// `new_base`, preserving the length of the slice.
-///
-///
-/// ```
-/// const old_base = [6]u8{};
-/// assert(@ptrToInt(&old_base) == 0x32);
-///
-///            0x32 0x33 0x34 0x35 0x36 0x37
-/// old_base |????|????|????|????|????|????|
-///                    ^
-///                    |<-- slice --->|
-///
-/// const new_base = [6]u8{};
-/// assert(@ptrToInt(&new_base) == 0x74);
-/// const output = rebaseSlice(slice, old_base, new_base)
-///
-///            0x74 0x75 0x76 0x77 0x78 0x79
-/// new_base |????|????|????|????|????|????|
-///                    ^
-///                    |<-- output -->|
-/// ```
-pub fn rebaseSlice(slice: []const u8, old_base: [*]const u8, new_base: [*]const u8) []const u8 {
-    const offset = @intFromPtr(slice.ptr) - @intFromPtr(old_base);
-    return new_base[offset..][0..slice.len];
-}
-
-/// Removes the sentinel from a sentinel-terminated slice or many-item pointer. The resulting
-/// non-sentinel-terminated slice can be freed with `allocator.free`.
-///
-/// `ptr` must be `[:x]T` or `[*:x]T`, or their const equivalents, and it must have been allocated
-/// by `allocator`.
-///
-/// Most allocators will perform this operation without allocating any memory, but unlike a simple
-/// cast, this function will not cause issues with allocators that need to know the exact size of
-/// the allocation to free it.
-pub fn dropSentinel(ptr: anytype, allocator: std.mem.Allocator) blk: {
-    var info = @typeInfo(@TypeOf(ptr));
-    info.pointer.size = .slice;
-    info.pointer.sentinel_ptr = null;
-    break :blk bun.OOM!@Type(info);
-} {
-    const info = @typeInfo(@TypeOf(ptr)).pointer;
-    const Child = info.child;
-    if (comptime info.sentinel_ptr == null) {
-        @compileError("pointer must have sentinel");
-    }
-
-    const slice = switch (comptime info.size) {
-        .many => std.mem.span(ptr),
-        .slice => ptr,
-        else => @compileError("only slices and many-item pointers are supported"),
-    };
-
-    if (allocator.remap(@constCast(slice), slice.len)) |new| return new;
-    defer allocator.free(slice);
-    return allocator.dupe(Child, slice);
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
-const Allocator = std.mem.Allocator;
+const string = []const u8;
 
-const bun = @import("bun");
+const Allocator = std.mem.Allocator;
 const Environment = bun.Environment;
 const isDefault = bun.allocators.isDefault;
+const OOM = bun.OOM;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime __T: type, comptime idx: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") return ti.@"struct".field_types[idx]; return @FieldType(__T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime __T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .array)) { return v[idx]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") return @field(v, ti.@"struct".field_names[idx]); return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime __T: type, comptime offset_from_end: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return ti.@"struct".field_types[n - offset_from_end]; } return @FieldType(__T, std.fmt.comptimePrint("{d}", .{1})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime __T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .array)) { return v[v.len - offset_from_end]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return @field(v, ti.@"struct".field_names[n - offset_from_end]); } return @field(v, std.fmt.comptimePrint("{d}", .{0})); } }
+pub fn CpUnpackSliceType(comptime __T: type, comptime start_idx: usize) type { if (__T == ?Message or __T == Message) return []const Message; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return __T; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return []const @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return []const @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const types = ti.@"struct".field_types; if (types.len == 0) return []const i32; const Elem = if (start_idx < types.len) types[start_idx] else types[0]; return []const CpValType(Elem); } return []const i32; }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime __T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const names = ti.@"struct".field_names; const types = ti.@"struct".field_types; const end = names.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < types.len) CpValType(types[start_idx]) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, names[f_idx])); } return buf; } return &[_]i32{}; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+
+pub fn create(comptime T: type, allocator: Allocator, value: T) OOM!*T {
+        if (comptime Environment.allow_assert) {
+            if (isDefault(allocator)) {
+                return bun.tryNew(T, value);
+            }
+        }
+        var ptr = try allocator.create(T);
+        _ = &ptr;
+        {
+            ptr.* = value;
+        }
+        return ptr;
+}
+
+pub fn destroy(allocator: Allocator, ptr: anytype) void {
+        if (comptime Environment.allow_assert) {
+            if (isDefault(allocator)) {
+                _ = bun.destroy(ptr);
+                return;
+            }
+        }
+        _ = allocator.destroy(ptr);
+}
+
+pub fn initDefault(comptime T: type) T {
+        if (comptime std.meta.hasFn(T, "initDefault")) {
+            return T.initDefault();
+        } else {
+            if (comptime std.meta.hasFn(T, "init")) {
+                return T.init();
+            } else {
+                return .{};
+            }
+        }
+}
+
+pub fn exemptedFromDeinit(comptime T: type) bool {
+        if (T == Allocator) {
+return true;
+} else {
+_ = T.deinit;
+        return false;
+}
+}
+
+pub fn deinitIsVoid(comptime T: type) bool {
+        if (@TypeOf(T.deinit) == type) {
+return (T.deinit == void);
+} else if (@TypeOf(T.deinit) == void) {
+return true;
+} else {
+return false;
+}
+}
+
+pub fn deinit(ptr_or_slice: anytype) void {
+        const PtrType = @TypeOf(ptr_or_slice);
+        const ptr_info = @typeInfo(PtrType);
+        switch (ptr_info.pointer.size) {
+.slice => {
+var i: usize = 0;
+        _ = &i;
+        while ((i < ptr_or_slice.len)) : (i = (i + 1)) {
+            _ = deinit((&ptr_or_slice[@as(usize, @intCast(i))]));
+        }
+        return;
+},
+.one => {
+
+},
+else => {
+_ = @compileError(std.fmt.comptimePrint("unsupported pointer type: {s}", .{ @typeName(PtrType) }));
+},
+}
+        const Child = ptr_info.pointer.child;
+        const mutable = (!ptr_info.pointer.is_const);
+        defer {
+        {
+            if (comptime mutable) {
+                {
+                    ptr_or_slice.* = undefined;
+                }
+            }
+        }
+        }
+        switch (@typeInfo(Child)) {
+.void, .bool, .int, .float, .pointer, .comptime_float, .comptime_int => {
+return;
+},
+.@"undefined", .@"null", .error_set, .@"enum", .vector => {
+return;
+},
+.array => {
+var i: usize = 0;
+        _ = &i;
+        while ((i < ptr_or_slice.len)) : (i = (i + 1)) {
+            _ = deinit((&ptr_or_slice[@as(usize, @intCast(i))]));
+        }
+        return;
+},
+.@"struct" => {
+
+},
+.optional => {
+{
+            if ((ptr_or_slice.* != null)) {
+                _ = deinit((&ptr_or_slice.*.?));
+            }
+        }
+        return;
+},
+.error_union => {
+{
+            if (comptime mutable) {
+                var payload = (blk_catch_0: { break :blk_catch_0 ((ptr_or_slice.*) catch |__ce_0| { _ = &__ce_0; return; }); });
+                _ = &payload;
+                _ = deinit((&payload));
+            } else {
+                const payload = (blk_catch_1: { break :blk_catch_1 ((ptr_or_slice.*) catch |__ce_1| { _ = &__ce_1; return; }); });
+                _ = deinit((&payload));
+            }
+        }
+        return;
+},
+.@"union" => |u| {
+if (comptime (u.tag_type == null)) {
+            _ = @compileError(std.fmt.comptimePrint("cannot deinit an untagged union: {s}", .{ @typeName(Child) }));
+        }
+},
+.@"type", .noreturn, .@"fn", .@"opaque", .frame, .@"anyframe", .enum_literal => {
+_ = @compileError(std.fmt.comptimePrint("unsupported type for deinit: {s}", .{ @typeName(Child) }));
+},
+}
+        if (comptime (!exemptedFromDeinit(Child))) {
+            if (comptime (!deinitIsVoid(Child))) {
+                _ = ptr_or_slice.deinit();
+            }
+        }
+}
+
+pub fn rebaseSlice(slice: []const u8, old_base: [*]const u8, new_base: [*]const u8) []const u8 {
+        {
+            const offset = (@intFromPtr(slice.ptr) - @intFromPtr(old_base));
+            return new_base[offset..][0..slice.len];
+        }
+}
+
+pub fn DropSentinelReturn(comptime Ptr: type) type {
+        var ptr_info = @typeInfo(Ptr).pointer;
+        _ = &ptr_info;
+        ptr_info.size = .slice;
+        ptr_info.sentinel_ptr = null;
+        return @Type(std.builtin.Type{ .pointer = ptr_info });
+}
+
+pub fn dropSentinel(ptr: anytype, allocator: Allocator) OOM!DropSentinelReturn(@TypeOf(ptr)) {
+        const info = @typeInfo(@TypeOf(ptr)).pointer;
+        const Child = info.child;
+        if (comptime (info.sentinel_ptr == null)) {
+            _ = @compileError("pointer must have sentinel");
+        }
+        const slice = (switch (info.size) {
+.many => std.mem.span(ptr),
+.slice => ptr,
+else => @compileError("only slices and many-item pointers are supported"),
+});
+        if (allocator.remap(@constCast(slice), slice.len)) |new_slice| {
+            _ = &new_slice;
+            return new_slice;
+        }
+        defer {
+        _ = allocator.free(slice);
+        }
+        return allocator.dupe(Child, slice);
+}

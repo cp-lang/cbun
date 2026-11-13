@@ -1,684 +1,9 @@
-// @link "../deps/libarchive.a"
-
-pub const lib = @import("../libarchive_sys/bindings.zig");
-const Archive = lib.Archive;
-pub const Seek = enum(c_int) {
-    set = std.posix.SEEK_SET,
-    current = std.posix.SEEK_CUR,
-    end = std.posix.SEEK_END,
-};
-
-pub const BufferReadStream = struct {
-    const Stream = @This();
-    buf: []const u8,
-    pos: usize = 0,
-
-    block_size: usize = 16384,
-
-    archive: *Archive,
-    reading: bool = false,
-
-    pub fn init(this: *BufferReadStream, buf: []const u8) void {
-        this.* = BufferReadStream{
-            .buf = buf,
-            .pos = 0,
-            .archive = Archive.readNew(),
-            .reading = false,
-        };
-    }
-
-    pub fn deinit(this: *BufferReadStream) void {
-        _ = this.archive.readClose();
-        _ = this.archive.readFree();
-    }
-
-    pub fn openRead(this: *BufferReadStream) Archive.Result {
-        // lib.archive_read_set_open_callback(this.archive, this.);
-        // _ = lib.archive_read_set_read_callback(this.archive, archive_read_callback);
-        // _ = lib.archive_read_set_seek_callback(this.archive, archive_seek_callback);
-        // _ = lib.archive_read_set_skip_callback(this.archive, archive_skip_callback);
-        // _ = lib.archive_read_set_close_callback(this.archive, archive_close_callback);
-        // // lib.archive_read_set_switch_callback(this.archive, this.archive_s);
-        // _ = lib.archive_read_set_callback_data(this.archive, this);
-
-        _ = this.archive.readSupportFormatTar();
-        _ = this.archive.readSupportFormatGnutar();
-        _ = this.archive.readSupportFilterGzip();
-
-        // Ignore zeroed blocks in the archive, which occurs when multiple tar archives
-        // have been concatenated together.
-        // Without this option, only the contents of
-        // the first concatenated archive would be read.
-        _ = this.archive.readSetOptions("read_concatenated_archives");
-
-        // _ = lib.archive_read_support_filter_none(this.archive);
-
-        const rc = this.archive.readOpenMemory(this.buf);
-
-        this.reading = @intFromEnum(rc) > -1;
-
-        // _ = lib.archive_read_support_compression_all(this.archive);
-
-        return rc;
-    }
-
-    pub inline fn bufLeft(this: BufferReadStream) []const u8 {
-        return this.buf[this.pos..];
-    }
-
-    pub inline fn fromCtx(ctx: *anyopaque) *Stream {
-        return @as(*Stream, @ptrCast(@alignCast(ctx)));
-    }
-
-    pub fn archive_close_callback(
-        _: *Archive,
-        _: *anyopaque,
-    ) callconv(.c) c_int {
-        return 0;
-    }
-
-    pub fn archive_read_callback(
-        _: *Archive,
-        ctx_: *anyopaque,
-        buffer: [*c]*const anyopaque,
-    ) callconv(.c) lib.la_ssize_t {
-        var this = fromCtx(ctx_);
-        const remaining = this.bufLeft();
-        if (remaining.len == 0) return 0;
-
-        const diff = @min(remaining.len, this.block_size);
-        buffer.* = remaining[0..diff].ptr;
-        this.pos += diff;
-        return @as(isize, @intCast(diff));
-    }
-
-    pub fn archive_skip_callback(
-        _: *Archive,
-        ctx_: *anyopaque,
-        offset: lib.la_int64_t,
-    ) callconv(.c) lib.la_int64_t {
-        var this = fromCtx(ctx_);
-
-        const buflen = @as(isize, @intCast(this.buf.len));
-        const pos = @as(isize, @intCast(this.pos));
-
-        const proposed = pos + offset;
-        const new_pos = @min(@max(proposed, 0), buflen - 1);
-        this.pos = @as(usize, @intCast(new_pos));
-        return new_pos - pos;
-    }
-
-    pub fn archive_seek_callback(
-        _: *Archive,
-        ctx_: *anyopaque,
-        offset: lib.la_int64_t,
-        whence: c_int,
-    ) callconv(.c) lib.la_int64_t {
-        var this = fromCtx(ctx_);
-
-        const buflen = @as(isize, @intCast(this.buf.len));
-        const pos = @as(isize, @intCast(this.pos));
-
-        switch (@as(Seek, @enumFromInt(whence))) {
-            Seek.current => {
-                const new_pos = @max(@min(pos + offset, buflen - 1), 0);
-                this.pos = @as(usize, @intCast(new_pos));
-                return new_pos;
-            },
-            Seek.end => {
-                const new_pos = @max(@min(buflen - offset, buflen), 0);
-                this.pos = @as(usize, @intCast(new_pos));
-                return new_pos;
-            },
-            Seek.set => {
-                const new_pos = @max(@min(offset, buflen - 1), 0);
-                this.pos = @as(usize, @intCast(new_pos));
-                return new_pos;
-            },
-        }
-    }
-
-    // pub fn archive_write_callback(
-    //     archive: *Archive,
-    //     ctx_: *anyopaque,
-    //     buffer: *const anyopaque,
-    //     len: usize,
-    // ) callconv(.c) lib.la_ssize_t {
-    //     var this = fromCtx(ctx_);
-    // }
-
-    // pub fn archive_close_callback(
-    //     archive: *Archive,
-    //     ctx_: *anyopaque,
-    // ) callconv(.c) c_int {
-    //     var this = fromCtx(ctx_);
-    // }
-    // pub fn archive_free_callback(
-    //     archive: *Archive,
-    //     ctx_: *anyopaque,
-    // ) callconv(.c) c_int {
-    //     var this = fromCtx(ctx_);
-    // }
-
-    // pub fn archive_switch_callback(
-    //     archive: *Archive,
-    //     ctx1: *anyopaque,
-    //     ctx2: *anyopaque,
-    // ) callconv(.c) c_int {
-    //     var this = fromCtx(ctx1);
-    //     var that = fromCtx(ctx2);
-    // }
-};
-
-/// Validates that a symlink target doesn't escape the extraction directory.
-/// Returns true if the symlink is safe (target stays within extraction dir),
-/// false if it would escape (e.g., via ../ traversal or absolute path).
-///
-/// The check works by resolving the symlink target relative to the symlink's
-/// directory location using a fake root, then checking if the result stays
-/// within that fake root.
-fn isSymlinkTargetSafe(symlink_path: []const u8, link_target: [:0]const u8, symlink_join_buf: *?*bun.PathBuffer) bool {
-    // Absolute symlink targets are never safe - they could point anywhere
-    if (link_target.len > 0 and link_target[0] == '/') {
-        return false;
-    }
-
-    // Get the directory containing the symlink
-    const symlink_dir = std.fs.path.dirname(symlink_path) orelse "";
-
-    // Use a fake root to resolve the path and check if it escapes
-    const fake_root = "/packages/";
-
-    const join_buf = symlink_join_buf.* orelse join_buf: {
-        symlink_join_buf.* = bun.path_buffer_pool.get();
-        break :join_buf symlink_join_buf.*.?;
-    };
-
-    const resolved = bun.path.joinAbsStringBuf(
-        fake_root,
-        join_buf,
-        &.{ symlink_dir, link_target },
-        .posix,
-    );
-
-    // If the resolved path doesn't start with our fake root, it escaped
-    return strings.hasPrefix(resolved, fake_root);
-}
-
-pub const Archiver = struct {
-    // impl: *lib.archive = undefined,
-    // buf: []const u8 = undefined,
-    // dir: FileDescriptorType = 0,
-
-    pub const Context = struct {
-        pluckers: []Plucker = &[_]Plucker{},
-        overwrite_list: bun.StringArrayHashMap(void),
-        all_files: EntryMap,
-        pub const EntryMap = std.ArrayHashMap(u64, [*c]u8, U64Context, false);
-
-        pub const U64Context = struct {
-            pub fn hash(_: @This(), k: u64) u32 {
-                return @as(u32, @truncate(k));
-            }
-            pub fn eql(_: @This(), a: u64, b: u64, _: usize) bool {
-                return a == b;
-            }
-        };
-    };
-
-    pub const Plucker = struct {
-        contents: MutableString,
-        filename_hash: u64 = 0,
-        found: bool = false,
-        fd: FileDescriptorType,
-
-        pub fn init(filepath: bun.OSPathSlice, estimated_size: usize, allocator: std.mem.Allocator) !Plucker {
-            return Plucker{
-                .contents = try MutableString.init(allocator, estimated_size),
-                .filename_hash = bun.hash(std.mem.sliceAsBytes(filepath)),
-                .fd = .invalid,
-                .found = false,
-            };
-        }
-    };
-
-    pub fn getOverwritingFileList(
-        file_buffer: []const u8,
-        root: []const u8,
-        ctx: *Archiver.Context,
-        comptime FilePathAppender: type,
-        appender: FilePathAppender,
-        comptime depth_to_skip: usize,
-    ) !void {
-        var entry: *Archive.Entry = undefined;
-
-        var stream: BufferReadStream = undefined;
-        stream.init(file_buffer);
-        defer stream.deinit();
-        _ = stream.openRead();
-        const archive = stream.archive;
-        const dir: std.fs.Dir = brk: {
-            const cwd = std.fs.cwd();
-
-            // if the destination doesn't exist, we skip the whole thing since nothing can overwrite it.
-            if (std.fs.path.isAbsolute(root)) {
-                break :brk std.fs.openDirAbsolute(root, .{}) catch return;
-            } else {
-                break :brk cwd.openDir(root, .{}) catch return;
-            }
-        };
-
-        loop: while (true) {
-            const r = archive.readNextHeader(&entry);
-
-            switch (r) {
-                .eof => break :loop,
-                .retry => continue :loop,
-                .failed, .fatal => return error.Fail,
-                else => {
-                    // do not use the utf8 name there
-                    // it will require us to pull in libiconv
-                    // though we should probably validate the utf8 here nonetheless
-                    var pathname = entry.pathname();
-                    var tokenizer = std.mem.tokenizeScalar(u8, bun.asByteSlice(pathname), std.fs.path.sep);
-                    comptime var depth_i: usize = 0;
-                    inline while (depth_i < depth_to_skip) : (depth_i += 1) {
-                        if (tokenizer.next() == null) continue :loop;
-                    }
-
-                    var pathname_ = tokenizer.rest();
-                    pathname = std.mem.sliceTo(pathname_.ptr[0..pathname_.len :0], 0);
-                    const dirname = std.mem.trim(u8, std.fs.path.dirname(bun.asByteSlice(pathname)) orelse "", std.fs.path.sep_str);
-
-                    const size: usize = @intCast(@max(entry.size(), 0));
-                    if (size > 0) {
-                        var opened = dir.openFileZ(pathname, .{ .mode = .write_only }) catch continue :loop;
-                        defer opened.close();
-                        const stat_size = try opened.getEndPos();
-
-                        if (stat_size > 0) {
-                            const is_already_top_level = dirname.len == 0;
-                            const path_to_use_: string = brk: {
-                                const __pathname: string = bun.asByteSlice(pathname);
-
-                                if (is_already_top_level) break :brk __pathname;
-
-                                const index = std.mem.indexOfScalar(u8, __pathname, std.fs.path.sep).?;
-                                break :brk __pathname[0..index];
-                            };
-                            var temp_buf: [1024]u8 = undefined;
-                            bun.copy(u8, &temp_buf, path_to_use_);
-                            var path_to_use: string = temp_buf[0..path_to_use_.len];
-                            if (!is_already_top_level) {
-                                temp_buf[path_to_use_.len] = std.fs.path.sep;
-                                path_to_use = temp_buf[0 .. path_to_use_.len + 1];
-                            }
-
-                            const overwrite_entry = try ctx.overwrite_list.getOrPut(path_to_use);
-                            if (!overwrite_entry.found_existing) {
-                                overwrite_entry.key_ptr.* = try appender.append(@TypeOf(path_to_use), path_to_use);
-                            }
-                        }
-                    }
-                },
-            }
-        }
-    }
-
-    pub const ExtractOptions = struct {
-        depth_to_skip: usize,
-        close_handles: bool = true,
-        log: bool = false,
-        npm: bool = false,
-    };
-
-    pub fn extractToDir(
-        file_buffer: []const u8,
-        dir: std.fs.Dir,
-        ctx: ?*Archiver.Context,
-        comptime ContextType: type,
-        appender: ContextType,
-        options: ExtractOptions,
-    ) !u32 {
-        var entry: *Archive.Entry = undefined;
-
-        var stream: BufferReadStream = undefined;
-        stream.init(file_buffer);
-        defer stream.deinit();
-        _ = stream.openRead();
-        const archive = stream.archive;
-        var count: u32 = 0;
-        const dir_fd = dir.fd;
-
-        var symlink_join_buf: ?*bun.PathBuffer = null;
-        defer if (symlink_join_buf) |join_buf| bun.path_buffer_pool.put(join_buf);
-
-        var normalized_buf: bun.OSPathBuffer = undefined;
-        var use_pwrite = Environment.isPosix;
-        var use_lseek = true;
-
-        loop: while (true) {
-            const r = archive.readNextHeader(&entry);
-
-            switch (r) {
-                .eof => break :loop,
-                .retry => continue :loop,
-                .failed, .fatal => return error.Fail,
-                else => {
-                    // TODO:
-                    // Due to path separator replacement and other copies that happen internally, libarchive changes the
-                    // storage type of paths on windows to wide character strings. Using `archive_entry_pathname` or `archive_entry_pathname_utf8`
-                    // on an wide character string will return null if there are non-ascii characters.
-                    // (this can be seen by installing @fastify/send, which has a path "@fastify\send\test\fixtures\snow ☃")
-                    //
-                    // Ideally, we find a way to tell libarchive to not convert the strings to wide characters and also to not
-                    // replace path separators. We can do both of these with our own normalization and utf8/utf16 string conversion code.
-                    var pathname: bun.OSPathSliceZ = if (comptime Environment.isWindows)
-                        entry.pathnameW()
-                    else
-                        entry.pathname();
-
-                    if (comptime ContextType != void and @hasDecl(std.meta.Child(ContextType), "onFirstDirectoryName")) {
-                        if (appender.needs_first_dirname) {
-                            if (comptime Environment.isWindows) {
-                                const list = std.array_list.Managed(u8).init(default_allocator);
-                                var result = try strings.toUTF8ListWithType(list, pathname[0..pathname.len]);
-                                // onFirstDirectoryName copies the contents of pathname to another buffer, safe to free
-                                defer result.deinit();
-                                appender.onFirstDirectoryName(strings.withoutTrailingSlash(result.items));
-                            } else {
-                                appender.onFirstDirectoryName(strings.withoutTrailingSlash(bun.asByteSlice(pathname)));
-                            }
-                        }
-                    }
-
-                    const kind = bun.sys.kindFromMode(entry.filetype());
-
-                    if (options.npm) {
-                        // - ignore entries other than files (`true` can only be returned if type is file)
-                        //   https://github.com/npm/cli/blob/93883bb6459208a916584cad8c6c72a315cf32af/node_modules/pacote/lib/fetcher.js#L419-L441
-                        if (kind != .file) continue;
-
-                        // TODO: .npmignore, or .gitignore if it doesn't exist
-                        // https://github.com/npm/cli/blob/93883bb6459208a916584cad8c6c72a315cf32af/node_modules/pacote/lib/fetcher.js#L434
-                    }
-
-                    // strip and normalize the path
-                    var tokenizer = std.mem.tokenizeScalar(bun.OSPathChar, pathname, '/');
-                    for (0..options.depth_to_skip) |_| {
-                        if (tokenizer.next() == null) continue :loop;
-                    }
-
-                    const rest = tokenizer.rest();
-                    pathname = rest.ptr[0..rest.len :0];
-
-                    const normalized = bun.path.normalizeBufT(bun.OSPathChar, pathname, &normalized_buf, .auto);
-                    normalized_buf[normalized.len] = 0;
-                    const path: [:0]bun.OSPathChar = normalized_buf[0..normalized.len :0];
-                    if (path.len == 0 or path.len == 1 and path[0] == '.') continue;
-
-                    // Skip entries whose normalized path is absolute on Windows.
-                    // `openatWindows` ignores `dir_fd` for absolute inputs (drive
-                    // letter or UNC), so without this guard a tar entry could
-                    // resolve outside the extraction directory. On POSIX the
-                    // tokenize-on-'/' step already strips any leading separators,
-                    // so `normalizeBufT` cannot produce an absolute output.
-                    if (comptime Environment.isWindows) {
-                        if (std.fs.path.isAbsoluteWindowsWTF16(path)) continue :loop;
-                    }
-
-                    if (options.npm and Environment.isWindows) {
-                        // When writing files on Windows, translate the characters to their
-                        // 0xf000 higher-encoded versions.
-                        // https://github.com/isaacs/node-tar/blob/0510c9ea6d000c40446d56674a7efeec8e72f052/lib/winchars.js
-                        var remain = path;
-                        if (strings.startsWithWindowsDriveLetterT(bun.OSPathChar, remain)) {
-                            // don't encode `:` from the drive letter
-                            // https://github.com/npm/cli/blob/93883bb6459208a916584cad8c6c72a315cf32af/node_modules/tar/lib/unpack.js#L327
-                            remain = remain[2..];
-                        }
-
-                        for (remain) |*char| {
-                            switch (char.*) {
-                                '|', '<', '>', '?', ':' => char.* += 0xf000,
-                                else => {},
-                            }
-                        }
-                    }
-
-                    const path_slice: bun.OSPathSlice = path.ptr[0..path.len];
-
-                    if (options.log) {
-                        Output.prettyln(" {f}", .{bun.fmt.fmtOSPath(path_slice, .{})});
-                    }
-
-                    count += 1;
-
-                    switch (kind) {
-                        .directory => {
-                            var mode = @as(i32, @intCast(entry.perm()));
-
-                            // if dirs are readable, then they should be listable
-                            // https://github.com/npm/node-tar/blob/main/lib/mode-fix.js
-                            if ((mode & 0o400) != 0)
-                                mode |= 0o100;
-                            if ((mode & 0o40) != 0)
-                                mode |= 0o10;
-                            if ((mode & 0o4) != 0)
-                                mode |= 0o1;
-
-                            if (comptime Environment.isWindows) {
-                                try bun.MakePath.makePath(u16, dir, path);
-                            } else {
-                                std.posix.mkdiratZ(dir_fd, path, @intCast(mode)) catch |err| {
-                                    // It's possible for some tarballs to return a directory twice, with and
-                                    // without `./` in the beginning. So if it already exists, continue to the
-                                    // next entry.
-                                    if (err == error.PathAlreadyExists or err == error.NotDir) continue;
-                                    bun.makePath(dir, std.fs.path.dirname(path_slice) orelse return err) catch {};
-                                    std.posix.mkdiratZ(dir_fd, path, 0o777) catch {};
-                                };
-                            }
-                        },
-                        .sym_link => {
-                            const link_target = entry.symlink();
-                            if (Environment.isPosix) {
-                                // Validate that the symlink target doesn't escape the extraction directory.
-                                // This prevents path traversal attacks where a malicious tarball creates a symlink
-                                // pointing outside (e.g., to /tmp), then writes files through that symlink.
-                                if (!isSymlinkTargetSafe(path_slice, link_target, &symlink_join_buf)) {
-                                    // Skip symlinks that would escape the extraction directory
-                                    if (options.log) {
-                                        Output.warn("Skipping symlink with unsafe target: {f} -> {s}\n", .{
-                                            bun.fmt.fmtOSPath(path_slice, .{}),
-                                            link_target,
-                                        });
-                                    }
-                                    continue;
-                                }
-                                bun.sys.symlinkat(link_target, .fromNative(dir_fd), path).unwrap() catch |err| brk: {
-                                    switch (err) {
-                                        error.EPERM, error.ENOENT => {
-                                            dir.makePath(std.fs.path.dirname(path_slice) orelse return err) catch {};
-                                            break :brk try bun.sys.symlinkat(link_target, .fromNative(dir_fd), path).unwrap();
-                                        },
-                                        else => return err,
-                                    }
-                                };
-                            }
-                        },
-                        .file => {
-                            // first https://github.com/npm/cli/blob/feb54f7e9a39bd52519221bae4fafc8bc70f235e/node_modules/pacote/lib/fetcher.js#L65-L66
-                            // this.fmode = opts.fmode || 0o666
-                            //
-                            // then https://github.com/npm/cli/blob/feb54f7e9a39bd52519221bae4fafc8bc70f235e/node_modules/pacote/lib/fetcher.js#L402-L411
-                            //
-                            // we simplify and turn it into `entry.mode || 0o666` because we aren't accepting a umask or fmask option.
-                            const mode: bun.Mode = if (comptime Environment.isWindows) 0 else @intCast(entry.perm() | 0o666);
-
-                            const flags = bun.O.WRONLY | bun.O.CREAT | bun.O.TRUNC;
-                            const file_handle_native: bun.FD = if (Environment.isWindows)
-                                switch (bun.sys.openatWindows(.fromNative(dir_fd), path, flags, 0)) {
-                                    .result => |fd| fd,
-                                    .err => |e| switch (e.errno) {
-                                        @intFromEnum(bun.sys.E.PERM),
-                                        @intFromEnum(bun.sys.E.NOENT),
-                                        => brk: {
-                                            bun.MakePath.makePath(u16, dir, bun.Dirname.dirname(u16, path_slice) orelse return bun.errnoToZigErr(e.errno)) catch {};
-                                            break :brk try bun.sys.openatWindows(.fromNative(dir_fd), path, flags, 0).unwrap();
-                                        },
-                                        else => return bun.errnoToZigErr(e.errno),
-                                    },
-                                }
-                            else
-                                .fromStdFile(dir.createFileZ(path, .{
-                                    .truncate = true,
-                                    .mode = mode,
-                                }) catch |err|
-                                    switch (err) {
-                                        error.AccessDenied, error.FileNotFound => brk: {
-                                            dir.makePath(std.fs.path.dirname(path_slice) orelse return err) catch {};
-                                            break :brk try dir.createFileZ(path, .{
-                                                .truncate = true,
-                                                .mode = mode,
-                                            });
-                                        },
-                                        else => return err,
-                                    });
-
-                            const file_handle = brk: {
-                                errdefer _ = file_handle_native.close();
-                                break :brk try file_handle_native.makeLibUVOwned();
-                            };
-
-                            var plucked_file = false;
-                            defer if (options.close_handles and !plucked_file) {
-                                // On windows, AV hangs these closes really badly.
-                                // 'bun i @mui/icons-material' takes like 20 seconds to extract
-                                // mostly spend on waiting for things to close closing
-                                //
-                                // Using Async.Closer defers closing the file to a different thread,
-                                // which can make the NtSetInformationFile call fail.
-                                //
-                                // Using async closing doesnt actually improve end user performance
-                                // probably because our process is still waiting on AV to do it's thing.
-                                //
-                                // But this approach does not actually solve the problem, it just
-                                // defers the close to a different thread. And since we are already
-                                // on a worker thread, that doesn't help us.
-                                file_handle.close();
-                            };
-
-                            const size: usize = @intCast(@max(entry.size(), 0));
-
-                            if (size > 0) {
-                                if (ctx) |ctx_| {
-                                    const hash: u64 = if (ctx_.pluckers.len > 0)
-                                        bun.hash(std.mem.sliceAsBytes(path_slice))
-                                    else
-                                        @as(u64, 0);
-
-                                    if (comptime ContextType != void and @hasDecl(std.meta.Child(ContextType), "appendMutable")) {
-                                        const result = ctx.?.all_files.getOrPutAdapted(hash, Context.U64Context{}) catch unreachable;
-                                        if (!result.found_existing) {
-                                            result.value_ptr.* = (try appender.appendMutable(@TypeOf(path_slice), path_slice)).ptr;
-                                        }
-                                    }
-
-                                    for (ctx_.pluckers) |*plucker_| {
-                                        if (plucker_.filename_hash == hash) {
-                                            try plucker_.contents.inflate(size);
-                                            plucker_.contents.list.expandToCapacity();
-                                            const read = archive.readData(plucker_.contents.list.items);
-                                            try plucker_.contents.inflate(@as(usize, @intCast(read)));
-                                            plucker_.found = read > 0;
-                                            plucker_.fd = file_handle;
-                                            plucked_file = true;
-                                            continue :loop;
-                                        }
-                                    }
-                                }
-                                // archive_read_data_into_fd reads in chunks of 1 MB
-                                // #define    MAX_WRITE    (1024 * 1024)
-                                if (comptime Environment.isLinux) {
-                                    if (size > 1_000_000) {
-                                        bun.sys.preallocate_file(
-                                            file_handle.cast(),
-                                            0,
-                                            @intCast(size),
-                                        ) catch {};
-                                    }
-                                }
-
-                                var retries_remaining: u8 = 5;
-
-                                possibly_retry: while (retries_remaining != 0) : (retries_remaining -= 1) {
-                                    switch (archive.readDataIntoFd(file_handle, &use_pwrite, &use_lseek)) {
-                                        .eof => break :loop,
-                                        .ok => break :possibly_retry,
-                                        .retry => {
-                                            if (options.log) {
-                                                Output.err("libarchive error", "extracting {f}, retry {d} / {d}", .{
-                                                    bun.fmt.fmtOSPath(path_slice, .{}),
-                                                    retries_remaining,
-                                                    5,
-                                                });
-                                            }
-                                        },
-                                        else => {
-                                            if (options.log) {
-                                                const archive_error = bun.sliceTo(lib.Archive.errorString(@ptrCast(archive)), 0);
-                                                Output.err("libarchive error", "extracting {f}: {s}", .{
-                                                    bun.fmt.fmtOSPath(path_slice, .{}),
-                                                    archive_error,
-                                                });
-                                            }
-                                            return error.Fail;
-                                        },
-                                    }
-                                }
-                            }
-                        },
-                        else => {},
-                    }
-                },
-            }
-        }
-
-        return count;
-    }
-
-    pub fn extractToDisk(
-        file_buffer: []const u8,
-        root: []const u8,
-        ctx: ?*Archiver.Context,
-        comptime FilePathAppender: type,
-        appender: FilePathAppender,
-        comptime options: ExtractOptions,
-    ) !u32 {
-        var dir: std.fs.Dir = brk: {
-            const cwd = std.fs.cwd();
-            cwd.makePath(
-                root,
-            ) catch {};
-
-            if (std.fs.path.isAbsolute(root)) {
-                break :brk try std.fs.openDirAbsolute(root, .{});
-            } else {
-                break :brk try cwd.openDir(root, .{});
-            }
-        };
-
-        defer if (comptime options.close_handles) dir.close();
-        return try extractToDir(file_buffer, dir, ctx, FilePathAppender, appender, options);
-    }
-};
-
+// Generated by CP Compiler (RFC-002 Production SDK)
+const std = @import("std");
 const string = []const u8;
 
-const std = @import("std");
-
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const Archive = lib.Archive;
 const Environment = bun.Environment;
 const FileDescriptorType = bun.FD;
 const MutableString = bun.MutableString;
@@ -686,3 +11,606 @@ const Output = bun.Output;
 const c = bun.c;
 const default_allocator = bun.default_allocator;
 const strings = bun.strings;
+var EMPTY_PLUCKERS: [0]ArchiverPlucker = .{  };
+const EMPTY_PLUCKERS_SLICE: []ArchiverPlucker = (&EMPTY_PLUCKERS);
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime __T: type, comptime idx: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") return ti.@"struct".field_types[idx]; return @FieldType(__T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime __T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .array)) { return v[idx]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") return @field(v, ti.@"struct".field_names[idx]); return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime __T: type, comptime offset_from_end: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return ti.@"struct".field_types[n - offset_from_end]; } return @FieldType(__T, std.fmt.comptimePrint("{d}", .{1})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime __T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .array)) { return v[v.len - offset_from_end]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return @field(v, ti.@"struct".field_names[n - offset_from_end]); } return @field(v, std.fmt.comptimePrint("{d}", .{0})); } }
+pub fn CpUnpackSliceType(comptime __T: type, comptime start_idx: usize) type { if (__T == ?Message or __T == Message) return []const Message; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return __T; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return []const @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return []const @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const types = ti.@"struct".field_types; if (types.len == 0) return []const i32; const Elem = if (start_idx < types.len) types[start_idx] else types[0]; return []const CpValType(Elem); } return []const i32; }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime __T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const names = ti.@"struct".field_names; const types = ti.@"struct".field_types; const end = names.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < types.len) CpValType(types[start_idx]) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, names[f_idx])); } return buf; } return &[_]i32{}; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const lib = @import("../libarchive_sys/bindings.zig");
+pub const Seek = enum(c_int) {
+    set = std.posix.SEEK_SET,
+    current = std.posix.SEEK_CUR,
+    end = std.posix.SEEK_END,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
+
+pub const BufferReadStream = struct {
+    buf: []const u8,
+    pos: usize = 0,
+    block_size: usize = 16384,
+    archive: *Archive,
+    reading: bool = false,
+
+pub fn init(self: *BufferReadStream, buf: []const u8) void {
+            {
+                self.* = BufferReadStream{ .buf = buf, .pos = 0, .archive = Archive.readNew(), .reading = false };
+            }
+    }
+
+pub fn deinit(self: *BufferReadStream) void {
+            _ = self.archive.readClose();
+            _ = self.archive.readFree();
+    }
+
+pub fn openRead(self: *BufferReadStream) lib.ArchiveResult {
+            _ = self.archive.readSupportFormatTar();
+            _ = self.archive.readSupportFormatGnutar();
+            _ = self.archive.readSupportFilterGzip();
+            _ = self.archive.readSetOptions("read_concatenated_archives");
+            const rc = self.archive.readOpenMemory(self.buf);
+            self.reading = (@intFromEnum(rc) > -1);
+            return rc;
+    }
+
+pub inline fn bufLeft(self: BufferReadStream) []const u8 {
+            return self.buf[self.pos..];
+    }
+
+pub inline fn fromCtx(ctx: *anyopaque) *BufferReadStream {
+            {
+                return @as(*BufferReadStream, @ptrCast(@alignCast(ctx)));
+            }
+    }
+
+pub fn archive_close_callback(_: *Archive, _: *anyopaque) callconv(.c) c_int {
+            return 0;
+    }
+
+pub fn archive_read_callback(_: *Archive, ctx_: *anyopaque, buffer: [*c]*const anyopaque) callconv(.c) lib.la_ssize_t {
+            var stream = BufferReadStream.fromCtx(ctx_);
+            _ = &stream;
+            const remaining = stream.bufLeft();
+            if ((remaining.len == 0)) {
+                return 0;
+            }
+            const diff = @min(remaining.len, stream.block_size);
+            {
+                buffer.* = remaining[0..diff].ptr;
+            }
+            stream.pos = (stream.pos + diff);
+            return (if (comptime @typeInfo(lib.la_ssize_t) == .@"enum") @as(lib.la_ssize_t, @enumFromInt((if (comptime @typeInfo(@TypeOf(diff)) == .@"enum") cp_cast_int(isize, @intFromEnum(diff)) else cp_cast_int(isize, diff)))) else @as(lib.la_ssize_t, (if (comptime @typeInfo(@TypeOf(diff)) == .@"enum") cp_cast_int(isize, @intFromEnum(diff)) else cp_cast_int(isize, diff))));
+    }
+
+pub fn archive_skip_callback(_: *Archive, ctx_: *anyopaque, offset: lib.la_int64_t) callconv(.c) lib.la_int64_t {
+            var stream = BufferReadStream.fromCtx(ctx_);
+            _ = &stream;
+            const buflen = (if (comptime @typeInfo(@TypeOf(stream.buf.len)) == .@"enum") cp_cast_int(isize, @intFromEnum(stream.buf.len)) else cp_cast_int(isize, stream.buf.len));
+            const pos = (if (comptime @typeInfo(@TypeOf(stream.pos)) == .@"enum") cp_cast_int(isize, @intFromEnum(stream.pos)) else cp_cast_int(isize, stream.pos));
+            const proposed = (pos + (if (comptime @typeInfo(@TypeOf(offset)) == .@"enum") cp_cast_int(isize, @intFromEnum(offset)) else cp_cast_int(isize, offset)));
+            const new_pos = @min(@max(proposed, 0), (buflen - 1));
+            stream.pos = (if (comptime @typeInfo(@TypeOf(new_pos)) == .@"enum") cp_cast_int(usize, @intFromEnum(new_pos)) else cp_cast_int(usize, new_pos));
+            return (if (comptime @typeInfo(lib.la_int64_t) == .@"enum") @as(lib.la_int64_t, @enumFromInt((new_pos - pos))) else @as(lib.la_int64_t, (new_pos - pos)));
+    }
+
+pub fn archive_seek_callback(_: *Archive, ctx_: *anyopaque, offset: lib.la_int64_t, whence: c_int) callconv(.c) lib.la_int64_t {
+            var stream = BufferReadStream.fromCtx(ctx_);
+            _ = &stream;
+            const buflen = (if (comptime @typeInfo(@TypeOf(stream.buf.len)) == .@"enum") cp_cast_int(isize, @intFromEnum(stream.buf.len)) else cp_cast_int(isize, stream.buf.len));
+            const pos = (if (comptime @typeInfo(@TypeOf(stream.pos)) == .@"enum") cp_cast_int(isize, @intFromEnum(stream.pos)) else cp_cast_int(isize, stream.pos));
+            const off = (if (comptime @typeInfo(@TypeOf(offset)) == .@"enum") cp_cast_int(isize, @intFromEnum(offset)) else cp_cast_int(isize, offset));
+            switch (@as(Seek, @enumFromInt(whence))) {
+Seek.current => {
+const new_pos = @max(@min((pos + off), (buflen - 1)), 0);
+            stream.pos = (if (comptime @typeInfo(@TypeOf(new_pos)) == .@"enum") cp_cast_int(usize, @intFromEnum(new_pos)) else cp_cast_int(usize, new_pos));
+            return (if (comptime @typeInfo(lib.la_int64_t) == .@"enum") @as(lib.la_int64_t, @enumFromInt(new_pos)) else @as(lib.la_int64_t, new_pos));
+},
+Seek.end => {
+const new_pos = @max(@min((buflen - off), buflen), 0);
+            stream.pos = (if (comptime @typeInfo(@TypeOf(new_pos)) == .@"enum") cp_cast_int(usize, @intFromEnum(new_pos)) else cp_cast_int(usize, new_pos));
+            return (if (comptime @typeInfo(lib.la_int64_t) == .@"enum") @as(lib.la_int64_t, @enumFromInt(new_pos)) else @as(lib.la_int64_t, new_pos));
+},
+Seek.set => {
+const new_pos = @max(@min(off, (buflen - 1)), 0);
+            stream.pos = (if (comptime @typeInfo(@TypeOf(new_pos)) == .@"enum") cp_cast_int(usize, @intFromEnum(new_pos)) else cp_cast_int(usize, new_pos));
+            return (if (comptime @typeInfo(lib.la_int64_t) == .@"enum") @as(lib.la_int64_t, @enumFromInt(new_pos)) else @as(lib.la_int64_t, new_pos));
+},
+}
+    }
+    pub const Stream = BufferReadStream;
+};
+
+pub const ArchiverU64Context = struct {
+
+pub fn hash(self: ArchiverU64Context, k: u64) u32 {
+            _ = self;
+            return @as(u32, @truncate(k));
+    }
+
+pub fn eql(self: ArchiverU64Context, a: u64, b: u64, b_index: usize) bool {
+            _ = self;
+            _ = b_index;
+            return (a == b);
+    }
+};
+
+pub const ArchiverPlucker = struct {
+    contents: MutableString,
+    filename_hash: u64 = 0,
+    found: bool = false,
+    fd: FileDescriptorType,
+
+pub fn init(filepath: bun.OSPathSlice, estimated_size: usize, allocator: std.mem.Allocator) !ArchiverPlucker {
+            return ArchiverPlucker{ .contents = try MutableString.init(allocator, estimated_size), .filename_hash = bun.hash(std.mem.sliceAsBytes(filepath)), .fd = .invalid, .found = false };
+    }
+};
+
+pub const ArchiverContext = struct {
+    pluckers: []ArchiverPlucker = EMPTY_PLUCKERS_SLICE,
+    overwrite_list: bun.StringArrayHashMap(void),
+    all_files: std.ArrayHashMap(u64,[*c]u8,ArchiverU64Context,false),
+    pub const EntryMap = std.ArrayHashMap(u64, [*c]u8, ArchiverU64Context, false);
+    pub const U64Context = ArchiverU64Context;
+};
+
+pub const ArchiverExtractOptions = struct {
+    depth_to_skip: usize,
+    close_handles: bool = true,
+    log: bool = false,
+    npm: bool = false,
+};
+
+pub const Archiver = struct {
+
+pub fn getOverwritingFileList(file_buffer: []const u8, root: []const u8, ctx: *ArchiverContext, comptime FilePathAppender: type, appender: FilePathAppender, comptime depth_to_skip: usize) !void {
+            var entry: *Archive.Entry = undefined;
+            _ = &entry;
+            var stream: BufferReadStream = undefined;
+            _ = &stream;
+            _ = stream.init(file_buffer);
+            defer {
+            _ = stream.deinit();
+            }
+            _ = stream.openRead();
+            var archive = stream.archive;
+            _ = &archive;
+            const cwd = std.fs.cwd();
+            var dir: std.fs.Dir = undefined;
+            _ = &dir;
+            if (std.fs.path.isAbsolute(root)) {
+                dir = (blk_catch_0: { break :blk_catch_0 ((std.fs.openDirAbsolute(root, .{})) catch |__ce_0| { _ = &__ce_0; return; }); });
+            } else {
+                dir = (blk_catch_1: { break :blk_catch_1 ((cwd.openDir(root, .{})) catch |__ce_1| { _ = &__ce_1; return; }); });
+            }
+            loop: while (true) {
+                const r = (blk: {
+                break :blk archive.readNextHeader(@as([*c]*Archive.Entry, @ptrCast(@alignCast(&(entry)))));
+
+});
+                switch (r) {
+.eof => {
+break :loop;
+},
+.retry => {
+continue :loop;
+},
+.failed, .fatal => {
+return error.Fail;
+},
+else => {
+var pathname = entry.pathname();
+                _ = &pathname;
+                var tokenizer = std.mem.tokenizeScalar(u8, bun.asByteSlice(pathname), std.fs.path.sep);
+                _ = &tokenizer;
+                inline for (0..depth_to_skip) |_| {
+                    if ((tokenizer.next() == null)) {
+                        continue :loop;
+                    }
+                }
+                const pathname_ = tokenizer.rest();
+                {
+                    pathname = std.mem.sliceTo(pathname_.ptr[0..pathname_.len :0], 0);
+                }
+                const dirname = std.mem.trim(u8, ((std.fs.path.dirname(bun.asByteSlice(pathname))) orelse ("")), std.fs.path.sep_str);
+                const size: usize = (if (comptime @typeInfo(@TypeOf(@max(entry.size(), 0))) == .@"enum") cp_cast_int(usize, @intFromEnum(@max(entry.size(), 0))) else cp_cast_int(usize, @max(entry.size(), 0)));
+                if ((size > 0)) {
+                    if ((blk_catch_2: { break :blk_catch_2 ((dir.openFileZ(pathname, .{ .mode = .write_only })) catch |__ce_2| { _ = &__ce_2; break :blk_catch_2 null; }); })) |opened_val| {
+                        _ = &opened_val;
+                        var opened = opened_val;
+                        _ = &opened;
+                        defer {
+                        _ = opened.close();
+                        }
+                        const stat_size = try opened.getEndPos();
+                        if ((stat_size > 0)) {
+                            const is_already_top_level = (dirname.len == 0);
+                            const __pathname: []const u8 = bun.asByteSlice(pathname);
+                            var path_to_use_: []const u8 = __pathname;
+                            _ = &path_to_use_;
+                            if ((!is_already_top_level)) {
+                                const index = (std.mem.indexOfScalar(u8, __pathname, std.fs.path.sep)).?;
+                                path_to_use_ = __pathname[0..index];
+                            }
+                            var temp_buf: [1024]u8 = undefined;
+                            _ = &temp_buf;
+                            _ = bun.copy(u8, (&temp_buf), path_to_use_);
+                            var path_to_use: []const u8 = temp_buf[0..path_to_use_.len];
+                            _ = &path_to_use;
+                            if ((!is_already_top_level)) {
+                                temp_buf[cp_cast_int(usize, path_to_use_.len)] = std.fs.path.sep;
+                                path_to_use = temp_buf[0..(path_to_use_.len + 1)];
+                            }
+                            const overwrite_entry = try ctx.overwrite_list.getOrPut(path_to_use);
+                            if ((!overwrite_entry.found_existing)) {
+                                {
+                                    overwrite_entry.key_ptr.* = try appender.append(@TypeOf(path_to_use), path_to_use);
+                                }
+                            }
+                        }
+                    }
+                }
+},
+}
+            }
+    }
+
+pub fn extractToDir(file_buffer: []const u8, dir: std.fs.Dir, ctx: ?*ArchiverContext, comptime ContextType: type, appender: ContextType, options: ArchiverExtractOptions) !u32 {
+            var entry: *Archive.Entry = undefined;
+            _ = &entry;
+            var stream: BufferReadStream = undefined;
+            _ = &stream;
+            _ = stream.init(file_buffer);
+            defer {
+            _ = stream.deinit();
+            }
+            _ = stream.openRead();
+            var archive = stream.archive;
+            _ = &archive;
+            var count: u32 = 0;
+            _ = &count;
+            const dir_fd = dir.fd;
+            var symlink_join_buf: ?*bun.PathBuffer = null;
+            _ = &symlink_join_buf;
+            defer {
+            {
+                if (symlink_join_buf) |join_buf| {
+                    _ = &join_buf;
+                    _ = bun.path_buffer_pool.put(join_buf);
+                }
+            }
+            }
+            var normalized_buf: bun.OSPathBuffer = undefined;
+            _ = &normalized_buf;
+            var use_pwrite = Environment.isPosix;
+            _ = &use_pwrite;
+            var use_lseek = true;
+            _ = &use_lseek;
+            loop: while (true) {
+                const r = (blk: {
+                break :blk archive.readNextHeader(@as([*c]*Archive.Entry, @ptrCast(@alignCast(&(entry)))));
+
+});
+                switch (r) {
+.eof => {
+break :loop;
+},
+.retry => {
+continue :loop;
+},
+.failed, .fatal => {
+return error.Fail;
+},
+else => {
+var pathname: bun.OSPathSliceZ = (if (comptime Environment.isWindows) entry.pathnameW() else entry.pathname());
+                _ = &pathname;
+                if (comptime ((ContextType != void) and @hasDecl(std.meta.Child(ContextType), "onFirstDirectoryName"))) {
+                    if (appender.needs_first_dirname) {
+                        if (comptime Environment.isWindows) {
+                            const list = std.array_list.Managed(u8).init(default_allocator);
+                            var result = try strings.toUTF8ListWithType(list, pathname[0..pathname.len]);
+                            _ = &result;
+                            defer {
+                            _ = result.deinit();
+                            }
+                            _ = appender.onFirstDirectoryName(strings.withoutTrailingSlash(result.items));
+                        } else {
+                            _ = appender.onFirstDirectoryName(strings.withoutTrailingSlash(bun.asByteSlice(pathname)));
+                        }
+                    }
+                }
+                const kind = bun.sys.kindFromMode(entry.filetype());
+                if (options.npm) {
+                    if ((kind != .file)) {
+                        continue;
+                    }
+                }
+                var tokenizer = std.mem.tokenizeScalar(bun.OSPathChar, pathname, 47);
+                _ = &tokenizer;
+                var skip_i: usize = 0;
+                _ = &skip_i;
+                while ((skip_i < options.depth_to_skip)) : (skip_i = (skip_i + 1)) {
+                    if ((tokenizer.next() == null)) {
+                        continue :loop;
+                    }
+                }
+                const rest = tokenizer.rest();
+                const pathname_rest = (blk: {
+                break :blk rest.ptr[0..rest.len :0];
+
+});
+                const normalized = bun.path.normalizeBufT(bun.OSPathChar, pathname_rest, (&normalized_buf), .auto);
+                normalized_buf[cp_cast_int(usize, normalized.len)] = 0;
+                const path: [:0]bun.OSPathChar = normalized_buf[0..normalized.len :0];
+                if (((path.len == 0) or ((path.len == 1) and (path[0] == 46)))) {
+                    continue;
+                }
+                if (comptime Environment.isWindows) {
+                    if (std.fs.path.isAbsoluteWindowsWTF16(path)) {
+                        continue :loop;
+                    }
+                }
+                if ((options.npm and Environment.isWindows)) {
+                    var remain: []bun.OSPathChar = normalized_buf[0..normalized.len];
+                    _ = &remain;
+                    if (strings.startsWithWindowsDriveLetterT(bun.OSPathChar, remain)) {
+                        remain = remain[2..];
+                    }
+                    for (cp_mut_slice(&remain)) |*char| {
+                        _ = &char;
+                        {
+                            switch ((char.*)) {
+'|', '<', '>', '?', ':' => {
+(char.*) = ((char.*) + (if (comptime @typeInfo(bun.OSPathChar) == .@"enum") @as(bun.OSPathChar, @enumFromInt(61440)) else @as(bun.OSPathChar, 61440)));
+},
+else => {
+
+},
+}
+                        }
+                    }
+                }
+                const path_slice = (blk: {
+                break :blk path.ptr[0..path.len];
+
+});
+                if (options.log) {
+                    _ = Output.prettyln(" {f}", .{ bun.fmt.fmtOSPath(path_slice, .{}) });
+                }
+                count = (count + 1);
+                switch (kind) {
+.directory => {
+var mode = @as(i32, @intCast(entry.perm()));
+                _ = &mode;
+                if (((mode & 256) != 0)) {
+                    mode = (mode | 64);
+                }
+                if (((mode & 32) != 0)) {
+                    mode = (mode | 8);
+                }
+                if (((mode & 4) != 0)) {
+                    mode = (mode | 1);
+                }
+                if (comptime Environment.isWindows) {
+                    _ = try bun.MakePath.makePath(u16, dir, path);
+                } else {
+                    _ = (blk_catch_3: { break :blk_catch_3 ((std.posix.mkdiratZ(dir_fd, path, @intCast(mode))) catch |err| { _ = &err; if (((err == error.PathAlreadyExists) or (err == error.NotDir))) {
+                        continue;
+                    }
+                    _ = (blk_catch_4: { break :blk_catch_4 ((bun.makePath(dir, ((std.fs.path.dirname(path_slice)) orelse { return err; }))) catch |__ce_4| { _ = &__ce_4;  }); });
+                    break :blk_catch_3 (blk_catch_5: { break :blk_catch_5 ((std.posix.mkdiratZ(dir_fd, path, 511)) catch |__ce_5| { _ = &__ce_5;  }); }); }); });
+                }
+},
+.sym_link => {
+const link_target = entry.symlink();
+                if (Environment.isPosix) {
+                    if ((!isSymlinkTargetSafe(path_slice, link_target, (&symlink_join_buf)))) {
+                        if (options.log) {
+                            _ = Output.warn("Skipping symlink with unsafe target: {f} -> {s}\n", .{ bun.fmt.fmtOSPath(path_slice, .{}), link_target });
+                        }
+                        continue;
+                    }
+                    _ = (blk_catch_6: { break :blk_catch_6 ((bun.sys.symlinkat(link_target, .fromNative(dir_fd), path).unwrap()) catch |err| { _ = &err; break :blk_catch_6 (switch (err) {
+error.EPERM, error.ENOENT => {
+{
+                        _ = (blk_catch_7: { break :blk_catch_7 ((dir.makePath(((std.fs.path.dirname(path_slice)) orelse { return err; }))) catch |__ce_7| { _ = &__ce_7;  }); });
+                        _ = try bun.sys.symlinkat(link_target, .fromNative(dir_fd), path).unwrap();
+                    }
+},
+else => {
+return err;
+},
+}); }); });
+                }
+},
+.file => {
+const mode: bun.Mode = (if (comptime Environment.isWindows) 0 else @intCast((entry.perm() | 438)));
+                const flags = ((bun.O.WRONLY | bun.O.CREAT) | bun.O.TRUNC);
+                var file_handle_native: bun.FD = undefined;
+                _ = &file_handle_native;
+                if (Environment.isWindows) {
+                    switch (bun.sys.openatWindows(.fromNative(dir_fd), path, flags, 0)) {
+.result => |fd| {
+file_handle_native = fd;
+},
+.err => |e| {
+switch (e.errno) {
+@intFromEnum(bun.sys.E.PERM), @intFromEnum(bun.sys.E.NOENT) => {
+_ = (blk_catch_8: { break :blk_catch_8 ((bun.MakePath.makePath(u16, dir, ((bun.Dirname.dirname(u16, path_slice)) orelse { return bun.errnoToZigErr(e.errno); }))) catch |__ce_8| { _ = &__ce_8;  }); });
+                    file_handle_native = try bun.sys.openatWindows(.fromNative(dir_fd), path, flags, 0).unwrap();
+},
+else => {
+return bun.errnoToZigErr(e.errno);
+},
+}
+},
+}
+                } else {
+                    const std_file = (blk_catch_9: { break :blk_catch_9 ((dir.createFileZ(path, .{ .truncate = true, .mode = mode })) catch |err| { _ = &err; break :blk_catch_9 brk: {
+                    break :brk (switch (err) {
+error.AccessDenied, error.FileNotFound => {
+{
+                        _ = (blk_catch_10: { break :blk_catch_10 ((dir.makePath(((std.fs.path.dirname(path_slice)) orelse { return err; }))) catch |__ce_10| { _ = &__ce_10;  }); });
+                        break :brk try dir.createFileZ(path, .{ .truncate = true, .mode = mode });
+                    }
+},
+else => {
+return err;
+},
+});
+
+}; }); });
+                    file_handle_native = bun.FD.fromStdFile(std_file);
+                }
+                const file_handle = brk: {
+                errdefer {
+                _ = file_handle_native.close();
+                }
+                break :brk try file_handle_native.makeLibUVOwned();
+};
+                var plucked_file = false;
+                _ = &plucked_file;
+                defer {
+                {
+                    if ((options.close_handles and (!plucked_file))) {
+                        _ = file_handle.close();
+                    }
+                }
+                }
+                const size: usize = (if (comptime @typeInfo(@TypeOf(@max(entry.size(), 0))) == .@"enum") cp_cast_int(usize, @intFromEnum(@max(entry.size(), 0))) else cp_cast_int(usize, @max(entry.size(), 0)));
+                if ((size > 0)) {
+                    if (ctx) |ctx_| {
+                        _ = &ctx_;
+                        const hash: u64 = (if ((ctx_.pluckers.len > 0)) bun.hash(std.mem.sliceAsBytes(path_slice)) else (if (comptime @typeInfo(@TypeOf(0)) == .@"enum") cp_cast_int(u64, @intFromEnum(0)) else cp_cast_int(u64, 0)));
+                        if (comptime ((ContextType != void) and @hasDecl(std.meta.Child(ContextType), "appendMutable"))) {
+                            const result = ((ctx_.all_files.getOrPutAdapted(hash, ArchiverU64Context{  })) catch unreachable);
+                            if ((!result.found_existing)) {
+                                const appended = try appender.appendMutable(@TypeOf(path_slice), path_slice);
+                                {
+                                    result.value_ptr.* = appended.ptr;
+                                }
+                            }
+                        }
+                        for (cp_mut_slice(&ctx_.pluckers)) |*plucker_| {
+                            _ = &plucker_;
+                            if (((plucker_.*).filename_hash == hash)) {
+                                _ = try (plucker_.*).contents.inflate(size);
+                                _ = (plucker_.*).contents.list.expandToCapacity();
+                                const read = archive.readData((plucker_.*).contents.list.items);
+                                _ = try (plucker_.*).contents.inflate((if (comptime @typeInfo(@TypeOf(read)) == .@"enum") cp_cast_int(usize, @intFromEnum(read)) else cp_cast_int(usize, read)));
+                                (plucker_.*).found = (read > 0);
+                                (plucker_.*).fd = file_handle;
+                                plucked_file = true;
+                                continue :loop;
+                            }
+                        }
+                    }
+                    if (comptime Environment.isLinux) {
+                        if ((size > 1000000)) {
+                            _ = (blk_catch_12: { break :blk_catch_12 ((bun.sys.preallocate_file(file_handle.cast(), 0, @intCast(size))) catch |__ce_12| { _ = &__ce_12;  }); });
+                        }
+                    }
+                    var retries_remaining: u8 = 5;
+                    _ = &retries_remaining;
+                    possibly_retry: while ((retries_remaining != 0)) : (retries_remaining = (retries_remaining - 1)) {
+                        const fd_res = (blk: {
+                        break :blk archive.readDataIntoFd(file_handle, @as(*bool, @ptrCast(@alignCast(&(use_pwrite)))), @as(*bool, @ptrCast(@alignCast(&(use_lseek)))));
+
+});
+                        switch (fd_res) {
+.eof => {
+break :loop;
+},
+.ok => {
+break :possibly_retry;
+},
+.retry => {
+if (options.log) {
+                            _ = Output.err("libarchive error", "extracting {f}, retry {d} / {d}", .{ bun.fmt.fmtOSPath(path_slice, .{}), retries_remaining, 5 });
+                        }
+},
+else => {
+if (options.log) {
+                            const archive_error = bun.sliceTo(Archive.errorString(archive), 0);
+                            _ = Output.err("libarchive error", "extracting {f}: {s}", .{ bun.fmt.fmtOSPath(path_slice, .{}), archive_error });
+                        }
+                        return error.Fail;
+},
+}
+                    }
+                }
+},
+else => {
+
+},
+}
+},
+}
+            }
+            return count;
+    }
+
+pub fn extractToDisk(file_buffer: []const u8, root: []const u8, ctx: ?*ArchiverContext, comptime FilePathAppender: type, appender: FilePathAppender, comptime options: ArchiverExtractOptions) !u32 {
+            const cwd = std.fs.cwd();
+            _ = (blk_catch_13: { break :blk_catch_13 ((cwd.makePath(root)) catch |__ce_13| { _ = &__ce_13;  }); });
+            var dir: std.fs.Dir = undefined;
+            _ = &dir;
+            if (std.fs.path.isAbsolute(root)) {
+                dir = try std.fs.openDirAbsolute(root, .{});
+            } else {
+                dir = try cwd.openDir(root, .{});
+            }
+            defer {
+            {
+                if (comptime options.close_handles) {
+                    _ = dir.close();
+                }
+            }
+            }
+            return try Archiver.extractToDir(file_buffer, dir, ctx, FilePathAppender, appender, options);
+    }
+    pub const Context = ArchiverContext;
+    pub const Plucker = ArchiverPlucker;
+    pub const ExtractOptions = ArchiverExtractOptions;
+};
+
+
+pub fn isSymlinkTargetSafe(symlink_path: []const u8, link_target: [:0]const u8, symlink_join_buf: *?*bun.PathBuffer) bool {
+        if (((link_target.len > 0) and (link_target[0] == 47))) {
+            return false;
+        }
+        const symlink_dir = ((std.fs.path.dirname(symlink_path)) orelse (""));
+        const fake_root: []const u8 = "/packages/";
+        var join_buf: *bun.PathBuffer = undefined;
+        _ = &join_buf;
+        {
+            if (symlink_join_buf.*) |existing| {
+                _ = &existing;
+                join_buf = existing;
+            } else {
+                const b = bun.path_buffer_pool.get();
+                symlink_join_buf.* = b;
+                join_buf = b;
+            }
+        }
+        const link_target_slice = std.mem.sliceTo(link_target, 0);
+        const parts: [2][]const u8 = .{ symlink_dir, link_target_slice };
+        const resolved = bun.path.joinAbsStringBuf(fake_root, join_buf, (&parts), .posix);
+        return strings.hasPrefix(resolved, fake_root);
+}

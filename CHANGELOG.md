@@ -219,3 +219,6 @@
 - **双向交互透明化**：主智能体与 `cp agy` 交互信息在屏幕实时回显并实时追加写入 `SESSION.md`；
 - **确立 5 项静态正则拦截门禁**：严禁 `zig {}`、`var`、`.@"0"`、`*anyopaque`、`*any!`；
 - **确立 Quota 耗尽自动恢复**：调用 `schedule` 工具注册后台唤醒定时器，保证配额恢复后无缝自动复工。
+
+## 2026-11-13 里程碑 7 Phase 2
+- 新增 `.cp`（附 `_.zig` 备份并由 cpc 重新生成 `.zig`）：bun_alloc 余下 3、meta/meta、safety/{alloc,asan}、platform/darwin、perf/tracy、ptr 全部 11、zlib/zlib、zlib_sys/win32、highway、tcc_sys、zstd、picohttp、lolhtml_sys、libarchive_sys、libarchive、collections/{array_list,baby_list,bounded_array,collections,identity_context,hive_array}、options_types/{CommandTag,CompileTarget,Context,import_record}、sys/sys_uv、bun_core/{Global,Progress,deprecated,env,env_var,feature_flags,result,tty,util}。

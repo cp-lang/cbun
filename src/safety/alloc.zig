@@ -1,192 +1,146 @@
-fn noAlloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-    _ = ptr;
-    _ = len;
-    _ = alignment;
-    _ = ret_addr;
-    return null;
-}
-
-const dummy_vtable = Allocator.VTable{
-    .alloc = noAlloc,
-    .resize = Allocator.noResize,
-    .remap = Allocator.noRemap,
-    .free = Allocator.noFree,
-};
-
-const arena_vtable = blk: {
-    var arena = std.heap.ArenaAllocator.init(.{
-        .ptr = undefined,
-        .vtable = &dummy_vtable,
-    });
-    break :blk arena.allocator().vtable;
-};
-
-/// Returns true if `alloc` definitely has a valid `.ptr`.
-fn hasPtr(alloc: Allocator) bool {
-    return alloc.vtable == arena_vtable or
-        bun.allocators.allocation_scope.isInstance(alloc) or
-        ((comptime bun.Environment.isLinux) and LinuxMemFdAllocator.isInstance(alloc)) or
-        bun.MaxHeapAllocator.isInstance(alloc) or
-        alloc.vtable == bun.allocators.c_allocator.vtable or
-        alloc.vtable == bun.allocators.z_allocator.vtable or
-        MimallocArena.isInstance(alloc) or
-        bun.jsc.CachedBytecode.isInstance(alloc) or
-        bun.bundle_v2.allocatorHasPointer(alloc) or
-        ((comptime bun.heap_breakdown.enabled) and bun.heap_breakdown.Zone.isInstance(alloc)) or
-        bun.String.isWTFAllocator(alloc);
-}
-
-/// Returns true if the allocators are definitely different.
-fn guaranteedMismatch(alloc1: Allocator, alloc2: Allocator) bool {
-    if (alloc1.vtable != alloc2.vtable) return true;
-    const ptr1 = if (hasPtr(alloc1)) alloc1.ptr else return false;
-    const ptr2 = if (hasPtr(alloc2)) alloc2.ptr else return false;
-    return ptr1 != ptr2;
-}
-
-/// Asserts that two allocators are equal (in `ci_assert` builds).
-///
-/// This function may have false negatives; that is, it may fail to detect that two allocators
-/// are different. However, in practice, it's a useful safety check.
-pub fn assertEq(alloc1: Allocator, alloc2: Allocator) void {
-    assertEqFmt(alloc1, alloc2, "allocators do not match", .{});
-}
-
-/// Asserts that two allocators are equal, with a formatted message.
-pub fn assertEqFmt(
-    alloc1: Allocator,
-    alloc2: Allocator,
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    if (comptime !enabled) return;
-    blk: {
-        if (alloc1.vtable != alloc2.vtable) {
-            bun.Output.err(
-                "allocator mismatch",
-                "vtables differ: {*} and {*}",
-                .{ alloc1.vtable, alloc2.vtable },
-            );
-            break :blk;
-        }
-        const ptr1 = if (hasPtr(alloc1)) alloc1.ptr else return;
-        const ptr2 = if (hasPtr(alloc2)) alloc2.ptr else return;
-        if (ptr1 == ptr2) return;
-        bun.Output.err(
-            "allocator mismatch",
-            "vtables are both {*} but pointers differ: {*} and {*}",
-            .{ alloc1.vtable, ptr1, ptr2 },
-        );
-    }
-    bun.assertf(false, format, args);
-}
-
-/// Use this in unmanaged containers to ensure multiple allocators aren't being used with the same
-/// container. Each method of the container that accepts an allocator parameter should call either
-/// `CheckedAllocator.set` (for non-const methods) or `CheckedAllocator.assertEq` (for const
-/// methods). (Exception: methods like `clone` which explicitly accept any allocator should not call
-/// any methods on this type.)
-pub const CheckedAllocator = struct {
-    const Self = @This();
-
-    #allocator: if (enabled) NullableAllocator else void = if (enabled) .init(null),
-    #trace: if (traces_enabled) StoredTrace else void = if (traces_enabled) StoredTrace.empty,
-
-    pub inline fn init(alloc: Allocator) Self {
-        var self: Self = .{};
-        self.set(alloc);
-        return self;
-    }
-
-    pub fn set(self: *Self, alloc: Allocator) void {
-        if (comptime !enabled) return;
-        if (self.#allocator.isNull()) {
-            self.#allocator = .init(alloc);
-            if (comptime traces_enabled) {
-                self.#trace = StoredTrace.capture(@returnAddress());
-            }
-        } else {
-            self.assertEq(alloc);
-        }
-    }
-
-    pub fn assertEq(self: Self, alloc: Allocator) void {
-        if (comptime !enabled) return;
-        const old_alloc = self.#allocator.get() orelse return;
-        if (!guaranteedMismatch(old_alloc, alloc)) return;
-
-        bun.Output.err(
-            "allocator mismatch",
-            "cannot use multiple allocators with the same collection",
-            .{},
-        );
-        if (comptime traces_enabled) {
-            bun.Output.err(
-                "allocator mismatch",
-                "collection first used here, with a different allocator:",
-                .{},
-            );
-            var trace = self.#trace;
-            bun.crash_handler.dumpStackTrace(
-                trace.trace(),
-                .{ .frame_count = 10, .stop_at_jsc_llint = true },
-            );
-        }
-        // Assertion will always fail. We want the error message.
-        bun.safety.alloc.assertEq(old_alloc, alloc);
-    }
-
-    /// Transfers ownership of the collection to a new allocator.
-    ///
-    /// This method is valid only if both the old allocator and new allocator are `MimallocArena`s.
-    /// This is okay because data allocated by one `MimallocArena` can always be freed by another
-    /// (this includes `resize` and `remap`).
-    ///
-    /// `new_allocator` should be one of the following:
-    ///
-    /// * `*MimallocArena`
-    /// * `*const MimallocArena`
-    /// * `MimallocArena.Borrowed`
-    ///
-    /// If you only have an `std.mem.Allocator`, see `MimallocArena.Borrowed.downcast`.
-    pub inline fn transferOwnership(self: *Self, new_allocator: anytype) void {
-        if (comptime !enabled) return;
-        const ArgType = @TypeOf(new_allocator);
-        const new_std = switch (comptime ArgType) {
-            *MimallocArena,
-            *const MimallocArena,
-            MimallocArena.Borrowed,
-            => new_allocator.allocator(),
-            else => @compileError("unsupported argument: " ++ @typeName(ArgType)),
-        };
-
-        defer self.* = .init(new_std);
-        const old_allocator = self.#allocator.get() orelse return;
-        if (MimallocArena.isInstance(old_allocator)) return;
-
-        if (comptime traces_enabled) {
-            bun.Output.errGeneric("collection first used here:", .{});
-            var trace = self.#trace;
-            bun.crash_handler.dumpStackTrace(
-                trace.trace(),
-                .{ .frame_count = 10, .stop_at_jsc_llint = true },
-            );
-        }
-        std.debug.panic(
-            "cannot transfer ownership from non-MimallocArena (old vtable is {*})",
-            .{old_allocator.vtable},
-        );
-    }
-};
-
-pub const enabled = bun.Environment.ci_assert;
-
-const bun = @import("bun");
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
+
 const Allocator = std.mem.Allocator;
 const StoredTrace = bun.crash_handler.StoredTrace;
 const traces_enabled = bun.Environment.isDebug;
-
 const LinuxMemFdAllocator = bun.allocators.LinuxMemFdAllocator;
 const MimallocArena = bun.allocators.MimallocArena;
 const NullableAllocator = bun.allocators.NullableAllocator;
+pub const enabled = bun.Environment.ci_assert;
+const dummy_vtable = Allocator.VTable{ .alloc = noAlloc, .resize = Allocator.noResize, .remap = Allocator.noRemap, .free = Allocator.noFree };
+const arena_vtable = blk: {
+    var arena_alloc = std.heap.ArenaAllocator.init(Allocator{ .ptr = undefined, .vtable = (&dummy_vtable) });
+    _ = &arena_alloc;
+    break :blk arena_alloc.allocator().vtable;
+};
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const CheckedAllocator = struct {
+    #allocator: if (enabled) NullableAllocator else void = (if (enabled) NullableAllocator.init(null) else ({
+})),
+    #trace: if (traces_enabled) StoredTrace else void = (if (traces_enabled) StoredTrace.empty else ({
+})),
+
+pub inline fn init(alloc: Allocator) CheckedAllocator {
+            var val = CheckedAllocator{  };
+            _ = &val;
+            _ = val.set(alloc);
+            return val;
+    }
+
+pub fn set(self: *CheckedAllocator, alloc: Allocator) void {
+            if (comptime (!enabled)) {
+                return;
+            }
+            if (self.#allocator.isNull()) {
+                self.#allocator = NullableAllocator.init(alloc);
+                if (comptime traces_enabled) {
+                    self.#trace = StoredTrace.capture(@returnAddress());
+                }
+            } else {
+                _ = self.assertEq(alloc);
+            }
+    }
+
+pub fn assertEq(self: CheckedAllocator, alloc: Allocator) void {
+            if (comptime (!enabled)) {
+                return;
+            }
+            const old_alloc = ((self.#allocator.get()) orelse { return; });
+            if ((!guaranteedMismatch(old_alloc, alloc))) {
+                return;
+            }
+            _ = bun.Output.err("allocator mismatch", "cannot use multiple allocators with the same collection", .{});
+            if (comptime traces_enabled) {
+                _ = bun.Output.err("allocator mismatch", "collection first used here, with a different allocator:", .{});
+                var trace = self.#trace;
+                _ = &trace;
+                _ = bun.crash_handler.dumpStackTrace(trace.trace(), .{ .frame_count = 10, .stop_at_jsc_llint = true });
+            }
+            _ = bun.safety.alloc.assertEq(old_alloc, alloc);
+    }
+
+pub inline fn transferOwnership(self: *CheckedAllocator, new_allocator: anytype) void {
+            if (comptime (!enabled)) {
+                return;
+            }
+            const ArgType = @TypeOf(new_allocator);
+            const new_std = (if ((ArgType == *MimallocArena) or (ArgType == *const MimallocArena) or (ArgType == MimallocArena.Borrowed)) new_allocator.allocator() else @compileError(std.fmt.comptimePrint("unsupported argument: {s}", .{ @typeName(ArgType) })));
+            defer {
+            self.* = CheckedAllocator.init(new_std);
+            }
+            const old_allocator = ((self.#allocator.get()) orelse { return; });
+            if (MimallocArena.isInstance(old_allocator)) {
+                return;
+            }
+            if (comptime traces_enabled) {
+                _ = bun.Output.errGeneric("collection first used here:", .{});
+                var trace = self.#trace;
+                _ = &trace;
+                _ = bun.crash_handler.dumpStackTrace(trace.trace(), .{ .frame_count = 10, .stop_at_jsc_llint = true });
+            }
+            _ = std.debug.panic("cannot transfer ownership from non-MimallocArena (old vtable is {*})", .{ old_allocator.vtable });
+    }
+};
+
+
+pub fn noAlloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        _ = ptr;
+        _ = len;
+        _ = alignment;
+        _ = ret_addr;
+        return null;
+}
+
+pub fn hasPtr(alloc: Allocator) bool {
+        return (((((((((((alloc.vtable == arena_vtable) or bun.allocators.allocation_scope.isInstance(alloc)) or ((comptime bun.Environment.isLinux) and LinuxMemFdAllocator.isInstance(alloc))) or bun.MaxHeapAllocator.isInstance(alloc)) or (alloc.vtable == bun.allocators.c_allocator.vtable)) or (alloc.vtable == bun.allocators.z_allocator.vtable)) or MimallocArena.isInstance(alloc)) or bun.jsc.CachedBytecode.isInstance(alloc)) or bun.bundle_v2.allocatorHasPointer(alloc)) or ((comptime bun.heap_breakdown.enabled) and bun.heap_breakdown.Zone.isInstance(alloc))) or bun.String.isWTFAllocator(alloc));
+}
+
+pub fn guaranteedMismatch(alloc1: Allocator, alloc2: Allocator) bool {
+        if ((alloc1.vtable != alloc2.vtable)) {
+            return true;
+        }
+        if ((!hasPtr(alloc1))) {
+            return false;
+        }
+        if ((!hasPtr(alloc2))) {
+            return false;
+        }
+        return (alloc1.ptr != alloc2.ptr);
+}
+
+pub fn assertEq(alloc1: Allocator, alloc2: Allocator) void {
+        _ = assertEqFmt(alloc1, alloc2, "allocators do not match", .{});
+}
+
+pub fn assertEqFmt(alloc1: Allocator, alloc2: Allocator, comptime format: []const u8, args: anytype) void {
+        if (comptime (!enabled)) {
+            return;
+        }
+        _ = blk: {
+        if ((alloc1.vtable != alloc2.vtable)) {
+            _ = bun.Output.err("allocator mismatch", "vtables differ: {*} and {*}", .{ alloc1.vtable, alloc2.vtable });
+            break :blk;
+        }
+        if ((!hasPtr(alloc1))) {
+            return;
+        }
+        if ((!hasPtr(alloc2))) {
+            return;
+        }
+        if ((alloc1.ptr == alloc2.ptr)) {
+            return;
+        }
+        break :blk bun.Output.err("allocator mismatch", "vtables are both {*} but pointers differ: {*} and {*}", .{ alloc1.vtable, alloc1.ptr, alloc2.ptr });
+
+};
+        _ = bun.assertf(false, format, args);
+}
