@@ -222,3 +222,7 @@
 
 ## 2026-11-13 里程碑 7 Phase 2
 - 新增 `.cp`（附 `_.zig` 备份并由 cpc 重新生成 `.zig`）：bun_alloc 余下 3、meta/meta、safety/{alloc,asan}、platform/darwin、perf/tracy、ptr 全部 11、zlib/zlib、zlib_sys/win32、highway、tcc_sys、zstd、picohttp、lolhtml_sys、libarchive_sys、libarchive、collections/{array_list,baby_list,bounded_array,collections,identity_context,hive_array}、options_types/{CommandTag,CompileTarget,Context,import_record}、sys/sys_uv、bun_core/{Global,Progress,deprecated,env,env_var,feature_flags,result,tty,util}。
+
+## 2026-11-14 里程碑 7 Phase 3
+- 新增并验证通过 `.cp`（含 `_.zig` 备份及生成 `.zig`）：`bun_core/{fmt,output}`、`collections/{pool,comptime_string_map,linear_fifo,StaticHashMap,multi_array_list,bit_set}`、`options_types/schema`、`windows_sys/externs`、`resolve_builtins/HardcodedModule`、`install_types/{ExternalString,NodeLinker,SemverString,SlicedString}`、`clap/{args,clap,comptime,streaming}`、`logger_jsc/logger_jsc`。
+- 更新 `GEMINI.md`：固化最多 2 路并发子智能体规则。

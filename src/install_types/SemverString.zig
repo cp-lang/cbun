@@ -1,662 +1,583 @@
-/// String type that stores either an offset/length into an external buffer or a string inline directly
-pub const String = extern struct {
-    pub const max_inline_len: usize = 8;
-    /// This is three different types of string.
-    /// 1. Empty string. If it's all zeroes, then it's an empty string.
-    /// 2. If the final bit is not set, then it's a string that is stored inline.
-    /// 3. If the final bit is set, then it's a string that is stored in an external buffer.
-    bytes: [max_inline_len]u8 = [8]u8{ 0, 0, 0, 0, 0, 0, 0, 0 },
-
-    pub const empty: String = .{};
-
-    /// Create an inline string
-    pub fn from(comptime inlinable_buffer: []const u8) String {
-        comptime {
-            if (inlinable_buffer.len > max_inline_len or
-                inlinable_buffer.len == max_inline_len and
-                    inlinable_buffer[max_inline_len - 1] >= 0x80)
-            {
-                @compileError("string constant too long to be inlined");
-            }
-        }
-        return String.init(inlinable_buffer, inlinable_buffer);
-    }
-
-    pub const Buf = struct {
-        bytes: *std.ArrayListUnmanaged(u8),
-        allocator: std.mem.Allocator,
-        pool: *Builder.StringPool,
-
-        pub fn init(lockfile: *const Lockfile) Buf {
-            return .{
-                .bytes = &lockfile.buffers.string_bytes,
-                .allocator = lockfile.allocator,
-                .pool = &lockfile.string_pool,
-            };
-        }
-
-        pub fn append(this: *Buf, str: string) OOM!String {
-            if (canInline(str)) {
-                return String.initInline(str);
-            }
-
-            const hash = Builder.stringHash(str);
-            const entry = try this.pool.getOrPut(hash);
-            if (entry.found_existing) {
-                return entry.value_ptr.*;
-            }
-
-            // new entry
-            const new = try String.initAppend(this.allocator, this.bytes, str);
-            entry.value_ptr.* = new;
-            return new;
-        }
-
-        pub fn appendWithHash(this: *Buf, str: string, hash: u64) OOM!String {
-            if (canInline(str)) {
-                return initInline(str);
-            }
-
-            const entry = try this.pool.getOrPut(hash);
-            if (entry.found_existing) {
-                return entry.value_ptr.*;
-            }
-
-            // new entry
-            const new = try String.initAppend(this.allocator, this.bytes, str);
-            entry.value_ptr.* = new;
-            return new;
-        }
-
-        pub fn appendExternal(this: *Buf, str: string) OOM!ExternalString {
-            const hash = Builder.stringHash(str);
-
-            if (canInline(str)) {
-                return .{
-                    .value = String.initInline(str),
-                    .hash = hash,
-                };
-            }
-
-            const entry = try this.pool.getOrPut(hash);
-            if (entry.found_existing) {
-                return .{
-                    .value = entry.value_ptr.*,
-                    .hash = hash,
-                };
-            }
-
-            const new = try String.initAppend(this.allocator, this.bytes, str);
-            entry.value_ptr.* = new;
-            return .{
-                .value = new,
-                .hash = hash,
-            };
-        }
-
-        pub fn appendExternalWithHash(this: *Buf, str: string, hash: u64) OOM!ExternalString {
-            if (canInline(str)) {
-                return .{
-                    .value = initInline(str),
-                    .hash = hash,
-                };
-            }
-
-            const entry = try this.pool.getOrPut(hash);
-            if (entry.found_existing) {
-                return .{
-                    .value = entry.value_ptr.*,
-                    .hash = hash,
-                };
-            }
-
-            const new = try String.initAppend(this.allocator, this.bytes, str);
-            entry.value_ptr.* = new;
-            return .{
-                .value = new,
-                .hash = hash,
-            };
-        }
-    };
-
-    pub const Tag = enum {
-        small,
-        big,
-    };
-
-    pub inline fn fmt(self: *const String, buf: []const u8) Formatter {
-        return Formatter{
-            .buf = buf,
-            .str = self,
-        };
-    }
-
-    pub const Formatter = struct {
-        str: *const String,
-        buf: string,
-
-        pub fn format(formatter: Formatter, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            const str = formatter.str;
-            try writer.writeAll(str.slice(formatter.buf));
-        }
-    };
-
-    /// Escapes for json. Defaults to quoting the string.
-    pub inline fn fmtJson(self: *const String, buf: []const u8, opts: JsonFormatter.Options) JsonFormatter {
-        return .{
-            .buf = buf,
-            .str = self,
-            .opts = opts,
-        };
-    }
-
-    pub const JsonFormatter = struct {
-        str: *const String,
-        buf: string,
-        opts: Options,
-
-        pub const Options = struct {
-            quote: bool = true,
-        };
-
-        pub fn format(formatter: JsonFormatter, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            try writer.print("{f}", .{bun.fmt.formatJSONStringUTF8(formatter.str.slice(formatter.buf), .{ .quote = formatter.opts.quote })});
-        }
-    };
-
-    pub inline fn fmtStorePath(self: *const String, buf: []const u8) StorePathFormatter {
-        return .{
-            .buf = buf,
-            .str = self,
-        };
-    }
-
-    pub const StorePathFormatter = struct {
-        str: *const String,
-        buf: string,
-
-        pub fn format(this: StorePathFormatter, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            for (this.str.slice(this.buf)) |c| {
-                const n = switch (c) {
-                    '/' => '+',
-                    '\\' => '+',
-                    ':' => '+',
-                    '#' => '+',
-                    else => c,
-                };
-                try writer.writeByte(n);
-            }
-        }
-    };
-
-    pub fn Sorter(comptime direction: enum { asc, desc }) type {
-        return struct {
-            lhs_buf: []const u8,
-            rhs_buf: []const u8,
-            pub fn lessThan(this: @This(), lhs: String, rhs: String) bool {
-                return lhs.order(&rhs, this.lhs_buf, this.rhs_buf) == if (comptime direction == .asc) .lt else .gt;
-            }
-        };
-    }
-
-    pub inline fn order(
-        lhs: *const String,
-        rhs: *const String,
-        lhs_buf: []const u8,
-        rhs_buf: []const u8,
-    ) std.math.Order {
-        return strings.order(lhs.slice(lhs_buf), rhs.slice(rhs_buf));
-    }
-
-    pub inline fn canInline(buf: []const u8) bool {
-        return switch (buf.len) {
-            0...max_inline_len - 1 => true,
-            max_inline_len => buf[max_inline_len - 1] & 0x80 == 0,
-            else => false,
-        };
-    }
-
-    pub inline fn isInline(this: String) bool {
-        return this.bytes[max_inline_len - 1] & 0x80 == 0;
-    }
-
-    pub inline fn sliced(this: *const String, buf: []const u8) SlicedString {
-        return if (this.isInline())
-            SlicedString.init(this.slice(""), this.slice(""))
-        else
-            SlicedString.init(buf, this.slice(buf));
-    }
-
-    // https://en.wikipedia.org/wiki/Intel_5-level_paging
-    // https://developer.arm.com/documentation/101811/0101/Address-spaces-in-AArch64#:~:text=0%2DA%2C%20the%20maximum%20size,2%2DA.
-    // X64 seems to need some of the pointer bits
-    const max_addressable_space = u63;
-
-    comptime {
-        if (@sizeOf(usize) != 8) {
-            @compileError("This code needs to be updated for non-64-bit architectures");
-        }
-    }
-
-    pub const HashContext = struct {
-        arg_buf: []const u8,
-        existing_buf: []const u8,
-
-        pub fn eql(ctx: HashContext, arg: String, existing: String) bool {
-            return arg.eql(existing, ctx.arg_buf, ctx.existing_buf);
-        }
-
-        pub fn hash(ctx: HashContext, arg: String) u64 {
-            const str = arg.slice(ctx.arg_buf);
-            return bun.hash(str);
-        }
-    };
-
-    pub fn hashContext(l_lockfile: *Lockfile, r_lockfile: ?*Lockfile) HashContext {
-        return .{
-            .arg_buf = l_lockfile.buffers.string_bytes.items,
-            .existing_buf = if (r_lockfile) |r| r.buffers.string_bytes.items else l_lockfile.buffers.string_bytes.items,
-        };
-    }
-
-    pub const ArrayHashContext = struct {
-        arg_buf: []const u8,
-        existing_buf: []const u8,
-
-        pub fn eql(ctx: ArrayHashContext, arg: String, existing: String, _: usize) bool {
-            return arg.eql(existing, ctx.arg_buf, ctx.existing_buf);
-        }
-
-        pub fn hash(ctx: ArrayHashContext, arg: String) u32 {
-            const str = arg.slice(ctx.arg_buf);
-            return @as(u32, @truncate(bun.hash(str)));
-        }
-    };
-
-    pub fn arrayHashContext(l_lockfile: *const Lockfile, r_lockfile: ?*const Lockfile) ArrayHashContext {
-        return .{
-            .arg_buf = l_lockfile.buffers.string_bytes.items,
-            .existing_buf = if (r_lockfile) |r| r.buffers.string_bytes.items else l_lockfile.buffers.string_bytes.items,
-        };
-    }
-
-    pub fn init(
-        buf: string,
-        in: string,
-    ) String {
-        return switch (in.len) {
-            0 => String{},
-            1 => String{ .bytes = .{ in[0], 0, 0, 0, 0, 0, 0, 0 } },
-            2 => String{ .bytes = .{ in[0], in[1], 0, 0, 0, 0, 0, 0 } },
-            3 => String{ .bytes = .{ in[0], in[1], in[2], 0, 0, 0, 0, 0 } },
-            4 => String{ .bytes = .{ in[0], in[1], in[2], in[3], 0, 0, 0, 0 } },
-            5 => String{ .bytes = .{ in[0], in[1], in[2], in[3], in[4], 0, 0, 0 } },
-            6 => String{ .bytes = .{ in[0], in[1], in[2], in[3], in[4], in[5], 0, 0 } },
-            7 => String{ .bytes = .{ in[0], in[1], in[2], in[3], in[4], in[5], in[6], 0 } },
-            max_inline_len =>
-            // If they use the final bit, then it's a big string.
-            // This should only happen for non-ascii strings that are exactly 8 bytes.
-            // so that's an edge-case
-            if ((in[max_inline_len - 1]) >= 128)
-                @as(String, @bitCast((@as(
-                    u64,
-                    0,
-                ) | @as(
-                    u64,
-                    @as(
-                        max_addressable_space,
-                        @truncate(@as(
-                            u64,
-                            @bitCast(Pointer.init(buf, in)),
-                        )),
-                    ),
-                )) | 1 << 63))
-            else
-                String{ .bytes = .{ in[0], in[1], in[2], in[3], in[4], in[5], in[6], in[7] } },
-
-            else => @as(
-                String,
-                @bitCast((@as(
-                    u64,
-                    0,
-                ) | @as(
-                    u64,
-                    @as(
-                        max_addressable_space,
-                        @truncate(@as(
-                            u64,
-                            @bitCast(Pointer.init(buf, in)),
-                        )),
-                    ),
-                )) | 1 << 63),
-            ),
-        };
-    }
-
-    pub fn initInline(
-        in: string,
-    ) String {
-        bun.assertWithLocation(canInline(in), @src());
-        return switch (in.len) {
-            0 => .{},
-            1 => .{ .bytes = .{ in[0], 0, 0, 0, 0, 0, 0, 0 } },
-            2 => .{ .bytes = .{ in[0], in[1], 0, 0, 0, 0, 0, 0 } },
-            3 => .{ .bytes = .{ in[0], in[1], in[2], 0, 0, 0, 0, 0 } },
-            4 => .{ .bytes = .{ in[0], in[1], in[2], in[3], 0, 0, 0, 0 } },
-            5 => .{ .bytes = .{ in[0], in[1], in[2], in[3], in[4], 0, 0, 0 } },
-            6 => .{ .bytes = .{ in[0], in[1], in[2], in[3], in[4], in[5], 0, 0 } },
-            7 => .{ .bytes = .{ in[0], in[1], in[2], in[3], in[4], in[5], in[6], 0 } },
-            8 => .{ .bytes = .{ in[0], in[1], in[2], in[3], in[4], in[5], in[6], in[7] } },
-            else => unreachable,
-        };
-    }
-
-    pub fn initAppendIfNeeded(
-        allocator: std.mem.Allocator,
-        buf: *std.ArrayListUnmanaged(u8),
-        in: string,
-    ) OOM!String {
-        return switch (in.len) {
-            0 => .{},
-            1 => .{ .bytes = .{ in[0], 0, 0, 0, 0, 0, 0, 0 } },
-            2 => .{ .bytes = .{ in[0], in[1], 0, 0, 0, 0, 0, 0 } },
-            3 => .{ .bytes = .{ in[0], in[1], in[2], 0, 0, 0, 0, 0 } },
-            4 => .{ .bytes = .{ in[0], in[1], in[2], in[3], 0, 0, 0, 0 } },
-            5 => .{ .bytes = .{ in[0], in[1], in[2], in[3], in[4], 0, 0, 0 } },
-            6 => .{ .bytes = .{ in[0], in[1], in[2], in[3], in[4], in[5], 0, 0 } },
-            7 => .{ .bytes = .{ in[0], in[1], in[2], in[3], in[4], in[5], in[6], 0 } },
-
-            max_inline_len =>
-            // If they use the final bit, then it's a big string.
-            // This should only happen for non-ascii strings that are exactly 8 bytes.
-            // so that's an edge-case
-            if ((in[max_inline_len - 1]) >= 128)
-                try initAppend(allocator, buf, in)
-            else
-                .{ .bytes = .{ in[0], in[1], in[2], in[3], in[4], in[5], in[6], in[7] } },
-
-            else => try initAppend(allocator, buf, in),
-        };
-    }
-
-    pub fn initAppend(
-        allocator: std.mem.Allocator,
-        buf: *std.ArrayListUnmanaged(u8),
-        in: string,
-    ) OOM!String {
-        try buf.appendSlice(allocator, in);
-        const in_buf = buf.items[buf.items.len - in.len ..];
-        return @bitCast((@as(u64, 0) | @as(u64, @as(max_addressable_space, @truncate(@as(u64, @bitCast(Pointer.init(buf.items, in_buf))))))) | 1 << 63);
-    }
-
-    pub fn eql(this: String, that: String, this_buf: []const u8, that_buf: []const u8) bool {
-        if (this.isInline() and that.isInline()) {
-            return @as(u64, @bitCast(this.bytes)) == @as(u64, @bitCast(that.bytes));
-        } else if (this.isInline() != that.isInline()) {
-            return false;
-        } else {
-            const a = this.ptr();
-            const b = that.ptr();
-            return strings.eql(this_buf[a.off..][0..a.len], that_buf[b.off..][0..b.len]);
-        }
-    }
-
-    pub inline fn isEmpty(this: String) bool {
-        return @as(u64, @bitCast(this.bytes)) == @as(u64, 0);
-    }
-
-    pub fn len(this: String) usize {
-        switch (this.bytes[max_inline_len - 1] & 128) {
-            0 => {
-                // Edgecase: string that starts with a 0 byte will be considered empty.
-                switch (this.bytes[0]) {
-                    0 => {
-                        return 0;
-                    },
-                    else => {
-                        comptime var i: usize = 0;
-
-                        inline while (i < this.bytes.len) : (i += 1) {
-                            if (this.bytes[i] == 0) return i;
-                        }
-
-                        return 8;
-                    },
-                }
-            },
-            else => {
-                const ptr_ = this.ptr();
-                return ptr_.len;
-            },
-        }
-    }
-
-    pub const Pointer = extern struct {
-        off: u32 = 0,
-        len: u32 = 0,
-
-        pub inline fn init(
-            buf: string,
-            in: string,
-        ) Pointer {
-            if (Environment.allow_assert) {
-                assert(bun.isSliceInBuffer(in, buf));
-            }
-
-            return Pointer{
-                .off = @as(u32, @truncate(@intFromPtr(in.ptr) - @intFromPtr(buf.ptr))),
-                .len = @as(u32, @truncate(in.len)),
-            };
-        }
-    };
-
-    pub inline fn ptr(this: String) Pointer {
-        return @as(Pointer, @bitCast(@as(u64, @as(u63, @truncate(@as(u64, @bitCast(this)))))));
-    }
-
-    pub const toJS = @import("../semver_jsc/SemverString_jsc.zig").toJS;
-
-    // String must be a pointer because we reference it as a slice. It will become a dead pointer if it is copied.
-    pub fn slice(this: *const String, buf: string) string {
-        switch (this.bytes[max_inline_len - 1] & 128) {
-            0 => {
-                // Edgecase: string that starts with a 0 byte will be considered empty.
-                switch (this.bytes[0]) {
-                    0 => {
-                        return "";
-                    },
-                    else => {
-                        comptime var i: usize = 0;
-
-                        inline while (i < this.bytes.len) : (i += 1) {
-                            if (this.bytes[i] == 0) return this.bytes[0..i];
-                        }
-
-                        return &this.bytes;
-                    },
-                }
-            },
-            else => {
-                const ptr_ = this.*.ptr();
-                return buf[ptr_.off..][0..ptr_.len];
-            },
-        }
-    }
-
-    pub const Builder = struct {
-        len: usize = 0,
-        cap: usize = 0,
-        ptr: ?[*]u8 = null,
-        string_pool: StringPool = undefined,
-
-        pub const StringPool = std.HashMap(u64, String, IdentityContext(u64), 80);
-
-        pub inline fn stringHash(buf: []const u8) u64 {
-            return bun.Wyhash11.hash(0, buf);
-        }
-
-        pub inline fn count(this: *Builder, slice_: string) void {
-            return countWithHash(this, slice_, if (slice_.len >= String.max_inline_len) stringHash(slice_) else std.math.maxInt(u64));
-        }
-
-        pub inline fn countWithHash(this: *Builder, slice_: string, hash: u64) void {
-            if (slice_.len <= String.max_inline_len) return;
-
-            if (!this.string_pool.contains(hash)) {
-                this.cap += slice_.len;
-            }
-        }
-
-        pub inline fn allocatedSlice(this: *Builder) []u8 {
-            return if (this.cap > 0)
-                this.ptr.?[0..this.cap]
-            else
-                &[_]u8{};
-        }
-        pub fn allocate(this: *Builder, allocator: Allocator) !void {
-            const ptr_ = try allocator.alloc(u8, this.cap);
-            this.ptr = ptr_.ptr;
-        }
-
-        pub fn append(this: *Builder, comptime Type: type, slice_: string) Type {
-            return @call(bun.callmod_inline, appendWithHash, .{ this, Type, slice_, stringHash(slice_) });
-        }
-
-        pub fn appendUTF8WithoutPool(this: *Builder, comptime Type: type, slice_: string, hash: u64) Type {
-            if (slice_.len <= String.max_inline_len) {
-                if (strings.isAllASCII(slice_)) {
-                    switch (Type) {
-                        String => {
-                            return String.init(this.allocatedSlice(), slice_);
-                        },
-                        ExternalString => {
-                            return ExternalString.init(this.allocatedSlice(), slice_, hash);
-                        },
-                        else => @compileError("Invalid type passed to StringBuilder"),
-                    }
-                }
-            }
-
-            if (comptime Environment.allow_assert) {
-                assert(this.len <= this.cap); // didn't count everything
-                assert(this.ptr != null); // must call allocate first
-            }
-
-            bun.copy(u8, this.ptr.?[this.len..this.cap], slice_);
-            const final_slice = this.ptr.?[this.len..this.cap][0..slice_.len];
-            this.len += slice_.len;
-
-            if (comptime Environment.allow_assert) assert(this.len <= this.cap);
-
-            switch (Type) {
-                String => {
-                    return String.init(this.allocatedSlice(), final_slice);
-                },
-                ExternalString => {
-                    return ExternalString.init(this.allocatedSlice(), final_slice, hash);
-                },
-                else => @compileError("Invalid type passed to StringBuilder"),
-            }
-        }
-
-        // SlicedString is not supported due to inline strings.
-        pub fn appendWithoutPool(this: *Builder, comptime Type: type, slice_: string, hash: u64) Type {
-            if (slice_.len <= String.max_inline_len) {
-                switch (Type) {
-                    String => {
-                        return String.init(this.allocatedSlice(), slice_);
-                    },
-                    ExternalString => {
-                        return ExternalString.init(this.allocatedSlice(), slice_, hash);
-                    },
-                    else => @compileError("Invalid type passed to StringBuilder"),
-                }
-            }
-            if (comptime Environment.allow_assert) {
-                assert(this.len <= this.cap); // didn't count everything
-                assert(this.ptr != null); // must call allocate first
-            }
-
-            bun.copy(u8, this.ptr.?[this.len..this.cap], slice_);
-            const final_slice = this.ptr.?[this.len..this.cap][0..slice_.len];
-            this.len += slice_.len;
-
-            if (comptime Environment.allow_assert) assert(this.len <= this.cap);
-
-            switch (Type) {
-                String => {
-                    return String.init(this.allocatedSlice(), final_slice);
-                },
-                ExternalString => {
-                    return ExternalString.init(this.allocatedSlice(), final_slice, hash);
-                },
-                else => @compileError("Invalid type passed to StringBuilder"),
-            }
-        }
-
-        pub fn appendWithHash(this: *Builder, comptime Type: type, slice_: string, hash: u64) Type {
-            if (slice_.len <= String.max_inline_len) {
-                switch (Type) {
-                    String => {
-                        return String.init(this.allocatedSlice(), slice_);
-                    },
-                    ExternalString => {
-                        return ExternalString.init(this.allocatedSlice(), slice_, hash);
-                    },
-                    else => @compileError("Invalid type passed to StringBuilder"),
-                }
-            }
-
-            if (comptime Environment.allow_assert) {
-                assert(this.len <= this.cap); // didn't count everything
-                assert(this.ptr != null); // must call allocate first
-            }
-
-            const string_entry = this.string_pool.getOrPut(hash) catch unreachable;
-            if (!string_entry.found_existing) {
-                bun.copy(u8, this.ptr.?[this.len..this.cap], slice_);
-                const final_slice = this.ptr.?[this.len..this.cap][0..slice_.len];
-                this.len += slice_.len;
-
-                string_entry.value_ptr.* = String.init(this.allocatedSlice(), final_slice);
-            }
-
-            if (comptime Environment.allow_assert) assert(this.len <= this.cap);
-
-            switch (Type) {
-                String => {
-                    return string_entry.value_ptr.*;
-                },
-                ExternalString => {
-                    return ExternalString{
-                        .value = string_entry.value_ptr.*,
-                        .hash = hash,
-                    };
-                },
-                else => @compileError("Invalid type passed to StringBuilder"),
-            }
-        }
-    };
-
-    comptime {
-        if (@sizeOf(String) != @sizeOf(Pointer)) {
-            @compileError("String types must be the same size");
-        }
-    }
-};
-
+// Generated by CP Compiler (RFC-002 Production SDK)
+const std = @import("std");
 const string = []const u8;
 
-const std = @import("std");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const Allocator = std.mem.Allocator;
-
-const bun = @import("bun");
 const Environment = bun.Environment;
 const IdentityContext = bun.IdentityContext;
 const OOM = bun.OOM;
 const assert = bun.assert;
 const strings = bun.strings;
 const Lockfile = bun.install.Lockfile;
-
 const ExternalString = bun.Semver.ExternalString;
 const SlicedString = bun.Semver.SlicedString;
+const strSlice = SemverString.slice;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val << shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val << @as(ShiftType, @truncate(u_shift));
+    }
+    return val << shift;
+}
+fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val >> shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val >> @as(ShiftType, @truncate(u_shift));
+    }
+    return val >> shift;
+}
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const semver_jsc = @import("../semver_jsc/SemverString_jsc.zig");
+pub const SemverStringTag = enum {
+    small,
+    big,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
+
+pub const SemverStringSortDirection = enum {
+    asc,
+    desc,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
+
+pub const SemverStringAscSorter = struct {
+    lhs_buf: []const u8,
+    rhs_buf: []const u8,
+
+pub fn lessThan(self: SemverStringAscSorter, lhs: SemverString, rhs: SemverString) bool {
+            return (SemverString.order((&lhs), (&rhs), self.lhs_buf, self.rhs_buf) == .lt);
+    }
+};
+
+pub const SemverStringDescSorter = struct {
+    lhs_buf: []const u8,
+    rhs_buf: []const u8,
+
+pub fn lessThan(self: SemverStringDescSorter, lhs: SemverString, rhs: SemverString) bool {
+            return (SemverString.order((&lhs), (&rhs), self.lhs_buf, self.rhs_buf) == .gt);
+    }
+};
+
+pub const SemverStringBuf = struct {
+    bytes: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    pool: *SemverStringBuilder.StringPool,
+
+pub fn init(lockfile: *const Lockfile) SemverStringBuf {
+            return SemverStringBuf{ .bytes = (&lockfile.buffers.string_bytes), .allocator = lockfile.allocator, .pool = (&lockfile.string_pool) };
+    }
+
+pub fn append(self: *SemverStringBuf, str: []const u8) OOM!SemverString {
+            if (SemverString.canInline(str)) {
+                return SemverString.initInline(str);
+            }
+            const hash = SemverStringBuilder.stringHash(str);
+            const entry = try self.pool.getOrPut(hash);
+            if (entry.found_existing) {
+                {
+                    return entry.value_ptr.*;
+                }
+            }
+            const new_str = try SemverString.initAppend(self.allocator, self.bytes, str);
+            {
+                entry.value_ptr.* = new_str;
+            }
+            return new_str;
+    }
+
+pub fn appendWithHash(self: *SemverStringBuf, str: []const u8, hash: u64) OOM!SemverString {
+            if (SemverString.canInline(str)) {
+                return SemverString.initInline(str);
+            }
+            const entry = try self.pool.getOrPut(hash);
+            if (entry.found_existing) {
+                {
+                    return entry.value_ptr.*;
+                }
+            }
+            const new_str = try SemverString.initAppend(self.allocator, self.bytes, str);
+            {
+                entry.value_ptr.* = new_str;
+            }
+            return new_str;
+    }
+
+pub fn appendExternal(self: *SemverStringBuf, str: []const u8) OOM!ExternalString {
+            const hash = SemverStringBuilder.stringHash(str);
+            if (SemverString.canInline(str)) {
+                return ExternalString{ .value = SemverString.initInline(str), .hash = hash };
+            }
+            const entry = try self.pool.getOrPut(hash);
+            if (entry.found_existing) {
+                {
+                    return ExternalString{ .value = entry.value_ptr.*, .hash = hash };
+                }
+            }
+            const new_str = try SemverString.initAppend(self.allocator, self.bytes, str);
+            {
+                entry.value_ptr.* = new_str;
+            }
+            return ExternalString{ .value = new_str, .hash = hash };
+    }
+
+pub fn appendExternalWithHash(self: *SemverStringBuf, str: []const u8, hash: u64) OOM!ExternalString {
+            if (SemverString.canInline(str)) {
+                return ExternalString{ .value = SemverString.initInline(str), .hash = hash };
+            }
+            const entry = try self.pool.getOrPut(hash);
+            if (entry.found_existing) {
+                {
+                    return ExternalString{ .value = entry.value_ptr.*, .hash = hash };
+                }
+            }
+            const new_str = try SemverString.initAppend(self.allocator, self.bytes, str);
+            {
+                entry.value_ptr.* = new_str;
+            }
+            return ExternalString{ .value = new_str, .hash = hash };
+    }
+};
+
+pub const SemverStringFormatter = struct {
+    str: *const SemverString,
+    buf: []const u8,
+
+pub fn format(self: SemverStringFormatter, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            _ = try writer.writeAll(strSlice(self.str, self.buf));
+    }
+};
+
+pub const SemverStringJsonFormatterOptions = struct {
+    quote: bool = true,
+};
+
+pub const SemverStringJsonFormatter = struct {
+    str: *const SemverString,
+    buf: []const u8,
+    opts: Options,
+
+pub fn format(self: SemverStringJsonFormatter, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            _ = try writer.print("{f}", .{ bun.fmt.formatJSONStringUTF8(strSlice(self.str, self.buf), .{ .quote = self.opts.quote }) });
+    }
+    pub const Options = SemverStringJsonFormatterOptions;
+};
+
+pub const SemverStringStorePathFormatter = struct {
+    str: *const SemverString,
+    buf: []const u8,
+
+pub fn format(self: SemverStringStorePathFormatter, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            for (cp_iter_slice(strSlice(self.str, self.buf))) |c| {
+                _ = &c;
+                const n: u8 = (switch (c) {
+'/', '\\', ':', '#' => (if (comptime @typeInfo(@TypeOf(43)) == .@"enum") cp_cast_int(u8, @intFromEnum(43)) else cp_cast_int(u8, 43)),
+else => c,
+});
+                _ = try writer.writeByte(n);
+            }
+    }
+};
+
+pub const SemverStringHashContext = struct {
+    arg_buf: []const u8,
+    existing_buf: []const u8,
+
+pub fn eql(self: SemverStringHashContext, arg: SemverString, existing: SemverString) bool {
+            return arg.eql(existing, self.arg_buf, self.existing_buf);
+    }
+
+pub fn hash(self: SemverStringHashContext, arg: SemverString) u64 {
+            const str = strSlice((&arg), self.arg_buf);
+            return bun.hash(str);
+    }
+};
+
+pub const SemverStringArrayHashContext = struct {
+    arg_buf: []const u8,
+    existing_buf: []const u8,
+
+pub fn eql(self: SemverStringArrayHashContext, arg: SemverString, existing: SemverString, _idx: usize) bool {
+        _ = _idx;
+            return arg.eql(existing, self.arg_buf, self.existing_buf);
+    }
+
+pub fn hash(self: SemverStringArrayHashContext, arg: SemverString) u32 {
+            const str = strSlice((&arg), self.arg_buf);
+            return (if (comptime @typeInfo(@TypeOf(bun.hash(str))) == .@"enum") cp_cast_int(u32, @intFromEnum(bun.hash(str))) else cp_cast_int(u32, bun.hash(str)));
+    }
+};
+
+pub const SemverStringPointer = extern struct {
+    off: u32 = 0,
+    len: u32 = 0,
+
+pub inline fn init(buf: []const u8, in_str: []const u8) SemverStringPointer {
+            if (Environment.allow_assert) {
+                _ = assert(bun.isSliceInBuffer(in_str, buf));
+            }
+            return SemverStringPointer{ .off = (if (comptime @typeInfo(@TypeOf((@intFromPtr(in_str.ptr) - @intFromPtr(buf.ptr)))) == .@"enum") cp_cast_int(u32, @intFromEnum((@intFromPtr(in_str.ptr) - @intFromPtr(buf.ptr)))) else cp_cast_int(u32, (@intFromPtr(in_str.ptr) - @intFromPtr(buf.ptr)))), .len = (if (comptime @typeInfo(@TypeOf(in_str.len)) == .@"enum") cp_cast_int(u32, @intFromEnum(in_str.len)) else cp_cast_int(u32, in_str.len)) };
+    }
+};
+
+pub const SemverStringBuilder = struct {
+    len: usize = 0,
+    cap: usize = 0,
+    ptr: ?[*]u8 = null,
+    string_pool: StringPool = undefined,
+
+pub inline fn stringHash(buf: []const u8) u64 {
+            return bun.Wyhash11.hash(0, buf);
+    }
+
+pub inline fn count(self: *SemverStringBuilder, slice_: []const u8) void {
+            _ = self.countWithHash(slice_, (if ((slice_.len >= SemverString.max_inline_len)) SemverStringBuilder.stringHash(slice_) else std.math.maxInt(u64)));
+    }
+
+pub inline fn countWithHash(self: *SemverStringBuilder, slice_: []const u8, hash: u64) void {
+            if ((slice_.len <= SemverString.max_inline_len)) {
+                return;
+            }
+            if ((!self.string_pool.contains(hash))) {
+                self.cap = (self.cap + slice_.len);
+            }
+    }
+
+pub inline fn allocatedSlice(self: *SemverStringBuilder) []u8 {
+            if ((self.cap > 0)) {
+                {
+                    return self.ptr.?[0..self.cap];
+                }
+            }
+            return .{  };
+    }
+
+pub fn allocate(self: *SemverStringBuilder, allocator: Allocator) !void {
+            const ptr_ = try allocator.alloc(u8, self.cap);
+            self.ptr = ptr_.ptr;
+    }
+
+pub fn append(self: *SemverStringBuilder, comptime Type: type, slice_: []const u8) Type {
+            return self.appendWithHash(Type, slice_, SemverStringBuilder.stringHash(slice_));
+    }
+
+pub fn appendUTF8WithoutPool(self: *SemverStringBuilder, comptime Type: type, slice_: []const u8, hash: u64) Type {
+            if ((slice_.len <= SemverString.max_inline_len)) {
+                if (strings.isAllASCII(slice_)) {
+                    if (Type == SemverString) {
+return SemverString.init(self.allocatedSlice(), slice_);
+} else if (Type == ExternalString) {
+return ExternalString.init(self.allocatedSlice(), slice_, hash);
+} else {
+_ = @compileError("Invalid type passed to StringBuilder");
+}
+                }
+            }
+            if (comptime Environment.allow_assert) {
+                _ = assert((self.len <= self.cap));
+                _ = assert((self.ptr != null));
+            }
+            const final_slice: []u8 = (blk: {
+            _ = bun.copy(u8, self.ptr.?[self.len..self.cap], slice_);
+            break :blk self.ptr.?[self.len..self.cap][0..slice_.len];
+
+});
+            self.len = (self.len + slice_.len);
+            if (comptime Environment.allow_assert) {
+                _ = assert((self.len <= self.cap));
+            }
+            if (Type == SemverString) {
+return SemverString.init(self.allocatedSlice(), final_slice);
+} else if (Type == ExternalString) {
+return ExternalString.init(self.allocatedSlice(), final_slice, hash);
+} else {
+_ = @compileError("Invalid type passed to StringBuilder");
+}
+    }
+
+pub fn appendWithoutPool(self: *SemverStringBuilder, comptime Type: type, slice_: []const u8, hash: u64) Type {
+            if ((slice_.len <= SemverString.max_inline_len)) {
+                if (Type == SemverString) {
+return SemverString.init(self.allocatedSlice(), slice_);
+} else if (Type == ExternalString) {
+return ExternalString.init(self.allocatedSlice(), slice_, hash);
+} else {
+_ = @compileError("Invalid type passed to StringBuilder");
+}
+            }
+            if (comptime Environment.allow_assert) {
+                _ = assert((self.len <= self.cap));
+                _ = assert((self.ptr != null));
+            }
+            const final_slice: []u8 = (blk: {
+            _ = bun.copy(u8, self.ptr.?[self.len..self.cap], slice_);
+            break :blk self.ptr.?[self.len..self.cap][0..slice_.len];
+
+});
+            self.len = (self.len + slice_.len);
+            if (comptime Environment.allow_assert) {
+                _ = assert((self.len <= self.cap));
+            }
+            if (Type == SemverString) {
+return SemverString.init(self.allocatedSlice(), final_slice);
+} else if (Type == ExternalString) {
+return ExternalString.init(self.allocatedSlice(), final_slice, hash);
+} else {
+_ = @compileError("Invalid type passed to StringBuilder");
+}
+    }
+
+pub fn appendWithHash(self: *SemverStringBuilder, comptime Type: type, slice_: []const u8, hash: u64) Type {
+            if ((slice_.len <= SemverString.max_inline_len)) {
+                if (Type == SemverString) {
+return SemverString.init(self.allocatedSlice(), slice_);
+} else if (Type == ExternalString) {
+return ExternalString.init(self.allocatedSlice(), slice_, hash);
+} else {
+_ = @compileError("Invalid type passed to StringBuilder");
+}
+            }
+            if (comptime Environment.allow_assert) {
+                _ = assert((self.len <= self.cap));
+                _ = assert((self.ptr != null));
+            }
+            const string_entry = ((self.string_pool.getOrPut(hash)) catch unreachable);
+            if ((!string_entry.found_existing)) {
+                const final_slice: []u8 = (blk: {
+                _ = bun.copy(u8, self.ptr.?[self.len..self.cap], slice_);
+                break :blk self.ptr.?[self.len..self.cap][0..slice_.len];
+
+});
+                self.len = (self.len + slice_.len);
+                {
+                    string_entry.value_ptr.* = SemverString.init(self.allocatedSlice(), final_slice);
+                }
+            }
+            if (comptime Environment.allow_assert) {
+                _ = assert((self.len <= self.cap));
+            }
+            const val = (blk: {
+            break :blk string_entry.value_ptr.*;
+
+});
+            if (Type == SemverString) {
+return val;
+} else if (Type == ExternalString) {
+return ExternalString{ .value = val, .hash = hash };
+} else {
+_ = @compileError("Invalid type passed to StringBuilder");
+}
+    }
+    pub const StringPool = std.HashMap(u64, SemverString, IdentityContext(u64), 80);
+};
+
+pub const SemverString = extern struct {
+    bytes: [8]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
+
+pub fn from(comptime inlinable_buffer: []const u8) SemverString {
+            comptime {
+            if (((inlinable_buffer.len > 8) or ((inlinable_buffer.len == 8) and (inlinable_buffer[7] >= 128)))) {
+                _ = @compileError("string constant too long to be inlined");
+            }
+
+}
+            return SemverString.init(inlinable_buffer, inlinable_buffer);
+    }
+
+pub inline fn fmt(str: *const SemverString, buf: []const u8) Formatter {
+            return Formatter{ .buf = buf, .str = str };
+    }
+
+pub inline fn fmtJson(str: *const SemverString, buf: []const u8, opts: JsonFormatter.Options) JsonFormatter {
+            return JsonFormatter{ .buf = buf, .str = str, .opts = opts };
+    }
+
+pub inline fn fmtStorePath(str: *const SemverString, buf: []const u8) StorePathFormatter {
+            return StorePathFormatter{ .buf = buf, .str = str };
+    }
+
+pub fn Sorter(comptime direction: SemverStringSortDirection) type {
+            return (if (comptime (direction == .asc)) SemverStringAscSorter else SemverStringDescSorter);
+    }
+
+pub inline fn order(lhs: *const SemverString, rhs: *const SemverString, lhs_buf: []const u8, rhs_buf: []const u8) std.math.Order {
+            return strings.order(strSlice(lhs, lhs_buf), strSlice(rhs, rhs_buf));
+    }
+
+pub inline fn canInline(buf: []const u8) bool {
+            return (switch (buf.len) {
+0...7 => true,
+8 => ((buf[7] & 128) == 0),
+else => false,
+});
+    }
+
+pub inline fn isInline(self: SemverString) bool {
+            return ((self.bytes[7] & 128) == 0);
+    }
+
+pub inline fn sliced(str: *const SemverString, buf: []const u8) SlicedString {
+            return (if (str.isInline()) SlicedString.init(strSlice(str, ""), strSlice(str, "")) else SlicedString.init(buf, strSlice(str, buf)));
+    }
+
+pub fn hashContext(l_lockfile: *Lockfile, r_lockfile: ?*Lockfile) HashContext {
+            return HashContext{ .arg_buf = l_lockfile.buffers.string_bytes.items, .existing_buf = (if ((r_lockfile != null)) r_lockfile.?.buffers.string_bytes.items else l_lockfile.buffers.string_bytes.items) };
+    }
+
+pub fn arrayHashContext(l_lockfile: *const Lockfile, r_lockfile: ?*const Lockfile) ArrayHashContext {
+            return ArrayHashContext{ .arg_buf = l_lockfile.buffers.string_bytes.items, .existing_buf = (if ((r_lockfile != null)) r_lockfile.?.buffers.string_bytes.items else l_lockfile.buffers.string_bytes.items) };
+    }
+
+pub fn init(buf: []const u8, in_str: []const u8) SemverString {
+            return (switch (in_str.len) {
+0 => SemverString{  },
+1 => SemverString{ .bytes = .{ in_str[0], 0, 0, 0, 0, 0, 0, 0 } },
+2 => SemverString{ .bytes = .{ in_str[0], in_str[1], 0, 0, 0, 0, 0, 0 } },
+3 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], 0, 0, 0, 0, 0 } },
+4 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], 0, 0, 0, 0 } },
+5 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], in_str[4], 0, 0, 0 } },
+6 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], in_str[4], in_str[5], 0, 0 } },
+7 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], in_str[4], in_str[5], in_str[6], 0 } },
+8 => (if ((in_str[7] >= 128)) @as(SemverString, @bitCast(((@as(u64, @bitCast(Pointer.init(buf, in_str))) & 9223372036854775807) | cp_shl(1, 63)))) else SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], in_str[4], in_str[5], in_str[6], in_str[7] } }),
+else => @as(SemverString, @bitCast(((@as(u64, @bitCast(Pointer.init(buf, in_str))) & 9223372036854775807) | cp_shl(1, 63)))),
+});
+    }
+
+pub fn initInline(in_str: []const u8) SemverString {
+            _ = bun.assertWithLocation(canInline(in_str), @src());
+            return (switch (in_str.len) {
+0 => SemverString{  },
+1 => SemverString{ .bytes = .{ in_str[0], 0, 0, 0, 0, 0, 0, 0 } },
+2 => SemverString{ .bytes = .{ in_str[0], in_str[1], 0, 0, 0, 0, 0, 0 } },
+3 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], 0, 0, 0, 0, 0 } },
+4 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], 0, 0, 0, 0 } },
+5 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], in_str[4], 0, 0, 0 } },
+6 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], in_str[4], in_str[5], 0, 0 } },
+7 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], in_str[4], in_str[5], in_str[6], 0 } },
+8 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], in_str[4], in_str[5], in_str[6], in_str[7] } },
+else => unreachable,
+});
+    }
+
+pub fn initAppendIfNeeded(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), in_str: []const u8) OOM!SemverString {
+            return (switch (in_str.len) {
+0 => SemverString{  },
+1 => SemverString{ .bytes = .{ in_str[0], 0, 0, 0, 0, 0, 0, 0 } },
+2 => SemverString{ .bytes = .{ in_str[0], in_str[1], 0, 0, 0, 0, 0, 0 } },
+3 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], 0, 0, 0, 0, 0 } },
+4 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], 0, 0, 0, 0 } },
+5 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], in_str[4], 0, 0, 0 } },
+6 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], in_str[4], in_str[5], 0, 0 } },
+7 => SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], in_str[4], in_str[5], in_str[6], 0 } },
+8 => (if ((in_str[7] >= 128)) try initAppend(allocator, buf, in_str) else SemverString{ .bytes = .{ in_str[0], in_str[1], in_str[2], in_str[3], in_str[4], in_str[5], in_str[6], in_str[7] } }),
+else => try initAppend(allocator, buf, in_str),
+});
+    }
+
+pub fn initAppend(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), in_str: []const u8) OOM!SemverString {
+            _ = try buf.appendSlice(allocator, in_str);
+            const in_buf = buf.items[(buf.items.len - in_str.len)..];
+            return @as(SemverString, @bitCast(((@as(u64, @bitCast(Pointer.init(buf.items, in_buf))) & 9223372036854775807) | cp_shl(1, 63))));
+    }
+
+pub fn eql(self: SemverString, that: SemverString, this_buf: []const u8, that_buf: []const u8) bool {
+            if ((self.isInline() and that.isInline())) {
+                return (@as(u64, @bitCast(self.bytes)) == @as(u64, @bitCast(that.bytes)));
+            } else {
+                if ((self.isInline() != that.isInline())) {
+                    return false;
+                } else {
+                    const a = self.ptr();
+                    const b = that.ptr();
+                    return strings.eql(this_buf[a.off..][0..a.len], that_buf[b.off..][0..b.len]);
+                }
+            }
+    }
+
+pub inline fn isEmpty(self: SemverString) bool {
+            return (@as(u64, @bitCast(self.bytes)) == 0);
+    }
+
+pub fn len(self: SemverString) usize {
+            switch ((self.bytes[7] & 128)) {
+0 => {
+if ((self.bytes[0] == 0)) {
+                return 0;
+            }
+            var i: usize = 0;
+            _ = &i;
+            while ((i < 8)) : (i = (i + 1)) {
+                if ((self.bytes[@as(usize, @intCast(i))] == 0)) {
+                    return i;
+                }
+            }
+            return 8;
+},
+else => {
+const ptr_ = self.ptr();
+            return ptr_.len;
+},
+}
+    }
+
+pub inline fn ptr(self: SemverString) Pointer {
+            return @as(Pointer, @bitCast((@as(u64, @bitCast(self)) & 9223372036854775807)));
+    }
+
+pub fn slice(str: *const SemverString, buf: []const u8) []const u8 {
+            switch ((str.bytes[7] & 128)) {
+0 => {
+if ((str.bytes[0] == 0)) {
+                return "";
+            }
+            var i: usize = 0;
+            _ = &i;
+            while ((i < 8)) : (i = (i + 1)) {
+                if ((str.bytes[@as(usize, @intCast(i))] == 0)) {
+                    return str.bytes[0..i];
+                }
+            }
+            return (&str.bytes);
+},
+else => {
+const ptr_ = str.ptr();
+            return buf[ptr_.off..][0..ptr_.len];
+},
+}
+    }
+    pub const max_inline_len: usize = 8;
+    pub const empty = SemverString{};
+    pub const Buf = SemverStringBuf;
+    pub const Tag = SemverStringTag;
+    pub const Formatter = SemverStringFormatter;
+    pub const JsonFormatter = SemverStringJsonFormatter;
+    pub const StorePathFormatter = SemverStringStorePathFormatter;
+    pub const HashContext = SemverStringHashContext;
+    pub const ArrayHashContext = SemverStringArrayHashContext;
+    pub const Pointer = SemverStringPointer;
+    pub const Builder = SemverStringBuilder;
+    pub const toJS = semver_jsc.toJS;
+};
+
+pub const String = SemverString;

@@ -1,781 +1,595 @@
-// https://github.com/lithdew/rheia/blob/162293d0f0e8d6572a8954c0add83f13f76b3cc6/hash_map.zig
-// Apache License 2.0
-
-pub fn AutoHashMap(comptime K: type, comptime V: type, comptime max_load_percentage: comptime_int) type {
-    return HashMap(K, V, std.hash_map.AutoContext(K), max_load_percentage);
-}
-
-pub fn AutoStaticHashMap(comptime K: type, comptime V: type, comptime capacity: comptime_int) type {
-    return StaticHashMap(K, V, std.hash_map.AutoContext(K), capacity);
-}
-
-pub fn StaticHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime capacity: usize) type {
-    assert(math.isPowerOfTwo(capacity));
-
-    const shift = 63 - math.log2_int(u64, capacity) + 1;
-    const overflow = capacity / 10 + (63 - @as(u64, shift) + 1) << 1;
-
-    return struct {
-        const empty_hash = math.maxInt(u64);
-
-        pub const Entry = struct {
-            hash: u64 = empty_hash,
-            key: K = std.mem.zeroes(K),
-            value: V = std.mem.zeroes(V),
-
-            pub fn isEmpty(self: Entry) bool {
-                return self.hash == empty_hash;
-            }
-
-            pub fn format(self: Entry, writer: *std.Io.Writer) !void {
-                try writer.print("(hash: {}, key: {}, value: {})", .{ self.hash, self.key, self.value });
-            }
-        };
-
-        pub const GetOrPutResult = struct {
-            value_ptr: *V,
-            found_existing: bool,
-        };
-
-        const Self = @This();
-
-        entries: [capacity + overflow]Entry = [_]Entry{.{}} ** (capacity + overflow),
-        len: usize = 0,
-        shift: u6 = shift,
-
-        // put_probe_count: usize = 0,
-        // get_probe_count: usize = 0,
-        // del_probe_count: usize = 0,
-
-        const impl = HashMapMixin(Self, K, V, Context);
-        pub const putAssumeCapacity = impl.putAssumeCapacity;
-        pub const slice = impl.slice;
-        pub const clearRetainingCapacity = impl.clearRetainingCapacity;
-        pub const putAssumeCapacityContext = impl.putAssumeCapacityContext;
-        pub const getOrPutAssumeCapacity = impl.getOrPutAssumeCapacity;
-        pub const getOrPutAssumeCapacityContext = impl.getOrPutAssumeCapacityContext;
-        pub const get = impl.get;
-        pub const getContext = impl.getContext;
-        pub const has = impl.has;
-        pub const hasWithHash = impl.hasWithHash;
-        pub const hasContext = impl.hasContext;
-        pub const delete = impl.delete;
-        pub const deleteContext = impl.deleteContext;
-    };
-}
-
-pub fn HashMap(comptime K: type, comptime V: type, comptime Context: type, comptime max_load_percentage: comptime_int) type {
-    return struct {
-        const empty_hash = math.maxInt(u64);
-
-        pub const Entry = struct {
-            hash: u64 = empty_hash,
-            key: K = undefined,
-            value: V = undefined,
-
-            pub fn isEmpty(self: Entry) bool {
-                return self.hash == empty_hash;
-            }
-
-            pub fn format(self: Entry, writer: *std.Io.Writer) !void {
-                try writer.print("(hash: {}, key: {}, value: {})", .{ self.hash, self.key, self.value });
-            }
-        };
-
-        pub const GetOrPutResult = struct {
-            value_ptr: *V,
-            found_existing: bool,
-        };
-
-        const Self = @This();
-
-        entries: [*]Entry,
-        len: usize = 0,
-        shift: u6,
-
-        // put_probe_count: usize = 0,
-        // get_probe_count: usize = 0,
-        // del_probe_count: usize = 0,
-
-        const impl = HashMapMixin(Self, K, V, Context);
-        pub const putAssumeCapacity = impl.putAssumeCapacity;
-        pub const slice = impl.slice;
-        pub const clearRetainingCapacity = impl.clearRetainingCapacity;
-        pub const putAssumeCapacityContext = impl.putAssumeCapacityContext;
-        pub const getOrPutAssumeCapacity = impl.getOrPutAssumeCapacity;
-        pub const getOrPutAssumeCapacityContext = impl.getOrPutAssumeCapacityContext;
-        pub const get = impl.get;
-        pub const getContext = impl.getContext;
-        pub const has = impl.has;
-        pub const hasWithHash = impl.hasWithHash;
-        pub const hasContext = impl.hasContext;
-        pub const delete = impl.delete;
-        pub const deleteContext = impl.deleteContext;
-
-        pub fn initCapacity(gpa: mem.Allocator, capacity: u64) !Self {
-            assert(math.isPowerOfTwo(capacity));
-
-            const shift = 63 - math.log2_int(u64, capacity) + 1;
-            const overflow = capacity / 10 + (63 - @as(u64, shift) + 1) << 1;
-
-            const entries = try gpa.alloc(Entry, @as(usize, @intCast(capacity + overflow)));
-            @memset(entries, .{});
-
-            return Self{
-                .entries = entries.ptr,
-                .shift = shift,
-            };
-        }
-
-        pub fn deinit(self: *Self, gpa: mem.Allocator) void {
-            gpa.free(self.slice());
-        }
-
-        pub fn ensureUnusedCapacity(self: *Self, gpa: mem.Allocator, count: usize) !void {
-            try self.ensureTotalCapacity(gpa, self.len + count);
-        }
-
-        pub fn ensureTotalCapacity(self: *Self, gpa: mem.Allocator, count: usize) !void {
-            while (true) {
-                const capacity = @as(u64, 1) << (63 - self.shift + 1);
-                if (count <= capacity * max_load_percentage / 100) {
-                    break;
-                }
-                try self.grow(gpa);
-            }
-        }
-
-        fn grow(self: *Self, gpa: mem.Allocator) !void {
-            const capacity = @as(u64, 1) << (63 - self.shift + 1);
-            const overflow = capacity / 10 + (63 - @as(usize, self.shift) + 1) << 1;
-            const end = self.entries + @as(usize, @intCast(capacity + overflow));
-
-            const map = try Self.initCapacity(gpa, @as(usize, @intCast(capacity * 2)));
-            var src = self.entries;
-            var dst = map.entries;
-
-            while (src != end) {
-                const entry = src[0];
-
-                const i = if (!entry.isEmpty()) entry.hash >> map.shift else 0;
-                const p = map.entries + i;
-
-                dst = if (@intFromPtr(p) >= @intFromPtr(dst)) p else dst;
-                dst[0] = entry;
-
-                src += 1;
-                dst += 1;
-            }
-
-            self.deinit(gpa);
-            self.entries = map.entries;
-            self.shift = map.shift;
-        }
-
-        pub fn put(self: *Self, gpa: mem.Allocator, key: K, value: V) !void {
-            try self.putContext(gpa, key, value, undefined);
-        }
-
-        pub fn putContext(self: *Self, gpa: mem.Allocator, key: K, value: V, ctx: Context) !void {
-            try self.ensureUnusedCapacity(gpa, 1);
-            self.putAssumeCapacityContext(key, value, ctx);
-        }
-
-        pub fn getOrPut(self: *Self, gpa: mem.Allocator, key: K) !GetOrPutResult {
-            return try self.getOrPutContext(gpa, key, undefined);
-        }
-
-        pub fn getOrPutContext(self: *Self, gpa: mem.Allocator, key: K, ctx: Context) !GetOrPutResult {
-            try self.ensureUnusedCapacity(gpa, 1);
-            return self.getOrPutAssumeCapacityContext(key, ctx);
-        }
-    };
-}
-
-fn HashMapMixin(
-    comptime Self: type,
-    comptime K: type,
-    comptime V: type,
-    comptime Context: type,
-) type {
-    return struct {
-        pub fn clearRetainingCapacity(self: *Self) void {
-            @memset(self.slice(), .{});
-            self.len = 0;
-        }
-
-        pub fn slice(self: *Self) []Self.Entry {
-            const capacity = @as(u64, 1) << (63 - self.shift + 1);
-            const overflow = capacity / 10 + (63 - @as(usize, self.shift) + 1) << 1;
-            return self.entries[0..@as(usize, @intCast(capacity + overflow))];
-        }
-
-        pub fn putAssumeCapacity(self: *Self, key: K, value: V) void {
-            self.putAssumeCapacityContext(key, value, undefined);
-        }
-
-        pub fn putAssumeCapacityContext(self: *Self, key: K, value: V, ctx: Context) void {
-            const result = self.getOrPutAssumeCapacityContext(key, ctx);
-            if (!result.found_existing) result.value_ptr.* = value;
-        }
-
-        pub fn getOrPutAssumeCapacity(self: *Self, key: K) Self.GetOrPutResult {
-            return self.getOrPutAssumeCapacityContext(key, undefined);
-        }
-
-        pub fn getOrPutAssumeCapacityContext(self: *Self, key: K, ctx: Context) Self.GetOrPutResult {
-            var it: Self.Entry = .{ .hash = ctx.hash(key), .key = key, .value = undefined };
-            var i = it.hash >> self.shift;
-
-            assert(it.hash != Self.empty_hash);
-
-            var inserted_at: ?usize = null;
-            while (true) : (i += 1) {
-                const entry = self.entries[i];
-                if (entry.hash >= it.hash) {
-                    if (ctx.eql(entry.key, key)) {
-                        return .{ .found_existing = true, .value_ptr = &self.entries[i].value };
-                    }
-                    self.entries[i] = it;
-                    if (entry.isEmpty()) {
-                        self.len += 1;
-                        return .{ .found_existing = false, .value_ptr = &self.entries[inserted_at orelse i].value };
-                    }
-                    if (inserted_at == null) {
-                        inserted_at = i;
-                    }
-                    it = entry;
-                }
-                // self.put_probe_count += 1;
-            }
-        }
-
-        pub fn get(self: *const Self, key: K) ?V {
-            return self.getContext(key, undefined);
-        }
-
-        pub fn getContext(self: *const Self, key: K, ctx: Context) ?V {
-            const hash = ctx.hash(key);
-            assert(hash != Self.empty_hash);
-
-            for (self.entries[hash >> self.shift ..]) |entry| {
-                if (entry.hash >= hash) {
-                    if (!ctx.eql(entry.key, key)) {
-                        return null;
-                    }
-                    return entry.value;
-                }
-                // self.get_probe_count += 1;
-            }
-        }
-
-        pub fn has(self: *const Self, key: K) bool {
-            return self.hasContext(key, undefined);
-        }
-
-        pub fn hasWithHash(self: *const Self, key_hash: u64) bool {
-            assert(key_hash != Self.empty_hash);
-
-            for (self.entries[key_hash >> self.shift ..]) |entry| {
-                if (entry.hash >= key_hash) {
-                    return entry.hash == key_hash;
-                }
-            }
-
-            return false;
-        }
-
-        pub fn hasContext(self: *const Self, key: K, ctx: Context) bool {
-            const hash = ctx.hash(key);
-            assert(hash != Self.empty_hash);
-
-            for (self.entries[hash >> self.shift ..]) |entry| {
-                if (entry.hash >= hash) {
-                    if (!ctx.eql(entry.key, key)) {
-                        return false;
-                    }
-                    return true;
-                }
-                // self.get_probe_count += 1;
-            }
-            unreachable;
-        }
-
-        pub fn delete(self: *Self, key: K) ?V {
-            return self.deleteContext(key, undefined);
-        }
-
-        pub fn deleteContext(self: *Self, key: K, ctx: Context) ?V {
-            const hash = ctx.hash(key);
-            assert(hash != Self.empty_hash);
-
-            var i = hash >> self.shift;
-            while (true) : (i += 1) {
-                const entry = self.entries[i];
-                if (entry.hash >= hash) {
-                    if (!ctx.eql(entry.key, key)) {
-                        return null;
-                    }
-                    break;
-                }
-                // self.del_probe_count += 1;
-            }
-
-            const value = self.entries[i].value;
-
-            while (true) : (i += 1) {
-                const j = self.entries[i + 1].hash >> self.shift;
-                if (i < j or self.entries[i + 1].isEmpty()) {
-                    break;
-                }
-                self.entries[i] = self.entries[i + 1];
-                // self.del_probe_count += 1;
-            }
-            self.entries[i] = .{};
-            self.len -= 1;
-
-            return value;
-        }
-    };
-}
-
-pub fn SortedHashMap(comptime V: type, comptime max_load_percentage: comptime_int) type {
-    return struct {
-        const empty_hash: [32]u8 = [_]u8{0xFF} ** 32;
-
-        pub const Entry = struct {
-            hash: [32]u8 = empty_hash,
-            value: V = undefined,
-
-            pub fn isEmpty(self: Entry) bool {
-                return cmp(self.hash, empty_hash) == .eq;
-            }
-
-            pub fn format(self: Entry, writer: *std.Io.Writer) !void {
-                try writer.print("(hash: {x}, value: {})", .{ mem.asBytes(&self.hash), self.value });
-            }
-        };
-
-        const Self = @This();
-
-        entries: [*]Entry,
-        len: usize = 0,
-        shift: u6,
-
-        // put_probe_count: usize = 0,
-        // get_probe_count: usize = 0,
-        // del_probe_count: usize = 0,
-
-        pub fn init(gpa: mem.Allocator) !Self {
-            return Self.initCapacity(gpa, 16);
-        }
-
-        pub fn initCapacity(gpa: mem.Allocator, capacity: u64) !Self {
-            assert(math.isPowerOfTwo(capacity));
-
-            const shift = 63 - math.log2_int(u64, capacity) + 1;
-            const overflow = capacity / 10 + (63 - @as(u64, shift) + 1) << 1;
-
-            const entries = try gpa.alloc(Entry, @as(usize, @intCast(capacity + overflow)));
-            @memset(entries, Entry{});
-
-            return Self{
-                .entries = entries.ptr,
-                .shift = shift,
-            };
-        }
-
-        pub fn deinit(self: *Self, gpa: mem.Allocator) void {
-            gpa.free(self.slice());
-        }
-
-        /// The following routine has its branches optimized against inputs that are cryptographic hashes by
-        /// assuming that if the first 64 bits of 'a' and 'b' are equivalent, then 'a' and 'b' are most likely
-        /// equivalent.
-        fn cmp(a: [32]u8, b: [32]u8) math.Order {
-            const msa = @as(u64, @bitCast(a[0..8].*));
-            const msb = @as(u64, @bitCast(b[0..8].*));
-            if (msa != msb) {
-                return if (mem.bigToNative(u64, msa) < mem.bigToNative(u64, msb)) .lt else .gt;
-            } else if (@reduce(.And, @as(@Vector(32, u8), a) == @as(@Vector(32, u8), b))) {
-                return .eq;
-            } else {
-                switch (math.order(mem.readIntBig(u64, a[8..16]), mem.readIntBig(u64, b[8..16]))) {
-                    .eq => {},
-                    .lt => return .lt,
-                    .gt => return .gt,
-                }
-                switch (math.order(mem.readIntBig(u64, a[16..24]), mem.readIntBig(u64, b[16..24]))) {
-                    .eq => {},
-                    .lt => return .lt,
-                    .gt => return .gt,
-                }
-                return math.order(mem.readIntBig(u64, a[24..32]), mem.readIntBig(u64, b[24..32]));
-            }
-        }
-
-        /// In release-fast mode, LLVM will optimize this routine to utilize 109 cycles. This routine scatters
-        /// hash values across a table into buckets which are lexicographically ordered from one another in
-        /// ascending order.
-        fn idx(a: [32]u8, shift: u6) usize {
-            return @as(usize, @intCast(mem.readIntBig(u64, a[0..8]) >> shift));
-        }
-
-        pub fn clearRetainingCapacity(self: *Self) void {
-            @memset(self.slice(), Entry{});
-            self.len = 0;
-        }
-
-        pub fn slice(self: *Self) []Entry {
-            const capacity = @as(u64, 1) << (63 - self.shift + 1);
-            const overflow = capacity / 10 + (63 - @as(usize, self.shift) + 1) << 1;
-            return self.entries[0..@as(usize, @intCast(capacity + overflow))];
-        }
-
-        pub fn ensureUnusedCapacity(self: *Self, gpa: mem.Allocator, count: usize) !void {
-            try self.ensureTotalCapacity(gpa, self.len + count);
-        }
-
-        pub fn ensureTotalCapacity(self: *Self, gpa: mem.Allocator, count: usize) !void {
-            while (true) {
-                const capacity = @as(u64, 1) << (63 - self.shift + 1);
-                if (count <= capacity * max_load_percentage / 100) {
-                    break;
-                }
-                try self.grow(gpa);
-            }
-        }
-
-        fn grow(self: *Self, gpa: mem.Allocator) !void {
-            const capacity = @as(u64, 1) << (63 - self.shift + 1);
-            const overflow = capacity / 10 + (63 - @as(usize, self.shift) + 1) << 1;
-            const end = self.entries + @as(usize, @intCast(capacity + overflow));
-
-            const map = try Self.initCapacity(gpa, @as(usize, @intCast(capacity * 2)));
-            var src = self.entries;
-            var dst = map.entries;
-
-            while (src != end) {
-                const entry = src[0];
-
-                const i = if (!entry.isEmpty()) idx(entry.hash, map.shift) else 0;
-                const p = map.entries + i;
-
-                dst = if (@intFromPtr(p) >= @intFromPtr(dst)) p else dst;
-                dst[0] = entry;
-
-                src += 1;
-                dst += 1;
-            }
-
-            self.deinit(gpa);
-            self.entries = map.entries;
-            self.shift = map.shift;
-        }
-
-        pub fn put(self: *Self, gpa: mem.Allocator, key: [32]u8, value: V) !void {
-            try self.ensureUnusedCapacity(gpa, 1);
-            self.putAssumeCapacity(key, value);
-        }
-
-        pub fn putAssumeCapacity(self: *Self, key: [32]u8, value: V) void {
-            const result = self.getOrPutAssumeCapacity(key);
-            if (!result.found_existing) result.value_ptr.* = value;
-        }
-
-        pub const GetOrPutResult = struct {
-            value_ptr: *V,
-            found_existing: bool,
-        };
-
-        pub fn getOrPut(self: *Self, gpa: mem.Allocator, key: [32]u8) !GetOrPutResult {
-            try self.ensureUnusedCapacity(gpa, 1);
-            return self.getOrPutAssumeCapacity(key);
-        }
-
-        pub fn getOrPutAssumeCapacity(self: *Self, key: [32]u8) GetOrPutResult {
-            assert(self.len < (@as(u64, 1) << (63 - self.shift + 1)));
-            assert(cmp(key, empty_hash) != .eq);
-
-            var it: Entry = .{ .hash = key, .value = undefined };
-            var i = idx(key, self.shift);
-
-            var inserted_at: ?usize = null;
-            while (true) : (i += 1) {
-                const entry = self.entries[i];
-                if (cmp(entry.hash, it.hash).compare(.gte)) {
-                    if (cmp(entry.hash, key) == .eq) {
-                        return .{ .found_existing = true, .value_ptr = &self.entries[i].value };
-                    }
-                    self.entries[i] = it;
-                    if (entry.isEmpty()) {
-                        self.len += 1;
-                        return .{ .found_existing = false, .value_ptr = &self.entries[inserted_at orelse i].value };
-                    }
-                    if (inserted_at == null) {
-                        inserted_at = i;
-                    }
-                    it = entry;
-                }
-                self.put_probe_count += 1;
-            }
-        }
-
-        pub fn get(self: *Self, key: [32]u8) ?V {
-            assert(cmp(key, empty_hash) != .eq);
-
-            for (self.entries[idx(key, self.shift)..]) |entry| {
-                if (cmp(entry.hash, key).compare(.gte)) {
-                    if (cmp(entry.hash, key) != .eq) {
-                        return null;
-                    }
-                    return entry.value;
-                }
-                // self.get_probe_count += 1;
-            }
-        }
-
-        pub fn delete(self: *Self, key: [32]u8) ?V {
-            assert(cmp(key, empty_hash) != .eq);
-
-            var i = idx(key, self.shift);
-            while (true) : (i += 1) {
-                const entry = self.entries[i];
-                if (cmp(entry.hash, key).compare(.gte)) {
-                    if (cmp(entry.hash, key) != .eq) {
-                        return null;
-                    }
-                    break;
-                }
-                self.del_probe_count += 1;
-            }
-
-            const value = self.entries[i].value;
-
-            while (true) : (i += 1) {
-                const j = idx(self.entries[i + 1].hash, self.shift);
-                if (i < j or self.entries[i + 1].isEmpty()) {
-                    break;
-                }
-                self.entries[i] = self.entries[i + 1];
-                self.del_probe_count += 1;
-            }
-            self.entries[i] = .{};
-            self.len -= 1;
-
-            return value;
-        }
-    };
-}
-
-test "StaticHashMap: put, get, delete, grow" {
-    var map: AutoStaticHashMap(usize, usize, 512) = .{};
-
-    for (0..128) |seed| {
-        var rng = std.rand.DefaultPrng.init(seed);
-
-        const keys = try testing.allocator.alloc(usize, 512);
-        defer testing.allocator.free(keys);
-
-        for (keys) |*key| key.* = @as(usize, rng.next());
-
-        try testing.expectEqual(@as(u6, 55), map.shift);
-
-        for (keys, 0..) |key, i| map.putAssumeCapacity(key, i);
-        try testing.expectEqual(keys.len, map.len);
-
-        var it: usize = 0;
-        for (map.slice()) |entry| {
-            if (!entry.isEmpty()) {
-                if (it > entry.hash) {
-                    return error.Unsorted;
-                }
-                it = entry.hash;
-            }
-        }
-
-        for (keys, 0..) |key, i| try testing.expectEqual(i, map.get(key).?);
-        for (keys, 0..) |key, i| try testing.expectEqual(i, map.delete(key).?);
-    }
-}
-
-test "HashMap: put, get, delete, grow" {
-    for (0..128) |seed| {
-        var rng = std.rand.DefaultPrng.init(seed);
-
-        const keys = try testing.allocator.alloc(usize, 512);
-        defer testing.allocator.free(keys);
-
-        for (keys) |*key| key.* = rng.next();
-
-        var map = try AutoHashMap(usize, usize, 50).initCapacity(testing.allocator, 16);
-        defer map.deinit(testing.allocator);
-
-        try testing.expectEqual(@as(u6, 60), map.shift);
-
-        for (keys, 0..) |key, i| try map.put(testing.allocator, key, i);
-
-        try testing.expectEqual(@as(u6, 54), map.shift);
-        try testing.expectEqual(keys.len, map.len);
-
-        var it: usize = 0;
-        for (map.slice()) |entry| {
-            if (!entry.isEmpty()) {
-                if (it > entry.hash) {
-                    return error.Unsorted;
-                }
-                it = entry.hash;
-            }
-        }
-
-        for (keys, 0..) |key, i| try testing.expectEqual(i, map.get(key).?);
-        for (keys, 0..) |key, i| try testing.expectEqual(i, map.delete(key).?);
-    }
-}
-
-test "SortedHashMap: cmp" {
-    const prefix = [_]u8{'0'} ** 8 ++ [_]u8{'1'} ** 23;
-    const a = prefix ++ [_]u8{0};
-    const b = prefix ++ [_]u8{1};
-
-    try testing.expect(SortedHashMap(void, 100).cmp(a, b) == .lt);
-    try testing.expect(SortedHashMap(void, 100).cmp(b, a) == .gt);
-    try testing.expect(SortedHashMap(void, 100).cmp(a, a) == .eq);
-    try testing.expect(SortedHashMap(void, 100).cmp(b, b) == .eq);
-    try testing.expect(SortedHashMap(void, 100).cmp([_]u8{'i'} ++ [_]u8{'0'} ** 31, [_]u8{'o'} ++ [_]u8{'0'} ** 31) == .lt);
-    try testing.expect(SortedHashMap(void, 100).cmp([_]u8{ 'h', 'i' } ++ [_]u8{'0'} ** 30, [_]u8{ 'h', 'o' } ++ [_]u8{'0'} ** 30) == .lt);
-}
-
-test "SortedHashMap: put, get, delete, grow" {
-    for (0..128) |seed| {
-        var rng = std.rand.DefaultPrng.init(seed);
-
-        const keys = try testing.allocator.alloc([32]u8, 512);
-        defer testing.allocator.free(keys);
-
-        for (keys) |*key| rng.fill(key);
-
-        var map = try SortedHashMap(usize, 50).initCapacity(testing.allocator, 16);
-        defer map.deinit(testing.allocator);
-
-        try testing.expectEqual(@as(u6, 60), map.shift);
-
-        for (keys, 0..) |key, i| try map.put(testing.allocator, key, i);
-
-        try testing.expectEqual(@as(u6, 54), map.shift);
-        try testing.expectEqual(keys.len, map.len);
-
-        var it = [_]u8{0} ** 32;
-        for (map.slice()) |entry| {
-            if (!entry.isEmpty()) {
-                if (!mem.order(u8, &it, &entry.hash).compare(.lte)) {
-                    return error.Unsorted;
-                }
-                it = entry.hash;
-            }
-        }
-
-        for (keys, 0..) |key, i| try testing.expectEqual(i, map.get(key).?);
-        for (keys, 0..) |key, i| try testing.expectEqual(i, map.delete(key).?);
-    }
-}
-
-test "SortedHashMap: collision test" {
-    const prefix = [_]u8{22} ** 8 ++ [_]u8{1} ** 23;
-
-    var map = try SortedHashMap(usize, 100).initCapacity(testing.allocator, 4);
-    defer map.deinit(testing.allocator);
-
-    try map.put(testing.allocator, prefix ++ [_]u8{0}, 0);
-    try map.put(testing.allocator, prefix ++ [_]u8{1}, 1);
-    try map.put(testing.allocator, prefix ++ [_]u8{2}, 2);
-    try map.put(testing.allocator, prefix ++ [_]u8{3}, 3);
-
-    var it = [_]u8{0} ** 32;
-    for (map.slice()) |entry| {
-        if (!entry.isEmpty()) {
-            if (!mem.order(u8, &it, &entry.hash).compare(.lte)) {
-                return error.Unsorted;
-            }
-            it = entry.hash;
-        }
-    }
-
-    try testing.expectEqual(@as(usize, 0), map.get(prefix ++ [_]u8{0}).?);
-    try testing.expectEqual(@as(usize, 1), map.get(prefix ++ [_]u8{1}).?);
-    try testing.expectEqual(@as(usize, 2), map.get(prefix ++ [_]u8{2}).?);
-    try testing.expectEqual(@as(usize, 3), map.get(prefix ++ [_]u8{3}).?);
-
-    try testing.expectEqual(@as(usize, 2), map.delete(prefix ++ [_]u8{2}).?);
-    try testing.expectEqual(@as(usize, 0), map.delete(prefix ++ [_]u8{0}).?);
-    try testing.expectEqual(@as(usize, 1), map.delete(prefix ++ [_]u8{1}).?);
-    try testing.expectEqual(@as(usize, 3), map.delete(prefix ++ [_]u8{3}).?);
-
-    try map.put(testing.allocator, prefix ++ [_]u8{0}, 0);
-    try map.put(testing.allocator, prefix ++ [_]u8{2}, 2);
-    try map.put(testing.allocator, prefix ++ [_]u8{3}, 3);
-    try map.put(testing.allocator, prefix ++ [_]u8{1}, 1);
-
-    it = [_]u8{0} ** 32;
-    for (map.slice()) |entry| {
-        if (!entry.isEmpty()) {
-            if (!mem.order(u8, &it, &entry.hash).compare(.lte)) {
-                return error.Unsorted;
-            }
-            it = entry.hash;
-        }
-    }
-
-    try testing.expectEqual(@as(usize, 0), map.delete(prefix ++ [_]u8{0}).?);
-    try testing.expectEqual(@as(usize, 1), map.delete(prefix ++ [_]u8{1}).?);
-    try testing.expectEqual(@as(usize, 2), map.delete(prefix ++ [_]u8{2}).?);
-    try testing.expectEqual(@as(usize, 3), map.delete(prefix ++ [_]u8{3}).?);
-
-    try map.put(testing.allocator, prefix ++ [_]u8{0}, 0);
-    try map.put(testing.allocator, prefix ++ [_]u8{2}, 2);
-    try map.put(testing.allocator, prefix ++ [_]u8{1}, 1);
-    try map.put(testing.allocator, prefix ++ [_]u8{3}, 3);
-
-    it = [_]u8{0} ** 32;
-    for (map.slice()) |entry| {
-        if (!entry.isEmpty()) {
-            if (!mem.order(u8, &it, &entry.hash).compare(.lte)) {
-                return error.Unsorted;
-            }
-            it = entry.hash;
-        }
-    }
-
-    try testing.expectEqual(@as(usize, 3), map.delete(prefix ++ [_]u8{3}).?);
-    try testing.expectEqual(@as(usize, 2), map.delete(prefix ++ [_]u8{2}).?);
-    try testing.expectEqual(@as(usize, 1), map.delete(prefix ++ [_]u8{1}).?);
-    try testing.expectEqual(@as(usize, 0), map.delete(prefix ++ [_]u8{0}).?);
-
-    try map.put(testing.allocator, prefix ++ [_]u8{3}, 3);
-    try map.put(testing.allocator, prefix ++ [_]u8{0}, 0);
-    try map.put(testing.allocator, prefix ++ [_]u8{1}, 1);
-    try map.put(testing.allocator, prefix ++ [_]u8{2}, 2);
-
-    it = [_]u8{0} ** 32;
-    for (map.slice()) |entry| {
-        if (!entry.isEmpty()) {
-            if (!mem.order(u8, &it, &entry.hash).compare(.lte)) {
-                return error.Unsorted;
-            }
-            it = entry.hash;
-        }
-    }
-
-    try testing.expectEqual(@as(usize, 3), map.delete(prefix ++ [_]u8{3}).?);
-    try testing.expectEqual(@as(usize, 0), map.delete(prefix ++ [_]u8{0}).?);
-    try testing.expectEqual(@as(usize, 1), map.delete(prefix ++ [_]u8{1}).?);
-    try testing.expectEqual(@as(usize, 2), map.delete(prefix ++ [_]u8{2}).?);
-}
-
-const bun = @import("bun");
-const assert = bun.assert;
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
+
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const assert = bun.assert;
 const math = std.math;
 const mem = std.mem;
 const testing = std.testing;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val << shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val << @as(ShiftType, @truncate(u_shift));
+    }
+    return val << shift;
+}
+fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val >> shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val >> @as(ShiftType, @truncate(u_shift));
+    }
+    return val >> shift;
+}
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+
+pub fn GetOrPutResultOf(comptime V: type) type {
+        return struct {
+    value_ptr: *V,
+    found_existing: bool,
+};
+}
+
+pub fn ZeroedEntry(comptime K: type, comptime V: type, comptime empty_hash: u64) type {
+        return struct {
+    hash: u64 = empty_hash,
+    key: K = std.mem.zeroes(K),
+    value: V = std.mem.zeroes(V),
+
+pub fn isEmpty(self: @This()) bool {
+            return (self.hash == empty_hash);
+    }
+
+pub fn format(self: @This(), writer: *std.Io.Writer) !void {
+            _ = try writer.print("(hash: {}, key: {}, value: {})", .{ self.hash, self.key, self.value });
+    }
+};
+}
+
+pub fn HashEntry(comptime K: type, comptime V: type, comptime empty_hash: u64) type {
+        return struct {
+    hash: u64 = empty_hash,
+    key: K = undefined,
+    value: V = undefined,
+
+pub fn isEmpty(self: @This()) bool {
+            return (self.hash == empty_hash);
+    }
+
+pub fn format(self: @This(), writer: *std.Io.Writer) !void {
+            _ = try writer.print("(hash: {}, key: {}, value: {})", .{ self.hash, self.key, self.value });
+    }
+};
+}
+
+pub fn SortedEntry(comptime V: type, comptime empty_hash: [32]u8) type {
+        return struct {
+    hash: [32]u8 = empty_hash,
+    value: V = undefined,
+
+pub fn isEmpty(self: @This()) bool {
+            return (sortedCmp(self.hash, empty_hash) == .eq);
+    }
+
+pub fn format(self: @This(), writer: *std.Io.Writer) !void {
+            _ = try writer.print("(hash: {x}, value: {})", .{ mem.asBytes((&self.hash)), self.value });
+    }
+};
+}
+
+pub fn sortedCmp(a: [32]u8, b: [32]u8) math.Order {
+        const msa = @as(u64, @bitCast((a[0..8]).*));
+        const msb = @as(u64, @bitCast((b[0..8]).*));
+        if ((msa != msb)) {
+            return (if ((mem.bigToNative(u64, msa) < mem.bigToNative(u64, msb))) .lt else .gt);
+        } else {
+            if (@reduce(.And, ((if (comptime @typeInfo(@Vector(32,u8)) == .@"enum") @as(@Vector(32,u8), @enumFromInt(a)) else @as(@Vector(32,u8), a)) == (if (comptime @typeInfo(@Vector(32,u8)) == .@"enum") @as(@Vector(32,u8), @enumFromInt(b)) else @as(@Vector(32,u8), b))))) {
+                return .eq;
+            } else {
+                switch (math.order(mem.readIntBig(u64, a[8..16]), mem.readIntBig(u64, b[8..16]))) {
+.eq => {
+
+},
+.lt => {
+return .lt;
+},
+.gt => {
+return .gt;
+},
+}
+                switch (math.order(mem.readIntBig(u64, a[16..24]), mem.readIntBig(u64, b[16..24]))) {
+.eq => {
+
+},
+.lt => {
+return .lt;
+},
+.gt => {
+return .gt;
+},
+}
+                return math.order(mem.readIntBig(u64, a[24..32]), mem.readIntBig(u64, b[24..32]));
+            }
+        }
+}
+
+pub fn AutoHashMap(comptime K: type, comptime V: type, comptime max_load_percentage: comptime_int) type {
+        return HashMap(K, V, std.hash_map.AutoContext(K), max_load_percentage);
+}
+
+pub fn AutoStaticHashMap(comptime K: type, comptime V: type, comptime capacity: comptime_int) type {
+        return StaticHashMap(K, V, std.hash_map.AutoContext(K), capacity);
+}
+
+pub fn StaticHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime capacity: usize) type {
+        _ = assert(math.isPowerOfTwo(capacity));
+        const shift = ((63 - math.log2_int(u64, capacity)) + 1);
+        const overflow = cp_shl(((capacity / 10) + ((63 - (if (comptime @typeInfo(@TypeOf(shift)) == .@"enum") cp_cast_int(u64, @intFromEnum(shift)) else cp_cast_int(u64, shift))) + 1)), 1);
+        const total = (capacity + overflow);
+        return struct {
+    entries: [total]Entry = @as([total]Entry, @splat(@as(Entry, Entry{  }))),
+    len: usize = 0,
+    shift: u6 = shift,
+    const empty_hash = math.maxInt(u64);
+    pub const Entry = ZeroedEntry(K, V, empty_hash);
+    pub const GetOrPutResult = GetOrPutResultOf(V);
+    const Self = @This();
+    const impl = HashMapMixin(Self, K, V, Context);
+    pub const putAssumeCapacity = impl.putAssumeCapacity;
+    pub const slice = impl.slice;
+    pub const clearRetainingCapacity = impl.clearRetainingCapacity;
+    pub const putAssumeCapacityContext = impl.putAssumeCapacityContext;
+    pub const getOrPutAssumeCapacity = impl.getOrPutAssumeCapacity;
+    pub const getOrPutAssumeCapacityContext = impl.getOrPutAssumeCapacityContext;
+    pub const get = impl.get;
+    pub const getContext = impl.getContext;
+    pub const has = impl.has;
+    pub const hasWithHash = impl.hasWithHash;
+    pub const hasContext = impl.hasContext;
+    pub const delete = impl.delete;
+    pub const deleteContext = impl.deleteContext;
+};
+}
+
+pub fn HashMap(comptime K: type, comptime V: type, comptime Context: type, comptime max_load_percentage: comptime_int) type {
+        return struct {
+    entries: [*]Entry,
+    len: usize = 0,
+    shift: u6,
+
+pub fn initCapacity(gpa: mem.Allocator, capacity: u64) !Self {
+            _ = assert(math.isPowerOfTwo(capacity));
+            const shift = ((63 - math.log2_int(u64, capacity)) + 1);
+            const overflow = cp_shl(((capacity / 10) + ((63 - (if (comptime @typeInfo(@TypeOf(shift)) == .@"enum") cp_cast_int(u64, @intFromEnum(shift)) else cp_cast_int(u64, shift))) + 1)), 1);
+            const entries = try gpa.alloc(Entry, (if (comptime @typeInfo(@TypeOf((capacity + overflow))) == .@"enum") cp_cast_int(usize, @intFromEnum((capacity + overflow))) else cp_cast_int(usize, (capacity + overflow))));
+            _ = @memset(entries, Entry{  });
+            return Self{ .entries = entries.ptr, .shift = shift };
+    }
+
+pub fn deinit(self: *@This(), gpa: mem.Allocator) void {
+            _ = gpa.free(self.slice());
+    }
+
+pub fn ensureUnusedCapacity(self: *@This(), gpa: mem.Allocator, count: usize) !void {
+            _ = try self.ensureTotalCapacity(gpa, (self.len + count));
+    }
+
+pub fn ensureTotalCapacity(self: *@This(), gpa: mem.Allocator, count: usize) !void {
+            while (true) {
+                const capacity = cp_shl((if (comptime @typeInfo(@TypeOf(1)) == .@"enum") cp_cast_int(u64, @intFromEnum(1)) else cp_cast_int(u64, 1)), ((63 - self.shift) + 1));
+                if ((count <= ((capacity * max_load_percentage) / 100))) {
+                    break;
+                }
+                _ = try self.grow(gpa);
+            }
+    }
+
+pub fn grow(self: *@This(), gpa: mem.Allocator) !void {
+            const capacity = cp_shl((if (comptime @typeInfo(@TypeOf(1)) == .@"enum") cp_cast_int(u64, @intFromEnum(1)) else cp_cast_int(u64, 1)), ((63 - self.shift) + 1));
+            const overflow = cp_shl(((capacity / 10) + ((63 - (if (comptime @typeInfo(@TypeOf(self.shift)) == .@"enum") cp_cast_int(usize, @intFromEnum(self.shift)) else cp_cast_int(usize, self.shift))) + 1)), 1);
+            {
+                const end = (self.entries + (if (comptime @typeInfo(@TypeOf((capacity + overflow))) == .@"enum") cp_cast_int(usize, @intFromEnum((capacity + overflow))) else cp_cast_int(usize, (capacity + overflow))));
+                const map = try Self.initCapacity(gpa, (if (comptime @typeInfo(@TypeOf((capacity * 2))) == .@"enum") cp_cast_int(usize, @intFromEnum((capacity * 2))) else cp_cast_int(usize, (capacity * 2))));
+                var src = self.entries;
+                _ = &src;
+                var dst = map.entries;
+                _ = &dst;
+                while ((src != end)) {
+                    const entry = src[0];
+                    const i = (if ((!entry.isEmpty())) cp_shr(entry.hash, map.shift) else 0);
+                    const p = (map.entries + i);
+                    dst = (if ((@intFromPtr(p) >= @intFromPtr(dst))) p else dst);
+                    dst[cp_cast_int(usize, 0)] = entry;
+                    src = (src + 1);
+                    dst = (dst + 1);
+                }
+                _ = self.deinit(gpa);
+                self.entries = map.entries;
+                self.shift = map.shift;
+            }
+    }
+
+pub fn put(self: *@This(), gpa: mem.Allocator, key: K, value: V) !void {
+            _ = try self.putContext(gpa, key, value, undefined);
+    }
+
+pub fn putContext(self: *@This(), gpa: mem.Allocator, key: K, value: V, ctx: Context) !void {
+            _ = try self.ensureUnusedCapacity(gpa, 1);
+            _ = self.putAssumeCapacityContext(key, value, ctx);
+    }
+
+pub fn getOrPut(self: *@This(), gpa: mem.Allocator, key: K) !GetOrPutResult {
+            return try self.getOrPutContext(gpa, key, undefined);
+    }
+
+pub fn getOrPutContext(self: *@This(), gpa: mem.Allocator, key: K, ctx: Context) !GetOrPutResult {
+            _ = try self.ensureUnusedCapacity(gpa, 1);
+            return self.getOrPutAssumeCapacityContext(key, ctx);
+    }
+    const empty_hash = math.maxInt(u64);
+    pub const Entry = HashEntry(K, V, empty_hash);
+    pub const GetOrPutResult = GetOrPutResultOf(V);
+    const Self = @This();
+    const impl = HashMapMixin(Self, K, V, Context);
+    pub const putAssumeCapacity = impl.putAssumeCapacity;
+    pub const slice = impl.slice;
+    pub const clearRetainingCapacity = impl.clearRetainingCapacity;
+    pub const putAssumeCapacityContext = impl.putAssumeCapacityContext;
+    pub const getOrPutAssumeCapacity = impl.getOrPutAssumeCapacity;
+    pub const getOrPutAssumeCapacityContext = impl.getOrPutAssumeCapacityContext;
+    pub const get = impl.get;
+    pub const getContext = impl.getContext;
+    pub const has = impl.has;
+    pub const hasWithHash = impl.hasWithHash;
+    pub const hasContext = impl.hasContext;
+    pub const delete = impl.delete;
+    pub const deleteContext = impl.deleteContext;
+};
+}
+
+pub fn HashMapMixin(comptime Self: type, comptime K: type, comptime V: type, comptime Context: type) type {
+        return struct {
+
+pub fn clearRetainingCapacity(self: *@This()) void {
+            _ = @memset(self.slice(), Self.Entry);
+            self.len = 0;
+    }
+
+pub fn slice(self: *@This()) []Self.Entry {
+            const capacity = cp_shl((if (comptime @typeInfo(@TypeOf(1)) == .@"enum") cp_cast_int(u64, @intFromEnum(1)) else cp_cast_int(u64, 1)), ((63 - self.shift) + 1));
+            const overflow = cp_shl(((capacity / 10) + ((63 - (if (comptime @typeInfo(@TypeOf(self.shift)) == .@"enum") cp_cast_int(usize, @intFromEnum(self.shift)) else cp_cast_int(usize, self.shift))) + 1)), 1);
+            {
+                return self.entries[0..(if (comptime @typeInfo(@TypeOf((capacity + overflow))) == .@"enum") cp_cast_int(usize, @intFromEnum((capacity + overflow))) else cp_cast_int(usize, (capacity + overflow)))];
+            }
+    }
+
+pub fn putAssumeCapacity(self: *@This(), key: K, value: V) void {
+            _ = self.putAssumeCapacityContext(key, value, undefined);
+    }
+
+pub fn putAssumeCapacityContext(self: *@This(), key: K, value: V, ctx: Context) void {
+            const result = self.getOrPutAssumeCapacityContext(key, ctx);
+            if ((!result.found_existing)) {
+                {
+                    result.value_ptr.* = value;
+                }
+            }
+    }
+
+pub fn getOrPutAssumeCapacity(self: *@This(), key: K) Self.GetOrPutResult {
+            return self.getOrPutAssumeCapacityContext(key, undefined);
+    }
+
+pub fn getOrPutAssumeCapacityContext(self: *@This(), key: K, ctx: Context) Self.GetOrPutResult {
+            var it: Self.Entry = Self.Entry{ .hash = ctx.hash(key), .key = key, .value = undefined };
+            _ = &it;
+            var i = cp_shr(it.hash, self.shift);
+            _ = &i;
+            _ = assert((it.hash != Self.empty_hash));
+            var inserted_at: ?usize = null;
+            _ = &inserted_at;
+            while (true) : (i = (i + 1)) {
+                {
+                    const entry = self.entries[@as(usize, @intCast(i))];
+                    if ((entry.hash >= it.hash)) {
+                        if (ctx.eql(entry.key, key)) {
+                            return Self.GetOrPutResult{ .found_existing = true, .value_ptr = (&(if (@typeInfo(@TypeOf(self.entries[@as(usize, @intCast(i))])) == .@"enum") @intFromEnum(self.entries[@as(usize, @intCast(i))]) else self.entries[@as(usize, @intCast(i))].value)) };
+                        }
+                        self.entries[cp_cast_int(usize, i)] = it;
+                        if (entry.isEmpty()) {
+                            self.len = (self.len + 1);
+                            return Self.GetOrPutResult{ .found_existing = false, .value_ptr = (&(if (@typeInfo(@TypeOf(self.entries[@as(usize, @intCast(((inserted_at) orelse (i))))])) == .@"enum") @intFromEnum(self.entries[@as(usize, @intCast(((inserted_at) orelse (i))))]) else self.entries[@as(usize, @intCast(((inserted_at) orelse (i))))].value)) };
+                        }
+                        if ((inserted_at == null)) {
+                            inserted_at = i;
+                        }
+                        it = entry;
+                    }
+                }
+            }
+    }
+
+pub fn get(self: *const @This(), key: K) ?V {
+            return self.getContext(key, undefined);
+    }
+
+pub fn getContext(self: *const @This(), key: K, ctx: Context) ?V {
+            const hash = ctx.hash(key);
+            _ = assert((hash != Self.empty_hash));
+            {
+                for (cp_iter_slice(self.entries[cp_shr(hash, self.shift)..])) |entry| {
+                    _ = &entry;
+                    if ((entry.hash >= hash)) {
+                        if ((!ctx.eql(entry.key, key))) {
+                            return null;
+                        }
+                        return (if (@typeInfo(@TypeOf(entry)) == .@"enum") @intFromEnum(entry) else entry.value);
+                    }
+                }
+            }
+    }
+
+pub fn has(self: *const @This(), key: K) bool {
+            return self.hasContext(key, undefined);
+    }
+
+pub fn hasWithHash(self: *const @This(), key_hash: u64) bool {
+            _ = assert((key_hash != Self.empty_hash));
+            {
+                for (cp_iter_slice(self.entries[cp_shr(key_hash, self.shift)..])) |entry| {
+                    _ = &entry;
+                    if ((entry.hash >= key_hash)) {
+                        return (entry.hash == key_hash);
+                    }
+                }
+            }
+            return false;
+    }
+
+pub fn hasContext(self: *const @This(), key: K, ctx: Context) bool {
+            const hash = ctx.hash(key);
+            _ = assert((hash != Self.empty_hash));
+            {
+                for (cp_iter_slice(self.entries[cp_shr(hash, self.shift)..])) |entry| {
+                    _ = &entry;
+                    if ((entry.hash >= hash)) {
+                        if ((!ctx.eql(entry.key, key))) {
+                            return false;
+                        }
+                        return true;
+                    }
+                }
+            }
+            _ = unreachable;
+    }
+
+pub fn delete(self: *@This(), key: K) ?V {
+            return self.deleteContext(key, undefined);
+    }
+
+pub fn deleteContext(self: *@This(), key: K, ctx: Context) ?V {
+            const hash = ctx.hash(key);
+            _ = assert((hash != Self.empty_hash));
+            var i = cp_shr(hash, self.shift);
+            _ = &i;
+            {
+                while (true) : (i = (i + 1)) {
+                    const entry = self.entries[@as(usize, @intCast(i))];
+                    if ((entry.hash >= hash)) {
+                        if ((!ctx.eql(entry.key, key))) {
+                            return null;
+                        }
+                        break;
+                    }
+                }
+                const value = (if (@typeInfo(@TypeOf(self.entries[@as(usize, @intCast(i))])) == .@"enum") @intFromEnum(self.entries[@as(usize, @intCast(i))]) else self.entries[@as(usize, @intCast(i))].value);
+                while (true) : (i = (i + 1)) {
+                    const j = cp_shr(self.entries[@as(usize, @intCast((i + 1)))].hash, self.shift);
+                    if (((i < j) or self.entries[@as(usize, @intCast((i + 1)))].isEmpty())) {
+                        break;
+                    }
+                    self.entries[cp_cast_int(usize, i)] = self.entries[@as(usize, @intCast((i + 1)))];
+                }
+                self.entries[cp_cast_int(usize, i)] = Self.Entry;
+                self.len = (self.len - 1);
+                return value;
+            }
+    }
+};
+}
+
+pub fn SortedHashMap(comptime V: type, comptime max_load_percentage: comptime_int) type {
+        return struct {
+    entries: [*]Entry,
+    len: usize = 0,
+    shift: u6,
+
+pub fn init(gpa: mem.Allocator) !Self {
+            return Self.initCapacity(gpa, 16);
+    }
+
+pub fn initCapacity(gpa: mem.Allocator, capacity: u64) !Self {
+            _ = assert(math.isPowerOfTwo(capacity));
+            const shift = ((63 - math.log2_int(u64, capacity)) + 1);
+            const overflow = cp_shl(((capacity / 10) + ((63 - (if (comptime @typeInfo(@TypeOf(shift)) == .@"enum") cp_cast_int(u64, @intFromEnum(shift)) else cp_cast_int(u64, shift))) + 1)), 1);
+            const entries = try gpa.alloc(Entry, (if (comptime @typeInfo(@TypeOf((capacity + overflow))) == .@"enum") cp_cast_int(usize, @intFromEnum((capacity + overflow))) else cp_cast_int(usize, (capacity + overflow))));
+            _ = @memset(entries, Entry{  });
+            return Self{ .entries = entries.ptr, .shift = shift };
+    }
+
+pub fn deinit(self: *@This(), gpa: mem.Allocator) void {
+            _ = gpa.free(self.slice());
+    }
+
+pub fn idx(a: [32]u8, shift: u6) usize {
+            return (if (comptime @typeInfo(@TypeOf(cp_shr(mem.readIntBig(u64, a[0..8]), shift))) == .@"enum") cp_cast_int(usize, @intFromEnum(cp_shr(mem.readIntBig(u64, a[0..8]), shift))) else cp_cast_int(usize, cp_shr(mem.readIntBig(u64, a[0..8]), shift)));
+    }
+
+pub fn clearRetainingCapacity(self: *@This()) void {
+            _ = @memset(self.slice(), Entry{  });
+            self.len = 0;
+    }
+
+pub fn slice(self: *@This()) []Entry {
+            const capacity = cp_shl((if (comptime @typeInfo(@TypeOf(1)) == .@"enum") cp_cast_int(u64, @intFromEnum(1)) else cp_cast_int(u64, 1)), ((63 - self.shift) + 1));
+            const overflow = cp_shl(((capacity / 10) + ((63 - (if (comptime @typeInfo(@TypeOf(self.shift)) == .@"enum") cp_cast_int(usize, @intFromEnum(self.shift)) else cp_cast_int(usize, self.shift))) + 1)), 1);
+            {
+                return self.entries[0..(if (comptime @typeInfo(@TypeOf((capacity + overflow))) == .@"enum") cp_cast_int(usize, @intFromEnum((capacity + overflow))) else cp_cast_int(usize, (capacity + overflow)))];
+            }
+    }
+
+pub fn ensureUnusedCapacity(self: *@This(), gpa: mem.Allocator, count: usize) !void {
+            _ = try self.ensureTotalCapacity(gpa, (self.len + count));
+    }
+
+pub fn ensureTotalCapacity(self: *@This(), gpa: mem.Allocator, count: usize) !void {
+            while (true) {
+                const capacity = cp_shl((if (comptime @typeInfo(@TypeOf(1)) == .@"enum") cp_cast_int(u64, @intFromEnum(1)) else cp_cast_int(u64, 1)), ((63 - self.shift) + 1));
+                if ((count <= ((capacity * max_load_percentage) / 100))) {
+                    break;
+                }
+                _ = try self.grow(gpa);
+            }
+    }
+
+pub fn grow(self: *@This(), gpa: mem.Allocator) !void {
+            const capacity = cp_shl((if (comptime @typeInfo(@TypeOf(1)) == .@"enum") cp_cast_int(u64, @intFromEnum(1)) else cp_cast_int(u64, 1)), ((63 - self.shift) + 1));
+            const overflow = cp_shl(((capacity / 10) + ((63 - (if (comptime @typeInfo(@TypeOf(self.shift)) == .@"enum") cp_cast_int(usize, @intFromEnum(self.shift)) else cp_cast_int(usize, self.shift))) + 1)), 1);
+            {
+                const end = (self.entries + (if (comptime @typeInfo(@TypeOf((capacity + overflow))) == .@"enum") cp_cast_int(usize, @intFromEnum((capacity + overflow))) else cp_cast_int(usize, (capacity + overflow))));
+                const map = try Self.initCapacity(gpa, (if (comptime @typeInfo(@TypeOf((capacity * 2))) == .@"enum") cp_cast_int(usize, @intFromEnum((capacity * 2))) else cp_cast_int(usize, (capacity * 2))));
+                var src = self.entries;
+                _ = &src;
+                var dst = map.entries;
+                _ = &dst;
+                while ((src != end)) {
+                    const entry = src[0];
+                    const i = (if ((!entry.isEmpty())) @This().idx(entry.hash, map.shift) else 0);
+                    const p = (map.entries + i);
+                    dst = (if ((@intFromPtr(p) >= @intFromPtr(dst))) p else dst);
+                    dst[cp_cast_int(usize, 0)] = entry;
+                    src = (src + 1);
+                    dst = (dst + 1);
+                }
+                _ = self.deinit(gpa);
+                self.entries = map.entries;
+                self.shift = map.shift;
+            }
+    }
+
+pub fn put(self: *@This(), gpa: mem.Allocator, key: [32]u8, value: V) !void {
+            _ = try self.ensureUnusedCapacity(gpa, 1);
+            _ = self.putAssumeCapacity(key, value);
+    }
+
+pub fn putAssumeCapacity(self: *@This(), key: [32]u8, value: V) void {
+            const result = self.getOrPutAssumeCapacity(key);
+            if ((!result.found_existing)) {
+                {
+                    result.value_ptr.* = value;
+                }
+            }
+    }
+
+pub fn getOrPut(self: *@This(), gpa: mem.Allocator, key: [32]u8) !GetOrPutResult {
+            _ = try self.ensureUnusedCapacity(gpa, 1);
+            return self.getOrPutAssumeCapacity(key);
+    }
+
+pub fn getOrPutAssumeCapacity(self: *@This(), key: [32]u8) GetOrPutResult {
+            _ = assert((self.len < cp_shl((if (comptime @typeInfo(@TypeOf(1)) == .@"enum") cp_cast_int(u64, @intFromEnum(1)) else cp_cast_int(u64, 1)), ((63 - self.shift) + 1))));
+            _ = assert((cmp(key, empty_hash) != .eq));
+            var it: Entry = Entry{ .hash = key, .value = undefined };
+            _ = &it;
+            var i = @This().idx(key, self.shift);
+            _ = &i;
+            var inserted_at: ?usize = null;
+            _ = &inserted_at;
+            while (true) : (i = (i + 1)) {
+                {
+                    const entry = self.entries[@as(usize, @intCast(i))];
+                    if (cmp(entry.hash, it.hash).compare(.gte)) {
+                        if ((cmp(entry.hash, key) == .eq)) {
+                            return GetOrPutResult{ .found_existing = true, .value_ptr = (&(if (@typeInfo(@TypeOf(self.entries[@as(usize, @intCast(i))])) == .@"enum") @intFromEnum(self.entries[@as(usize, @intCast(i))]) else self.entries[@as(usize, @intCast(i))].value)) };
+                        }
+                        self.entries[cp_cast_int(usize, i)] = it;
+                        if (entry.isEmpty()) {
+                            self.len = (self.len + 1);
+                            return GetOrPutResult{ .found_existing = false, .value_ptr = (&(if (@typeInfo(@TypeOf(self.entries[@as(usize, @intCast(((inserted_at) orelse (i))))])) == .@"enum") @intFromEnum(self.entries[@as(usize, @intCast(((inserted_at) orelse (i))))]) else self.entries[@as(usize, @intCast(((inserted_at) orelse (i))))].value)) };
+                        }
+                        if ((inserted_at == null)) {
+                            inserted_at = i;
+                        }
+                        it = entry;
+                    }
+                    self.put_probe_count = (self.put_probe_count + 1);
+                }
+            }
+    }
+
+pub fn get(self: *@This(), key: [32]u8) ?V {
+            _ = assert((cmp(key, empty_hash) != .eq));
+            {
+                for (cp_iter_slice(self.entries[@This().idx(key, self.shift)..])) |entry| {
+                    _ = &entry;
+                    if (cmp(entry.hash, key).compare(.gte)) {
+                        if ((cmp(entry.hash, key) != .eq)) {
+                            return null;
+                        }
+                        return (if (@typeInfo(@TypeOf(entry)) == .@"enum") @intFromEnum(entry) else entry.value);
+                    }
+                }
+            }
+    }
+
+pub fn delete(self: *@This(), key: [32]u8) ?V {
+            _ = assert((cmp(key, empty_hash) != .eq));
+            var i = @This().idx(key, self.shift);
+            _ = &i;
+            {
+                while (true) : (i = (i + 1)) {
+                    const entry = self.entries[@as(usize, @intCast(i))];
+                    if (cmp(entry.hash, key).compare(.gte)) {
+                        if ((cmp(entry.hash, key) != .eq)) {
+                            return null;
+                        }
+                        break;
+                    }
+                    self.del_probe_count = (self.del_probe_count + 1);
+                }
+                const value = (if (@typeInfo(@TypeOf(self.entries[@as(usize, @intCast(i))])) == .@"enum") @intFromEnum(self.entries[@as(usize, @intCast(i))]) else self.entries[@as(usize, @intCast(i))].value);
+                while (true) : (i = (i + 1)) {
+                    const j = @This().idx(self.entries[@as(usize, @intCast((i + 1)))].hash, self.shift);
+                    if (((i < j) or self.entries[@as(usize, @intCast((i + 1)))].isEmpty())) {
+                        break;
+                    }
+                    self.entries[cp_cast_int(usize, i)] = self.entries[@as(usize, @intCast((i + 1)))];
+                    self.del_probe_count = (self.del_probe_count + 1);
+                }
+                self.entries[cp_cast_int(usize, i)] = Entry{  };
+                self.len = (self.len - 1);
+                return value;
+            }
+    }
+    const empty_hash: [32]u8 = @splat(0xFF);
+    pub const Entry = SortedEntry(V, empty_hash);
+    pub const GetOrPutResult = GetOrPutResultOf(V);
+    pub const cmp = sortedCmp;
+    const Self = @This();
+};
+}

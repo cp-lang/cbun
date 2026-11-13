@@ -1,0 +1,428 @@
+import bun from "bun";
+import options from "../bundler/options.zig";
+import std from "std";
+import ast from "../options_types/import_record.zig";
+
+const ImportRecord = ast.ImportRecord;
+
+pub struct HardcodedModuleAliasCfg {
+    rewrite_jest_for_tests: bool = false,
+}
+
+pub struct HardcodedModuleAlias {
+    path: cstring,
+    tag: ImportRecord.Tag = .builtin,
+    node_builtin: bool = false,
+    node_only_prefix: bool = false,
+
+    pub const Cfg = HardcodedModuleAliasCfg;
+
+    static fn nodeEntry(comptime path: cstring): [string, HardcodedModuleAlias] {
+        return [
+            path,
+            HardcodedModuleAlias{
+                path: if (path.len > 5 && std.mem.eql(u8, path[0..5], "node:")) path else std.fmt.comptimePrint("node:{s}", [path]),
+                node_builtin: true,
+            },
+        ];
+    }
+
+    static fn nodeEntryOnlyPrefix(comptime path: cstring): [string, HardcodedModuleAlias] {
+        return [
+            path,
+            HardcodedModuleAlias{
+                path: if (path.len > 5 && std.mem.eql(u8, path[0..5], "node:")) path else std.fmt.comptimePrint("node:{s}", [path]),
+                node_builtin: true,
+                node_only_prefix: true,
+            },
+        ];
+    }
+
+    static fn entry(comptime path: cstring): [string, HardcodedModuleAlias] {
+        return [path, HardcodedModuleAlias{ path: path }];
+    }
+
+    const node_aliases = bun.ComptimeStringMap(HardcodedModuleAlias, common_alias_kvs);
+    pub const bun_aliases = bun.ComptimeStringMap(HardcodedModuleAlias, common_alias_kvs ++ bun_extra_alias_kvs);
+    const bun_test_aliases = bun.ComptimeStringMap(HardcodedModuleAlias, common_alias_kvs ++ bun_extra_alias_kvs ++ bun_test_extra_alias_kvs);
+
+    pub static fn has(name: []const u8, target: options.Target, cfg: Cfg): bool {
+        return get(name, target, cfg) != null;
+    }
+
+    pub static fn get(name: []const u8, target: options.Target, cfg: Cfg): HardcodedModuleAlias? {
+        if (target.isBun()) {
+            if (cfg.rewrite_jest_for_tests) {
+                return bun_test_aliases.get(name);
+            } else {
+                return bun_aliases.get(name);
+            }
+        } else if (target.isNode()) {
+            return node_aliases.get(name);
+        }
+        return null;
+    }
+}
+
+const common_alias_kvs: [[string, HardcodedModuleAlias]; 137] = [
+    HardcodedModuleAlias.nodeEntry("node:assert"),
+    HardcodedModuleAlias.nodeEntry("node:assert/strict"),
+    HardcodedModuleAlias.nodeEntry("node:async_hooks"),
+    HardcodedModuleAlias.nodeEntry("node:buffer"),
+    HardcodedModuleAlias.nodeEntry("node:child_process"),
+    HardcodedModuleAlias.nodeEntry("node:cluster"),
+    HardcodedModuleAlias.nodeEntry("node:console"),
+    HardcodedModuleAlias.nodeEntry("node:constants"),
+    HardcodedModuleAlias.nodeEntry("node:crypto"),
+    HardcodedModuleAlias.nodeEntry("node:dgram"),
+    HardcodedModuleAlias.nodeEntry("node:diagnostics_channel"),
+    HardcodedModuleAlias.nodeEntry("node:dns"),
+    HardcodedModuleAlias.nodeEntry("node:dns/promises"),
+    HardcodedModuleAlias.nodeEntry("node:domain"),
+    HardcodedModuleAlias.nodeEntry("node:events"),
+    HardcodedModuleAlias.nodeEntry("node:fs"),
+    HardcodedModuleAlias.nodeEntry("node:fs/promises"),
+    HardcodedModuleAlias.nodeEntry("node:http"),
+    HardcodedModuleAlias.nodeEntry("node:http2"),
+    HardcodedModuleAlias.nodeEntry("node:https"),
+    HardcodedModuleAlias.nodeEntry("node:inspector"),
+    HardcodedModuleAlias.nodeEntry("node:inspector/promises"),
+    HardcodedModuleAlias.nodeEntry("node:module"),
+    HardcodedModuleAlias.nodeEntry("node:net"),
+    HardcodedModuleAlias.nodeEntry("node:os"),
+    HardcodedModuleAlias.nodeEntry("node:path"),
+    HardcodedModuleAlias.nodeEntry("node:path/posix"),
+    HardcodedModuleAlias.nodeEntry("node:path/win32"),
+    HardcodedModuleAlias.nodeEntry("node:perf_hooks"),
+    HardcodedModuleAlias.nodeEntry("node:process"),
+    HardcodedModuleAlias.nodeEntry("node:punycode"),
+    HardcodedModuleAlias.nodeEntry("node:querystring"),
+    HardcodedModuleAlias.nodeEntry("node:readline"),
+    HardcodedModuleAlias.nodeEntry("node:readline/promises"),
+    HardcodedModuleAlias.nodeEntry("node:repl"),
+    HardcodedModuleAlias.nodeEntry("node:stream"),
+    HardcodedModuleAlias.nodeEntry("node:stream/consumers"),
+    HardcodedModuleAlias.nodeEntry("node:stream/promises"),
+    HardcodedModuleAlias.nodeEntry("node:stream/web"),
+    HardcodedModuleAlias.nodeEntry("node:string_decoder"),
+    HardcodedModuleAlias.nodeEntry("node:timers"),
+    HardcodedModuleAlias.nodeEntry("node:timers/promises"),
+    HardcodedModuleAlias.nodeEntry("node:tls"),
+    HardcodedModuleAlias.nodeEntry("node:trace_events"),
+    HardcodedModuleAlias.nodeEntry("node:tty"),
+    HardcodedModuleAlias.nodeEntry("node:url"),
+    HardcodedModuleAlias.nodeEntry("node:util"),
+    HardcodedModuleAlias.nodeEntry("node:util/types"),
+    HardcodedModuleAlias.nodeEntry("node:v8"),
+    HardcodedModuleAlias.nodeEntry("node:vm"),
+    HardcodedModuleAlias.nodeEntry("node:wasi"),
+    HardcodedModuleAlias.nodeEntry("node:worker_threads"),
+    HardcodedModuleAlias.nodeEntry("node:zlib"),
+    // New Node.js builtins only resolve from the prefixed one.
+    HardcodedModuleAlias.nodeEntryOnlyPrefix("node:test"),
+
+    HardcodedModuleAlias.nodeEntry("assert"),
+    HardcodedModuleAlias.nodeEntry("assert/strict"),
+    HardcodedModuleAlias.nodeEntry("async_hooks"),
+    HardcodedModuleAlias.nodeEntry("buffer"),
+    HardcodedModuleAlias.nodeEntry("child_process"),
+    HardcodedModuleAlias.nodeEntry("cluster"),
+    HardcodedModuleAlias.nodeEntry("console"),
+    HardcodedModuleAlias.nodeEntry("constants"),
+    HardcodedModuleAlias.nodeEntry("crypto"),
+    HardcodedModuleAlias.nodeEntry("dgram"),
+    HardcodedModuleAlias.nodeEntry("diagnostics_channel"),
+    HardcodedModuleAlias.nodeEntry("dns"),
+    HardcodedModuleAlias.nodeEntry("dns/promises"),
+    HardcodedModuleAlias.nodeEntry("domain"),
+    HardcodedModuleAlias.nodeEntry("events"),
+    HardcodedModuleAlias.nodeEntry("fs"),
+    HardcodedModuleAlias.nodeEntry("fs/promises"),
+    HardcodedModuleAlias.nodeEntry("http"),
+    HardcodedModuleAlias.nodeEntry("http2"),
+    HardcodedModuleAlias.nodeEntry("https"),
+    HardcodedModuleAlias.nodeEntry("inspector"),
+    HardcodedModuleAlias.nodeEntry("inspector/promises"),
+    HardcodedModuleAlias.nodeEntry("module"),
+    HardcodedModuleAlias.nodeEntry("net"),
+    HardcodedModuleAlias.nodeEntry("os"),
+    HardcodedModuleAlias.nodeEntry("path"),
+    HardcodedModuleAlias.nodeEntry("path/posix"),
+    HardcodedModuleAlias.nodeEntry("path/win32"),
+    HardcodedModuleAlias.nodeEntry("perf_hooks"),
+    HardcodedModuleAlias.nodeEntry("process"),
+    HardcodedModuleAlias.nodeEntry("punycode"),
+    HardcodedModuleAlias.nodeEntry("querystring"),
+    HardcodedModuleAlias.nodeEntry("readline"),
+    HardcodedModuleAlias.nodeEntry("readline/promises"),
+    HardcodedModuleAlias.nodeEntry("repl"),
+    HardcodedModuleAlias.nodeEntry("stream"),
+    HardcodedModuleAlias.nodeEntry("stream/consumers"),
+    HardcodedModuleAlias.nodeEntry("stream/promises"),
+    HardcodedModuleAlias.nodeEntry("stream/web"),
+    HardcodedModuleAlias.nodeEntry("string_decoder"),
+    HardcodedModuleAlias.nodeEntry("timers"),
+    HardcodedModuleAlias.nodeEntry("timers/promises"),
+    HardcodedModuleAlias.nodeEntry("tls"),
+    HardcodedModuleAlias.nodeEntry("trace_events"),
+    HardcodedModuleAlias.nodeEntry("tty"),
+    HardcodedModuleAlias.nodeEntry("url"),
+    HardcodedModuleAlias.nodeEntry("util"),
+    HardcodedModuleAlias.nodeEntry("util/types"),
+    HardcodedModuleAlias.nodeEntry("v8"),
+    HardcodedModuleAlias.nodeEntry("vm"),
+    HardcodedModuleAlias.nodeEntry("wasi"),
+    HardcodedModuleAlias.nodeEntry("worker_threads"),
+    HardcodedModuleAlias.nodeEntry("zlib"),
+
+    HardcodedModuleAlias.nodeEntry("node:_http_agent"),
+    HardcodedModuleAlias.nodeEntry("node:_http_client"),
+    HardcodedModuleAlias.nodeEntry("node:_http_common"),
+    HardcodedModuleAlias.nodeEntry("node:_http_incoming"),
+    HardcodedModuleAlias.nodeEntry("node:_http_outgoing"),
+    HardcodedModuleAlias.nodeEntry("node:_http_server"),
+
+    HardcodedModuleAlias.nodeEntry("_http_agent"),
+    HardcodedModuleAlias.nodeEntry("_http_client"),
+    HardcodedModuleAlias.nodeEntry("_http_common"),
+    HardcodedModuleAlias.nodeEntry("_http_incoming"),
+    HardcodedModuleAlias.nodeEntry("_http_outgoing"),
+    HardcodedModuleAlias.nodeEntry("_http_server"),
+
+    // sys is a deprecated alias for util
+    ["sys", HardcodedModuleAlias{ path: "node:util", node_builtin: true }],
+    ["node:sys", HardcodedModuleAlias{ path: "node:util", node_builtin: true }],
+
+    // These are returned in builtinModules, but probably not many
+    // packages use them so we will just alias them.
+    ["node:_stream_duplex", HardcodedModuleAlias{ path: "node:_stream_duplex", node_builtin: true }],
+    ["node:_stream_passthrough", HardcodedModuleAlias{ path: "node:_stream_passthrough", node_builtin: true }],
+    ["node:_stream_readable", HardcodedModuleAlias{ path: "node:_stream_readable", node_builtin: true }],
+    ["node:_stream_transform", HardcodedModuleAlias{ path: "node:_stream_transform", node_builtin: true }],
+    ["node:_stream_wrap", HardcodedModuleAlias{ path: "node:_stream_wrap", node_builtin: true }],
+    ["node:_stream_writable", HardcodedModuleAlias{ path: "node:_stream_writable", node_builtin: true }],
+    ["node:_tls_wrap", HardcodedModuleAlias{ path: "node:tls", node_builtin: true }],
+    ["node:_tls_common", HardcodedModuleAlias{ path: "node:_tls_common", node_builtin: true }],
+    ["_stream_duplex", HardcodedModuleAlias{ path: "node:_stream_duplex", node_builtin: true }],
+    ["_stream_passthrough", HardcodedModuleAlias{ path: "node:_stream_passthrough", node_builtin: true }],
+    ["_stream_readable", HardcodedModuleAlias{ path: "node:_stream_readable", node_builtin: true }],
+    ["_stream_transform", HardcodedModuleAlias{ path: "node:_stream_transform", node_builtin: true }],
+    ["_stream_wrap", HardcodedModuleAlias{ path: "node:_stream_wrap", node_builtin: true }],
+    ["_stream_writable", HardcodedModuleAlias{ path: "node:_stream_writable", node_builtin: true }],
+    ["_tls_wrap", HardcodedModuleAlias{ path: "node:tls", node_builtin: true }],
+    ["_tls_common", HardcodedModuleAlias{ path: "node:_tls_common", node_builtin: true }],
+];
+
+const bun_extra_alias_kvs: [[string, HardcodedModuleAlias]; 22] = [
+    ["bun", HardcodedModuleAlias{ path: "bun", tag: .bun }],
+    ["bun:test", HardcodedModuleAlias{ path: "bun:test" }],
+    ["bun:app", HardcodedModuleAlias{ path: "bun:app" }],
+    ["bun:ffi", HardcodedModuleAlias{ path: "bun:ffi" }],
+    ["bun:jsc", HardcodedModuleAlias{ path: "bun:jsc" }],
+    ["bun:main", HardcodedModuleAlias{ path: "bun:main" }],
+    ["bun:sqlite", HardcodedModuleAlias{ path: "bun:sqlite" }],
+    ["bun:wrap", HardcodedModuleAlias{ path: "bun:wrap" }],
+    ["bun:internal-for-testing", HardcodedModuleAlias{ path: "bun:internal-for-testing" }],
+    ["ffi", HardcodedModuleAlias{ path: "bun:ffi" }],
+
+    // Thirdparty packages we override
+    ["@vercel/fetch", HardcodedModuleAlias{ path: "@vercel/fetch" }],
+    ["isomorphic-fetch", HardcodedModuleAlias{ path: "isomorphic-fetch" }],
+    ["node-fetch", HardcodedModuleAlias{ path: "node-fetch" }],
+    ["undici", HardcodedModuleAlias{ path: "undici" }],
+    ["utf-8-validate", HardcodedModuleAlias{ path: "utf-8-validate" }],
+    ["ws", HardcodedModuleAlias{ path: "ws" }],
+    ["ws/lib/websocket", HardcodedModuleAlias{ path: "ws" }],
+
+    // Polyfills we force to native
+    ["abort-controller", HardcodedModuleAlias{ path: "abort-controller" }],
+    ["abort-controller/polyfill", HardcodedModuleAlias{ path: "abort-controller" }],
+
+    // To force Next.js to not use bundled dependencies.
+    ["next/dist/compiled/ws", HardcodedModuleAlias{ path: "ws" }],
+    ["next/dist/compiled/node-fetch", HardcodedModuleAlias{ path: "node-fetch" }],
+    ["next/dist/compiled/undici", HardcodedModuleAlias{ path: "undici" }],
+];
+
+const bun_test_extra_alias_kvs: [[string, HardcodedModuleAlias]; 2] = [
+    ["@jest/globals", HardcodedModuleAlias{ path: "bun:test" }],
+    ["vitest", HardcodedModuleAlias{ path: "bun:test" }],
+];
+
+const hardcoded_module_map_kvs: [[string, HardcodedModule]; 83] = [
+    // Bun
+    ["bun", .bun],
+    ["bun:app", .@"bun:app"],
+    ["bun:ffi", .@"bun:ffi"],
+    ["bun:jsc", .@"bun:jsc"],
+    ["bun:main", .@"bun:main"],
+    ["bun:test", .@"bun:test"],
+    ["bun:sqlite", .@"bun:sqlite"],
+    ["bun:wrap", .@"bun:wrap"],
+    ["bun:internal-for-testing", .@"bun:internal-for-testing"],
+    // Node.js
+    ["node:assert", .@"node:assert"],
+    ["node:assert/strict", .@"node:assert/strict"],
+    ["node:async_hooks", .@"node:async_hooks"],
+    ["node:buffer", .@"node:buffer"],
+    ["node:child_process", .@"node:child_process"],
+    ["node:cluster", .@"node:cluster"],
+    ["node:console", .@"node:console"],
+    ["node:constants", .@"node:constants"],
+    ["node:crypto", .@"node:crypto"],
+    ["node:dgram", .@"node:dgram"],
+    ["node:diagnostics_channel", .@"node:diagnostics_channel"],
+    ["node:dns", .@"node:dns"],
+    ["node:dns/promises", .@"node:dns/promises"],
+    ["node:domain", .@"node:domain"],
+    ["node:events", .@"node:events"],
+    ["node:fs", .@"node:fs"],
+    ["node:fs/promises", .@"node:fs/promises"],
+    ["node:http", .@"node:http"],
+    ["node:http2", .@"node:http2"],
+    ["node:https", .@"node:https"],
+    ["node:inspector", .@"node:inspector"],
+    ["node:inspector/promises", .@"node:inspector/promises"],
+    ["node:module", .@"node:module"],
+    ["node:net", .@"node:net"],
+    ["node:readline", .@"node:readline"],
+    ["node:test", .@"node:test"],
+    ["node:os", .@"node:os"],
+    ["node:path", .@"node:path"],
+    ["node:path/posix", .@"node:path/posix"],
+    ["node:path/win32", .@"node:path/win32"],
+    ["node:perf_hooks", .@"node:perf_hooks"],
+    ["node:process", .@"node:process"],
+    ["node:punycode", .@"node:punycode"],
+    ["node:querystring", .@"node:querystring"],
+    ["node:readline/promises", .@"node:readline/promises"],
+    ["node:repl", .@"node:repl"],
+    ["node:stream", .@"node:stream"],
+    ["node:stream/consumers", .@"node:stream/consumers"],
+    ["node:stream/promises", .@"node:stream/promises"],
+    ["node:stream/web", .@"node:stream/web"],
+    ["node:string_decoder", .@"node:string_decoder"],
+    ["node:timers", .@"node:timers"],
+    ["node:timers/promises", .@"node:timers/promises"],
+    ["node:tls", .@"node:tls"],
+    ["node:trace_events", .@"node:trace_events"],
+    ["node:tty", .@"node:tty"],
+    ["node:url", .@"node:url"],
+    ["node:util", .@"node:util"],
+    ["node:util/types", .@"node:util/types"],
+    ["node:v8", .@"node:v8"],
+    ["node:vm", .@"node:vm"],
+    ["node:wasi", .@"node:wasi"],
+    ["node:worker_threads", .@"node:worker_threads"],
+    ["node:zlib", .@"node:zlib"],
+    ["node:_stream_duplex", .@"node:_stream_duplex"],
+    ["node:_stream_passthrough", .@"node:_stream_passthrough"],
+    ["node:_stream_readable", .@"node:_stream_readable"],
+    ["node:_stream_transform", .@"node:_stream_transform"],
+    ["node:_stream_wrap", .@"node:_stream_wrap"],
+    ["node:_stream_writable", .@"node:_stream_writable"],
+    ["node:_tls_common", .@"node:_tls_common"],
+    ["node:_http_agent", .@"node:_http_agent"],
+    ["node:_http_client", .@"node:_http_client"],
+    ["node:_http_common", .@"node:_http_common"],
+    ["node:_http_incoming", .@"node:_http_incoming"],
+    ["node:_http_outgoing", .@"node:_http_outgoing"],
+    ["node:_http_server", .@"node:_http_server"],
+
+    ["node-fetch", .@"node-fetch"],
+    ["isomorphic-fetch", .@"isomorphic-fetch"],
+    ["undici", .undici],
+    ["ws", .ws],
+    ["@vercel/fetch", .vercel_fetch],
+    ["utf-8-validate", .@"utf-8-validate"],
+    ["abort-controller", .@"abort-controller"],
+];
+
+pub enum HardcodedModule {
+    bun,
+    @"abort-controller",
+    @"bun:app",
+    @"bun:ffi",
+    @"bun:jsc",
+    @"bun:main",
+    @"bun:test",
+    @"bun:wrap",
+    @"bun:sqlite",
+    @"node:assert",
+    @"node:assert/strict",
+    @"node:async_hooks",
+    @"node:buffer",
+    @"node:child_process",
+    @"node:console",
+    @"node:constants",
+    @"node:crypto",
+    @"node:dns",
+    @"node:dns/promises",
+    @"node:domain",
+    @"node:events",
+    @"node:fs",
+    @"node:fs/promises",
+    @"node:http",
+    @"node:https",
+    @"node:module",
+    @"node:net",
+    @"node:os",
+    @"node:path",
+    @"node:path/posix",
+    @"node:path/win32",
+    @"node:perf_hooks",
+    @"node:process",
+    @"node:querystring",
+    @"node:readline",
+    @"node:readline/promises",
+    @"node:stream",
+    @"node:stream/consumers",
+    @"node:stream/promises",
+    @"node:stream/web",
+    @"node:string_decoder",
+    @"node:test",
+    @"node:timers",
+    @"node:timers/promises",
+    @"node:tls",
+    @"node:tty",
+    @"node:url",
+    @"node:util",
+    @"node:util/types",
+    @"node:vm",
+    @"node:wasi",
+    @"node:zlib",
+    @"node:worker_threads",
+    @"node:punycode",
+    undici,
+    ws,
+    @"isomorphic-fetch",
+    @"node-fetch",
+    vercel_fetch,
+    @"utf-8-validate",
+    @"node:v8",
+    @"node:trace_events",
+    @"node:repl",
+    @"node:inspector",
+    @"node:inspector/promises",
+    @"node:http2",
+    @"node:diagnostics_channel",
+    @"node:dgram",
+    @"node:cluster",
+    @"node:_stream_duplex",
+    @"node:_stream_passthrough",
+    @"node:_stream_readable",
+    @"node:_stream_transform",
+    @"node:_stream_wrap",
+    @"node:_stream_writable",
+    @"node:_tls_common",
+    @"node:_http_agent",
+    @"node:_http_client",
+    @"node:_http_common",
+    @"node:_http_incoming",
+    @"node:_http_outgoing",
+    @"node:_http_server",
+    @"bun:internal-for-testing",
+
+    pub const map = bun.ComptimeStringMap(HardcodedModule, hardcoded_module_map_kvs);
+    pub const Alias = HardcodedModuleAlias;
+}

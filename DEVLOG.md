@@ -176,3 +176,6 @@
 ## 2026-11-13 里程碑 7 Phase 2 思路
 - cp_agy 结单 7 项编译器修复后，并行派发 cp_migrator 按目录切片；429 配额中断后以全量脚本复检（cpc/ast-check/门禁）确认已完成文件，未完成的 fmt/output/pool 不入库，保持提交内全部可编译。
 - 观察到的 cpc 注意点：嵌套 struct/enum 于 @opaque struct 需提升到顶层；`impl`/`meta`/`arena`/`from` 为关键字；extern fn 用 `cstr` 保留 const；元组索引用 @field。
+
+## 2026-11-14 里程碑 7 Phase 3 思路
+- 落实节省 Token 策略：将子智能体并发上限固化为 2 路，简短任务主线程顺手闭环（如 `fmt.cp`、`output.cp`、`pool.cp`），子智能体每次均新建 `inherit` 实例以保持极简上下文。

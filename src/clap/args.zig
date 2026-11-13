@@ -1,348 +1,274 @@
-/// An example of what methods should be implemented on an arg iterator.
-pub const ExampleArgIterator = struct {
-    const Error = error{};
-
-    pub fn next(_: *ExampleArgIterator) Error!?[]const u8 {
-        return "2";
-    }
-};
-
-/// An argument iterator which iterates over a slice of arguments.
-/// This implementation does not allocate.
-pub const SliceIterator = struct {
-    const Error = error{};
-
-    remain: []const []const u8,
-
-    pub fn init(args: []const []const u8) SliceIterator {
-        return .{
-            .remain = args,
-        };
-    }
-
-    pub fn next(iter: *SliceIterator) ?[]const u8 {
-        if (iter.remain.len > 0) {
-            const res = iter.remain[0];
-            iter.remain = iter.remain[1..];
-            return res;
-        }
-        return null;
-    }
-};
-
-test "SliceIterator" {
-    const args = &[_][]const u8{ "A", "BB", "CCC" };
-    var iter = SliceIterator{ .args = args };
-
-    for (args) |a| {
-        const b = try iter.next();
-        debug.assert(mem.eql(u8, a, b.?));
-    }
-}
-
-/// An argument iterator which wraps the ArgIterator in ::std.
-/// On windows, this iterator allocates.
-pub const OsIterator = struct {
-    const Error = process.ArgIterator.InitError;
-
-    arena: bun.ArenaAllocator,
-    remain: [][:0]const u8,
-
-    /// The executable path (this is the first argument passed to the program)
-    /// TODO: Is it the right choice for this to be null? Maybe `init` should
-    ///       return an error when we have no exe.
-    exe_arg: ?[:0]const u8,
-
-    pub fn init(allocator: mem.Allocator) OsIterator {
-        var res = OsIterator{
-            .arena = bun.ArenaAllocator.init(allocator),
-            .exe_arg = undefined,
-            .remain = bun.argv,
-        };
-        res.exe_arg = res.next();
-        return res;
-    }
-
-    pub fn deinit(iter: *OsIterator) void {
-        iter.arena.deinit();
-    }
-
-    pub fn next(iter: *OsIterator) ?[:0]const u8 {
-        if (iter.remain.len > 0) {
-            const res = iter.remain[0];
-            iter.remain = iter.remain[1..];
-            return res;
-        }
-
-        return null;
-    }
-};
-
-/// An argument iterator that takes a string and parses it into arguments, simulating
-/// how shells split arguments.
-pub const ShellIterator = struct {
-    const Error = error{
-        DanglingEscape,
-        QuoteNotClosed,
-    } || mem.Allocator.Error;
-
-    arena: bun.ArenaAllocator,
-    str: []const u8,
-
-    pub fn init(allocator: mem.Allocator, str: []const u8) ShellIterator {
-        return .{
-            .arena = bun.ArenaAllocator.init(allocator),
-            .str = str,
-        };
-    }
-
-    pub fn deinit(iter: *ShellIterator) void {
-        iter.arena.deinit();
-    }
-
-    pub fn next(iter: *ShellIterator) Error!?[]const u8 {
-        // Whenever possible, this iterator will return slices into `str` instead of
-        // allocating. Sometimes this is not possible, for example, escaped characters
-        // have be be unescape, so we need to allocate in this case.
-        var list = std.array_list.Managed(u8).init(&iter.arena.allocator);
-        var start: usize = 0;
-        var state: enum {
-            skip_whitespace,
-            no_quote,
-            no_quote_escape,
-            single_quote,
-            double_quote,
-            double_quote_escape,
-            after_quote,
-        } = .skip_whitespace;
-
-        for (iter.str, 0..) |c, i| {
-            switch (state) {
-                // The state that skips the initial whitespace.
-                .skip_whitespace => switch (c) {
-                    ' ', '\t', '\n' => {},
-                    '\'' => {
-                        start = i + 1;
-                        state = .single_quote;
-                    },
-                    '"' => {
-                        start = i + 1;
-                        state = .double_quote;
-                    },
-                    '\\' => {
-                        start = i + 1;
-                        state = .no_quote_escape;
-                    },
-                    else => {
-                        start = i;
-                        state = .no_quote;
-                    },
-                },
-
-                // The state that parses the none quoted part of a argument.
-                .no_quote => switch (c) {
-                    // We're done parsing a none quoted argument when we hit a
-                    // whitespace.
-                    ' ', '\t', '\n' => {
-                        defer iter.str = iter.str[i..];
-                        return iter.result(start, i, &list);
-                    },
-
-                    // Slicing is not possible if a quote starts while parsing none
-                    // quoted args.
-                    // Example:
-                    // ab'cd' -> abcd
-                    '\'' => {
-                        try list.appendSlice(iter.str[start..i]);
-                        start = i + 1;
-                        state = .single_quote;
-                    },
-                    '"' => {
-                        try list.appendSlice(iter.str[start..i]);
-                        start = i + 1;
-                        state = .double_quote;
-                    },
-
-                    // Slicing is not possible if we need to escape a character.
-                    // Example:
-                    // ab\"d -> ab"d
-                    '\\' => {
-                        try list.appendSlice(iter.str[start..i]);
-                        start = i + 1;
-                        state = .no_quote_escape;
-                    },
-                    else => {},
-                },
-
-                // We're in this state after having parsed the quoted part of an
-                // argument. This state works mostly the same as .no_quote, but
-                // is aware, that the last character seen was a quote, which should
-                // not be part of the argument. This is why you will see `i - 1` here
-                // instead of just `i` when `iter.str` is sliced.
-                .after_quote => switch (c) {
-                    ' ', '\t', '\n' => {
-                        defer iter.str = iter.str[i..];
-                        return iter.result(start, i - 1, &list);
-                    },
-                    '\'' => {
-                        try list.appendSlice(iter.str[start .. i - 1]);
-                        start = i + 1;
-                        state = .single_quote;
-                    },
-                    '"' => {
-                        try list.appendSlice(iter.str[start .. i - 1]);
-                        start = i + 1;
-                        state = .double_quote;
-                    },
-                    '\\' => {
-                        try list.appendSlice(iter.str[start .. i - 1]);
-                        start = i + 1;
-                        state = .no_quote_escape;
-                    },
-                    else => {
-                        try list.appendSlice(iter.str[start .. i - 1]);
-                        start = i;
-                        state = .no_quote;
-                    },
-                },
-
-                // The states that parse the quoted part of arguments. The only differnece
-                // between single and double quoted arguments is that single quoted
-                // arguments ignore escape sequences, while double quoted arguments
-                // does escaping.
-                .single_quote => switch (c) {
-                    '\'' => state = .after_quote,
-                    else => {},
-                },
-                .double_quote => switch (c) {
-                    '"' => state = .after_quote,
-                    '\\' => {
-                        try list.appendSlice(iter.str[start..i]);
-                        start = i + 1;
-                        state = .double_quote_escape;
-                    },
-                    else => {},
-                },
-
-                // The state we end up when after the escape character (`\`). All these
-                // states do is transition back into the previous state.
-                // TODO: Are there any escape sequences that does transform the second
-                //       character into something else? For example, in Zig, `\n` is
-                //       transformed into the line feed ascii character.
-                .no_quote_escape => switch (c) {
-                    else => state = .no_quote,
-                },
-                .double_quote_escape => switch (c) {
-                    else => state = .double_quote,
-                },
-            }
-        }
-
-        defer iter.str = iter.str[iter.str.len..];
-        switch (state) {
-            .skip_whitespace => return null,
-            .no_quote => return iter.result(start, iter.str.len, &list),
-            .after_quote => return iter.result(start, iter.str.len - 1, &list),
-            .no_quote_escape => return Error.DanglingEscape,
-            .single_quote,
-            .double_quote,
-            .double_quote_escape,
-            => return Error.QuoteNotClosed,
-        }
-    }
-
-    fn result(iter: *ShellIterator, start: usize, end: usize, list: *std.array_list.Managed(u8)) Error!?[]const u8 {
-        const res = iter.str[start..end];
-
-        // If we already have something in `list` that means that we could not
-        // parse the argument without allocation. We therefor need to just append
-        // the rest we have to the list and return that.
-        if (list.items.len != 0) {
-            try list.appendSlice(res);
-            return try list.toOwnedSlice();
-        }
-        return res;
-    }
-};
-
-fn testShellIteratorOk(str: []const u8, allocations: usize, expect: []const []const u8) void {
-    var allocator = testing.FailingAllocator.init(testing.allocator, allocations);
-    var it = ShellIterator.init(&allocator.allocator, str);
-    defer it.deinit();
-
-    for (expect) |e| {
-        if (it.next()) |actual| {
-            testing.expect(actual != null);
-            testing.expectEqualStrings(e, actual.?);
-        } else |err| testing.expectEqual(@as(anyerror![]const u8, e), err);
-    }
-
-    if (it.next()) |actual| {
-        testing.expectEqual(@as(?[]const u8, null), actual);
-        testing.expectEqual(allocations, allocator.allocations);
-    } else |err| testing.expectEqual(@as(anyerror!void, {}), err);
-}
-
-fn testShellIteratorErr(str: []const u8, expect: anyerror) void {
-    var it = ShellIterator.init(testing.allocator, str);
-    defer it.deinit();
-
-    while (it.next() catch |err| {
-        testing.expectError(expect, @as(anyerror!void, err));
-        return;
-    }) |_| {}
-
-    testing.expectError(expect, @as(anyerror!void, {}));
-}
-
-test "ShellIterator" {
-    testShellIteratorOk("a", 0, &[_][]const u8{"a"});
-    testShellIteratorOk("'a'", 0, &[_][]const u8{"a"});
-    testShellIteratorOk("\"a\"", 0, &[_][]const u8{"a"});
-    testShellIteratorOk("a b", 0, &[_][]const u8{ "a", "b" });
-    testShellIteratorOk("'a' b", 0, &[_][]const u8{ "a", "b" });
-    testShellIteratorOk("\"a\" b", 0, &[_][]const u8{ "a", "b" });
-    testShellIteratorOk("a 'b'", 0, &[_][]const u8{ "a", "b" });
-    testShellIteratorOk("a \"b\"", 0, &[_][]const u8{ "a", "b" });
-    testShellIteratorOk("'a b'", 0, &[_][]const u8{"a b"});
-    testShellIteratorOk("\"a b\"", 0, &[_][]const u8{"a b"});
-    testShellIteratorOk("\"a\"\"b\"", 1, &[_][]const u8{"ab"});
-    testShellIteratorOk("'a''b'", 1, &[_][]const u8{"ab"});
-    testShellIteratorOk("'a'b", 1, &[_][]const u8{"ab"});
-    testShellIteratorOk("a'b'", 1, &[_][]const u8{"ab"});
-    testShellIteratorOk("a\\ b", 1, &[_][]const u8{"a b"});
-    testShellIteratorOk("\"a\\ b\"", 1, &[_][]const u8{"a b"});
-    testShellIteratorOk("'a\\ b'", 0, &[_][]const u8{"a\\ b"});
-    testShellIteratorOk("   a     b      ", 0, &[_][]const u8{ "a", "b" });
-    testShellIteratorOk("\\  \\ ", 0, &[_][]const u8{ " ", " " });
-
-    testShellIteratorOk(
-        \\printf 'run\nuninstall\n'
-    , 0, &[_][]const u8{ "printf", "run\\nuninstall\\n" });
-    testShellIteratorOk(
-        \\setsid -f steam "steam://$action/$id"
-    , 0, &[_][]const u8{ "setsid", "-f", "steam", "steam://$action/$id" });
-    testShellIteratorOk(
-        \\xargs -I% rg --no-heading --no-line-number --only-matching
-        \\    --case-sensitive --multiline --text --byte-offset '(?-u)%' $@
-        \\
-    , 0, &[_][]const u8{
-        "xargs",            "-I%",             "rg",               "--no-heading",
-        "--no-line-number", "--only-matching", "--case-sensitive", "--multiline",
-        "--text",           "--byte-offset",   "(?-u)%",           "$@",
-    });
-
-    testShellIteratorErr("'a", error.QuoteNotClosed);
-    testShellIteratorErr("'a\\", error.QuoteNotClosed);
-    testShellIteratorErr("\"a", error.QuoteNotClosed);
-    testShellIteratorErr("\"a\\", error.QuoteNotClosed);
-    testShellIteratorErr("a\\", error.DanglingEscape);
-}
-
-const bun = @import("bun");
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
+
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const debug = std.debug;
 const mem = std.mem;
 const process = std.process;
 const testing = std.testing;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const ShellState = enum {
+    skip_whitespace,
+    no_quote,
+    no_quote_escape,
+    single_quote,
+    double_quote,
+    double_quote_escape,
+    after_quote,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
+
+pub const ExampleArgIterator = struct {
+
+pub fn next(self: *ExampleArgIterator) ExampleArgIterator.Error!?[]const u8 {
+        _ = &self;
+            return "2";
+    }
+    pub const Error = error{};
+};
+
+pub const SliceIterator = struct {
+    remain: []const []const u8,
+
+pub fn init(args: []const []const u8) SliceIterator {
+            return SliceIterator{ .remain = args };
+    }
+
+pub fn next(self: *SliceIterator) ?[]const u8 {
+            if ((self.remain.len > 0)) {
+                const res = self.remain[0];
+                self.remain = self.remain[1..];
+                return res;
+            }
+            return null;
+    }
+    pub const Error = error{};
+};
+
+pub const OsIterator = struct {
+    @"arena": bun.ArenaAllocator,
+    remain: [][:0]const u8,
+    exe_arg: ?[:0]const u8,
+
+pub fn init(allocator: mem.Allocator) OsIterator {
+            var res = OsIterator{ .@"arena" = bun.ArenaAllocator.init(allocator), .exe_arg = undefined, .remain = bun.argv };
+            _ = &res;
+            res.exe_arg = res.next();
+            return res;
+    }
+
+pub fn deinit(self: *OsIterator) void {
+            _ = self.@"arena".deinit();
+    }
+
+pub fn next(self: *OsIterator) ?[:0]const u8 {
+            if ((self.remain.len > 0)) {
+                const res = self.remain[0];
+                self.remain = self.remain[1..];
+                return res;
+            }
+            return null;
+    }
+    pub const Error = process.ArgIterator.InitError;
+};
+
+pub const ShellIterator = struct {
+    @"arena": bun.ArenaAllocator,
+    str: []const u8,
+
+pub fn init(allocator: mem.Allocator, str: []const u8) ShellIterator {
+            return ShellIterator{ .@"arena" = bun.ArenaAllocator.init(allocator), .str = str };
+    }
+
+pub fn deinit(self: *ShellIterator) void {
+            _ = self.@"arena".deinit();
+    }
+
+pub fn next(self: *ShellIterator) ShellIterator.Error!?[]const u8 {
+            var list = (blk: {
+            break :blk std.array_list.Managed(u8).init(@as(*mem.Allocator, @ptrCast(@alignCast(@as(*anyopaque, @ptrCast(@alignCast(&(self.@"arena".allocator))))))));
+
+});
+            _ = &list;
+            const list_ptr = (blk: {
+            break :blk @as(*std.array_list.Managed(u8), @ptrCast(@alignCast(@as(*anyopaque, @ptrCast(@alignCast(&(list)))))));
+
+});
+            var start: usize = 0;
+            _ = &start;
+            var state: ShellState = .skip_whitespace;
+            _ = &state;
+            var i: usize = 0;
+            _ = &i;
+            while ((i < self.str.len)) : (i = (i + 1)) {
+                const c = self.str[@as(usize, @intCast(i))];
+                switch (state) {
+.skip_whitespace => {
+switch (c) {
+' ', 9, 10 => {
+
+},
+'\'' => {
+start = (i + 1);
+                state = .single_quote;
+},
+'"' => {
+start = (i + 1);
+                state = .double_quote;
+},
+'\\' => {
+start = (i + 1);
+                state = .no_quote_escape;
+},
+else => {
+start = i;
+                state = .no_quote;
+},
+}
+},
+.no_quote => {
+switch (c) {
+' ', 9, 10 => {
+defer {
+                self.str = self.str[i..];
+                }
+                return self.result(start, i, list_ptr);
+},
+'\'' => {
+_ = try list.appendSlice(self.str[start..i]);
+                start = (i + 1);
+                state = .single_quote;
+},
+'"' => {
+_ = try list.appendSlice(self.str[start..i]);
+                start = (i + 1);
+                state = .double_quote;
+},
+'\\' => {
+_ = try list.appendSlice(self.str[start..i]);
+                start = (i + 1);
+                state = .no_quote_escape;
+},
+else => {
+
+},
+}
+},
+.after_quote => {
+switch (c) {
+' ', 9, 10 => {
+defer {
+                self.str = self.str[i..];
+                }
+                return self.result(start, (i - 1), list_ptr);
+},
+'\'' => {
+_ = try list.appendSlice(self.str[start..(i - 1)]);
+                start = (i + 1);
+                state = .single_quote;
+},
+'"' => {
+_ = try list.appendSlice(self.str[start..(i - 1)]);
+                start = (i + 1);
+                state = .double_quote;
+},
+'\\' => {
+_ = try list.appendSlice(self.str[start..(i - 1)]);
+                start = (i + 1);
+                state = .no_quote_escape;
+},
+else => {
+_ = try list.appendSlice(self.str[start..(i - 1)]);
+                start = i;
+                state = .no_quote;
+},
+}
+},
+.single_quote => {
+switch (c) {
+'\'' => {
+state = .after_quote;
+},
+else => {
+
+},
+}
+},
+.double_quote => {
+switch (c) {
+'"' => {
+state = .after_quote;
+},
+'\\' => {
+_ = try list.appendSlice(self.str[start..i]);
+                start = (i + 1);
+                state = .double_quote_escape;
+},
+else => {
+
+},
+}
+},
+.no_quote_escape => {
+switch (c) {
+else => {
+state = .no_quote;
+},
+}
+},
+.double_quote_escape => {
+switch (c) {
+else => {
+state = .double_quote;
+},
+}
+},
+}
+            }
+            defer {
+            self.str = self.str[self.str.len..];
+            }
+            switch (state) {
+.skip_whitespace => {
+return null;
+},
+.no_quote => {
+return self.result(start, self.str.len, list_ptr);
+},
+.after_quote => {
+return self.result(start, (self.str.len - 1), list_ptr);
+},
+.no_quote_escape => {
+return Error.DanglingEscape;
+},
+.single_quote, .double_quote, .double_quote_escape => {
+return Error.QuoteNotClosed;
+},
+}
+    }
+
+pub fn result(self: *ShellIterator, start: usize, end: usize, list: *std.array_list.Managed(u8)) ShellIterator.Error!?[]const u8 {
+            const res = self.str[start..end];
+            if ((list.items.len != 0)) {
+                _ = try list.appendSlice(res);
+                return try list.toOwnedSlice();
+            }
+            return res;
+    }
+    pub const Error = error{
+            DanglingEscape,
+            QuoteNotClosed,
+        } || mem.Allocator.Error;
+};
+

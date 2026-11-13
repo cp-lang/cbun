@@ -370,3 +370,15 @@
 - 全量复检 77 个已迁移 `.cp`：`cpc --lib` + `ast-check` + 静态门禁，71 PASS；其余 3 个门禁命中仅为注释中的版本号（Global/Progress/CompileTarget，实际合格），真实未完成 3 个：`bun_core/fmt.cp`、`bun_core/output.cp`、`collections/pool.cp`（不入本次提交）。
 - 本次入库目录闭环：bun_alloc(13/13)、meta、safety、platform、perf、ptr(11/11)、zlib、zlib_sys、brotli*、picohttp*、zstd、highway、tcc_sys、lolhtml_sys、libarchive*、collections 第1批(5)、options_types 基础4、sys_uv、bun_core 部分(Global/Progress/deprecated/env/env_var/feature_flags/result/tty/util)、hive_array。
 - cp_agy 回执：`task-20261113-zeroes-fixedarray-splat` resolved，复测 PASS。
+
+### [2026-11-14 00:51] 里程碑 7 Phase 3：8 个基础目录全部闭环提交 + 严格限制 2 路并发
+- 收到指令：「很好, token 配额不多, 尽量节省 token」「启动五路子智能体, token消耗很快, 后续使用 2路子智能体」，已写入 `GEMINI.md` 严格限制最多 2 路并发子智能体。
+- 本阶段新增闭环 8 个目录（共 22 个模块全部通过 `cpc --lib` + `ast-check` + 静态门禁）：
+  - `src/bun_core/` 收尾：`fmt.cp`、`output.cp`（11/11 闭环）
+  - `src/collections/` 收尾：`pool.cp`、`comptime_string_map.cp`、`linear_fifo.cp`、`StaticHashMap.cp`、`multi_array_list.cp`、`bit_set.cp`（12/12 闭环）
+  - `src/options_types/` 收尾：`schema.cp`（9/9 闭环）
+  - `src/windows_sys/`：`externs.cp`（1/1 闭环）
+  - `src/resolve_builtins/`：`HardcodedModule.cp`（1/1 闭环）
+  - `src/install_types/`：`ExternalString.cp`、`NodeLinker.cp`、`SemverString.cp`、`SlicedString.cp`（4/4 闭环）
+  - `src/clap/`：`args.cp`、`clap.cp`、`comptime.cp`、`streaming.cp`（4/4 闭环）
+  - `src/logger_jsc/`：`logger_jsc.cp`（1/1 闭环）
