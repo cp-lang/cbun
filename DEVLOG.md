@@ -186,3 +186,11 @@
 ## 2026-11-14 里程碑 7 Phase 5 思路
 - 严格遵循 2 路并发上限完成 `crash_handler`、`semver_jsc`、`patch_jsc`、`valkey`、`sourcemap` 5 个目录闭环。
 - 汇总 `cpc` 行为注意：单参数 `obj.slice(arg)` 会被识别为数组切片语法，通过绑定函数别名 `const sliceFn = T.slice; sliceFn(obj, arg)` 保持原方法调用。
+
+
+## 2026-11-14: Milestone 7 Phase 6 闭环与代码生成规范总结
+- **新增 12 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - `src/patch/patch.cp`、`src/standalone_graph/StandaloneModuleGraph.cp`、`src/sourcemap_jsc/` (4/4)、`src/sys_jsc/` (3/3)、`src/css_jsc/` (3/3)、`src/js_parser_jsc/expr_jsc.cp`。
+- **关键工程经验**：
+  - `CodeCoverage.cp` 中 `@tls pub let map` 属性修饰符需置于 `pub` 之前；嵌套在 `struct` 内部的二级子结构体（如 `ReportText` / `ReportLcov`）提升至模块顶层并通过 `pub const Text = ReportText;` 导出别名，确保方法内 CP 表达式完整经过 `cpc` lowering。
+  - 单参数 `.slice(offset)` 方法在 `cpc` 中默认映射为切片语法，对自定义类型的单参 `slice` 方法可通过 `const sliceFn = Type.slice; sliceFn(obj, arg)` 显式调用。

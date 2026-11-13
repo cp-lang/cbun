@@ -232,3 +232,13 @@
 
 ## 2026-11-14 里程碑 7 Phase 5
 - 新增并验证通过 `.cp`（含 `_.zig` 备份与生成 `.zig`）：`crash_handler/crash_handler`、`semver_jsc/{SemverObject,SemverString_jsc}`、`patch_jsc/testing`、`valkey/valkey_protocol`、`sourcemap/{Chunk,InternalSourceMap,LineOffsetTable,Mapping,ParsedSourceMap,sourcemap}`。
+
+
+## 2026-11-14 (Milestone 7 Phase 6: 闭合 patch, standalone_graph, sourcemap_jsc, sys_jsc, css_jsc 及 js_parser_jsc/expr_jsc)
+- **新增 12 个 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/patch/patch.cp` (1/1 100% 闭合)
+  - `src/standalone_graph/StandaloneModuleGraph.cp` (1/1 100% 闭合)
+  - `src/sourcemap_jsc/{CodeCoverage,internal_jsc,JSSourceMap,source_provider}.cp` (4/4 100% 闭合)
+  - `src/sys_jsc/{error_jsc,fd_jsc,signal_code_jsc}.cp` (3/3 100% 闭合)
+  - `src/css_jsc/{color_js,css_internals,error_jsc}.cp` (3/3 100% 闭合)
+  - `src/js_parser_jsc/expr_jsc.cp` (1/2)

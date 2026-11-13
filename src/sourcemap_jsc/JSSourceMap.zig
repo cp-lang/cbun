@@ -1,316 +1,290 @@
-/// This implements the JavaScript SourceMap class from Node.js.
-///
-const JSSourceMap = @This();
-
-sourcemap: *bun.SourceMap.ParsedSourceMap,
-sources: []bun.String = &.{},
-names: []bun.String = &.{},
-
-/// TODO: when we implement --enable-source-map CLI flag, set this to true.
-pub var @"--enable-source-maps" = false;
-
-fn findSourceMap(
-    globalObject: *JSGlobalObject,
-    callFrame: *CallFrame,
-) bun.JSError!JSValue {
-    // Node.js doesn't enable source maps by default.
-    // In Bun, we do use them for almost all files since we transpile almost all files
-    // If we enable this by default, we don't have a `payload` object since we don't internally create one.
-    // This causes Next.js to emit errors like the below on start:
-    //       .next/server/chunks/ssr/[root-of-the-server]__012ba519._.js: Invalid source map. Only conformant source maps can be used to filter stack frames. Cause: TypeError: payload is not an Object. (evaluating '"sections" in payload')
-    if (!@"--enable-source-maps") {
-        return .js_undefined;
-    }
-
-    const source_url_value = callFrame.argument(0);
-    if (!source_url_value.isString()) {
-        return .js_undefined;
-    }
-
-    var source_url_string = try bun.String.fromJS(source_url_value, globalObject);
-    defer source_url_string.deref();
-
-    var source_url_slice = source_url_string.toUTF8(bun.default_allocator);
-    defer source_url_slice.deinit();
-
-    var source_url = source_url_slice.slice();
-    if (bun.strings.hasPrefix(source_url, "node:") or bun.strings.hasPrefix(source_url, "bun:") or bun.strings.hasPrefix(source_url, "data:")) {
-        return .js_undefined;
-    }
-
-    if (bun.strings.indexOf(source_url, "://")) |source_url_index| {
-        if (bun.strings.eqlComptime(source_url[0..source_url_index], "file")) {
-            const path = bun.jsc.URL.pathFromFileURL(source_url_string);
-
-            if (path.tag == .Dead) {
-                return globalObject.ERR(.INVALID_URL, "Invalid URL: {s}", .{source_url}).throw();
-            }
-
-            // Replace the file:// URL with the absolute path.
-            source_url_string.deref();
-            source_url_slice.deinit();
-            source_url_string = path;
-            source_url_slice = path.toUTF8(bun.default_allocator);
-            source_url = source_url_slice.slice();
-        }
-    }
-
-    const vm = globalObject.bunVM();
-    const source_map = vm.source_mappings.get(source_url) orelse return .js_undefined;
-    const fake_sources_array = bun.default_allocator.alloc(bun.String, 1) catch return globalObject.throwOutOfMemory();
-    fake_sources_array[0] = source_url_string.dupeRef();
-
-    const this = bun.new(JSSourceMap, .{
-        .sourcemap = source_map,
-        .sources = fake_sources_array,
-        .names = &.{},
-    });
-
-    return this.toJS(globalObject);
-}
-
-pub fn constructor(
-    globalObject: *JSGlobalObject,
-    callFrame: *CallFrame,
-    thisValue: JSValue,
-) bun.JSError!*JSSourceMap {
-    const payload_arg = callFrame.argument(0);
-    const options_arg = callFrame.argument(1);
-
-    try globalObject.validateObject("payload", payload_arg, .{});
-
-    var line_lengths: JSValue = .zero;
-    if (options_arg.isObject()) {
-        // Node doesn't check it further than this.
-        if (try options_arg.getIfPropertyExists(globalObject, "lineLengths")) |lengths| {
-            if (lengths.jsType().isArray()) {
-                line_lengths = lengths;
-            }
-        }
-    }
-
-    // Parse the payload to create a proper sourcemap
-    var arena = bun.ArenaAllocator.init(bun.default_allocator);
-    defer arena.deinit();
-    const arena_allocator = arena.allocator();
-
-    // Extract mappings string from payload
-    const mappings_value = try payload_arg.getStringish(globalObject, "mappings") orelse {
-        return globalObject.throwInvalidArguments("payload 'mappings' must be a string", .{});
-    };
-    defer mappings_value.deref();
-
-    const mappings_str = mappings_value.toUTF8(arena_allocator);
-    defer mappings_str.deinit();
-
-    var names = std.array_list.Managed(bun.String).init(bun.default_allocator);
-    errdefer {
-        for (names.items) |*str| {
-            str.deref();
-        }
-        names.deinit();
-    }
-
-    var sources = std.array_list.Managed(bun.String).init(bun.default_allocator);
-    errdefer {
-        for (sources.items) |*str| {
-            str.deref();
-        }
-        sources.deinit();
-    }
-
-    if (try payload_arg.getArray(globalObject, "sources")) |sources_value| {
-        var iter = try sources_value.arrayIterator(globalObject);
-        while (try iter.next()) |source| {
-            const source_str = try source.toBunString(globalObject);
-            try sources.append(source_str);
-        }
-    }
-
-    if (try payload_arg.getArray(globalObject, "names")) |names_value| {
-        var iter = try names_value.arrayIterator(globalObject);
-        while (try iter.next()) |name| {
-            const name_str = try name.toBunString(globalObject);
-            try names.append(name_str);
-        }
-    }
-
-    // Parse the VLQ mappings
-    const parse_result = bun.SourceMap.Mapping.parse(
-        bun.default_allocator,
-        mappings_str.slice(),
-        null, // estimated_mapping_count
-        @intCast(sources.items.len), // sources_count
-        std.math.maxInt(i32),
-        .{ .allow_names = true, .sort = true },
-    );
-
-    const mapping_list = switch (parse_result) {
-        .success => |parsed| parsed,
-        .fail => |fail| {
-            if (fail.loc.toNullable()) |loc| {
-                return globalObject.throwValue(globalObject.createSyntaxErrorInstance("{s} at {d}", .{ fail.msg, loc.start }));
-            }
-            return globalObject.throwValue(globalObject.createSyntaxErrorInstance("{s}", .{fail.msg}));
-        },
-    };
-
-    const source_map = bun.new(JSSourceMap, .{
-        .sourcemap = bun.new(bun.SourceMap.ParsedSourceMap, mapping_list),
-        .sources = sources.items,
-        .names = names.items,
-    });
-
-    if (payload_arg != .zero) {
-        js.payloadSetCached(thisValue, globalObject, payload_arg);
-    }
-    if (line_lengths != .zero) {
-        js.lineLengthsSetCached(thisValue, globalObject, line_lengths);
-    }
-
-    return source_map;
-}
-
-pub fn memoryCost(this: *const JSSourceMap) usize {
-    return @sizeOf(JSSourceMap) + this.sources.len * @sizeOf(bun.String) + this.sourcemap.memoryCost();
-}
-
-pub fn estimatedSize(this: *JSSourceMap) usize {
-    return this.memoryCost();
-}
-
-// The cached value should handle this.
-pub fn getPayload(_: *JSSourceMap, _: *JSGlobalObject) JSValue {
-    return .js_undefined;
-}
-
-// The cached value should handle this.
-pub fn getLineLengths(_: *JSSourceMap, _: *JSGlobalObject) JSValue {
-    return .js_undefined;
-}
-
-fn getLineColumn(globalObject: *JSGlobalObject, callFrame: *CallFrame) bun.JSError![2]i32 {
-    const line_number_value = callFrame.argument(0);
-    const column_number_value = callFrame.argument(1);
-
-    return .{
-        // Node.js does no validations.
-        try line_number_value.coerce(i32, globalObject),
-        try column_number_value.coerce(i32, globalObject),
-    };
-}
-
-fn mappingNameToJS(this: *const JSSourceMap, globalObject: *JSGlobalObject, mapping: *const bun.SourceMap.Mapping) bun.JSError!JSValue {
-    const name_index = mapping.nameIndex();
-    if (name_index >= 0) {
-        if (this.sourcemap.mappings.getName(name_index)) |name| {
-            return bun.String.createUTF8ForJS(globalObject, name);
-        } else {
-            const index: usize = @intCast(name_index);
-            if (index < this.names.len) {
-                return this.names[index].toJS(globalObject);
-            }
-        }
-    }
-    return .js_undefined;
-}
-
-fn sourceNameToJS(this: *const JSSourceMap, globalObject: *JSGlobalObject, mapping: *const bun.SourceMap.Mapping) bun.JSError!JSValue {
-    const source_index = mapping.sourceIndex();
-    if (source_index >= 0 and source_index < @as(i32, @intCast(this.sources.len))) {
-        return this.sources[@intCast(source_index)].toJS(globalObject);
-    }
-
-    return .js_undefined;
-}
-
-extern fn Bun__createNodeModuleSourceMapOriginObject(
-    globalObject: *JSGlobalObject,
-    name: JSValue,
-    line: JSValue,
-    column: JSValue,
-    source: JSValue,
-) JSValue;
-
-extern fn Bun__createNodeModuleSourceMapEntryObject(
-    globalObject: *JSGlobalObject,
-    generatedLine: JSValue,
-    generatedColumn: JSValue,
-    originalLine: JSValue,
-    originalColumn: JSValue,
-    source: JSValue,
-    name: JSValue,
-) JSValue;
-
-pub fn findOrigin(this: *JSSourceMap, globalObject: *JSGlobalObject, callFrame: *CallFrame) bun.JSError!JSValue {
-    const line_number, const column_number = try getLineColumn(globalObject, callFrame);
-
-    const mapping = this.sourcemap.findMapping(.fromZeroBased(line_number), .fromZeroBased(column_number)) orelse return jsc.JSValue.createEmptyObject(globalObject, 0);
-    const name = try mappingNameToJS(this, globalObject, &mapping);
-    const source = try sourceNameToJS(this, globalObject, &mapping);
-    return Bun__createNodeModuleSourceMapOriginObject(
-        globalObject,
-        name,
-        jsc.JSValue.jsNumber(mapping.originalLine()),
-        jsc.JSValue.jsNumber(mapping.originalColumn()),
-        source,
-    );
-}
-
-pub fn findEntry(this: *JSSourceMap, globalObject: *JSGlobalObject, callFrame: *CallFrame) bun.JSError!JSValue {
-    const line_number, const column_number = try getLineColumn(globalObject, callFrame);
-
-    const mapping = this.sourcemap.findMapping(.fromZeroBased(line_number), .fromZeroBased(column_number)) orelse return jsc.JSValue.createEmptyObject(globalObject, 0);
-
-    const name = try mappingNameToJS(this, globalObject, &mapping);
-    const source = try sourceNameToJS(this, globalObject, &mapping);
-    return Bun__createNodeModuleSourceMapEntryObject(
-        globalObject,
-        jsc.JSValue.jsNumber(mapping.generatedLine()),
-        jsc.JSValue.jsNumber(mapping.generatedColumn()),
-        jsc.JSValue.jsNumber(mapping.originalLine()),
-        jsc.JSValue.jsNumber(mapping.originalColumn()),
-        source,
-        name,
-    );
-}
-
-pub fn deinit(this: *JSSourceMap) void {
-    for (this.sources) |*str| {
-        str.deref();
-    }
-    bun.default_allocator.free(this.sources);
-
-    for (this.names) |*name| {
-        name.deref();
-    }
-
-    bun.default_allocator.free(this.names);
-
-    this.sourcemap.deref();
-    bun.destroy(this);
-}
-
-pub fn finalize(this: *JSSourceMap) void {
-    this.deinit();
-}
-
-comptime {
-    const jsFunctionFindSourceMap = jsc.toJSHostFn(findSourceMap);
-    @export(&jsFunctionFindSourceMap, .{ .name = "Bun__JSSourceMap__find" });
-}
-
-pub const js = jsc.Codegen.JSSourceMap;
-pub const fromJS = js.fromJS;
-pub const fromJSDirect = js.fromJSDirect;
-pub const toJS = js.toJS;
-
+// Generated by CP Compiler (RFC-002 Production SDK)
+const std = @import("std");
 const string = []const u8;
 
-const bun = @import("bun");
-const std = @import("std");
-
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const jsc = bun.jsc;
 const CallFrame = jsc.CallFrame;
 const JSGlobalObject = jsc.JSGlobalObject;
 const JSValue = jsc.JSValue;
+const Mapping = bun.SourceMap.Mapping;
+pub var @"--enable-source-maps" = false;
+pub const js = jsc.Codegen.JSSourceMap;
+pub const fromJS = js.fromJS;
+pub const fromJSDirect = js.fromJSDirect;
+pub const toJS = js.toJS;
+comptime {
+    const jsFunctionFindSourceMap = jsc.toJSHostFn(findSourceMap);
+    _ = @export((&jsFunctionFindSourceMap), .{ .name = "Bun__JSSourceMap__find" });
+
+}
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime __T: type, comptime idx: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") return ti.@"struct".field_types[idx]; return @FieldType(__T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime __T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .array)) { return v[idx]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") return @field(v, ti.@"struct".field_names[idx]); return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime __T: type, comptime offset_from_end: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return ti.@"struct".field_types[n - offset_from_end]; } return @FieldType(__T, std.fmt.comptimePrint("{d}", .{1})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime __T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .array)) { return v[v.len - offset_from_end]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return @field(v, ti.@"struct".field_names[n - offset_from_end]); } return @field(v, std.fmt.comptimePrint("{d}", .{0})); } }
+pub fn CpUnpackSliceType(comptime __T: type, comptime start_idx: usize) type { if (__T == ?Message or __T == Message) return []const Message; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return __T; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return []const @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return []const @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const types = ti.@"struct".field_types; if (types.len == 0) return []const i32; const Elem = if (start_idx < types.len) types[start_idx] else types[0]; return []const CpValType(Elem); } return []const i32; }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime __T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const names = ti.@"struct".field_names; const types = ti.@"struct".field_types; const end = names.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < types.len) CpValType(types[start_idx]) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, names[f_idx])); } return buf; } return &[_]i32{}; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const JSSourceMap = @This();
+
+sourcemap: *bun.SourceMap.ParsedSourceMap,
+sources: []bun.String = (&.{  }),
+names: []bun.String = (&.{  }),
+
+pub fn findSourceMap(globalObject: *JSGlobalObject, callFrame: *CallFrame) bun.JSError!JSValue {
+        if ((!@field(@This(), "--enable-source-maps"))) {
+            return JSValue.js_undefined;
+        }
+        const source_url_value = callFrame.argument(0);
+        if ((!source_url_value.isString())) {
+            return JSValue.js_undefined;
+        }
+        var source_url_string = try bun.String.fromJS(source_url_value, globalObject);
+        _ = &source_url_string;
+        defer {
+        _ = source_url_string.deref();
+        }
+        var source_url_slice = source_url_string.toUTF8(bun.default_allocator);
+        _ = &source_url_slice;
+        defer {
+        _ = source_url_slice.deinit();
+        }
+        var source_url: []const u8 = source_url_slice.slice();
+        _ = &source_url;
+        if (((bun.strings.hasPrefix(source_url, "node:") or bun.strings.hasPrefix(source_url, "bun:")) or bun.strings.hasPrefix(source_url, "data:"))) {
+            return JSValue.js_undefined;
+        }
+        if (bun.strings.indexOf(source_url, "://")) |source_url_index| {
+            _ = &source_url_index;
+            if (bun.strings.eqlComptime(source_url[0..source_url_index], "file")) {
+                const path = bun.jsc.URL.pathFromFileURL(source_url_string);
+                if ((path.tag == .Dead)) {
+                    return globalObject.ERR(.INVALID_URL, "Invalid URL: {s}", .{ source_url }).throw();
+                }
+                _ = source_url_string.deref();
+                _ = source_url_slice.deinit();
+                source_url_string = path;
+                source_url_slice = path.toUTF8(bun.default_allocator);
+                source_url = source_url_slice.slice();
+            }
+        }
+        const vm = globalObject.bunVM();
+        const source_map = ((vm.source_mappings.get(source_url)) orelse (({
+        return JSValue.js_undefined;
+})));
+        var fake_sources_array = (blk_catch_0: { break :blk_catch_0 ((bun.default_allocator.alloc(bun.String, 1)) catch |__ce_0| { _ = &__ce_0; return globalObject.throwOutOfMemory(); }); });
+        _ = &fake_sources_array;
+        fake_sources_array[cp_cast_int(usize, 0)] = source_url_string.dupeRef();
+        const instance = bun.new(JSSourceMap, .{ .sourcemap = source_map, .sources = fake_sources_array, .names = (&.{  }) });
+        return instance.toJS(globalObject);
+}
+
+pub fn constructor(globalObject: *JSGlobalObject, callFrame: *CallFrame, thisValue: JSValue) bun.JSError!*JSSourceMap {
+        const payload_arg = callFrame.argument(0);
+        const options_arg = callFrame.argument(1);
+        _ = try globalObject.validateObject("payload", payload_arg, .{});
+        var line_lengths: JSValue = JSValue.zero;
+        _ = &line_lengths;
+        if (options_arg.isObject()) {
+            if (try options_arg.getIfPropertyExists(globalObject, "lineLengths")) |lengths| {
+                _ = &lengths;
+                if (lengths.jsType().isArray()) {
+                    line_lengths = lengths;
+                }
+            }
+        }
+        var arena_alloc = bun.ArenaAllocator.init(bun.default_allocator);
+        _ = &arena_alloc;
+        defer {
+        _ = arena_alloc.deinit();
+        }
+        const arena_allocator = arena_alloc.allocator();
+        const mappings_opt = try payload_arg.getStringish(globalObject, "mappings");
+        const mappings_value = ((mappings_opt) orelse (({
+        return globalObject.throwInvalidArguments("payload 'mappings' must be a string", .{});
+})));
+        defer {
+        _ = mappings_value.deref();
+        }
+        const mappings_str = mappings_value.toUTF8(arena_allocator);
+        defer {
+        _ = mappings_str.deinit();
+        }
+        var names = std.array_list.Managed(bun.String).init(bun.default_allocator);
+        _ = &names;
+        errdefer {
+        {
+            for (names.items) |*str| {
+                _ = &str;
+                _ = (str.*).deref();
+            }
+            _ = names.deinit();
+        }
+        }
+        var sources = std.array_list.Managed(bun.String).init(bun.default_allocator);
+        _ = &sources;
+        errdefer {
+        {
+            for (sources.items) |*str| {
+                _ = &str;
+                _ = (str.*).deref();
+            }
+            _ = sources.deinit();
+        }
+        }
+        if (try payload_arg.getArray(globalObject, "sources")) |sources_value| {
+            _ = &sources_value;
+            var iter = try sources_value.arrayIterator(globalObject);
+            _ = &iter;
+            while (try iter.next()) |source| {
+                const source_str = try source.toBunString(globalObject);
+                _ = try sources.append(source_str);
+            }
+        }
+        if (try payload_arg.getArray(globalObject, "names")) |names_value| {
+            _ = &names_value;
+            var iter = try names_value.arrayIterator(globalObject);
+            _ = &iter;
+            while (try iter.next()) |name| {
+                const name_str = try name.toBunString(globalObject);
+                _ = try names.append(name_str);
+            }
+        }
+        const parse_result = bun.SourceMap.Mapping.parse(bun.default_allocator, mappings_str.slice(), null, @intCast(sources.items.len), std.math.maxInt(i32), .{ .allow_names = true, .sort = true });
+        const mapping_list = (switch (parse_result) {
+.success => |parsed| parsed,
+.fail => |fail| {
+{
+            if (fail.loc.toNullable()) |loc| {
+                _ = &loc;
+                return globalObject.throwValue(globalObject.createSyntaxErrorInstance("{s} at {d}", .{ fail.msg, loc.start }));
+            }
+            return globalObject.throwValue(globalObject.createSyntaxErrorInstance("{s}", .{ fail.msg }));
+        }
+},
+});
+        const source_map = bun.new(JSSourceMap, .{ .sourcemap = bun.new(bun.SourceMap.ParsedSourceMap, mapping_list), .sources = sources.items, .names = names.items });
+        if ((payload_arg != JSValue.zero)) {
+            _ = js.payloadSetCached(thisValue, globalObject, payload_arg);
+        }
+        if ((line_lengths != JSValue.zero)) {
+            _ = js.lineLengthsSetCached(thisValue, globalObject, line_lengths);
+        }
+        return source_map;
+}
+
+pub fn memoryCost(self: JSSourceMap) usize {
+        return ((@sizeOf(JSSourceMap) + (self.sources.len * @sizeOf(bun.String))) + self.sourcemap.memoryCost());
+}
+
+pub fn estimatedSize(self: *JSSourceMap) usize {
+        return self.memoryCost();
+}
+
+pub fn getPayload(self: *JSSourceMap, globalObject: *JSGlobalObject) JSValue {
+    _ = &self;
+        _ = globalObject;
+        return JSValue.js_undefined;
+}
+
+pub fn getLineLengths(self: *JSSourceMap, globalObject: *JSGlobalObject) JSValue {
+    _ = &self;
+        _ = globalObject;
+        return JSValue.js_undefined;
+}
+
+pub fn getLineColumn(globalObject: *JSGlobalObject, callFrame: *CallFrame) bun.JSError![2]i32 {
+        const line_number_value = callFrame.argument(0);
+        const column_number_value = callFrame.argument(1);
+        return .{ try line_number_value.coerce(i32, globalObject), try column_number_value.coerce(i32, globalObject) };
+}
+
+pub fn mappingNameToJS(self: JSSourceMap, globalObject: *JSGlobalObject, mapping: *const Mapping) bun.JSError!JSValue {
+        const name_index = mapping.nameIndex();
+        if ((name_index >= 0)) {
+            if (self.sourcemap.mappings.getName(name_index)) |name| {
+                _ = &name;
+                return bun.String.createUTF8ForJS(globalObject, name);
+            } else {
+                const index: usize = @intCast(name_index);
+                if ((index < self.names.len)) {
+                    return self.names[@as(usize, @intCast(index))].toJS(globalObject);
+                }
+            }
+        }
+        return JSValue.js_undefined;
+}
+
+pub fn sourceNameToJS(self: JSSourceMap, globalObject: *JSGlobalObject, mapping: *const Mapping) bun.JSError!JSValue {
+        const source_index = mapping.sourceIndex();
+        const len_i32: i32 = @intCast(self.sources.len);
+        if (((source_index >= 0) and (source_index < len_i32))) {
+            const idx: usize = @intCast(source_index);
+            return self.sources[@as(usize, @intCast(idx))].toJS(globalObject);
+        }
+        return JSValue.js_undefined;
+}
+
+pub fn findOrigin(self: *JSSourceMap, globalObject: *JSGlobalObject, callFrame: *CallFrame) bun.JSError!JSValue {
+        const coords = try JSSourceMap.getLineColumn(globalObject, callFrame);
+        const mapping_opt = self.sourcemap.findMapping(.fromZeroBased(coords[0]), .fromZeroBased(coords[1]));
+        if ((mapping_opt == null)) {
+            return jsc.JSValue.createEmptyObject(globalObject, 0);
+        }
+        const mapping: Mapping = mapping_opt.?;
+        const name = try self.mappingNameToJS(globalObject, (&mapping));
+        const source = try self.sourceNameToJS(globalObject, (&mapping));
+        return (blk: {
+        break :blk Bun__createNodeModuleSourceMapOriginObject(globalObject, name, jsc.JSValue.jsNumber(mapping.originalLine()), jsc.JSValue.jsNumber(mapping.originalColumn()), source);
+
+});
+}
+
+pub fn findEntry(self: *JSSourceMap, globalObject: *JSGlobalObject, callFrame: *CallFrame) bun.JSError!JSValue {
+        const coords = try JSSourceMap.getLineColumn(globalObject, callFrame);
+        const mapping_opt = self.sourcemap.findMapping(.fromZeroBased(coords[0]), .fromZeroBased(coords[1]));
+        if ((mapping_opt == null)) {
+            return jsc.JSValue.createEmptyObject(globalObject, 0);
+        }
+        const mapping: Mapping = mapping_opt.?;
+        const name = try self.mappingNameToJS(globalObject, (&mapping));
+        const source = try self.sourceNameToJS(globalObject, (&mapping));
+        return (blk: {
+        break :blk Bun__createNodeModuleSourceMapEntryObject(globalObject, jsc.JSValue.jsNumber(mapping.generatedLine()), jsc.JSValue.jsNumber(mapping.generatedColumn()), jsc.JSValue.jsNumber(mapping.originalLine()), jsc.JSValue.jsNumber(mapping.originalColumn()), source, name);
+
+});
+}
+
+pub fn deinit(self: *JSSourceMap) void {
+        for (cp_mut_slice(&self.sources)) |*str| {
+            _ = &str;
+            _ = (str.*).deref();
+        }
+        _ = bun.default_allocator.free(self.sources);
+        for (cp_mut_slice(&self.names)) |*name| {
+            _ = &name;
+            _ = (name.*).deref();
+        }
+        _ = bun.default_allocator.free(self.names);
+        _ = self.sourcemap.deref();
+        _ = bun.destroy(self);
+}
+
+pub fn finalize(self: *JSSourceMap) void {
+        _ = self.deinit();
+}
+
+pub extern "c" fn Bun__createNodeModuleSourceMapOriginObject(globalObject: *JSGlobalObject, name: JSValue, line: JSValue, column: JSValue, source: JSValue) callconv(.c) JSValue;
+
+pub extern "c" fn Bun__createNodeModuleSourceMapEntryObject(globalObject: *JSGlobalObject, generatedLine: JSValue, generatedColumn: JSValue, originalLine: JSValue, originalColumn: JSValue, source: JSValue, name: JSValue) callconv(.c) JSValue;
