@@ -1,232 +1,190 @@
-const LineOffsetTable = @This();
-
-/// The source map specification is very loose and does not specify what
-/// column numbers actually mean. The popular "source-map" library from Mozilla
-/// appears to interpret them as counts of UTF-16 code units, so we generate
-/// those too for compatibility.
-///
-/// We keep mapping tables around to accelerate conversion from byte offsets
-/// to UTF-16 code unit counts. However, this mapping takes up a lot of memory
-/// and takes up a lot of memory. Since most JavaScript is ASCII and the
-/// mapping for ASCII is 1:1, we avoid creating a table for ASCII-only lines
-/// as an optimization.
-///
-columns_for_non_ascii: BabyList(i32) = .{},
-byte_offset_to_first_non_ascii: u32 = 0,
-byte_offset_to_start_of_line: u32 = 0,
-
-pub const List = bun.MultiArrayList(LineOffsetTable);
-
-pub fn findLine(byte_offsets_to_start_of_line: []const u32, loc: Logger.Loc) i32 {
-    assert(loc.start > -1); // checked by caller
-    var original_line: usize = 0;
-    const loc_start = @as(usize, @intCast(loc.start));
-
-    {
-        var count = @as(usize, @truncate(byte_offsets_to_start_of_line.len));
-        var i: usize = 0;
-        while (count > 0) {
-            const step = count / 2;
-            i = original_line + step;
-            if (byte_offsets_to_start_of_line[i] <= loc_start) {
-                original_line = i + 1;
-                count = count - step - 1;
-            } else {
-                count = step;
-            }
-        }
-    }
-
-    return @as(i32, @intCast(original_line)) - 1;
-}
-
-pub fn findIndex(byte_offsets_to_start_of_line: []const u32, loc: Logger.Loc) ?usize {
-    assert(loc.start > -1); // checked by caller
-    var original_line: usize = 0;
-    const loc_start = @as(usize, @intCast(loc.start));
-
-    var count = @as(usize, @truncate(byte_offsets_to_start_of_line.len));
-    var i: usize = 0;
-    while (count > 0) {
-        const step = count / 2;
-        i = original_line + step;
-        const byte_offset = byte_offsets_to_start_of_line[i];
-        if (byte_offset == loc_start) {
-            return i;
-        }
-        if (i + 1 < byte_offsets_to_start_of_line.len) {
-            const next_byte_offset = byte_offsets_to_start_of_line[i + 1];
-            if (byte_offset < loc_start and loc_start < next_byte_offset) {
-                return i;
-            }
-        }
-
-        if (byte_offset < loc_start) {
-            original_line = i + 1;
-            count = count - step - 1;
-        } else {
-            count = step;
-        }
-    }
-
-    return null;
-}
-
-pub fn generate(allocator: std.mem.Allocator, contents: []const u8, approximate_line_count: i32) List {
-    var list = List{};
-    // Preallocate the top-level table using the approximate line count from the lexer
-    list.ensureUnusedCapacity(allocator, @as(usize, @intCast(@max(approximate_line_count, 1)))) catch unreachable;
-    var column: i32 = 0;
-    var byte_offset_to_first_non_ascii: u32 = 0;
-    var column_byte_offset: u32 = 0;
-    var line_byte_offset: u32 = 0;
-
-    // the idea here is:
-    // we want to avoid re-allocating this array _most_ of the time
-    // when lines _do_ have unicode characters, they probably still won't be longer than 255 much
-    var stack_fallback = std.heap.stackFallback(@sizeOf(i32) * 256, allocator);
-    var columns_for_non_ascii = std.array_list.Managed(i32).initCapacity(stack_fallback.get(), 120) catch unreachable;
-    const reset_end_index = stack_fallback.fixed_buffer_allocator.end_index;
-    const initial_columns_for_non_ascii = columns_for_non_ascii;
-
-    var remaining = contents;
-    while (remaining.len > 0) {
-        const len_ = strings.wtf8ByteSequenceLengthWithInvalid(remaining[0]);
-        const c = strings.decodeWTF8RuneT(remaining.ptr[0..4], len_, i32, 0);
-        const cp_len = @as(usize, len_);
-
-        if (column == 0) {
-            line_byte_offset = @as(
-                u32,
-                @truncate(@intFromPtr(remaining.ptr) - @intFromPtr(contents.ptr)),
-            );
-        }
-
-        if (c > 0x7F and columns_for_non_ascii.items.len == 0) {
-            assert(@intFromPtr(
-                remaining.ptr,
-            ) >= @intFromPtr(
-                contents.ptr,
-            ));
-            // we have a non-ASCII character, so we need to keep track of the
-            // mapping from byte offsets to UTF-16 code unit counts
-            columns_for_non_ascii.appendAssumeCapacity(column);
-            column_byte_offset = @as(
-                u32,
-                @intCast((@intFromPtr(
-                    remaining.ptr,
-                ) - @intFromPtr(
-                    contents.ptr,
-                )) - line_byte_offset),
-            );
-            byte_offset_to_first_non_ascii = column_byte_offset;
-        }
-
-        // Update the per-byte column offsets
-        if (columns_for_non_ascii.items.len > 0) {
-            const line_bytes_so_far = @as(u32, @intCast(@as(
-                u32,
-                @truncate(@intFromPtr(remaining.ptr) - @intFromPtr(contents.ptr)),
-            ))) - line_byte_offset;
-            columns_for_non_ascii.ensureUnusedCapacity((line_bytes_so_far - column_byte_offset) + 1) catch unreachable;
-            while (column_byte_offset <= line_bytes_so_far) : (column_byte_offset += 1) {
-                columns_for_non_ascii.appendAssumeCapacity(column);
-            }
-        } else {
-            switch (c) {
-                (@max('\r', '\n') + 1)...127 => {
-                    // skip ahead to the next newline or non-ascii character
-                    if (strings.indexOfNewlineOrNonASCIICheckStart(remaining, @as(u32, len_), false)) |j| {
-                        column += @as(i32, @intCast(j));
-                        remaining = remaining[j..];
-                    } else {
-                        // if there are no more lines, we are done!
-                        column += @as(i32, @intCast(remaining.len));
-                        remaining = remaining[remaining.len..];
-                    }
-
-                    continue;
-                },
-                else => {},
-            }
-        }
-
-        switch (c) {
-            '\r', '\n', 0x2028, 0x2029 => {
-                // windows newline
-                if (c == '\r' and remaining.len > 1 and remaining[1] == '\n') {
-                    column += 1;
-                    remaining = remaining[1..];
-                    continue;
-                }
-
-                // We don't call .toOwnedSlice() because it is expensive to
-                // reallocate the array AND when inside an Arena, it's
-                // hideously expensive
-                var owned = columns_for_non_ascii.items;
-                if (stack_fallback.fixed_buffer_allocator.ownsSlice(std.mem.sliceAsBytes(owned))) {
-                    owned = allocator.dupe(i32, owned) catch unreachable;
-                }
-
-                list.append(allocator, .{
-                    .byte_offset_to_start_of_line = line_byte_offset,
-                    .byte_offset_to_first_non_ascii = byte_offset_to_first_non_ascii,
-                    .columns_for_non_ascii = BabyList(i32).fromOwnedSlice(owned),
-                }) catch unreachable;
-
-                column = 0;
-                byte_offset_to_first_non_ascii = 0;
-                column_byte_offset = 0;
-                line_byte_offset = 0;
-
-                // reset the list to use the stack-allocated memory
-                stack_fallback.fixed_buffer_allocator.reset();
-                stack_fallback.fixed_buffer_allocator.end_index = reset_end_index;
-                columns_for_non_ascii = initial_columns_for_non_ascii;
-            },
-            else => {
-                // Mozilla's "source-map" library counts columns using UTF-16 code units
-                column += @as(i32, @intFromBool(c > 0xFFFF)) + 1;
-            },
-        }
-
-        remaining = remaining[cp_len..];
-    }
-
-    // Mark the start of the next line
-    if (column == 0) {
-        line_byte_offset = @as(u32, @intCast(contents.len));
-    }
-
-    if (columns_for_non_ascii.items.len > 0) {
-        const line_bytes_so_far = @as(u32, @intCast(contents.len)) - line_byte_offset;
-        columns_for_non_ascii.ensureUnusedCapacity((line_bytes_so_far - column_byte_offset) + 1) catch unreachable;
-        while (column_byte_offset <= line_bytes_so_far) : (column_byte_offset += 1) {
-            columns_for_non_ascii.appendAssumeCapacity(column);
-        }
-    }
-    {
-        var owned = columns_for_non_ascii.toOwnedSlice() catch unreachable;
-        if (stack_fallback.fixed_buffer_allocator.ownsSlice(std.mem.sliceAsBytes(owned))) {
-            owned = allocator.dupe(i32, owned) catch unreachable;
-        }
-        list.append(allocator, .{
-            .byte_offset_to_start_of_line = line_byte_offset,
-            .byte_offset_to_first_non_ascii = byte_offset_to_first_non_ascii,
-            .columns_for_non_ascii = BabyList(i32).fromOwnedSlice(owned),
-        }) catch unreachable;
-    }
-
-    if (list.capacity > list.len) {
-        list.shrinkAndFree(allocator, list.len);
-    }
-    return list;
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const BabyList = bun.BabyList;
 const Logger = bun.logger;
 const assert = bun.assert;
 const strings = bun.strings;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const LineOffsetTable = @This();
+
+columns_for_non_ascii: BabyList(i32) = .{},
+byte_offset_to_first_non_ascii: u32 = 0,
+byte_offset_to_start_of_line: u32 = 0,
+
+pub fn findLine(byte_offsets_to_start_of_line: []const u32, loc: Logger.Loc) i32 {
+        _ = assert((loc.start > -1));
+        var original_line: usize = 0;
+        _ = &original_line;
+        const loc_start = (if (comptime @typeInfo(@TypeOf(loc.start)) == .@"enum") cp_cast_int(usize, @intFromEnum(loc.start)) else cp_cast_int(usize, loc.start));
+        {
+            var count = (if (comptime @typeInfo(@TypeOf(byte_offsets_to_start_of_line.len)) == .@"enum") cp_cast_int(usize, @intFromEnum(byte_offsets_to_start_of_line.len)) else cp_cast_int(usize, byte_offsets_to_start_of_line.len));
+            _ = &count;
+            var i: usize = 0;
+            _ = &i;
+            while ((count > 0)) {
+                const step = (count / 2);
+                i = (original_line + step);
+                if ((byte_offsets_to_start_of_line[@as(usize, @intCast(i))] <= loc_start)) {
+                    original_line = (i + 1);
+                    count = ((count - step) - 1);
+                } else {
+                    count = step;
+                }
+            }
+        }
+        return ((if (comptime @typeInfo(@TypeOf(original_line)) == .@"enum") cp_cast_int(i32, @intFromEnum(original_line)) else cp_cast_int(i32, original_line)) - 1);
+}
+
+pub fn findIndex(byte_offsets_to_start_of_line: []const u32, loc: Logger.Loc) ?usize {
+        _ = assert((loc.start > -1));
+        var original_line: usize = 0;
+        _ = &original_line;
+        const loc_start = (if (comptime @typeInfo(@TypeOf(loc.start)) == .@"enum") cp_cast_int(usize, @intFromEnum(loc.start)) else cp_cast_int(usize, loc.start));
+        var count = (if (comptime @typeInfo(@TypeOf(byte_offsets_to_start_of_line.len)) == .@"enum") cp_cast_int(usize, @intFromEnum(byte_offsets_to_start_of_line.len)) else cp_cast_int(usize, byte_offsets_to_start_of_line.len));
+        _ = &count;
+        var i: usize = 0;
+        _ = &i;
+        while ((count > 0)) {
+            const step = (count / 2);
+            i = (original_line + step);
+            const byte_offset = byte_offsets_to_start_of_line[@as(usize, @intCast(i))];
+            if ((byte_offset == loc_start)) {
+                return i;
+            }
+            if (((i + 1) < byte_offsets_to_start_of_line.len)) {
+                const next_byte_offset = byte_offsets_to_start_of_line[@as(usize, @intCast((i + 1)))];
+                if (((byte_offset < loc_start) and (loc_start < next_byte_offset))) {
+                    return i;
+                }
+            }
+            if ((byte_offset < loc_start)) {
+                original_line = (i + 1);
+                count = ((count - step) - 1);
+            } else {
+                count = step;
+            }
+        }
+        return null;
+}
+
+pub fn generate(allocator: std.mem.Allocator, contents: []const u8, approximate_line_count: i32) List {
+        var list = List{  };
+        _ = &list;
+        _ = ((list.ensureUnusedCapacity(allocator, (if (comptime @typeInfo(@TypeOf(@max(approximate_line_count, 1))) == .@"enum") cp_cast_int(usize, @intFromEnum(@max(approximate_line_count, 1))) else cp_cast_int(usize, @max(approximate_line_count, 1))))) catch unreachable);
+        var column: i32 = 0;
+        _ = &column;
+        var byte_offset_to_first_non_ascii: u32 = 0;
+        _ = &byte_offset_to_first_non_ascii;
+        var column_byte_offset: u32 = 0;
+        _ = &column_byte_offset;
+        var line_byte_offset: u32 = 0;
+        _ = &line_byte_offset;
+        var stack_fallback = std.heap.stackFallback((@sizeOf(i32) * 256), allocator);
+        _ = &stack_fallback;
+        var columns_for_non_ascii = ((std.array_list.Managed(i32).initCapacity(stack_fallback.get(), 120)) catch unreachable);
+        _ = &columns_for_non_ascii;
+        const reset_end_index = stack_fallback.fixed_buffer_allocator.end_index;
+        const initial_columns_for_non_ascii = columns_for_non_ascii;
+        var remaining = contents;
+        _ = &remaining;
+        while ((remaining.len > 0)) {
+            const len_ = strings.wtf8ByteSequenceLengthWithInvalid(remaining[0]);
+            const c = (blk: {
+            break :blk strings.decodeWTF8RuneT(remaining.ptr[0..4], len_, i32, 0);
+
+});
+            const cp_len = (if (comptime @typeInfo(@TypeOf(len_)) == .@"enum") cp_cast_int(usize, @intFromEnum(len_)) else cp_cast_int(usize, len_));
+            if ((column == 0)) {
+                line_byte_offset = (if (comptime @typeInfo(@TypeOf((@intFromPtr(remaining.ptr) - @intFromPtr(contents.ptr)))) == .@"enum") cp_cast_int(u32, @intFromEnum((@intFromPtr(remaining.ptr) - @intFromPtr(contents.ptr)))) else cp_cast_int(u32, (@intFromPtr(remaining.ptr) - @intFromPtr(contents.ptr))));
+            }
+            if (((c > 127) and (columns_for_non_ascii.items.len == 0))) {
+                _ = assert((@intFromPtr(remaining.ptr) >= @intFromPtr(contents.ptr)));
+                _ = columns_for_non_ascii.appendAssumeCapacity(column);
+                column_byte_offset = (if (comptime @typeInfo(@TypeOf(((@intFromPtr(remaining.ptr) - @intFromPtr(contents.ptr)) - line_byte_offset))) == .@"enum") cp_cast_int(u32, @intFromEnum(((@intFromPtr(remaining.ptr) - @intFromPtr(contents.ptr)) - line_byte_offset))) else cp_cast_int(u32, ((@intFromPtr(remaining.ptr) - @intFromPtr(contents.ptr)) - line_byte_offset)));
+                byte_offset_to_first_non_ascii = column_byte_offset;
+            }
+            if ((columns_for_non_ascii.items.len > 0)) {
+                const line_bytes_so_far = ((if (comptime @typeInfo(@TypeOf((@intFromPtr(remaining.ptr) - @intFromPtr(contents.ptr)))) == .@"enum") cp_cast_int(u32, @intFromEnum((@intFromPtr(remaining.ptr) - @intFromPtr(contents.ptr)))) else cp_cast_int(u32, (@intFromPtr(remaining.ptr) - @intFromPtr(contents.ptr)))) - line_byte_offset);
+                _ = ((columns_for_non_ascii.ensureUnusedCapacity(((line_bytes_so_far - column_byte_offset) + 1))) catch unreachable);
+                while ((column_byte_offset <= line_bytes_so_far)) : (column_byte_offset = (column_byte_offset + 1)) {
+                    _ = columns_for_non_ascii.appendAssumeCapacity(column);
+                }
+            } else {
+                switch (c) {
+14...127 => {
+if (strings.indexOfNewlineOrNonASCIICheckStart(remaining, (if (comptime @typeInfo(@TypeOf(len_)) == .@"enum") cp_cast_int(u32, @intFromEnum(len_)) else cp_cast_int(u32, len_)), false)) |j| {
+                    _ = &j;
+                    column = (column + (if (comptime @typeInfo(@TypeOf(j)) == .@"enum") cp_cast_int(i32, @intFromEnum(j)) else cp_cast_int(i32, j)));
+                    remaining = remaining[j..];
+                } else {
+                    column = (column + (if (comptime @typeInfo(@TypeOf(remaining.len)) == .@"enum") cp_cast_int(i32, @intFromEnum(remaining.len)) else cp_cast_int(i32, remaining.len)));
+                    remaining = remaining[remaining.len..];
+                }
+                continue;
+},
+else => {
+
+},
+}
+            }
+            switch (c) {
+13, 10, 8232, 8233 => {
+if ((((c == 13) and (remaining.len > 1)) and (remaining[1] == 10))) {
+                column = (column + 1);
+                remaining = remaining[1..];
+                continue;
+            }
+            var owned = columns_for_non_ascii.items;
+            _ = &owned;
+            if (stack_fallback.fixed_buffer_allocator.ownsSlice(std.mem.sliceAsBytes(owned))) {
+                owned = ((allocator.dupe(i32, owned)) catch unreachable);
+            }
+            _ = ((list.append(allocator, .{ .byte_offset_to_start_of_line = line_byte_offset, .byte_offset_to_first_non_ascii = byte_offset_to_first_non_ascii, .columns_for_non_ascii = BabyList(i32).fromOwnedSlice(owned) })) catch unreachable);
+            column = 0;
+            byte_offset_to_first_non_ascii = 0;
+            column_byte_offset = 0;
+            line_byte_offset = 0;
+            _ = stack_fallback.fixed_buffer_allocator.reset();
+            stack_fallback.fixed_buffer_allocator.end_index = reset_end_index;
+            columns_for_non_ascii = initial_columns_for_non_ascii;
+},
+else => {
+column = (column + ((if (comptime @typeInfo(@TypeOf(@intFromBool((c > 65535)))) == .@"enum") cp_cast_int(i32, @intFromEnum(@intFromBool((c > 65535)))) else cp_cast_int(i32, @intFromBool((c > 65535)))) + 1));
+},
+}
+            remaining = remaining[cp_len..];
+        }
+        if ((column == 0)) {
+            line_byte_offset = (if (comptime @typeInfo(@TypeOf(contents.len)) == .@"enum") cp_cast_int(u32, @intFromEnum(contents.len)) else cp_cast_int(u32, contents.len));
+        }
+        if ((columns_for_non_ascii.items.len > 0)) {
+            const line_bytes_so_far = ((if (comptime @typeInfo(@TypeOf(contents.len)) == .@"enum") cp_cast_int(u32, @intFromEnum(contents.len)) else cp_cast_int(u32, contents.len)) - line_byte_offset);
+            _ = ((columns_for_non_ascii.ensureUnusedCapacity(((line_bytes_so_far - column_byte_offset) + 1))) catch unreachable);
+            while ((column_byte_offset <= line_bytes_so_far)) : (column_byte_offset = (column_byte_offset + 1)) {
+                _ = columns_for_non_ascii.appendAssumeCapacity(column);
+            }
+        }
+        {
+            var owned = ((columns_for_non_ascii.toOwnedSlice()) catch unreachable);
+            _ = &owned;
+            if (stack_fallback.fixed_buffer_allocator.ownsSlice(std.mem.sliceAsBytes(owned))) {
+                owned = ((allocator.dupe(i32, owned)) catch unreachable);
+            }
+            _ = ((list.append(allocator, .{ .byte_offset_to_start_of_line = line_byte_offset, .byte_offset_to_first_non_ascii = byte_offset_to_first_non_ascii, .columns_for_non_ascii = BabyList(i32).fromOwnedSlice(owned) })) catch unreachable);
+        }
+        if ((list.capacity > list.len)) {
+            _ = list.shrinkAndFree(allocator, list.len);
+        }
+        return list;
+}
+pub const List = bun.MultiArrayList(LineOffsetTable);

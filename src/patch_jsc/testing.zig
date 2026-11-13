@@ -1,147 +1,175 @@
-//! JS testing bindings for `bun.patch`. Keeps `src/patch/` free of JSC types.
-
-pub const TestingAPIs = struct {
-    pub fn makeDiff(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
-        const arguments_ = callframe.arguments_old(2);
-        var arguments = jsc.CallFrame.ArgumentsSlice.init(globalThis.bunVM(), arguments_.slice());
-
-        const old_folder_jsval = arguments.nextEat() orelse {
-            return globalThis.throw("expected 2 strings", .{});
-        };
-        const old_folder_bunstr = try old_folder_jsval.toBunString(globalThis);
-        defer old_folder_bunstr.deref();
-
-        const new_folder_jsval = arguments.nextEat() orelse {
-            return globalThis.throw("expected 2 strings", .{});
-        };
-        const new_folder_bunstr = try new_folder_jsval.toBunString(globalThis);
-        defer new_folder_bunstr.deref();
-
-        const old_folder = old_folder_bunstr.toUTF8(bun.default_allocator);
-        defer old_folder.deinit();
-
-        const new_folder = new_folder_bunstr.toUTF8(bun.default_allocator);
-        defer new_folder.deinit();
-
-        return switch (gitDiffInternal(bun.default_allocator, old_folder.slice(), new_folder.slice()) catch |e| {
-            return globalThis.throwError(e, "failed to make diff");
-        }) {
-            .result => |s| {
-                defer s.deinit();
-                return bun.String.fromBytes(s.items).toJS(globalThis);
-            },
-            .err => |e| {
-                defer e.deinit();
-                return globalThis.throw("failed to make diff: {s}", .{e.items});
-            },
-        };
-    }
-    const ApplyArgs = struct {
-        patchfile_txt: jsc.ZigString.Slice,
-        patchfile: PatchFile,
-        dirfd: bun.FD,
-
-        pub fn deinit(this: *ApplyArgs) void {
-            this.patchfile_txt.deinit();
-            this.patchfile.deinit(bun.default_allocator);
-            // TODO: HAVE @zackradisic REVIEW THIS DIFF
-            if (bun.FD.cwd() != this.dirfd) {
-                this.dirfd.close();
-            }
-        }
-    };
-    pub fn apply(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
-        var args = switch (parseApplyArgs(globalThis, callframe)) {
-            .err => |e| return e,
-            .result => |a| a,
-        };
-        defer args.deinit();
-
-        if (args.patchfile.apply(bun.default_allocator, args.dirfd)) |err| {
-            return globalThis.throwValue(try err.toJS(globalThis));
-        }
-
-        return .true;
-    }
-    /// Used in JS tests, see `internal-for-testing.ts` and patch tests.
-    pub fn parse(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
-        const arguments_ = callframe.arguments_old(2);
-        var arguments = jsc.CallFrame.ArgumentsSlice.init(globalThis.bunVM(), arguments_.slice());
-
-        const patchfile_src_js = arguments.nextEat() orelse {
-            return globalThis.throw("TestingAPIs.parse: expected at least 1 argument, got 0", .{});
-        };
-        const patchfile_src_bunstr = try patchfile_src_js.toBunString(globalThis);
-        const patchfile_src = patchfile_src_bunstr.toUTF8(bun.default_allocator);
-
-        var patchfile = parsePatchFile(patchfile_src.slice()) catch |e| {
-            if (e == error.hunk_header_integrity_check_failed) {
-                return globalThis.throwError(e, "this indicates either that the supplied patch file was incorrect, or there is a bug in Bun. Please check your .patch file, or open a GitHub issue :)");
-            } else {
-                return globalThis.throwError(e, "failed to parse patch file");
-            }
-        };
-        defer patchfile.deinit(bun.default_allocator);
-
-        const str = bun.handleOom(std.fmt.allocPrint(bun.default_allocator, "{f}", .{std.json.fmt(patchfile, .{})}));
-        const outstr = bun.String.borrowUTF8(str);
-        return outstr.toJS(globalThis);
-    }
-
-    pub fn parseApplyArgs(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.jsc.Node.Maybe(ApplyArgs, jsc.JSValue) {
-        const arguments_ = callframe.arguments_old(2);
-        var arguments = jsc.CallFrame.ArgumentsSlice.init(globalThis.bunVM(), arguments_.slice());
-
-        const patchfile_js = arguments.nextEat() orelse {
-            globalThis.throw("apply: expected at least 1 argument, got 0", .{}) catch {};
-            return .initErr(.js_undefined);
-        };
-
-        const dir_fd = if (arguments.nextEat()) |dir_js| brk: {
-            var bunstr = dir_js.toBunString(globalThis) catch return .initErr(.js_undefined);
-            defer bunstr.deref();
-            const path = bunstr.toOwnedSliceZ(bun.default_allocator) catch unreachable;
-            defer bun.default_allocator.free(path);
-
-            break :brk switch (bun.sys.open(path, bun.O.DIRECTORY | bun.O.RDONLY, 0)) {
-                .err => |e| {
-                    globalThis.throwValue(e.withPath(path).toJS(globalThis) catch return .initErr(.js_undefined)) catch {};
-                    return .initErr(.js_undefined);
-                },
-                .result => |fd| fd,
-            };
-        } else bun.FD.cwd();
-
-        const patchfile_bunstr = patchfile_js.toBunString(globalThis) catch return .initErr(.js_undefined);
-        defer patchfile_bunstr.deref();
-        const patchfile_src = patchfile_bunstr.toUTF8(bun.default_allocator);
-
-        const patch_file = parsePatchFile(patchfile_src.slice()) catch |e| {
-            // TODO: HAVE @zackradisic REVIEW THIS DIFF
-            if (bun.FD.cwd() != dir_fd) {
-                dir_fd.close();
-            }
-
-            patchfile_src.deinit();
-            globalThis.throwError(e, "failed to parse patchfile") catch {};
-            return .initErr(.js_undefined);
-        };
-
-        return .{
-            .result = ApplyArgs{
-                .dirfd = dir_fd,
-                .patchfile = patch_file,
-                .patchfile_txt = patchfile_src,
-            },
-        };
-    }
-};
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const bun = @import("bun");
 const jsc = bun.jsc;
-
 const PatchFile = bun.patch.PatchFile;
 const gitDiffInternal = bun.patch.gitDiffInternal;
 const parsePatchFile = bun.patch.parsePatchFile;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime __T: type, comptime idx: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") return ti.@"struct".field_types[idx]; return @FieldType(__T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime __T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .array)) { return v[idx]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") return @field(v, ti.@"struct".field_names[idx]); return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime __T: type, comptime offset_from_end: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return ti.@"struct".field_types[n - offset_from_end]; } return @FieldType(__T, std.fmt.comptimePrint("{d}", .{1})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime __T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .array)) { return v[v.len - offset_from_end]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return @field(v, ti.@"struct".field_names[n - offset_from_end]); } return @field(v, std.fmt.comptimePrint("{d}", .{0})); } }
+pub fn CpUnpackSliceType(comptime __T: type, comptime start_idx: usize) type { if (__T == ?Message or __T == Message) return []const Message; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return __T; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return []const @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return []const @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const types = ti.@"struct".field_types; if (types.len == 0) return []const i32; const Elem = if (start_idx < types.len) types[start_idx] else types[0]; return []const CpValType(Elem); } return []const i32; }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime __T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const names = ti.@"struct".field_names; const types = ti.@"struct".field_types; const end = names.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < types.len) CpValType(types[start_idx]) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, names[f_idx])); } return buf; } return &[_]i32{}; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const ApplyArgs = struct {
+    patchfile_txt: jsc.ZigString.Slice,
+    patchfile: PatchFile,
+    dirfd: bun.FD,
+
+pub fn deinit(self: *ApplyArgs) void {
+            _ = self.patchfile_txt.deinit();
+            _ = self.patchfile.deinit(bun.default_allocator);
+            if ((bun.FD.cwd() != self.dirfd)) {
+                _ = self.dirfd.close();
+            }
+    }
+};
+
+pub const TestingAPIs = struct {
+
+pub fn makeDiff(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
+            const arguments_ = callframe.arguments_old(2);
+            var arguments = jsc.CallFrame.ArgumentsSlice.init(globalThis.bunVM(), arguments_.slice());
+            _ = &arguments;
+            const old_folder_jsval = ((arguments.nextEat()) orelse (({
+            return globalThis.throw("expected 2 strings", .{});
+})));
+            const old_folder_bunstr = try old_folder_jsval.toBunString(globalThis);
+            defer {
+            _ = old_folder_bunstr.deref();
+            }
+            const new_folder_jsval = ((arguments.nextEat()) orelse (({
+            return globalThis.throw("expected 2 strings", .{});
+})));
+            const new_folder_bunstr = try new_folder_jsval.toBunString(globalThis);
+            defer {
+            _ = new_folder_bunstr.deref();
+            }
+            const old_folder = old_folder_bunstr.toUTF8(bun.default_allocator);
+            defer {
+            _ = old_folder.deinit();
+            }
+            const new_folder = new_folder_bunstr.toUTF8(bun.default_allocator);
+            defer {
+            _ = new_folder.deinit();
+            }
+            return (switch ((blk_catch_0: { break :blk_catch_0 ((gitDiffInternal(bun.default_allocator, old_folder.slice(), new_folder.slice())) catch |e| { _ = &e; return globalThis.throwError(e, "failed to make diff"); }); })) {
+.result => |s| {
+{
+                defer {
+                _ = s.deinit();
+                }
+                return bun.String.fromBytes(s.items).toJS(globalThis);
+            }
+},
+.err => |e| {
+{
+                defer {
+                _ = e.deinit();
+                }
+                return globalThis.throw("failed to make diff: {s}", .{ e.items });
+            }
+},
+});
+    }
+
+pub fn apply(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
+            var args = (switch (parseApplyArgs(globalThis, callframe)) {
+.err => |e| {
+return e;
+},
+.result => |a| a,
+});
+            _ = &args;
+            defer {
+            _ = args.deinit();
+            }
+            if (args.patchfile.apply(bun.default_allocator, args.dirfd)) |err| {
+                _ = &err;
+                return globalThis.throwValue(try err.toJS(globalThis));
+            }
+            return jsc.JSValue.true;
+    }
+
+pub fn parse(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!jsc.JSValue {
+            const arguments_ = callframe.arguments_old(2);
+            var arguments = jsc.CallFrame.ArgumentsSlice.init(globalThis.bunVM(), arguments_.slice());
+            _ = &arguments;
+            const patchfile_src_js = ((arguments.nextEat()) orelse (({
+            return globalThis.throw("TestingAPIs.parse: expected at least 1 argument, got 0", .{});
+})));
+            const patchfile_src_bunstr = try patchfile_src_js.toBunString(globalThis);
+            const patchfile_src = patchfile_src_bunstr.toUTF8(bun.default_allocator);
+            var patchfile = (blk_catch_1: { break :blk_catch_1 ((parsePatchFile(patchfile_src.slice())) catch |e| { _ = &e; if ((e == error.hunk_header_integrity_check_failed)) {
+                return globalThis.throwError(e, "this indicates either that the supplied patch file was incorrect, or there is a bug in Bun. Please check your .patch file, or open a GitHub issue :)");
+            } else {
+                return globalThis.throwError(e, "failed to parse patch file");
+            } }); });
+            _ = &patchfile;
+            defer {
+            _ = patchfile.deinit(bun.default_allocator);
+            }
+            const str = bun.handleOom(std.fmt.allocPrint(bun.default_allocator, "{f}", .{ std.json.fmt(patchfile, .{}) }));
+            const outstr = bun.String.borrowUTF8(str);
+            return outstr.toJS(globalThis);
+    }
+
+pub fn parseApplyArgs(globalThis: *jsc.JSGlobalObject, callframe: *jsc.CallFrame) bun.jsc.Node.Maybe(ApplyArgs,jsc.JSValue) {
+            const arguments_ = callframe.arguments_old(2);
+            var arguments = jsc.CallFrame.ArgumentsSlice.init(globalThis.bunVM(), arguments_.slice());
+            _ = &arguments;
+            const patchfile_js_opt = arguments.nextEat();
+            if ((patchfile_js_opt == null)) {
+                _ = (blk_catch_2: { break :blk_catch_2 ((globalThis.throw("apply: expected at least 1 argument, got 0", .{})) catch |__ce_2| { _ = &__ce_2;  }); });
+                return .initErr(.js_undefined);
+            }
+            const patchfile_js = patchfile_js_opt.?;
+            var dir_fd = bun.FD.cwd();
+            _ = &dir_fd;
+            if (arguments.nextEat()) |dir_js| {
+                _ = &dir_js;
+                var bunstr = (blk_catch_3: { break :blk_catch_3 ((dir_js.toBunString(globalThis)) catch |__ce_3| { _ = &__ce_3; return .initErr(.js_undefined); }); });
+                _ = &bunstr;
+                defer {
+                _ = bunstr.deref();
+                }
+                const path = ((bunstr.toOwnedSliceZ(bun.default_allocator)) catch unreachable);
+                defer {
+                _ = bun.default_allocator.free(path);
+                }
+                dir_fd = (switch (bun.sys.open(path, (bun.O.DIRECTORY | bun.O.RDONLY), 0)) {
+.err => |e| {
+{
+                    _ = (blk_catch_6: { break :blk_catch_6 ((globalThis.throwValue((blk_catch_5: { break :blk_catch_5 ((e.withPath(path).toJS(globalThis)) catch |__ce_5| { _ = &__ce_5; return .initErr(.js_undefined); }); }))) catch |__ce_6| { _ = &__ce_6;  }); });
+                    return .initErr(.js_undefined);
+                }
+},
+.result => |fd| fd,
+});
+            }
+            const patchfile_bunstr = (blk_catch_7: { break :blk_catch_7 ((patchfile_js.toBunString(globalThis)) catch |__ce_7| { _ = &__ce_7; return .initErr(.js_undefined); }); });
+            defer {
+            _ = patchfile_bunstr.deref();
+            }
+            const patchfile_src = patchfile_bunstr.toUTF8(bun.default_allocator);
+            const patch_file = (blk_catch_8: { break :blk_catch_8 ((parsePatchFile(patchfile_src.slice())) catch |e| { _ = &e; if ((bun.FD.cwd() != dir_fd)) {
+                _ = dir_fd.close();
+            }
+            _ = patchfile_src.deinit();
+            _ = (blk_catch_9: { break :blk_catch_9 ((globalThis.throwError(e, "failed to parse patchfile")) catch |__ce_9| { _ = &__ce_9;  }); });
+            return .initErr(.js_undefined); }); });
+            return .{ .result = ApplyArgs{ .dirfd = dir_fd, .patchfile = patch_file, .patchfile_txt = patchfile_src } };
+    }
+};
+

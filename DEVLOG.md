@@ -182,3 +182,7 @@
 
 ## 2026-11-14 里程碑 7 Phase 4 思路
 - 定位 `logger.cp` 的 `E0201` 根因：结构体方法内局部变量名若与结构体字段同名（如 `Msg.notes`、`Log.errors`），`borrow.rs` 的 `is_class_field` 会误判为修改只读接收者字段；重命名局部变量后立即通过。
+
+## 2026-11-14 里程碑 7 Phase 5 思路
+- 严格遵循 2 路并发上限完成 `crash_handler`、`semver_jsc`、`patch_jsc`、`valkey`、`sourcemap` 5 个目录闭环。
+- 汇总 `cpc` 行为注意：单参数 `obj.slice(arg)` 会被识别为数组切片语法，通过绑定函数别名 `const sliceFn = T.slice; sliceFn(obj, arg)` 保持原方法调用。

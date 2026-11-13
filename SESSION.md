@@ -391,3 +391,22 @@
   - `src/exe_format/`：`elf.cp`、`macho.cp`、`pe.cp`（3/3 闭环）
   - `src/logger/`：`logger.cp`（1/1 闭环）
   - `src/crash_handler/`：`CPUFeatures.cp`、`handle_oom.cp`（2/3 入库）
+
+### [2026-11-14 01:50] 双向协同实时记录：向 `cp_agy` 投递任务 `task-20261114-field-shadow-readonly-e0201`
+- **关联模块**：`src/logger/logger.cp`（已通过重命名局部变量闭环入库）
+- **投递任务 ID**：`task-20261114-field-shadow-readonly-e0201`
+- **复现文件**：`/data/dev/bun/temp/repro_field_shadow_borrow.cp`
+- **问题描述**：只读方法 `fn foo(this)` 内声明与结构体字段同名的局部可变变量 `let errors: u32 = 0; errors += 1;` 时，`borrow.rs`/`stmt.rs` 的 `is_class_field` 未排除局部变量遮蔽，误报 `E0201: cannot perform mutable operation in a read-only method`。
+
+### [2026-11-14 01:54] 双向协同实时记录：收到 `cp_agy` 任务 `task-20261114-field-shadow-readonly-e0201` 结单通知！
+- **任务 ID**：`task-20261114-field-shadow-readonly-e0201`
+- **上游回执 (`cp_agy` @ `2026-11-14T01:54:37`)**：`Fixed in cpc/src/codegen/types.rs: is_class_field() returns false when shadowed by local/param in self.locals / self.var_cp_types / self.block_locals`
+- **复测与清理**：`temp/repro_field_shadow_borrow.cp` 编译与 `ast-check` **PASS**，已删除临时复现文件并重启 `watch_task.py`（Pending = 0）。
+
+### [2026-11-14 03:05] 里程碑 7 Phase 5：闭环 crash_handler、semver_jsc、patch_jsc、valkey、sourcemap 共 5 个目录
+- 本阶段新增闭环 5 个目录（共 11 个模块全部通过 `cpc --lib` + `ast-check` + 静态门禁）：
+  - `src/crash_handler/` 收尾：`crash_handler.cp`（3/3 闭环）
+  - `src/semver_jsc/`：`SemverObject.cp`、`SemverString_jsc.cp`（2/2 闭环）
+  - `src/patch_jsc/`：`testing.cp`（1/1 闭环）
+  - `src/valkey/`：`valkey_protocol.cp`（1/1 闭环）
+  - `src/sourcemap/` 收尾：`Chunk.cp`、`InternalSourceMap.cp`、`LineOffsetTable.cp`、`Mapping.cp`、`ParsedSourceMap.cp`、`sourcemap.cp`（7/7 闭环）

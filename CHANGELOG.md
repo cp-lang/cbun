@@ -229,3 +229,6 @@
 
 ## 2026-11-14 里程碑 7 Phase 4
 - 新增并验证通过 `.cp`（含 `_.zig` 备份与生成 `.zig`）：`analytics/{analytics,schema}`、`exe_format/{elf,macho,pe}`、`logger/logger`、`crash_handler/{CPUFeatures,handle_oom}`。
+
+## 2026-11-14 里程碑 7 Phase 5
+- 新增并验证通过 `.cp`（含 `_.zig` 备份与生成 `.zig`）：`crash_handler/crash_handler`、`semver_jsc/{SemverObject,SemverString_jsc}`、`patch_jsc/testing`、`valkey/valkey_protocol`、`sourcemap/{Chunk,InternalSourceMap,LineOffsetTable,Mapping,ParsedSourceMap,sourcemap}`。

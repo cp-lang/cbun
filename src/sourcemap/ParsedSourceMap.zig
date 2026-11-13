@@ -1,184 +1,8 @@
-const ParsedSourceMap = @This();
-
-const RefCount = bun.ptr.ThreadSafeRefCount(@This(), "ref_count", deinit, .{});
-pub const ref = RefCount.ref;
-pub const deref = RefCount.deref;
-
-/// ParsedSourceMap can be acquired by different threads via the thread-safe
-/// source map store (SavedSourceMap), so the reference count must be thread-safe.
-ref_count: RefCount,
-
-input_line_count: usize = 0,
-mappings: Mapping.List = .{},
-/// Set when this map's mappings are backed by an InternalSourceMap blob (e.g.
-/// embedded in a `bun build --compile` executable) instead of a materialized
-/// `Mapping.List`. The blob's bytes are borrowed (they live in the standalone
-/// module graph's section), so `deinit` does not free them.
-internal: ?InternalSourceMap = null,
-
-/// If this is empty, this implies that the source code is a single file
-/// transpiled on-demand. If there are items, then it means this is a file
-/// loaded without transpilation but with external sources. This array
-/// maps `source_index` to the correct filename.
-external_source_names: []const []const u8 = &.{},
-/// In order to load source contents from a source-map after the fact,
-/// a handle to the underlying source provider is stored. Within this pointer,
-/// a flag is stored if it is known to be an inline or external source map.
-///
-/// Source contents are large, we don't preserve them in memory. This has
-/// the downside of repeatedly re-decoding sourcemaps if multiple errors
-/// are emitted (specifically with Bun.inspect / unhandled; the ones that
-/// rely on source contents)
-underlying_provider: SourceContentPtr = .none,
-
-is_standalone_module_graph: bool = false,
-
-const SourceProviderKind = enum(u2) { zig, bake, dev_server };
-const AnySourceProvider = union(enum) {
-    zig: *SourceProviderMap,
-    bake: *BakeSourceProvider,
-    dev_server: *DevServerSourceProvider,
-
-    pub fn ptr(this: AnySourceProvider) *anyopaque {
-        return switch (this) {
-            .zig => @ptrCast(this.zig),
-            .bake => @ptrCast(this.bake),
-            .dev_server => @ptrCast(this.dev_server),
-        };
-    }
-
-    pub fn getSourceMap(
-        this: AnySourceProvider,
-        source_filename: []const u8,
-        load_hint: SourceMapLoadHint,
-        result: ParseUrlResultHint,
-    ) ?SourceMap.ParseUrl {
-        return switch (this) {
-            .zig => this.zig.getSourceMap(source_filename, load_hint, result),
-            .bake => this.bake.getSourceMap(source_filename, load_hint, result),
-            .dev_server => this.dev_server.getSourceMap(source_filename, load_hint, result),
-        };
-    }
-};
-
-pub const SourceContentPtr = packed struct(u64) {
-    load_hint: SourceMapLoadHint,
-    kind: SourceProviderKind,
-    data: u60,
-
-    pub const none: SourceContentPtr = .{ .load_hint = .none, .kind = .zig, .data = 0 };
-
-    pub fn fromProvider(p: *SourceProviderMap) SourceContentPtr {
-        return .{ .load_hint = .none, .data = @intCast(@intFromPtr(p)), .kind = .zig };
-    }
-
-    pub fn fromBakeProvider(p: *BakeSourceProvider) SourceContentPtr {
-        return .{ .load_hint = .none, .data = @intCast(@intFromPtr(p)), .kind = .bake };
-    }
-
-    pub fn fromDevServerProvider(p: *DevServerSourceProvider) SourceContentPtr {
-        return .{ .load_hint = .none, .data = @intCast(@intFromPtr(p)), .kind = .dev_server };
-    }
-
-    pub fn provider(sc: SourceContentPtr) ?AnySourceProvider {
-        switch (sc.kind) {
-            .zig => return .{ .zig = @ptrFromInt(sc.data) },
-            .bake => return .{ .bake = @ptrFromInt(sc.data) },
-            .dev_server => return .{ .dev_server = @ptrFromInt(sc.data) },
-        }
-    }
-};
-
-pub fn isExternal(psm: *ParsedSourceMap) bool {
-    return psm.external_source_names.len != 0;
-}
-
-pub fn findMapping(this: *const ParsedSourceMap, line: bun.Ordinal, column: bun.Ordinal) ?Mapping {
-    if (this.internal) |ism| return ism.find(line, column);
-    return this.mappings.find(line, column);
-}
-
-pub fn internalCursor(this: *const ParsedSourceMap) ?InternalSourceMap.Cursor {
-    return if (this.internal) |ism| ism.cursor() else null;
-}
-
-fn deinit(this: *ParsedSourceMap) void {
-    const allocator = bun.default_allocator;
-
-    if (this.internal) |ism| {
-        if (!this.is_standalone_module_graph) ism.deinit();
-    }
-    this.mappings.deinit(allocator);
-
-    if (this.external_source_names.len > 0) {
-        for (this.external_source_names) |name|
-            allocator.free(name);
-        allocator.free(this.external_source_names);
-    }
-
-    bun.destroy(this);
-}
-
-pub fn standaloneModuleGraphData(this: *ParsedSourceMap) *bun.StandaloneModuleGraph.SerializedSourceMap.Loaded {
-    bun.assert(this.is_standalone_module_graph);
-    return @ptrFromInt(this.underlying_provider.data);
-}
-
-pub fn memoryCost(this: *const ParsedSourceMap) usize {
-    const mappings_cost = if (this.internal) |ism| ism.memoryCost() else this.mappings.memoryCost();
-    return @sizeOf(ParsedSourceMap) + mappings_cost + this.external_source_names.len * @sizeOf([]const u8);
-}
-
-pub fn writeVLQs(map: *const ParsedSourceMap, writer: anytype) !void {
-    if (map.internal) |ism| {
-        var buf = bun.MutableString.initEmpty(bun.default_allocator);
-        defer buf.deinit();
-        ism.appendVLQTo(&buf);
-        try writer.writeAll(buf.list.items);
-        return;
-    }
-    var last_col: i32 = 0;
-    var last_src: i32 = 0;
-    var last_ol: i32 = 0;
-    var last_oc: i32 = 0;
-    var current_line: i32 = 0;
-    for (
-        map.mappings.generated(),
-        map.mappings.original(),
-        map.mappings.sourceIndex(),
-        0..,
-    ) |gen, orig, source_index, i| {
-        if (current_line != gen.lines.zeroBased()) {
-            assert(gen.lines.zeroBased() > current_line);
-            const inc = gen.lines.zeroBased() - current_line;
-            try writer.splatByteAll(';', @intCast(inc));
-            current_line = gen.lines.zeroBased();
-            last_col = 0;
-        } else if (i != 0) {
-            try writer.writeByte(',');
-        }
-        try VLQ.encode(gen.columns.zeroBased() - last_col).writeTo(writer);
-        last_col = gen.columns.zeroBased();
-        try VLQ.encode(source_index - last_src).writeTo(writer);
-        last_src = source_index;
-        try VLQ.encode(orig.lines.zeroBased() - last_ol).writeTo(writer);
-        last_ol = orig.lines.zeroBased();
-        try VLQ.encode(orig.columns.zeroBased() - last_oc).writeTo(writer);
-        last_oc = orig.columns.zeroBased();
-    }
-}
-
-pub fn formatVLQs(map: *const ParsedSourceMap) std.fmt.Alt(*const ParsedSourceMap, formatVLQsImpl) {
-    return .{ .data = map };
-}
-
-fn formatVLQsImpl(map: *const ParsedSourceMap, w: *std.Io.Writer) !void {
-    try map.writeVLQs(w);
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const SourceMap = @import("./sourcemap.zig");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const BakeSourceProvider = SourceMap.BakeSourceProvider;
 const DevServerSourceProvider = SourceMap.DevServerSourceProvider;
 const InternalSourceMap = SourceMap.InternalSourceMap;
@@ -187,6 +11,213 @@ const ParseUrlResultHint = SourceMap.ParseUrlResultHint;
 const SourceMapLoadHint = SourceMap.SourceMapLoadHint;
 const SourceProviderMap = SourceMap.SourceProviderMap;
 const VLQ = SourceMap.VLQ;
-
-const bun = @import("bun");
 const assert = bun.assert;
+const RefCount = bun.ptr.ThreadSafeRefCount(ParsedSourceMap, "ref_count", ParsedSourceMap.deinit, .{});
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const SourceMap = @import("./sourcemap.zig");
+pub const SourceProviderKind = enum(u2) {
+    @"zig",
+    bake,
+    dev_server,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
+
+pub const AnySourceProvider = union(enum) {
+    @"zig": *SourceProviderMap,
+    bake: *BakeSourceProvider,
+    dev_server: *DevServerSourceProvider,
+    pub fn has(s: []const u8) bool { if (comptime @typeInfo(@This()).@"union".tag_type) |TagType| { return std.meta.stringToEnum(TagType, s) != null; } return false; }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+
+pub fn ptr(self: AnySourceProvider) *anyopaque {
+            {
+                return (switch (self) {
+.@"zig" => @as(*anyopaque, @ptrCast(@alignCast(self.@"zig"))),
+.bake => @as(*anyopaque, @ptrCast(@alignCast(self.bake))),
+.dev_server => @as(*anyopaque, @ptrCast(@alignCast(self.dev_server))),
+});
+            }
+    }
+
+pub fn getSourceMap(self: AnySourceProvider, source_filename: []const u8, load_hint: SourceMapLoadHint, result: ParseUrlResultHint) ?SourceMap.ParseUrl {
+            return (switch (self) {
+.@"zig" => self.@"zig".getSourceMap(source_filename, load_hint, result),
+.bake => self.bake.getSourceMap(source_filename, load_hint, result),
+.dev_server => self.dev_server.getSourceMap(source_filename, load_hint, result),
+});
+    }
+};
+
+pub const SourceContentPtr = packed struct(u64) {
+    load_hint: SourceMapLoadHint,
+    kind: SourceProviderKind,
+    data: u60,
+
+pub fn initNone() SourceContentPtr {
+            return SourceContentPtr{ .load_hint = .none, .kind = .@"zig", .data = 0 };
+    }
+
+pub fn fromProvider(p: *SourceProviderMap) SourceContentPtr {
+            return SourceContentPtr{ .load_hint = .none, .data = (if (comptime @typeInfo(u60) == .@"enum") @as(u60, @enumFromInt(@intFromPtr(p))) else @as(u60, @intFromPtr(p))), .kind = .@"zig" };
+    }
+
+pub fn fromBakeProvider(p: *BakeSourceProvider) SourceContentPtr {
+            return SourceContentPtr{ .load_hint = .none, .data = (if (comptime @typeInfo(u60) == .@"enum") @as(u60, @enumFromInt(@intFromPtr(p))) else @as(u60, @intFromPtr(p))), .kind = .bake };
+    }
+
+pub fn fromDevServerProvider(p: *DevServerSourceProvider) SourceContentPtr {
+            return SourceContentPtr{ .load_hint = .none, .data = (if (comptime @typeInfo(u60) == .@"enum") @as(u60, @enumFromInt(@intFromPtr(p))) else @as(u60, @intFromPtr(p))), .kind = .dev_server };
+    }
+
+pub fn provider(self: SourceContentPtr) ?AnySourceProvider {
+            {
+                return (switch (self.kind) {
+.@"zig" => AnySourceProvider{ .@"zig" = @ptrFromInt(self.data) },
+.bake => AnySourceProvider{ .bake = @ptrFromInt(self.data) },
+.dev_server => AnySourceProvider{ .dev_server = @ptrFromInt(self.data) },
+});
+            }
+    }
+    pub const none: SourceContentPtr = initNone();
+};
+
+pub const ParsedSourceMap = @This();
+
+ref_count: RefCount = .init(),
+input_line_count: usize = 0,
+mappings: Mapping.List = .{},
+internal: ?InternalSourceMap = null,
+external_source_names: []const []const u8 = (&.{  }),
+underlying_provider: SourceContentPtr = .none,
+is_standalone_module_graph: bool = false,
+
+pub fn isExternal(self: *ParsedSourceMap) bool {
+        return (self.external_source_names.len != 0);
+}
+
+pub fn findMapping(self: *const ParsedSourceMap, line: bun.Ordinal, column: bun.Ordinal) ?Mapping {
+        if (self.internal) |ism| {
+            _ = &ism;
+            return ism.find(line, column);
+        }
+        return self.mappings.find(line, column);
+}
+
+pub fn internalCursor(self: *const ParsedSourceMap) ?InternalSourceMap.Cursor {
+        if (self.internal) |ism| {
+            _ = &ism;
+            return ism.cursor();
+        }
+        return null;
+}
+
+pub fn deinit(self: *ParsedSourceMap) void {
+        const allocator = bun.default_allocator;
+        if (self.internal) |ism| {
+            _ = &ism;
+            if ((!self.is_standalone_module_graph)) {
+                _ = ism.deinit();
+            }
+        }
+        _ = self.mappings.deinit(allocator);
+        if ((self.external_source_names.len > 0)) {
+            for (cp_iter_slice(self.external_source_names)) |name| {
+                _ = &name;
+                _ = allocator.free(name);
+            }
+            _ = allocator.free(self.external_source_names);
+        }
+        _ = bun.destroy(self);
+}
+
+pub fn standaloneModuleGraphData(self: *ParsedSourceMap) *bun.StandaloneModuleGraph.SerializedSourceMap.Loaded {
+        _ = bun.assert(self.is_standalone_module_graph);
+        return (blk: {
+        break :blk @ptrFromInt(self.underlying_provider.data);
+
+});
+}
+
+pub fn memoryCost(self: *const ParsedSourceMap) usize {
+        const mappings_cost = (if ((self.internal != null)) self.internal.?.memoryCost() else self.mappings.memoryCost());
+        return ((@sizeOf(ParsedSourceMap) + mappings_cost) + (self.external_source_names.len * @sizeOf(string)));
+}
+
+pub fn writeVLQs(self: *const ParsedSourceMap, writer: anytype) !void {
+        if (self.internal) |ism| {
+            _ = &ism;
+            var buf = bun.MutableString.initEmpty(bun.default_allocator);
+            _ = &buf;
+            defer {
+            _ = buf.deinit();
+            }
+            _ = ism.appendVLQTo((&buf));
+            _ = try writer.writeAll(buf.list.items);
+            return;
+        }
+        var last_col: i32 = 0;
+        _ = &last_col;
+        var last_src: i32 = 0;
+        _ = &last_src;
+        var last_ol: i32 = 0;
+        _ = &last_ol;
+        var last_oc: i32 = 0;
+        _ = &last_oc;
+        var current_line: i32 = 0;
+        _ = &current_line;
+        const gens = self.mappings.generated();
+        const origs = self.mappings.original();
+        const srcs = self.mappings.sourceIndex();
+        {
+            var i: i32 = 0;
+            _ = &i;
+            const __end_1 = gens.len;
+            while (i < __end_1) : (i += 1) {
+                const gen = gens[@as(usize, @intCast(i))];
+                const orig = origs[@as(usize, @intCast(i))];
+                const source_index = srcs[@as(usize, @intCast(i))];
+                if ((current_line != gen.lines.zeroBased())) {
+                    _ = assert((gen.lines.zeroBased() > current_line));
+                    const inc = (gen.lines.zeroBased() - current_line);
+                    _ = try writer.splatByteAll(59, (if (comptime @typeInfo(@TypeOf(inc)) == .@"enum") cp_cast_int(usize, @intFromEnum(inc)) else cp_cast_int(usize, inc)));
+                    current_line = gen.lines.zeroBased();
+                    last_col = 0;
+                } else {
+                    if ((i != 0)) {
+                        _ = try writer.writeByte(44);
+                    }
+                }
+                _ = try VLQ.encode((gen.columns.zeroBased() - last_col)).writeTo(writer);
+                last_col = gen.columns.zeroBased();
+                _ = try VLQ.encode((source_index - last_src)).writeTo(writer);
+                last_src = source_index;
+                _ = try VLQ.encode((orig.lines.zeroBased() - last_ol)).writeTo(writer);
+                last_ol = orig.lines.zeroBased();
+                _ = try VLQ.encode((orig.columns.zeroBased() - last_oc)).writeTo(writer);
+                last_oc = orig.columns.zeroBased();
+            }
+        }
+}
+
+pub fn formatVLQs(self: *const ParsedSourceMap) std.fmt.Alt(ConstParsedSourceMapPtr,formatVLQsImpl) {
+        return .{ .data = self };
+}
+
+pub fn formatVLQsImpl(map: *const ParsedSourceMap, w: *std.Io.Writer) !void {
+        _ = try map.writeVLQs(w);
+}
+pub const ref = RefCount.ref;
+pub const deref = RefCount.deref;
+const ConstParsedSourceMapPtr = *const ParsedSourceMap;
