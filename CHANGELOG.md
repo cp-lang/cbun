@@ -226,3 +226,6 @@
 ## 2026-11-14 里程碑 7 Phase 3
 - 新增并验证通过 `.cp`（含 `_.zig` 备份及生成 `.zig`）：`bun_core/{fmt,output}`、`collections/{pool,comptime_string_map,linear_fifo,StaticHashMap,multi_array_list,bit_set}`、`options_types/schema`、`windows_sys/externs`、`resolve_builtins/HardcodedModule`、`install_types/{ExternalString,NodeLinker,SemverString,SlicedString}`、`clap/{args,clap,comptime,streaming}`、`logger_jsc/logger_jsc`。
 - 更新 `GEMINI.md`：固化最多 2 路并发子智能体规则。
+
+## 2026-11-14 里程碑 7 Phase 4
+- 新增并验证通过 `.cp`（含 `_.zig` 备份与生成 `.zig`）：`analytics/{analytics,schema}`、`exe_format/{elf,macho,pe}`、`logger/logger`、`crash_handler/{CPUFeatures,handle_oom}`。

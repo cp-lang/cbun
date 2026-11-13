@@ -1,1517 +1,9 @@
-pub const Kind = enum(u8) {
-    err = 0,
-    warn = 1,
-    note = 2,
-    debug = 3,
-    verbose = 4,
-
-    pub inline fn shouldPrint(this: Kind, other: Log.Level) bool {
-        return switch (other) {
-            .err => switch (this) {
-                .err, .note => true,
-                else => false,
-            },
-            .warn => switch (this) {
-                .err, .warn, .note => true,
-                else => false,
-            },
-            .info, .debug => this != .verbose,
-            .verbose => true,
-        };
-    }
-
-    pub inline fn string(self: Kind) []const u8 {
-        return switch (self) {
-            .err => "error",
-            .warn => "warn",
-            .note => "note",
-            .debug => "debug",
-            .verbose => "verbose",
-        };
-    }
-
-    pub inline fn toAPI(kind: Kind) api.MessageLevel {
-        return switch (kind) {
-            .err => .err,
-            .warn => .warn,
-            .note => .note,
-            else => .debug,
-        };
-    }
-};
-
-// Do not mark these as packed
-// https://github.com/ziglang/zig/issues/15715
-pub const Loc = struct {
-    start: i32 = -1,
-
-    pub inline fn toNullable(loc: Loc) ?Loc {
-        return if (loc.start == -1) null else loc;
-    }
-
-    pub const toUsize = i;
-
-    pub inline fn i(self: *const Loc) usize {
-        return @as(usize, @intCast(@max(self.start, 0)));
-    }
-
-    pub const Empty = Loc{ .start = -1 };
-
-    pub inline fn eql(loc: Loc, other: Loc) bool {
-        return loc.start == other.start;
-    }
-
-    pub inline fn isEmpty(this: Loc) bool {
-        return eql(this, Empty);
-    }
-
-    pub fn jsonStringify(self: *const Loc, writer: anytype) !void {
-        return try writer.write(self.start);
-    }
-};
-
-pub const Location = struct {
-    // Field ordering optimized to reduce padding:
-    // - 16-byte fields first: string (ptr+len), ?string (ptr+len+null flag)
-    // - 8-byte fields next: usize
-    // - 4-byte fields last: i32
-    // This eliminates padding between differently-sized fields.
-
-    file: string,
-    namespace: string = "file",
-    /// Text on the line, avoiding the need to refetch the source code
-    line_text: ?string = null,
-    /// Number of bytes this location should highlight.
-    /// 0 to just point at a single character
-    length: usize = 0,
-    // TODO: document or remove
-    offset: usize = 0,
-
-    /// 1-based line number.
-    /// Line <= 0 means there is no line and column information.
-    // TODO: move to `bun.Ordinal`
-    line: i32,
-    // TODO: figure out how this is interpreted, convert to `bun.Ordinal`
-    // original docs: 0-based, in bytes.
-    // but there is a place where this is emitted in output, implying one based character offset
-    column: i32,
-
-    pub fn memoryCost(this: *const Location) usize {
-        var cost: usize = 0;
-        cost += this.file.len;
-        cost += this.namespace.len;
-        if (this.line_text) |text| cost += text.len;
-        return cost;
-    }
-
-    pub fn count(this: Location, builder: *StringBuilder) void {
-        builder.count(this.file);
-        builder.count(this.namespace);
-        if (this.line_text) |text| builder.count(text);
-    }
-
-    pub fn clone(this: Location, allocator: std.mem.Allocator) !Location {
-        return Location{
-            .file = try allocator.dupe(u8, this.file),
-            .namespace = this.namespace,
-            .line = this.line,
-            .column = this.column,
-            .length = this.length,
-            .line_text = if (this.line_text != null) try allocator.dupe(u8, this.line_text.?) else null,
-            .offset = this.offset,
-        };
-    }
-
-    pub fn cloneWithBuilder(this: Location, string_builder: *StringBuilder) Location {
-        return Location{
-            .file = string_builder.append(this.file),
-            .namespace = this.namespace,
-            .line = this.line,
-            .column = this.column,
-            .length = this.length,
-            .line_text = if (this.line_text != null) string_builder.append(this.line_text.?) else null,
-            .offset = this.offset,
-        };
-    }
-
-    pub fn toAPI(this: *const Location) api.Location {
-        return api.Location{
-            .file = this.file,
-            .namespace = this.namespace,
-            .line = this.line,
-            .column = this.column,
-            .line_text = this.line_text orelse "",
-            .offset = @as(u32, @truncate(this.offset)),
-        };
-    }
-
-    // don't really know what's safe to deinit here!
-    pub fn deinit(_: *Location, _: std.mem.Allocator) void {}
-
-    pub fn init(file: string, namespace: string, line: i32, column: i32, length: u32, line_text: ?string) Location {
-        return Location{
-            .file = file,
-            .namespace = namespace,
-            .line = line,
-            .column = column,
-            .length = length,
-            .line_text = line_text,
-            .offset = length,
-        };
-    }
-
-    pub fn initOrNull(_source: ?*const Source, r: Range) ?Location {
-        if (_source) |source| {
-            if (r.isEmpty()) {
-                return Location{
-                    .file = source.path.text,
-                    .namespace = source.path.namespace,
-                    .line = -1,
-                    .column = -1,
-                    .length = 0,
-                    .line_text = "",
-                    .offset = 0,
-                };
-            }
-            const data = source.initErrorPosition(r.loc);
-            var full_line = source.contents[data.line_start..data.line_end];
-            if (full_line.len > 80 + data.column_count) {
-                full_line = full_line[@max(data.column_count, 40) - 40 .. @min(data.column_count + 40, full_line.len - 40) + 40];
-            }
-
-            return Location{
-                .file = source.path.text,
-                .namespace = source.path.namespace,
-                .line = usize2Loc(data.line_count).start,
-                .column = usize2Loc(data.column_count).start,
-                .length = if (r.len > -1) @as(u32, @intCast(r.len)) else 1,
-                .line_text = std.mem.trimLeft(u8, full_line, "\n\r"),
-                .offset = @as(usize, @intCast(@max(r.loc.start, 0))),
-            };
-        }
-        return null;
-    }
-};
-
-pub const Data = struct {
-    text: string,
-    location: ?Location = null,
-
-    pub fn memoryCost(this: *const Data) usize {
-        var cost: usize = 0;
-        cost += this.text.len;
-        if (this.location) |*loc| {
-            cost += loc.memoryCost();
-        }
-        return cost;
-    }
-
-    pub fn deinit(d: *Data, allocator: std.mem.Allocator) void {
-        if (d.location) |*loc| {
-            loc.deinit(allocator);
-        }
-
-        allocator.free(d.text);
-    }
-
-    pub fn cloneLineText(this: Data, should: bool, allocator: std.mem.Allocator) OOM!Data {
-        if (!should or this.location == null or this.location.?.line_text == null)
-            return this;
-
-        const new_line_text = try allocator.dupe(u8, this.location.?.line_text.?);
-        var new_location = this.location.?;
-        new_location.line_text = new_line_text;
-        return Data{
-            .text = this.text,
-            .location = new_location,
-        };
-    }
-
-    pub fn clone(this: Data, allocator: std.mem.Allocator) OOM!Data {
-        return Data{
-            .text = if (this.text.len > 0) try allocator.dupe(u8, this.text) else "",
-            .location = if (this.location != null) try this.location.?.clone(allocator) else null,
-        };
-    }
-
-    pub fn cloneWithBuilder(this: Data, builder: *StringBuilder) Data {
-        return Data{
-            .text = if (this.text.len > 0) builder.append(this.text) else "",
-            .location = if (this.location != null) this.location.?.cloneWithBuilder(builder) else null,
-        };
-    }
-
-    pub fn count(this: Data, builder: *StringBuilder) void {
-        builder.count(this.text);
-        if (this.location) |loc| loc.count(builder);
-    }
-
-    pub fn toAPI(this: *const Data) api.MessageData {
-        return api.MessageData{
-            .text = this.text,
-            .location = if (this.location != null) this.location.?.toAPI() else null,
-        };
-    }
-
-    pub fn writeFormat(
-        this: *const Data,
-        to: *std.Io.Writer,
-        kind: Kind,
-        redact_sensitive_information: bool,
-        comptime enable_ansi_colors: bool,
-    ) !void {
-        if (this.text.len == 0) return;
-
-        const message_color = switch (kind) {
-            .err => comptime Output.color_map.get("b").?,
-            .note => comptime Output.color_map.get("blue").?,
-            else => comptime Output.color_map.get("d").? ++ Output.color_map.get("b").?,
-        };
-
-        const color_name: string = switch (kind) {
-            .err => comptime Output.color_map.get("red").?,
-            .note => comptime Output.color_map.get("blue").?,
-            else => comptime Output.color_map.get("d").?,
-        };
-
-        if (this.location) |*location| {
-            if (location.line_text) |line_text_| {
-                const line_text_right_trimmed = std.mem.trimRight(u8, line_text_, " \r\n\t");
-                const line_text = std.mem.trimLeft(u8, line_text_right_trimmed, "\n\r");
-                if (location.column > 0 and line_text.len > 0) {
-                    var line_offset_for_second_line: usize = @intCast(location.column - 1);
-
-                    if (location.line > -1) {
-                        switch (kind == .err or kind == .warn) {
-                            inline else => |bold| try to.print(
-                                // bold the line number for error but dim for the attached note
-                                if (bold)
-                                    comptime Output.prettyFmt("<b>{d} | <r>", enable_ansi_colors)
-                                else
-                                    comptime Output.prettyFmt("<d>{d} | <r>", enable_ansi_colors),
-                                .{
-                                    location.line,
-                                },
-                            ),
-                        }
-
-                        line_offset_for_second_line += std.fmt.count("{d} | ", .{location.line});
-                    }
-
-                    try to.print("{f}\n", .{bun.fmt.fmtJavaScript(line_text, .{
-                        .enable_colors = enable_ansi_colors,
-                        .redact_sensitive_information = redact_sensitive_information,
-                    })});
-
-                    try to.splatByteAll(' ', line_offset_for_second_line);
-                    if ((comptime enable_ansi_colors) and message_color.len > 0) {
-                        try to.writeAll(message_color);
-                        try to.writeAll(color_name);
-                        // always bold the ^
-                        try to.writeAll(comptime Output.color_map.get("b").?);
-
-                        try to.writeByte('^');
-
-                        try to.writeAll("\x1b[0m\n");
-                    } else {
-                        try to.writeAll("^\n");
-                    }
-                }
-            }
-        }
-
-        if (comptime enable_ansi_colors) {
-            try to.writeAll(color_name);
-        }
-
-        try to.writeAll(kind.string());
-
-        try to.print(comptime Output.prettyFmt("<r><d>: <r>", enable_ansi_colors), .{});
-
-        if (comptime enable_ansi_colors) {
-            try to.writeAll(message_color);
-        }
-
-        try to.print(comptime Output.prettyFmt("{s}<r>", enable_ansi_colors), .{this.text});
-
-        if (this.location) |*location| {
-            if (location.file.len > 0) {
-                try to.writeAll("\n");
-                try to.splatByteAll(' ', (kind.string().len + ": ".len) - "at ".len);
-
-                try to.print(comptime Output.prettyFmt("<d>at <r><cyan>{s}<r>", enable_ansi_colors), .{
-                    location.file,
-                });
-
-                if (location.line > 0 and location.column > -1) {
-                    try to.print(comptime Output.prettyFmt("<d>:<r><yellow>{d}<r><d>:<r><yellow>{d}<r>", enable_ansi_colors), .{
-                        location.line,
-                        location.column,
-                    });
-                } else if (location.line > -1) {
-                    try to.print(comptime Output.prettyFmt("<d>:<r><yellow>{d}<r>", enable_ansi_colors), .{
-                        location.line,
-                    });
-                }
-
-                if (Environment.isDebug) {
-                    // comptime magic: do not print byte when using Bun.inspect, but only print
-                    // when you the writer is to a file (like standard out)
-                    if ((comptime std.mem.indexOf(u8, @typeName(@TypeOf(to)), "fs.file") != null) and Output.enable_ansi_colors_stderr) {
-                        try to.print(comptime Output.prettyFmt(" <d>byte={d}<r>", enable_ansi_colors), .{
-                            location.offset,
-                        });
-                    }
-                }
-            }
-        }
-    }
-};
-
-pub const BabyString = packed struct(u32) {
-    offset: u16,
-    len: u16,
-
-    pub fn in(parent: string, text: string) BabyString {
-        return BabyString{
-            .offset = @as(u16, @truncate(std.mem.indexOf(u8, parent, text) orelse unreachable)),
-            .len = @as(u16, @truncate(text.len)),
-        };
-    }
-
-    pub fn slice(this: BabyString, container: string) string {
-        return container[this.offset..][0..this.len];
-    }
-};
-
-pub const Msg = struct {
-    kind: Kind = Kind.err,
-    data: Data,
-    metadata: Metadata = .build,
-    notes: []Data = &.{},
-    redact_sensitive_information: bool = false,
-
-    pub fn memoryCost(this: *const Msg) usize {
-        var cost: usize = 0;
-        cost += this.data.memoryCost();
-        for (this.notes) |*note| {
-            cost += note.memoryCost();
-        }
-        return cost;
-    }
-
-    pub const fromJS = @import("../logger_jsc/logger_jsc.zig").msgFromJS;
-    pub const toJS = @import("../logger_jsc/logger_jsc.zig").msgToJS;
-
-    pub fn count(this: *const Msg, builder: *StringBuilder) void {
-        this.data.count(builder);
-        for (this.notes) |note| {
-            note.count(builder);
-        }
-    }
-
-    pub fn clone(this: *const Msg, allocator: std.mem.Allocator) OOM!Msg {
-        return Msg{
-            .kind = this.kind,
-            .data = try this.data.clone(allocator),
-            .metadata = this.metadata,
-            .notes = try bun.clone(this.notes, allocator),
-        };
-    }
-
-    pub fn cloneWithBuilder(this: *const Msg, notes: []Data, builder: *StringBuilder) Msg {
-        return Msg{
-            .kind = this.kind,
-            .data = this.data.cloneWithBuilder(builder),
-            .metadata = this.metadata,
-            .notes = if (this.notes.len > 0) brk: {
-                for (this.notes, 0..) |note, i| {
-                    notes[i] = note.cloneWithBuilder(builder);
-                }
-                break :brk notes[0..this.notes.len];
-            } else &.{},
-        };
-    }
-
-    pub const Metadata = union(enum) {
-        build,
-        resolve: Resolve,
-
-        pub const Resolve = struct {
-            specifier: BabyString,
-            import_kind: ImportKind,
-            err: anyerror = error.ModuleNotFound,
-        };
-    };
-
-    pub fn toAPI(this: *const Msg, allocator: std.mem.Allocator) OOM!api.Message {
-        var notes = try allocator.alloc(
-            api.MessageData,
-            this.notes.len,
-        );
-        const msg = api.Message{
-            .level = this.kind.toAPI(),
-            .data = this.data.toAPI(),
-            .notes = notes,
-            .on = api.MessageMeta{
-                .resolve = if (this.metadata == .resolve) this.metadata.resolve.specifier.slice(this.data.text) else "",
-                .build = this.metadata == .build,
-            },
-        };
-
-        for (this.notes, 0..) |note, i| {
-            notes[i] = note.toAPI();
-        }
-
-        return msg;
-    }
-
-    pub fn toAPIFromList(comptime ListType: type, list: ListType, allocator: std.mem.Allocator) OOM![]api.Message {
-        var out_list = try allocator.alloc(api.Message, list.items.len);
-        for (list.items, 0..) |item, i| {
-            out_list[i] = try item.toAPI(allocator);
-        }
-
-        return out_list;
-    }
-
-    pub fn deinit(msg: *Msg, allocator: std.mem.Allocator) void {
-        msg.data.deinit(allocator);
-        for (msg.notes) |*note| {
-            note.deinit(allocator);
-        }
-
-        allocator.free(msg.notes);
-
-        msg.notes = &.{};
-    }
-
-    pub fn writeFormat(
-        msg: *const Msg,
-        to: *std.Io.Writer,
-        comptime enable_ansi_colors: bool,
-    ) !void {
-        try msg.data.writeFormat(to, msg.kind, msg.redact_sensitive_information, enable_ansi_colors);
-
-        if (msg.notes.len > 0) {
-            try to.writeAll("\n");
-        }
-
-        for (msg.notes) |note| {
-            try to.writeAll("\n");
-
-            try note.writeFormat(to, .note, msg.redact_sensitive_information, enable_ansi_colors);
-        }
-    }
-
-    pub fn formatWriter(
-        msg: *const Msg,
-        comptime Writer: type,
-        writer: Writer,
-        comptime _: bool,
-    ) !void {
-        if (msg.data.location) |location| {
-            try writer.print("{s}: {s}\n{s}\n{s}:{}:{} ({d})", .{
-                msg.kind.string(),
-                msg.data.text,
-                location.line_text orelse "",
-                location.file,
-                location.line,
-                location.column,
-                location.offset,
-            });
-        } else {
-            try writer.print("{s}: {s}", .{
-                msg.kind.string(),
-                msg.data.text,
-            });
-        }
-    }
-
-    pub fn formatNoWriter(msg: *const Msg, comptime formatterFunc: @TypeOf(Output.panic)) void {
-        formatterFunc("\n\n{s}: {s}\n{s}\n{s}:{}:{} ({d})", .{
-            msg.kind.string(),
-            msg.data.text,
-            msg.data.location.?.line_text,
-            msg.data.location.?.file,
-            msg.data.location.?.line,
-            msg.data.location.?.column,
-            msg.data.location.?.offset,
-        });
-    }
-};
-
-// Do not mark these as packed
-// https://github.com/ziglang/zig/issues/15715
-pub const Range = struct {
-    loc: Loc = Loc.Empty,
-    len: i32 = 0,
-
-    /// Deprecated: use .none
-    pub const None = none;
-    pub const none = Range{ .loc = Loc.Empty, .len = 0 };
-
-    pub fn in(this: Range, buf: []const u8) []const u8 {
-        if (this.loc.start < 0 or this.len <= 0) return "";
-        const slice = buf[@as(usize, @intCast(this.loc.start))..];
-        return slice[0..@min(@as(usize, @intCast(this.len)), buf.len)];
-    }
-
-    pub fn contains(this: Range, k: i32) bool {
-        return k >= this.loc.start and k < this.loc.start + this.len;
-    }
-
-    pub fn isEmpty(r: *const Range) bool {
-        return r.len == 0 and r.loc.start == Loc.Empty.start;
-    }
-
-    pub fn end(self: *const Range) Loc {
-        return Loc{ .start = self.loc.start + self.len };
-    }
-    pub fn endI(self: *const Range) usize {
-        return std.math.lossyCast(usize, self.loc.start + self.len);
-    }
-
-    pub fn jsonStringify(self: *const Range, writer: anytype) !void {
-        return try writer.write([2]i32{ self.loc.start, self.len + self.loc.start });
-    }
-};
-
-pub const Log = struct {
-    warnings: u32 = 0,
-    errors: u32 = 0,
-    msgs: std.array_list.Managed(Msg),
-    level: Level = if (Environment.isDebug) Level.info else Level.warn,
-
-    clone_line_text: bool = false,
-
-    pub fn memoryCost(this: *const Log) usize {
-        var cost: usize = 0;
-        for (this.msgs.items) |msg| {
-            cost += msg.memoryCost();
-        }
-        return cost;
-    }
-
-    pub inline fn hasErrors(this: *const Log) bool {
-        return this.errors > 0;
-    }
-
-    pub fn reset(this: *Log) void {
-        this.msgs.clearRetainingCapacity();
-        this.warnings = 0;
-        this.errors = 0;
-    }
-
-    pub var default_log_level = Level.warn;
-
-    pub fn hasAny(this: *const Log) bool {
-        return (this.warnings + this.errors) > 0;
-    }
-
-    pub fn toAPI(this: *const Log, allocator: std.mem.Allocator) !api.Log {
-        var warnings: u32 = 0;
-        var errors: u32 = 0;
-        for (this.msgs.items) |msg| {
-            errors += @as(u32, @intCast(@intFromBool(msg.kind == .err)));
-            warnings += @as(u32, @intCast(@intFromBool(msg.kind == .warn)));
-        }
-
-        return api.Log{
-            .warnings = warnings,
-            .errors = errors,
-            .msgs = try Msg.toAPIFromList(@TypeOf(this.msgs), this.msgs, allocator),
-        };
-    }
-
-    pub const Level = enum(i8) {
-        verbose, // 0
-        debug, // 1
-        info, // 2
-        warn, //  3
-        err, // 4
-
-        pub fn atLeast(this: Level, other: Level) bool {
-            return @intFromEnum(this) <= @intFromEnum(other);
-        }
-
-        pub const label: std.EnumArray(Level, string) = brk: {
-            var map = std.EnumArray(Level, string).initFill("");
-            map.set(Level.verbose, "verbose");
-            map.set(Level.debug, "debug");
-            map.set(Level.info, "info");
-            map.set(Level.warn, "warn");
-            map.set(Level.err, "error");
-            break :brk map;
-        };
-        pub const Map = bun.ComptimeStringMap(Level, .{
-            .{ "verbose", Level.verbose },
-            .{ "debug", Level.debug },
-            .{ "info", Level.info },
-            .{ "warn", Level.warn },
-            .{ "error", Level.err },
-        });
-
-        pub const fromJS = @import("../logger_jsc/logger_jsc.zig").levelFromJS;
-    };
-
-    pub fn init(allocator: std.mem.Allocator) Log {
-        return Log{
-            .msgs = std.array_list.Managed(Msg).init(allocator),
-            .level = default_log_level,
-        };
-    }
-
-    pub fn initComptime(allocator: std.mem.Allocator) Log {
-        return Log{
-            .msgs = std.array_list.Managed(Msg).init(allocator),
-        };
-    }
-
-    pub inline fn addDebugFmt(log: *Log, source: ?*const Source, l: Loc, allocator: std.mem.Allocator, comptime text: string, args: anytype) OOM!void {
-        if (!Kind.shouldPrint(.debug, log.level)) return;
-        return log.addFormattedMsg(.debug, source, .{ .loc = l }, try allocPrint(allocator, text, args), &.{}, true, false);
-    }
-
-    pub fn addVerbose(log: *Log, source: ?*const Source, loc: Loc, text: string) OOM!void {
-        if (Kind.shouldPrint(.verbose, log.level)) {
-            @branchHint(.cold);
-            try log.addMsg(.{
-                .kind = .verbose,
-                .data = rangeData(source, Range{ .loc = loc }, text),
-            });
-        }
-    }
-
-    pub const toJS = @import("../logger_jsc/logger_jsc.zig").logToJS;
-    pub const toJSAggregateError = @import("../logger_jsc/logger_jsc.zig").logToJSAggregateError;
-    pub const toJSArray = @import("../logger_jsc/logger_jsc.zig").logToJSArray;
-
-    pub fn cloneTo(self: *Log, other: *Log) OOM!void {
-        var notes_count: usize = 0;
-
-        for (self.msgs.items) |msg_| {
-            const msg: Msg = msg_;
-            for (msg.notes) |note| {
-                notes_count += @as(usize, @intCast(@intFromBool(note.text.len > 0)));
-            }
-        }
-
-        if (notes_count > 0) {
-            var notes = try other.msgs.allocator.alloc(Data, notes_count);
-            var note_i: usize = 0;
-            for (self.msgs.items) |*msg| {
-                const start_note_i: usize = note_i;
-                for (msg.notes) |note| {
-                    notes[note_i] = note;
-                    note_i += 1;
-                }
-                msg.notes = notes[start_note_i..note_i];
-            }
-        }
-
-        try other.msgs.appendSlice(self.msgs.items);
-        other.warnings += self.warnings;
-        other.errors += self.errors;
-    }
-
-    pub fn appendTo(self: *Log, other: *Log) OOM!void {
-        try self.cloneTo(other);
-        self.msgs.clearAndFree();
-    }
-
-    pub fn cloneToWithRecycled(self: *Log, other: *Log, recycled: bool) OOM!void {
-        try other.msgs.appendSlice(self.msgs.items);
-        other.warnings += self.warnings;
-        other.errors += self.errors;
-
-        if (recycled) {
-            var string_builder = StringBuilder{};
-            var notes_count: usize = 0;
-            {
-                for (self.msgs.items) |msg| {
-                    msg.count(&string_builder);
-
-                    notes_count += msg.notes.len;
-                }
-            }
-
-            try string_builder.allocate(other.msgs.allocator);
-            var notes_buf = try other.msgs.allocator.alloc(Data, notes_count);
-            var note_i: usize = 0;
-
-            {
-                for (self.msgs.items, (other.msgs.items.len - self.msgs.items.len)..) |msg, j| {
-                    other.msgs.items[j] = msg.cloneWithBuilder(notes_buf[note_i..], &string_builder);
-                    note_i += msg.notes.len;
-                }
-            }
-        }
-    }
-
-    pub fn appendToWithRecycled(self: *Log, other: *Log, recycled: bool) OOM!void {
-        try self.cloneToWithRecycled(other, recycled);
-        self.msgs.clearAndFree();
-    }
-
-    pub fn appendToMaybeRecycled(self: *Log, other: *Log, source: *const Source) OOM!void {
-        return self.appendToWithRecycled(other, source.contents_is_recycled);
-    }
-
-    pub fn deinit(log: *Log) void {
-        log.msgs.clearAndFree();
-        // log.warnings = 0;
-        // log.errors = 0;
-    }
-
-    // TODO: remove `deinit` because it does not de-initialize the log; it clears it
-    pub const clearAndFree = deinit;
-
-    pub fn addVerboseWithNotes(log: *Log, source: ?*const Source, loc: Loc, text: string, notes: []Data) OOM!void {
-        @branchHint(.cold);
-        if (!Kind.shouldPrint(.verbose, log.level)) return;
-
-        try log.addMsg(.{
-            .kind = .verbose,
-            .data = rangeData(source, Range{ .loc = loc }, text),
-            .notes = notes,
-        });
-    }
-
-    pub inline fn allocPrint(allocator: std.mem.Allocator, comptime fmt: string, args: anytype) OOM!string {
-        return switch (Output.enable_ansi_colors_stderr) {
-            inline else => |enable_ansi_colors| std.fmt.allocPrint(allocator, Output.prettyFmt(fmt, enable_ansi_colors), args),
-        };
-    }
-
-    /// Shared, non-generic tail for the `add*Fmt` family. The public wrappers
-    /// are `inline` and only do the per-call-site `allocPrint(fmt, args)`; the
-    /// rest (counter bump, rangeData, cloneLineText, addMsg) lives here so it
-    /// isn't re-stamped for every distinct format string. ~165 callers of
-    /// `addErrorFmt` alone used to duplicate this body.
-    noinline fn addFormattedMsg(
-        log: *Log,
-        kind: Kind,
-        source: ?*const Source,
-        r: Range,
-        text: string,
-        notes: []Data,
-        clone: bool,
-        redact: bool,
-    ) OOM!void {
-        @branchHint(.cold);
-        switch (kind) {
-            .err => log.errors += 1,
-            .warn => log.warnings += 1,
-            else => {},
-        }
-        var data = rangeData(source, r, text);
-        if (clone) data = try data.cloneLineText(log.clone_line_text, log.msgs.allocator);
-        try log.addMsg(.{
-            .kind = kind,
-            .data = data,
-            .notes = notes,
-            .redact_sensitive_information = redact,
-        });
-    }
-
-    inline fn addResolveErrorWithLevel(
-        log: *Log,
-        source: ?*const Source,
-        r: Range,
-        allocator: std.mem.Allocator,
-        comptime fmt: string,
-        args: anytype,
-        import_kind: ImportKind,
-        comptime dupe_text: bool,
-        comptime kind: enum { err, warn },
-        err: anyerror,
-    ) OOM!void {
-        const text = try allocPrint(allocator, fmt, args);
-        // TODO: fix this. this is stupid, it should be returned in allocPrint.
-        const specifier = BabyString.in(text, args.@"0");
-        if (comptime kind == .err) {
-            log.errors += 1;
-        } else {
-            log.warnings += 1;
-        }
-
-        const data = if (comptime dupe_text) brk: {
-            var _data = rangeData(
-                source,
-                r,
-                text,
-            );
-            if (_data.location != null) {
-                if (_data.location.?.line_text) |line| {
-                    _data.location.?.line_text = try allocator.dupe(u8, line);
-                }
-            }
-            break :brk _data;
-        } else rangeData(
-            source,
-            r,
-            text,
-        );
-
-        const msg = Msg{
-            // .kind = if (comptime error_type == .err) Kind.err else Kind.warn,
-            .kind = @field(Kind, @tagName(kind)),
-            .data = data,
-            .metadata = .{ .resolve = Msg.Metadata.Resolve{
-                .specifier = specifier,
-                .import_kind = import_kind,
-                .err = err,
-            } },
-        };
-
-        try log.addMsg(msg);
-    }
-
-    pub fn addResolveError(
-        log: *Log,
-        source: ?*const Source,
-        r: Range,
-        allocator: std.mem.Allocator,
-        comptime fmt: string,
-        args: anytype,
-        import_kind: ImportKind,
-        err: anyerror,
-    ) OOM!void {
-        @branchHint(.cold);
-        // Always dupe the line_text from the source to ensure the Location data
-        // outlives the source's backing memory (which may be arena-allocated).
-        return try addResolveErrorWithLevel(log, source, r, allocator, fmt, args, import_kind, true, .err, err);
-    }
-
-    pub fn addResolveErrorWithTextDupe(
-        log: *Log,
-        source: ?*const Source,
-        r: Range,
-        allocator: std.mem.Allocator,
-        comptime fmt: string,
-        args: anytype,
-        import_kind: ImportKind,
-    ) OOM!void {
-        @branchHint(.cold);
-        return try addResolveErrorWithLevel(log, source, r, allocator, fmt, args, import_kind, true, .err, error.ModuleNotFound);
-    }
-
-    pub fn addRangeError(log: *Log, source: ?*const Source, r: Range, text: string) OOM!void {
-        @branchHint(.cold);
-        log.errors += 1;
-        try log.addMsg(.{
-            .kind = .err,
-            .data = rangeData(source, r, text),
-        });
-    }
-
-    pub inline fn addRangeErrorFmt(log: *Log, source: ?*const Source, r: Range, allocator: std.mem.Allocator, comptime text: string, args: anytype) OOM!void {
-        return log.addFormattedMsg(.err, source, r, try allocPrint(allocator, text, args), &.{}, true, false);
-    }
-
-    pub inline fn addRangeErrorFmtWithNotes(log: *Log, source: ?*const Source, r: Range, allocator: std.mem.Allocator, notes: []Data, comptime fmt: string, args: anytype) OOM!void {
-        return log.addFormattedMsg(.err, source, r, try allocPrint(allocator, fmt, args), notes, true, false);
-    }
-
-    pub inline fn addErrorFmt(log: *Log, source: ?*const Source, l: Loc, allocator: std.mem.Allocator, comptime text: string, args: anytype) OOM!void {
-        return log.addFormattedMsg(.err, source, .{ .loc = l }, try allocPrint(allocator, text, args), &.{}, true, false);
-    }
-
-    // TODO(dylan-conway): rename and replace `addErrorFmt`
-    pub inline fn addErrorFmtOpts(log: *Log, allocator: std.mem.Allocator, comptime fmt: string, args: anytype, opts: AddErrorOptions) OOM!void {
-        return log.addFormattedMsg(.err, opts.source, .{ .loc = opts.loc, .len = opts.len }, try allocPrint(allocator, fmt, args), &.{}, true, opts.redact_sensitive_information);
-    }
-
-    // Use a bun.sys.Error's message in addition to some extra context.
-    pub fn addSysError(log: *Log, alloc: std.mem.Allocator, e: bun.sys.Error, comptime fmt: string, args: anytype) OOM!void {
-        const tag_name, const sys_errno = e.getErrorCodeTagName() orelse {
-            try log.addErrorFmt(null, Loc.Empty, alloc, fmt, args);
-            return;
-        };
-        try log.addErrorFmt(
-            null,
-            Loc.Empty,
-            alloc,
-            "{s}: " ++ fmt,
-            .{bun.sys.coreutils_error_map.get(sys_errno) orelse tag_name} ++ args,
-        );
-    }
-
-    pub fn addZigErrorWithNote(log: *Log, allocator: std.mem.Allocator, err: anyerror, comptime noteFmt: string, args: anytype) OOM!void {
-        @branchHint(.cold);
-        log.errors += 1;
-
-        var notes = try allocator.alloc(Data, 1);
-        notes[0] = rangeData(null, Range.None, try allocPrint(allocator, noteFmt, args));
-
-        try log.addMsg(.{
-            .kind = .err,
-            .data = rangeData(null, Range.None, @errorName(err)),
-            .notes = notes,
-        });
-    }
-
-    pub fn addRangeWarning(log: *Log, source: ?*const Source, r: Range, text: string) OOM!void {
-        @branchHint(.cold);
-        if (!Kind.shouldPrint(.warn, log.level)) return;
-        log.warnings += 1;
-        try log.addMsg(.{
-            .kind = .warn,
-            .data = try rangeData(source, r, text).cloneLineText(log.clone_line_text, log.msgs.allocator),
-        });
-    }
-
-    pub inline fn addWarningFmt(log: *Log, source: ?*const Source, l: Loc, allocator: std.mem.Allocator, comptime text: string, args: anytype) OOM!void {
-        if (!Kind.shouldPrint(.warn, log.level)) return;
-        return log.addFormattedMsg(.warn, source, .{ .loc = l }, try allocPrint(allocator, text, args), &.{}, true, false);
-    }
-
-    pub fn addWarningFmtLineCol(log: *Log, filepath: []const u8, line: u32, col: u32, allocator: std.mem.Allocator, comptime text: string, args: anytype) OOM!void {
-        @branchHint(.cold);
-        return log.addWarningFmtLineColWithNotes(filepath, line, col, allocator, text, args, &[_]Data{});
-    }
-
-    pub fn addWarningFmtLineColWithNotes(log: *Log, filepath: []const u8, line: u32, col: u32, allocator: std.mem.Allocator, comptime text: string, args: anytype, notes: []Data) OOM!void {
-        @branchHint(.cold);
-        if (!Kind.shouldPrint(.warn, log.level)) return;
-        log.warnings += 1;
-
-        // TODO: do this properly
-
-        try log.addMsg(.{
-            .kind = .warn,
-            .data = try Data.cloneLineText(
-                Data{
-                    .text = try allocPrint(allocator, text, args),
-                    .location = Location{
-                        .file = filepath,
-                        .line = @intCast(line),
-                        .column = @intCast(col),
-                    },
-                },
-                log.clone_line_text,
-                allocator,
-            ),
-            .notes = notes,
-        });
-    }
-
-    // pub fn addWarningFmtLineColWithNote(log: *Log, filepath: []const u8, line: u32, col: u32, allocator: std.mem.Allocator, comptime text: string, args: anytype, comptime note_fmt: string, note_args: anytype, note_range: Range) OOM!void {
-    //     @branchHint(.cold);
-    //     if (!Kind.shouldPrint(.warn, log.level)) return;
-    //     log.warnings += 1;
-
-    //     var notes = try allocator.alloc(Data, 1);
-    //     notes[0] = Data{
-    //         .text = try allocPrint(allocator, note_fmt, note_args),
-    //         .lcoation = Location{
-    //             .file = filepath,
-    //             .line = @intCast(line),
-    //             .column = @intCast(col),
-    //         },
-    //     };
-
-    //     try log.addMsg(.{
-    //         .kind = .warn,
-    //         .data = try Data.cloneLineText(
-    //             Data{
-    //                 .text = try allocPrint(allocator, text, args),
-    //                 .location = Location{
-    //                     .file = filepath,
-    //                     .line = @intCast(line),
-    //                     .column = @intCast(col),
-    //                 },
-    //             },
-    //             log.clone_line_text,
-    //             allocator,
-    //         ),
-    //         .notes = notes,
-    //     });
-    // }
-
-    pub inline fn addRangeWarningFmt(log: *Log, source: ?*const Source, r: Range, allocator: std.mem.Allocator, comptime text: string, args: anytype) OOM!void {
-        if (!Kind.shouldPrint(.warn, log.level)) return;
-        return log.addFormattedMsg(.warn, source, r, try allocPrint(allocator, text, args), &.{}, true, false);
-    }
-
-    pub fn addRangeWarningFmtWithNote(
-        log: *Log,
-        source: ?*const Source,
-        r: Range,
-        allocator: std.mem.Allocator,
-        comptime fmt: string,
-        args: anytype,
-        comptime note_fmt: string,
-        note_args: anytype,
-        note_range: Range,
-    ) OOM!void {
-        @branchHint(.cold);
-        if (!Kind.shouldPrint(.warn, log.level)) return;
-        log.warnings += 1;
-
-        var notes = try allocator.alloc(Data, 1);
-        notes[0] = rangeData(source, note_range, try allocPrint(allocator, note_fmt, note_args));
-
-        try log.addMsg(.{
-            .kind = .warn,
-            .data = rangeData(source, r, try allocPrint(allocator, fmt, args)),
-            .notes = notes,
-        });
-    }
-
-    pub inline fn addRangeWarningFmtWithNotes(log: *Log, source: ?*const Source, r: Range, allocator: std.mem.Allocator, notes: []Data, comptime fmt: string, args: anytype) OOM!void {
-        return log.addFormattedMsg(.warn, source, r, try allocPrint(allocator, fmt, args), notes, true, false);
-    }
-
-    pub fn addRangeErrorFmtWithNote(
-        log: *Log,
-        source: ?*const Source,
-        r: Range,
-        allocator: std.mem.Allocator,
-        comptime fmt: string,
-        args: anytype,
-        comptime note_fmt: string,
-        note_args: anytype,
-        note_range: Range,
-    ) OOM!void {
-        @branchHint(.cold);
-        if (!Kind.shouldPrint(.err, log.level)) return;
-        log.errors += 1;
-
-        var notes = try allocator.alloc(Data, 1);
-        notes[0] = rangeData(source, note_range, try allocPrint(allocator, note_fmt, note_args));
-
-        try log.addMsg(.{
-            .kind = .err,
-            .data = rangeData(source, r, try allocPrint(allocator, fmt, args)),
-            .notes = notes,
-        });
-    }
-
-    pub fn addWarning(log: *Log, source: ?*const Source, l: Loc, text: string) OOM!void {
-        @branchHint(.cold);
-        if (!Kind.shouldPrint(.warn, log.level)) return;
-        log.warnings += 1;
-        try log.addMsg(.{
-            .kind = .warn,
-            .data = rangeData(source, Range{ .loc = l }, text),
-        });
-    }
-
-    pub fn addWarningWithNote(log: *Log, source: ?*const Source, l: Loc, allocator: std.mem.Allocator, warn: string, comptime note_fmt: string, note_args: anytype) OOM!void {
-        @branchHint(.cold);
-        if (!Kind.shouldPrint(.warn, log.level)) return;
-        log.warnings += 1;
-
-        var notes = try allocator.alloc(Data, 1);
-        notes[0] = rangeData(source, Range{ .loc = l }, try allocPrint(allocator, note_fmt, note_args));
-
-        try log.addMsg(.{
-            .kind = .warn,
-            .data = rangeData(null, Range.None, warn),
-            .notes = notes,
-        });
-    }
-
-    pub fn addRangeDebug(log: *Log, source: ?*const Source, r: Range, text: string) OOM!void {
-        @branchHint(.cold);
-        if (!Kind.shouldPrint(.debug, log.level)) return;
-        try log.addMsg(.{
-            .kind = .debug,
-            .data = rangeData(source, r, text),
-        });
-    }
-
-    pub fn addRangeDebugWithNotes(log: *Log, source: ?*const Source, r: Range, text: string, notes: []Data) OOM!void {
-        @branchHint(.cold);
-        if (!Kind.shouldPrint(.debug, log.level)) return;
-        // log.de += 1;
-        try log.addMsg(.{
-            .kind = Kind.debug,
-            .data = rangeData(source, r, text),
-            .notes = notes,
-        });
-    }
-
-    pub fn addRangeErrorWithNotes(log: *Log, source: ?*const Source, r: Range, text: string, notes: []Data) OOM!void {
-        @branchHint(.cold);
-        log.errors += 1;
-        try log.addMsg(.{
-            .kind = Kind.err,
-            .data = rangeData(source, r, text),
-            .notes = notes,
-        });
-    }
-
-    pub fn addRangeWarningWithNotes(log: *Log, source: ?*const Source, r: Range, text: string, notes: []Data) OOM!void {
-        @branchHint(.cold);
-        if (!Kind.shouldPrint(.warn, log.level)) return;
-        log.warnings += 1;
-        try log.addMsg(.{
-            .kind = .warning,
-            .data = rangeData(source, r, text),
-            .notes = notes,
-        });
-    }
-
-    pub fn addMsg(self: *Log, msg: Msg) OOM!void {
-        try self.msgs.append(msg);
-    }
-
-    pub fn addError(self: *Log, _source: ?*const Source, loc: Loc, text: string) OOM!void {
-        @branchHint(.cold);
-        self.errors += 1;
-        try self.addMsg(.{ .kind = .err, .data = rangeData(_source, Range{ .loc = loc }, text) });
-    }
-
-    const AddErrorOptions = struct {
-        source: ?*const Source = null,
-        loc: Loc = Loc.Empty,
-        len: i32 = 0,
-        redact_sensitive_information: bool = false,
-    };
-
-    // TODO(dylan-conway): rename and replace `addError`
-    pub fn addErrorOpts(self: *Log, text: string, opts: AddErrorOptions) OOM!void {
-        @branchHint(.cold);
-        self.errors += 1;
-        try self.addMsg(.{
-            .kind = .err,
-            .data = rangeData(opts.source, .{ .loc = opts.loc, .len = opts.len }, text),
-            .redact_sensitive_information = opts.redact_sensitive_information,
-        });
-    }
-
-    pub fn addSymbolAlreadyDeclaredError(self: *Log, allocator: std.mem.Allocator, source: *const Source, name: string, new_loc: Loc, old_loc: Loc) OOM!void {
-        var notes = try allocator.alloc(Data, 1);
-        notes[0] = rangeData(
-            source,
-            source.rangeOfIdentifier(old_loc),
-            try std.fmt.allocPrint(allocator, "\"{s}\" was originally declared here", .{name}),
-        );
-
-        try self.addRangeErrorFmtWithNotes(
-            source,
-            source.rangeOfIdentifier(new_loc),
-            allocator,
-            notes,
-            "\"{s}\" has already been declared",
-            .{name},
-        );
-    }
-
-    pub fn print(self: *const Log, to: *std.Io.Writer) !void {
-        return switch (Output.enable_ansi_colors_stderr) {
-            inline else => |enable_ansi_colors| self.printWithEnableAnsiColors(to, enable_ansi_colors),
-        };
-    }
-
-    pub fn printWithEnableAnsiColors(self: *const Log, to: *std.Io.Writer, comptime enable_ansi_colors: bool) !void {
-        var needs_newline = false;
-        if (self.warnings > 0 and self.errors > 0) {
-            // Print warnings at the top
-            // errors at the bottom
-            // This is so if you're reading from a terminal
-            // and there are a bunch of warnings
-            // You can more easily see where the errors are
-            for (self.msgs.items) |*msg| {
-                if (msg.kind != .err) {
-                    if (msg.kind.shouldPrint(self.level)) {
-                        if (needs_newline) try to.writeAll("\n\n");
-                        try msg.writeFormat(to, enable_ansi_colors);
-                        needs_newline = true;
-                    }
-                }
-            }
-
-            for (self.msgs.items) |*msg| {
-                if (msg.kind == .err) {
-                    if (msg.kind.shouldPrint(self.level)) {
-                        if (needs_newline) try to.writeAll("\n\n");
-                        try msg.writeFormat(to, enable_ansi_colors);
-                        needs_newline = true;
-                    }
-                }
-            }
-        } else {
-            for (self.msgs.items) |*msg| {
-                if (msg.kind.shouldPrint(self.level)) {
-                    if (needs_newline) try to.writeAll("\n\n");
-                    try msg.writeFormat(to, enable_ansi_colors);
-                    needs_newline = true;
-                }
-            }
-        }
-
-        if (needs_newline) _ = try to.write("\n");
-    }
-};
-
-pub inline fn usize2Loc(loc: usize) Loc {
-    return Loc{ .start = @as(i32, @intCast(loc)) };
-}
-
-pub const Source = struct {
-    path: fs.Path,
-
-    contents: string,
-    contents_is_recycled: bool = false,
-
-    /// Lazily-generated human-readable identifier name that is non-unique
-    /// Avoid accessing this directly most of the  time
-    identifier_name: string = "",
-
-    index: Index = Index.source(0),
-
-    pub fn fmtIdentifier(this: *const Source) bun.fmt.FormatValidIdentifier {
-        return this.path.name.fmtIdentifier();
-    }
-
-    pub fn identifierName(this: *Source, allocator: std.mem.Allocator) !string {
-        if (this.identifier_name.len > 0) {
-            return this.identifier_name;
-        }
-
-        bun.assert(this.path.text.len > 0);
-        const name = try this.path.name.nonUniqueNameString(allocator);
-        this.identifier_name = name;
-        return name;
-    }
-
-    pub fn rangeOfIdentifier(this: *const Source, loc: Loc) Range {
-        const js_lexer = @import("../js_parser/lexer.zig");
-        return js_lexer.rangeOfIdentifier(this, loc);
-    }
-
-    pub fn isWebAssembly(this: *const Source) bool {
-        if (this.contents.len < 4) return false;
-
-        const bytes = @as(u32, @bitCast(this.contents[0..4].*));
-        return bytes == 0x6d736100; // "\0asm"
-    }
-
-    pub const ErrorPosition = struct {
-        line_start: usize,
-        line_end: usize,
-        column_count: usize,
-        line_count: usize,
-    };
-
-    pub fn initEmptyFile(filepath: string) Source {
-        const path = fs.Path.init(filepath);
-        return Source{ .path = path, .contents = "" };
-    }
-
-    pub fn initFile(file: fs.PathContentsPair, _: std.mem.Allocator) !Source {
-        var source = Source{
-            .path = file.path,
-            .contents = file.contents,
-        };
-        source.path.namespace = "file";
-        return source;
-    }
-
-    pub fn initRecycledFile(file: fs.PathContentsPair, _: std.mem.Allocator) !Source {
-        var source = Source{
-            .path = file.path,
-            .contents = file.contents,
-            .contents_is_recycled = true,
-        };
-        source.path.namespace = "file";
-
-        return source;
-    }
-
-    pub fn initPathString(pathString: string, contents: string) Source {
-        const path = fs.Path.init(pathString);
-        return Source{ .path = path, .contents = contents };
-    }
-
-    pub fn textForRange(self: *const Source, r: Range) string {
-        return self.contents[r.loc.i()..r.endI()];
-    }
-
-    pub fn rangeOfOperatorBefore(self: *const Source, loc: Loc, op: string) Range {
-        const text = self.contents[0..loc.i()];
-        const index = strings.index(text, op);
-        if (index >= 0) {
-            return Range{ .loc = Loc{
-                .start = loc.start + index,
-            }, .len = @as(i32, @intCast(op.len)) };
-        }
-
-        return Range{ .loc = loc };
-    }
-
-    pub fn rangeOfString(self: *const Source, loc: Loc) Range {
-        if (loc.start < 0) return Range.None;
-
-        const text = self.contents[loc.i()..];
-
-        if (text.len == 0) {
-            return Range.None;
-        }
-
-        const quote = text[0];
-
-        if (quote == '"' or quote == '\'') {
-            var i: usize = 1;
-            var c: u8 = 0;
-            while (i < text.len) {
-                c = text[i];
-
-                if (c == quote) {
-                    return Range{ .loc = loc, .len = @as(i32, @intCast(i + 1)) };
-                } else if (c == '\\') {
-                    i += 1;
-                }
-                i += 1;
-            }
-        }
-
-        return Range{ .loc = loc, .len = 0 };
-    }
-
-    pub fn rangeOfOperatorAfter(self: *const Source, loc: Loc, op: string) Range {
-        const text = self.contents[loc.i()..];
-        const index = strings.index(text, op);
-        if (index >= 0) {
-            return Range{ .loc = Loc{
-                .start = loc.start + index,
-            }, .len = op.len };
-        }
-
-        return Range{ .loc = loc };
-    }
-
-    pub fn initErrorPosition(self: *const Source, offset_loc: Loc) ErrorPosition {
-        bun.assert(!offset_loc.isEmpty());
-        var prev_code_point: i32 = 0;
-        const offset: usize = @min(@as(usize, @intCast(offset_loc.start)), @max(self.contents.len, 1) - 1);
-
-        const contents = self.contents;
-
-        var iter_ = strings.CodepointIterator{
-            .bytes = self.contents[0..offset],
-            .i = 0,
-        };
-        var iter = strings.CodepointIterator.Cursor{};
-
-        var line_start: usize = 0;
-        var line_count: usize = 1;
-        var column_number: usize = 1;
-
-        while (iter_.next(&iter)) {
-            switch (iter.c) {
-                '\n' => {
-                    column_number = 1;
-                    line_start = iter.width + iter.i;
-                    if (prev_code_point != '\r') {
-                        line_count += 1;
-                    }
-                },
-
-                '\r' => {
-                    column_number = 0;
-                    line_start = iter.width + iter.i;
-                    line_count += 1;
-                },
-
-                0x2028, 0x2029 => {
-                    line_start = iter.width + iter.i; // These take three bytes to encode in UTF-8
-                    line_count += 1;
-                    column_number = 1;
-                },
-                else => {
-                    column_number += 1;
-                },
-            }
-
-            prev_code_point = iter.c;
-        }
-
-        iter_ = strings.CodepointIterator{
-            .bytes = self.contents[offset..],
-            .i = 0,
-        };
-
-        iter = strings.CodepointIterator.Cursor{};
-        // Scan to the end of the line (or end of file if this is the last line)
-        var line_end: usize = contents.len;
-
-        loop: while (iter_.next(&iter)) {
-            switch (iter.c) {
-                '\r', '\n', 0x2028, 0x2029 => {
-                    line_end = offset + iter.i;
-                    break :loop;
-                },
-                else => {},
-            }
-        }
-
-        return ErrorPosition{
-            .line_start = if (line_start > 0) line_start - 1 else line_start,
-            .line_end = line_end,
-            .line_count = line_count,
-            .column_count = column_number,
-        };
-    }
-    pub fn lineColToByteOffset(source_contents: []const u8, start_line: usize, start_col: usize, line: usize, col: usize) ?usize {
-        var iter_ = strings.CodepointIterator{
-            .bytes = source_contents,
-            .i = 0,
-        };
-        var iter = strings.CodepointIterator.Cursor{};
-
-        var line_count: usize = start_line;
-        var column_number: usize = start_col;
-
-        _ = iter_.next(&iter);
-        while (true) {
-            const c = iter.c;
-            if (!iter_.next(&iter)) break;
-            switch (c) {
-                '\n' => {
-                    column_number = 1;
-                    line_count += 1;
-                },
-
-                '\r' => {
-                    column_number = 1;
-                    line_count += 1;
-                    if (iter.c == '\n') {
-                        _ = iter_.next(&iter);
-                    }
-                },
-
-                0x2028, 0x2029 => {
-                    line_count += 1;
-                    column_number = 1;
-                },
-                else => {
-                    column_number += 1;
-                },
-            }
-
-            if (line_count == line and column_number == col) return iter.i;
-            if (line_count > line) return null;
-        }
-        return null;
-    }
-};
-
-pub fn rangeData(source: ?*const Source, r: Range, text: string) Data {
-    return Data{ .text = text, .location = Location.initOrNull(source, r) };
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
+const std = @import("std");
 const string = []const u8;
 
-const fs = @import("../resolver/fs.zig");
-const std = @import("std");
-const ImportKind = @import("../options_types/import_record.zig").ImportKind;
-
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const ImportKind = import_record.ImportKind;
 const Environment = bun.Environment;
 const OOM = bun.OOM;
 const Output = bun.Output;
@@ -1520,3 +12,1239 @@ const assert = bun.assert;
 const strings = bun.strings;
 const Index = bun.ast.Index;
 const api = bun.schema.api;
+const empty_notes_slice: []Data = .{  };
+const LogLevelMap = bun.ComptimeStringMap(LogLevel, .{ .{ "verbose", LogLevel.verbose }, .{ "debug", LogLevel.debug }, .{ "info", LogLevel.info }, .{ "warn", LogLevel.warn }, .{ "error", LogLevel.err } });
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime __T: type, comptime idx: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") return ti.@"struct".field_types[idx]; return @FieldType(__T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime __T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .array)) { return v[idx]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") return @field(v, ti.@"struct".field_names[idx]); return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime __T: type, comptime offset_from_end: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return ti.@"struct".field_types[n - offset_from_end]; } return @FieldType(__T, std.fmt.comptimePrint("{d}", .{1})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime __T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .array)) { return v[v.len - offset_from_end]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return @field(v, ti.@"struct".field_names[n - offset_from_end]); } return @field(v, std.fmt.comptimePrint("{d}", .{0})); } }
+pub fn CpUnpackSliceType(comptime __T: type, comptime start_idx: usize) type { if (__T == ?Message or __T == Message) return []const Message; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return __T; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return []const @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return []const @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const types = ti.@"struct".field_types; if (types.len == 0) return []const i32; const Elem = if (start_idx < types.len) types[start_idx] else types[0]; return []const CpValType(Elem); } return []const i32; }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime __T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const names = ti.@"struct".field_names; const types = ti.@"struct".field_types; const end = names.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < types.len) CpValType(types[start_idx]) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, names[f_idx])); } return buf; } return &[_]i32{}; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const fs = @import("../resolver/fs.zig");
+pub const import_record = @import("../options_types/import_record.zig");
+pub const logger_jsc = @import("../logger_jsc/logger_jsc.zig");
+pub const js_lexer = @import("../js_parser/lexer.zig");
+pub const Kind = enum(u8) {
+    err = 0,
+    warn = 1,
+    note = 2,
+    debug = 3,
+    verbose = 4,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+
+pub inline fn shouldPrint(self: Kind, other: LogLevel) bool {
+            return (switch (other) {
+.err => (switch (self) {
+.err, .note => true,
+else => false,
+}),
+.warn => (switch (self) {
+.err, .warn, .note => true,
+else => false,
+}),
+.info, .debug => (self != .verbose),
+.verbose => true,
+});
+    }
+
+pub inline fn string(self: Kind) []const u8 {
+            return (switch (self) {
+.err => "error",
+.warn => "warn",
+.note => "note",
+.debug => "debug",
+.verbose => "verbose",
+});
+    }
+
+pub inline fn toAPI(self: Kind) api.MessageLevel {
+            return (switch (self) {
+.err => .err,
+.warn => .warn,
+.note => .note,
+else => .debug,
+});
+    }
+};
+
+pub const MsgMetadata = union(enum) {
+    build,
+    resolve: MsgMetadataResolve,
+    pub fn has(s: []const u8) bool { if (comptime @typeInfo(@This()).@"union".tag_type) |TagType| { return std.meta.stringToEnum(TagType, s) != null; } return false; }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+    
+    pub const Resolve = MsgMetadataResolve;
+};
+
+pub const LogLevel = enum(i8) {
+    verbose,
+    debug,
+    info,
+    warn,
+    err,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+
+pub fn atLeast(self: LogLevel, other: LogLevel) bool {
+            return (@intFromEnum(self) <= @intFromEnum(other));
+    }
+
+pub fn makeLabel() std.EnumArray(LogLevel,string) {
+            var map = std.EnumArray(LogLevel, string).initFill("");
+            _ = &map;
+            _ = map.set(LogLevel.verbose, "verbose");
+            _ = map.set(LogLevel.debug, "debug");
+            _ = map.set(LogLevel.info, "info");
+            _ = map.set(LogLevel.warn, "warn");
+            _ = map.set(LogLevel.err, "error");
+            return map;
+    }
+    
+    pub const label: std.EnumArray(LogLevel, string) = makeLabel();
+    
+    pub const Map = LogLevelMap;
+    
+    pub const fromJS = logger_jsc.levelFromJS;
+};
+
+pub const ResolveErrorKind = enum {
+    err,
+    warn,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
+
+pub const Loc = struct {
+    start: i32 = -1,
+
+pub inline fn toNullable(self: Loc) ?Loc {
+            return (if ((self.start == -1)) null else self);
+    }
+
+pub inline fn i(self: Loc) usize {
+            return (if (comptime @typeInfo(@TypeOf(@max(self.start, 0))) == .@"enum") cp_cast_int(usize, @intFromEnum(@max(self.start, 0))) else cp_cast_int(usize, @max(self.start, 0)));
+    }
+
+pub inline fn eql(self: Loc, other: Loc) bool {
+            return (self.start == other.start);
+    }
+
+pub inline fn isEmpty(self: Loc) bool {
+            return self.eql(Empty);
+    }
+
+pub fn jsonStringify(self: Loc, writer: anytype) !void {
+            return try writer.write(self.start);
+    }
+    pub const toUsize = i;
+    pub const Empty = Loc{};
+};
+
+pub const Location = struct {
+    file: []const u8,
+    namespace: []const u8 = "file",
+    line_text: ?[]const u8 = null,
+    length: usize = 0,
+    offset: usize = 0,
+    line: i32,
+    column: i32,
+
+pub fn memoryCost(self: Location) usize {
+            var cost: usize = 0;
+            _ = &cost;
+            cost = (cost + self.file.len);
+            cost = (cost + self.namespace.len);
+            if (self.line_text) |text| {
+                _ = &text;
+                cost = (cost + text.len);
+            }
+            return cost;
+    }
+
+pub fn count(self: Location, builder: *StringBuilder) void {
+            _ = builder.count(self.file);
+            _ = builder.count(self.namespace);
+            if (self.line_text) |text| {
+                _ = &text;
+                _ = builder.count(text);
+            }
+    }
+
+pub fn clone(self: Location, allocator: std.mem.Allocator) !Location {
+            return Location{ .file = try allocator.dupe(u8, self.file), .namespace = self.namespace, .line = self.line, .column = self.column, .length = self.length, .line_text = (if ((self.line_text != null)) try allocator.dupe(u8, self.line_text.?) else null), .offset = self.offset };
+    }
+
+pub fn cloneWithBuilder(self: Location, string_builder: *StringBuilder) Location {
+            return Location{ .file = string_builder.append(self.file), .namespace = self.namespace, .line = self.line, .column = self.column, .length = self.length, .line_text = (if ((self.line_text != null)) string_builder.append(self.line_text.?) else null), .offset = self.offset };
+    }
+
+pub fn toAPI(self: Location) api.Location {
+            return api.Location{ .file = self.file, .namespace = self.namespace, .line = self.line, .column = self.column, .line_text = ((self.line_text) orelse ("")), .offset = (if (comptime @typeInfo(@TypeOf(self.offset)) == .@"enum") cp_cast_int(u32, @intFromEnum(self.offset)) else cp_cast_int(u32, self.offset)) };
+    }
+
+pub fn deinit(self: *Location, allocator: std.mem.Allocator) void {
+        _ = &self;
+            _ = allocator;
+    }
+
+pub fn init(file: []const u8, namespace: []const u8, line: i32, column: i32, length: u32, line_text: ?[]const u8) Location {
+            return Location{ .file = file, .namespace = namespace, .line = line, .column = column, .length = length, .line_text = line_text, .offset = length };
+    }
+
+pub fn initOrNull(_source: ?*const Source, r: Range) ?Location {
+            if (_source) |source| {
+                _ = &source;
+                if (r.isEmpty()) {
+                    return Location{ .file = source.path.text, .namespace = source.path.namespace, .line = -1, .column = -1, .length = 0, .line_text = "", .offset = 0 };
+                }
+                const data = source.initErrorPosition(r.loc);
+                var full_line = source.contents[data.line_start..data.line_end];
+                _ = &full_line;
+                if ((full_line.len > (80 + data.column_count))) {
+                    full_line = full_line[(@max(data.column_count, 40) - 40)..(@min((data.column_count + 40), (full_line.len - 40)) + 40)];
+                }
+                return Location{ .file = source.path.text, .namespace = source.path.namespace, .line = usize2Loc(data.line_count).start, .column = usize2Loc(data.column_count).start, .length = (if ((r.len > -1)) (if (comptime @typeInfo(@TypeOf(r.len)) == .@"enum") cp_cast_int(u32, @intFromEnum(r.len)) else cp_cast_int(u32, r.len)) else 1), .line_text = std.mem.trimLeft(u8, full_line, "\n\r"), .offset = (if (comptime @typeInfo(@TypeOf(@max(r.loc.start, 0))) == .@"enum") cp_cast_int(usize, @intFromEnum(@max(r.loc.start, 0))) else cp_cast_int(usize, @max(r.loc.start, 0))) };
+            }
+            return null;
+    }
+};
+
+pub const Data = struct {
+    text: []const u8,
+    location: ?Location = null,
+
+pub fn memoryCost(self: Data) usize {
+            var cost: usize = 0;
+            _ = &cost;
+            cost = (cost + self.text.len);
+            if (self.location) |loc| {
+                _ = &loc;
+                cost = (cost + loc.memoryCost());
+            }
+            return cost;
+    }
+
+pub fn deinit(self: *Data, allocator: std.mem.Allocator) void {
+            if (self.location) |*loc| {
+                _ = &loc;
+                _ = (loc.*).deinit(allocator);
+            }
+            _ = allocator.free(self.text);
+    }
+
+pub fn cloneLineText(self: Data, should: bool, allocator: std.mem.Allocator) OOM!Data {
+            if ((((!should) or (self.location == null)) or (self.location.?.line_text == null))) {
+                return self;
+            }
+            const new_line_text = try allocator.dupe(u8, self.location.?.line_text.?);
+            var new_location = self.location.?;
+            _ = &new_location;
+            new_location.line_text = new_line_text;
+            return Data{ .text = self.text, .location = new_location };
+    }
+
+pub fn clone(self: Data, allocator: std.mem.Allocator) OOM!Data {
+            return Data{ .text = (if ((self.text.len > 0)) try allocator.dupe(u8, self.text) else ""), .location = (if ((self.location != null)) try self.location.?.clone(allocator) else null) };
+    }
+
+pub fn cloneWithBuilder(self: Data, builder: *StringBuilder) Data {
+            return Data{ .text = (if ((self.text.len > 0)) builder.append(self.text) else ""), .location = (if ((self.location != null)) self.location.?.cloneWithBuilder(builder) else null) };
+    }
+
+pub fn count(self: Data, builder: *StringBuilder) void {
+            _ = builder.count(self.text);
+            if (self.location) |loc| {
+                _ = &loc;
+                _ = loc.count(builder);
+            }
+    }
+
+pub fn toAPI(self: Data) api.MessageData {
+            return api.MessageData{ .text = self.text, .location = (if ((self.location != null)) self.location.?.toAPI() else null) };
+    }
+
+pub fn writeFormat(self: Data, to: *std.Io.Writer, kind: Kind, redact_sensitive_information: bool, comptime enable_ansi_colors: bool) !void {
+            if ((self.text.len == 0)) {
+                return;
+            }
+            const message_color = (switch (kind) {
+.err => (comptime (Output.color_map.get("b")).?),
+.note => (comptime (Output.color_map.get("blue")).?),
+else => (comptime std.fmt.comptimePrint("{s}{s}", .{ (Output.color_map.get("d")).?, (Output.color_map.get("b")).? })),
+});
+            const color_name: []const u8 = (switch (kind) {
+.err => (comptime (Output.color_map.get("red")).?),
+.note => (comptime (Output.color_map.get("blue")).?),
+else => (comptime (Output.color_map.get("d")).?),
+});
+            if (self.location) |location| {
+                _ = &location;
+                if (location.line_text) |line_text_| {
+                    _ = &line_text_;
+                    const line_text_right_trimmed = std.mem.trimRight(u8, line_text_, " \r\n\t");
+                    const line_text = std.mem.trimLeft(u8, line_text_right_trimmed, "\n\r");
+                    if (((location.column > 0) and (line_text.len > 0))) {
+                        var line_offset_for_second_line: usize = (if (comptime @typeInfo(@TypeOf((location.column - 1))) == .@"enum") cp_cast_int(usize, @intFromEnum((location.column - 1))) else cp_cast_int(usize, (location.column - 1)));
+                        _ = &line_offset_for_second_line;
+                        if ((location.line > -1)) {
+                            if (((kind == .err) or (kind == .warn))) {
+                                _ = try to.print((comptime Output.prettyFmt("<b>{d} | <r>", enable_ansi_colors)), .{ location.line });
+                            } else {
+                                _ = try to.print((comptime Output.prettyFmt("<d>{d} | <r>", enable_ansi_colors)), .{ location.line });
+                            }
+                            line_offset_for_second_line = (line_offset_for_second_line + std.fmt.count("{d} | ", .{ location.line }));
+                        }
+                        _ = try to.print("{f}\n", .{ bun.fmt.fmtJavaScript(line_text, .{ .enable_colors = enable_ansi_colors, .redact_sensitive_information = redact_sensitive_information }) });
+                        _ = try to.splatByteAll(32, line_offset_for_second_line);
+                        if (((comptime enable_ansi_colors) and (message_color.len > 0))) {
+                            _ = try to.writeAll(message_color);
+                            _ = try to.writeAll(color_name);
+                            _ = try to.writeAll((comptime (Output.color_map.get("b")).?));
+                            _ = try to.writeByte(94);
+                            _ = try to.writeAll("\x1b[0m\n");
+                        } else {
+                            _ = try to.writeAll("^\n");
+                        }
+                    }
+                }
+            }
+            if (comptime enable_ansi_colors) {
+                _ = try to.writeAll(color_name);
+            }
+            _ = try to.writeAll(kind.string());
+            _ = try to.print((comptime Output.prettyFmt("<r><d>: <r>", enable_ansi_colors)), .{});
+            if (comptime enable_ansi_colors) {
+                _ = try to.writeAll(message_color);
+            }
+            _ = try to.print((comptime Output.prettyFmt("{s}<r>", enable_ansi_colors)), .{ self.text });
+            if (self.location) |location| {
+                _ = &location;
+                if ((location.file.len > 0)) {
+                    _ = try to.writeAll("\n");
+                    _ = try to.splatByteAll(32, ((kind.string().len + ": ".len) - "at ".len));
+                    _ = try to.print((comptime Output.prettyFmt("<d>at <r><cyan>{s}<r>", enable_ansi_colors)), .{ location.file });
+                    if (((location.line > 0) and (location.column > -1))) {
+                        _ = try to.print((comptime Output.prettyFmt("<d>:<r><yellow>{d}<r><d>:<r><yellow>{d}<r>", enable_ansi_colors)), .{ location.line, location.column });
+                    } else {
+                        if ((location.line > -1)) {
+                            _ = try to.print((comptime Output.prettyFmt("<d>:<r><yellow>{d}<r>", enable_ansi_colors)), .{ location.line });
+                        }
+                    }
+                    if (Environment.isDebug) {
+                        if (((comptime (std.mem.indexOf(u8, @typeName(@TypeOf(to)), "fs.file") != null)) and Output.enable_ansi_colors_stderr)) {
+                            _ = try to.print((comptime Output.prettyFmt(" <d>byte={d}<r>", enable_ansi_colors)), .{ location.offset });
+                        }
+                    }
+                }
+            }
+    }
+};
+
+pub const BabyString = packed struct(u32) {
+    offset: u16,
+    len: u16,
+
+pub fn @"in"(parent: []const u8, text: []const u8) BabyString {
+            return BabyString{ .offset = (if (comptime @typeInfo(@TypeOf(((std.mem.indexOf(u8, parent, text)) orelse (unreachable)))) == .@"enum") cp_cast_int(u16, @intFromEnum(((std.mem.indexOf(u8, parent, text)) orelse (unreachable)))) else cp_cast_int(u16, ((std.mem.indexOf(u8, parent, text)) orelse (unreachable)))), .len = (if (comptime @typeInfo(@TypeOf(text.len)) == .@"enum") cp_cast_int(u16, @intFromEnum(text.len)) else cp_cast_int(u16, text.len)) };
+    }
+
+pub fn slice(self: BabyString, container: []const u8) []const u8 {
+            return container[self.offset..][0..self.len];
+    }
+};
+
+pub const MsgMetadataResolve = struct {
+    specifier: BabyString,
+    import_kind: ImportKind,
+    err: anyerror = error.ModuleNotFound,
+};
+
+pub const Msg = struct {
+    kind: Kind = Kind.err,
+    data: Data,
+    metadata: MsgMetadata = .build,
+    notes: []Data = empty_notes_slice,
+    redact_sensitive_information: bool = false,
+
+pub fn memoryCost(self: Msg) usize {
+            var cost: usize = 0;
+            _ = &cost;
+            cost = (cost + self.data.memoryCost());
+            for (cp_iter_slice(self.notes)) |note| {
+                _ = &note;
+                cost = (cost + note.memoryCost());
+            }
+            return cost;
+    }
+
+pub fn count(self: Msg, builder: *StringBuilder) void {
+            _ = self.data.count(builder);
+            for (cp_iter_slice(self.notes)) |note| {
+                _ = &note;
+                _ = note.count(builder);
+            }
+    }
+
+pub fn clone(self: Msg, allocator: std.mem.Allocator) OOM!Msg {
+            return Msg{ .kind = self.kind, .data = try self.data.clone(allocator), .metadata = self.metadata, .notes = try bun.clone(self.notes, allocator) };
+    }
+
+pub fn cloneWithBuilder(self: Msg, notes_buf: []Data, builder: *StringBuilder) Msg {
+            return Msg{ .kind = self.kind, .data = self.data.cloneWithBuilder(builder), .metadata = self.metadata, .notes = (if ((self.notes.len > 0)) brk: {
+            {
+                var i: i32 = 0;
+                _ = &i;
+                const __end_2 = self.notes.len;
+                while (i < __end_2) : (i += 1) {
+                    notes_buf[cp_cast_int(usize, i)] = self.notes[@as(usize, @intCast(i))].cloneWithBuilder(builder);
+                }
+            }
+            break :brk notes_buf[0..self.notes.len];
+} else empty_notes_slice) };
+    }
+
+pub fn toAPI(self: Msg, allocator: std.mem.Allocator) OOM!api.Message {
+            var out_notes = try allocator.alloc(api.MessageData, self.notes.len);
+            _ = &out_notes;
+            const resolve_str = (switch (self.metadata) {
+.resolve => |r| cp_iter_slice(r.specifier)[@intCast(self.data.text)..],
+else => "",
+});
+            const msg = api.Message{ .level = self.kind.toAPI(), .data = self.data.toAPI(), .notes = out_notes, .on = api.MessageMeta{ .resolve = resolve_str, .build = (self.metadata == .build) } };
+            {
+                var i: i32 = 0;
+                _ = &i;
+                const __end_3 = self.notes.len;
+                while (i < __end_3) : (i += 1) {
+                    out_notes[cp_cast_int(usize, i)] = self.notes[@as(usize, @intCast(i))].toAPI();
+                }
+            }
+            return msg;
+    }
+
+pub fn toAPIFromList(comptime ListType: type, list: ListType, allocator: std.mem.Allocator) OOM![]api.Message {
+            var out_list = try allocator.alloc(api.Message, list.items.len);
+            _ = &out_list;
+            {
+                {
+                    var i: i32 = 0;
+                    _ = &i;
+                    const __end_4 = list.items.len;
+                    while (i < __end_4) : (i += 1) {
+                        out_list[cp_cast_int(usize, i)] = try list.items[@as(usize, @intCast(i))].toAPI(allocator);
+                    }
+                }
+            }
+            return out_list;
+    }
+
+pub fn deinit(self: *Msg, allocator: std.mem.Allocator) void {
+            _ = self.data.deinit(allocator);
+            for (cp_mut_slice(&self.notes)) |*note| {
+                _ = &note;
+                _ = (note.*).deinit(allocator);
+            }
+            _ = allocator.free(self.notes);
+            self.notes = empty_notes_slice;
+    }
+
+pub fn writeFormat(self: Msg, to: *std.Io.Writer, comptime enable_ansi_colors: bool) !void {
+            _ = try self.data.writeFormat(to, self.kind, self.redact_sensitive_information, enable_ansi_colors);
+            if ((self.notes.len > 0)) {
+                _ = try to.writeAll("\n");
+            }
+            for (cp_iter_slice(self.notes)) |note| {
+                _ = &note;
+                _ = try to.writeAll("\n");
+                _ = try note.writeFormat(to, .note, self.redact_sensitive_information, enable_ansi_colors);
+            }
+    }
+
+pub fn formatWriter(self: Msg, comptime Writer: type, writer: Writer, comptime enable_colors: bool) !void {
+            _ = enable_colors;
+            if (self.data.location) |location| {
+                _ = &location;
+                _ = try writer.print("{s}: {s}\n{s}\n{s}:{}:{} ({d})", .{ self.kind.string(), self.data.text, ((location.line_text) orelse ("")), location.file, location.line, location.column, location.offset });
+            } else {
+                _ = try writer.print("{s}: {s}", .{ self.kind.string(), self.data.text });
+            }
+    }
+
+pub fn formatNoWriter(self: Msg, comptime formatterFunc: anytype) void {
+            _ = formatterFunc("\n\n{s}: {s}\n{s}\n{s}:{}:{} ({d})", .{ self.kind.string(), self.data.text, self.data.location.?.line_text, self.data.location.?.file, self.data.location.?.line, self.data.location.?.column, self.data.location.?.offset });
+    }
+    pub const Metadata = MsgMetadata;
+    pub const fromJS = logger_jsc.msgFromJS;
+    pub const toJS = logger_jsc.msgToJS;
+};
+
+pub const Range = struct {
+    loc: Loc = Loc.Empty,
+    len: i32 = 0,
+
+pub fn @"in"(self: Range, buf: []const u8) []const u8 {
+            if (((self.loc.start < 0) or (self.len <= 0))) {
+                return "";
+            }
+            const slice = buf[(if (comptime @typeInfo(@TypeOf(self.loc.start)) == .@"enum") cp_cast_int(usize, @intFromEnum(self.loc.start)) else cp_cast_int(usize, self.loc.start))..];
+            return slice[0..@min((if (comptime @typeInfo(@TypeOf(self.len)) == .@"enum") cp_cast_int(usize, @intFromEnum(self.len)) else cp_cast_int(usize, self.len)), buf.len)];
+    }
+
+pub fn contains(self: Range, k: i32) bool {
+            return ((k >= self.loc.start) and (k < (self.loc.start + self.len)));
+    }
+
+pub fn isEmpty(self: Range) bool {
+            return ((self.len == 0) and (self.loc.start == Loc.Empty.start));
+    }
+
+pub fn end(self: Range) Loc {
+            return Loc{ .start = (self.loc.start + self.len) };
+    }
+
+pub fn endI(self: Range) usize {
+            return std.math.lossyCast(usize, (self.loc.start + self.len));
+    }
+
+pub fn jsonStringify(self: Range, writer: anytype) !void {
+            const arr: [2]i32 = .{ self.loc.start, (self.len + self.loc.start) };
+            return try writer.write(arr);
+    }
+    pub const none = Range{};
+    pub const None = none;
+};
+
+pub const LogAddErrorOptions = struct {
+    source: ?*const Source = null,
+    loc: Loc = Loc.Empty,
+    len: i32 = 0,
+    redact_sensitive_information: bool = false,
+};
+
+pub const Log = struct {
+    warnings: u32 = 0,
+    errors: u32 = 0,
+    msgs: std.array_list.Managed(Msg),
+    level: LogLevel = (if (Environment.isDebug) LogLevel.info else LogLevel.warn),
+    clone_line_text: bool = false,
+    pub var default_log_level: LogLevel = LogLevel.warn;
+
+pub fn memoryCost(self: Log) usize {
+            var cost: usize = 0;
+            _ = &cost;
+            for (self.msgs.items) |msg| {
+                _ = &msg;
+                cost = (cost + msg.memoryCost());
+            }
+            return cost;
+    }
+
+pub inline fn hasErrors(self: Log) bool {
+            return (self.errors > 0);
+    }
+
+pub fn reset(self: *Log) void {
+            _ = self.msgs.clearRetainingCapacity();
+            self.warnings = 0;
+            self.errors = 0;
+    }
+
+pub fn hasAny(self: Log) bool {
+            return ((self.warnings + self.errors) > 0);
+    }
+
+pub fn toAPI(self: Log, allocator: std.mem.Allocator) !api.Log {
+            var warn_count: u32 = 0;
+            _ = &warn_count;
+            var err_count: u32 = 0;
+            _ = &err_count;
+            for (self.msgs.items) |msg| {
+                _ = &msg;
+                err_count = (err_count + (if (comptime @typeInfo(@TypeOf(@intFromBool((msg.kind == .err)))) == .@"enum") cp_cast_int(u32, @intFromEnum(@intFromBool((msg.kind == .err)))) else cp_cast_int(u32, @intFromBool((msg.kind == .err)))));
+                warn_count = (warn_count + (if (comptime @typeInfo(@TypeOf(@intFromBool((msg.kind == .warn)))) == .@"enum") cp_cast_int(u32, @intFromEnum(@intFromBool((msg.kind == .warn)))) else cp_cast_int(u32, @intFromBool((msg.kind == .warn)))));
+            }
+            return api.Log{ .warnings = warn_count, .errors = err_count, .msgs = try Msg.toAPIFromList(@TypeOf(self.msgs), self.msgs, allocator) };
+    }
+
+pub fn init(allocator: std.mem.Allocator) Log {
+            return Log{ .msgs = std.array_list.Managed(Msg).init(allocator), .level = default_log_level };
+    }
+
+pub fn initComptime(allocator: std.mem.Allocator) Log {
+            return Log{ .msgs = std.array_list.Managed(Msg).init(allocator) };
+    }
+
+pub inline fn addDebugFmt(self: *Log, source: ?*const Source, l: Loc, allocator: std.mem.Allocator, comptime text: []const u8, args: anytype) OOM!void {
+            if ((!Kind.shouldPrint(.debug, self.level))) {
+                return;
+            }
+            return try self.addFormattedMsg(.debug, source, Range{ .loc = l }, try Log.allocPrint(allocator, text, args), .{  }, true, false);
+    }
+
+pub fn addVerbose(self: *Log, source: ?*const Source, loc: Loc, text: []const u8) OOM!void {
+            if (Kind.shouldPrint(.verbose, self.level)) {
+                @branchHint(.cold);
+                _ = try self.addMsg(Msg{ .kind = .verbose, .data = rangeData(source, Range{ .loc = loc }, text) });
+            }
+    }
+
+pub fn cloneTo(self: *Log, other: *Log) OOM!void {
+            var notes_count: usize = 0;
+            _ = &notes_count;
+            for (self.msgs.items) |msg_| {
+                _ = &msg_;
+                const msg: Msg = msg_;
+                for (cp_iter_slice(msg.notes)) |note| {
+                    _ = &note;
+                    notes_count = (notes_count + (if (comptime @typeInfo(@TypeOf(@intFromBool((note.text.len > 0)))) == .@"enum") cp_cast_int(usize, @intFromEnum(@intFromBool((note.text.len > 0)))) else cp_cast_int(usize, @intFromBool((note.text.len > 0)))));
+                }
+            }
+            if ((notes_count > 0)) {
+                var notes = try other.msgs.allocator.alloc(Data, notes_count);
+                _ = &notes;
+                var note_i: usize = 0;
+                _ = &note_i;
+                for (self.msgs.items) |*msg_mut| {
+                    _ = &msg_mut;
+                    const start_note_i: usize = note_i;
+                    for (cp_iter_slice((msg_mut.*).notes)) |note| {
+                        _ = &note;
+                        notes[cp_cast_int(usize, note_i)] = note;
+                        note_i = (note_i + 1);
+                    }
+                    (msg_mut.*).notes = notes[start_note_i..note_i];
+                }
+            }
+            _ = try other.msgs.appendSlice(self.msgs.items);
+            other.warnings = (other.warnings + self.warnings);
+            other.errors = (other.errors + self.errors);
+    }
+
+pub fn appendTo(self: *Log, other: *Log) OOM!void {
+            _ = try self.cloneTo(other);
+            _ = self.msgs.clearAndFree();
+    }
+
+pub fn cloneToWithRecycled(self: *Log, other: *Log, recycled: bool) OOM!void {
+            _ = try other.msgs.appendSlice(self.msgs.items);
+            other.warnings = (other.warnings + self.warnings);
+            other.errors = (other.errors + self.errors);
+            if (recycled) {
+                var string_builder = StringBuilder{  };
+                _ = &string_builder;
+                var notes_count: usize = 0;
+                _ = &notes_count;
+                {
+                    for (self.msgs.items) |msg| {
+                        _ = &msg;
+                        _ = msg.count((&string_builder));
+                        notes_count = (notes_count + msg.notes.len);
+                    }
+                }
+                _ = try string_builder.allocate(other.msgs.allocator);
+                var notes_buf = try other.msgs.allocator.alloc(Data, notes_count);
+                _ = &notes_buf;
+                var note_i: usize = 0;
+                _ = &note_i;
+                {
+                    const offset = (other.msgs.items.len - self.msgs.items.len);
+                    {
+                        var i: i32 = 0;
+                        _ = &i;
+                        const __end_14 = self.msgs.items.len;
+                        while (i < __end_14) : (i += 1) {
+                            const msg = self.msgs.items[@as(usize, @intCast(i))];
+                            const j = (offset + i);
+                            other.msgs.items[cp_cast_int(usize, j)] = msg.cloneWithBuilder(notes_buf[note_i..], (&string_builder));
+                            note_i = (note_i + msg.notes.len);
+                        }
+                    }
+                }
+            }
+    }
+
+pub fn appendToWithRecycled(self: *Log, other: *Log, recycled: bool) OOM!void {
+            _ = try self.cloneToWithRecycled(other, recycled);
+            _ = self.msgs.clearAndFree();
+    }
+
+pub fn appendToMaybeRecycled(self: *Log, other: *Log, source: *const Source) OOM!void {
+            return try self.appendToWithRecycled(other, source.contents_is_recycled);
+    }
+
+pub fn deinit(self: *Log) void {
+            _ = self.msgs.clearAndFree();
+    }
+
+pub fn addVerboseWithNotes(self: *Log, source: ?*const Source, loc: Loc, text: []const u8, notes: []Data) OOM!void {
+            @branchHint(.cold);
+            if ((!Kind.shouldPrint(.verbose, self.level))) {
+                return;
+            }
+            _ = try self.addMsg(Msg{ .kind = .verbose, .data = rangeData(source, Range{ .loc = loc }, text), .notes = notes });
+    }
+
+pub inline fn allocPrint(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) OOM![]const u8 {
+            const fmtAlloc = std.fmt.allocPrint;
+            if (Output.enable_ansi_colors_stderr) {
+                return try fmtAlloc(allocator, (comptime Output.prettyFmt(fmt, true)), args);
+            } else {
+                return try fmtAlloc(allocator, (comptime Output.prettyFmt(fmt, false)), args);
+            }
+    }
+
+pub noinline fn addFormattedMsg(self: *Log, kind: Kind, source: ?*const Source, r: Range, text: []const u8, notes: []Data, clone: bool, redact: bool) OOM!void {
+            @branchHint(.cold);
+            switch (kind) {
+.err => {
+self.errors = (self.errors + 1);
+},
+.warn => {
+self.warnings = (self.warnings + 1);
+},
+else => {
+
+},
+}
+            var data = rangeData(source, r, text);
+            _ = &data;
+            if (clone) {
+                data = try data.cloneLineText(self.clone_line_text, self.msgs.allocator);
+            }
+            _ = try self.addMsg(Msg{ .kind = kind, .data = data, .notes = notes, .redact_sensitive_information = redact });
+    }
+
+pub inline fn addResolveErrorWithLevel(self: *Log, source: ?*const Source, r: Range, allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype, import_kind: ImportKind, comptime dupe_text: bool, comptime kind: ResolveErrorKind, err_val: anyerror) OOM!void {
+            const text = try Log.allocPrint(allocator, fmt, args);
+            const first_arg = @field(args, std.fmt.comptimePrint("{}", .{ 0 }));
+            const specifier = BabyString.in(text, first_arg);
+            if (comptime (kind == .err)) {
+                self.errors = (self.errors + 1);
+            } else {
+                self.warnings = (self.warnings + 1);
+            }
+            const data = (if (comptime dupe_text) brk: {
+            var _data = rangeData(source, r, text);
+            _ = &_data;
+            if ((_data.location != null)) {
+                if (_data.location.?.line_text) |line| {
+                    _ = &line;
+                    _data.location.?.line_text = try allocator.dupe(u8, line);
+                }
+            }
+            break :brk _data;
+} else rangeData(source, r, text));
+            const msg = Msg{ .kind = @field(Kind, @tagName(kind)), .data = data, .metadata = .{ .resolve = MsgMetadataResolve{ .specifier = specifier, .import_kind = import_kind, .err = err_val } } };
+            _ = try self.addMsg(msg);
+    }
+
+pub fn addResolveError(self: *Log, source: ?*const Source, r: Range, allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype, import_kind: ImportKind, err_val: anyerror) OOM!void {
+            @branchHint(.cold);
+            return try self.addResolveErrorWithLevel(source, r, allocator, fmt, args, import_kind, true, .err, err_val);
+    }
+
+pub fn addResolveErrorWithTextDupe(self: *Log, source: ?*const Source, r: Range, allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype, import_kind: ImportKind) OOM!void {
+            @branchHint(.cold);
+            return try self.addResolveErrorWithLevel(source, r, allocator, fmt, args, import_kind, true, .err, error.ModuleNotFound);
+    }
+
+pub fn addRangeError(self: *Log, source: ?*const Source, r: Range, text: []const u8) OOM!void {
+            @branchHint(.cold);
+            self.errors = (self.errors + 1);
+            _ = try self.addMsg(Msg{ .kind = .err, .data = rangeData(source, r, text) });
+    }
+
+pub inline fn addRangeErrorFmt(self: *Log, source: ?*const Source, r: Range, allocator: std.mem.Allocator, comptime text: []const u8, args: anytype) OOM!void {
+            return try self.addFormattedMsg(.err, source, r, try Log.allocPrint(allocator, text, args), .{  }, true, false);
+    }
+
+pub inline fn addRangeErrorFmtWithNotes(self: *Log, source: ?*const Source, r: Range, allocator: std.mem.Allocator, notes: []Data, comptime fmt: []const u8, args: anytype) OOM!void {
+            return try self.addFormattedMsg(.err, source, r, try Log.allocPrint(allocator, fmt, args), notes, true, false);
+    }
+
+pub inline fn addErrorFmt(self: *Log, source: ?*const Source, l: Loc, allocator: std.mem.Allocator, comptime text: []const u8, args: anytype) OOM!void {
+            return try self.addFormattedMsg(.err, source, Range{ .loc = l }, try Log.allocPrint(allocator, text, args), .{  }, true, false);
+    }
+
+pub inline fn addErrorFmtOpts(self: *Log, allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype, opts: AddErrorOptions) OOM!void {
+            return try self.addFormattedMsg(.err, opts.source, Range{ .loc = opts.loc, .len = opts.len }, try Log.allocPrint(allocator, fmt, args), .{  }, true, opts.redact_sensitive_information);
+    }
+
+pub fn addSysError(self: *Log, alloc: std.mem.Allocator, e: bun.sys.Error, comptime fmt: []const u8, args: anytype) OOM!void {
+            if (e.getErrorCodeTagName()) |pair| {
+                _ = &pair;
+                const _tmp_v15 = pair;
+                const tag_name = cp_unpack_elem(_tmp_v15, 0);
+                _ = &tag_name;
+                const sys_errno = cp_unpack_elem(_tmp_v15, 1);
+                _ = &sys_errno;
+                const prefix = ((bun.sys.coreutils_error_map.get(sys_errno)) orelse (tag_name));
+                const msg_body = try Log.allocPrint(alloc, fmt, args);
+                defer {
+                _ = alloc.free(msg_body);
+                }
+                _ = try self.addErrorFmt(null, Loc.Empty, alloc, "{s}: {s}", .{ prefix, msg_body });
+            } else {
+                _ = try self.addErrorFmt(null, Loc.Empty, alloc, fmt, args);
+            }
+    }
+
+pub fn addZigErrorWithNote(self: *Log, allocator: std.mem.Allocator, err_val: anyerror, comptime noteFmt: []const u8, args: anytype) OOM!void {
+            @branchHint(.cold);
+            self.errors = (self.errors + 1);
+            var notes = try allocator.alloc(Data, 1);
+            _ = &notes;
+            notes[cp_cast_int(usize, 0)] = rangeData(null, Range.None, try Log.allocPrint(allocator, noteFmt, args));
+            _ = try self.addMsg(Msg{ .kind = .err, .data = rangeData(null, Range.None, @errorName(err_val)), .notes = notes });
+    }
+
+pub fn addRangeWarning(self: *Log, source: ?*const Source, r: Range, text: []const u8) OOM!void {
+            @branchHint(.cold);
+            if ((!Kind.shouldPrint(.warn, self.level))) {
+                return;
+            }
+            self.warnings = (self.warnings + 1);
+            _ = try self.addMsg(Msg{ .kind = .warn, .data = try rangeData(source, r, text).cloneLineText(self.clone_line_text, self.msgs.allocator) });
+    }
+
+pub inline fn addWarningFmt(self: *Log, source: ?*const Source, l: Loc, allocator: std.mem.Allocator, comptime text: []const u8, args: anytype) OOM!void {
+            if ((!Kind.shouldPrint(.warn, self.level))) {
+                return;
+            }
+            return try self.addFormattedMsg(.warn, source, Range{ .loc = l }, try Log.allocPrint(allocator, text, args), .{  }, true, false);
+    }
+
+pub fn addWarningFmtLineCol(self: *Log, filepath: []const u8, line: u32, col: u32, allocator: std.mem.Allocator, comptime text: []const u8, args: anytype) OOM!void {
+            @branchHint(.cold);
+            return try self.addWarningFmtLineColWithNotes(filepath, line, col, allocator, text, args, .{  });
+    }
+
+pub fn addWarningFmtLineColWithNotes(self: *Log, filepath: []const u8, line: u32, col: u32, allocator: std.mem.Allocator, comptime text: []const u8, args: anytype, notes: []Data) OOM!void {
+            @branchHint(.cold);
+            if ((!Kind.shouldPrint(.warn, self.level))) {
+                return;
+            }
+            self.warnings = (self.warnings + 1);
+            _ = try self.addMsg(Msg{ .kind = .warn, .data = try Data.cloneLineText(Data{ .text = try Log.allocPrint(allocator, text, args), .location = Location{ .file = filepath, .line = (if (comptime @typeInfo(@TypeOf(line)) == .@"enum") cp_cast_int(i32, @intFromEnum(line)) else cp_cast_int(i32, line)), .column = (if (comptime @typeInfo(@TypeOf(col)) == .@"enum") cp_cast_int(i32, @intFromEnum(col)) else cp_cast_int(i32, col)) } }, self.clone_line_text, allocator), .notes = notes });
+    }
+
+pub inline fn addRangeWarningFmt(self: *Log, source: ?*const Source, r: Range, allocator: std.mem.Allocator, comptime text: []const u8, args: anytype) OOM!void {
+            if ((!Kind.shouldPrint(.warn, self.level))) {
+                return;
+            }
+            return try self.addFormattedMsg(.warn, source, r, try Log.allocPrint(allocator, text, args), .{  }, true, false);
+    }
+
+pub fn addRangeWarningFmtWithNote(self: *Log, source: ?*const Source, r: Range, allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype, comptime note_fmt: []const u8, note_args: anytype, note_range: Range) OOM!void {
+            @branchHint(.cold);
+            if ((!Kind.shouldPrint(.warn, self.level))) {
+                return;
+            }
+            self.warnings = (self.warnings + 1);
+            var notes = try allocator.alloc(Data, 1);
+            _ = &notes;
+            notes[cp_cast_int(usize, 0)] = rangeData(source, note_range, try Log.allocPrint(allocator, note_fmt, note_args));
+            _ = try self.addMsg(Msg{ .kind = .warn, .data = rangeData(source, r, try Log.allocPrint(allocator, fmt, args)), .notes = notes });
+    }
+
+pub inline fn addRangeWarningFmtWithNotes(self: *Log, source: ?*const Source, r: Range, allocator: std.mem.Allocator, notes: []Data, comptime fmt: []const u8, args: anytype) OOM!void {
+            return try self.addFormattedMsg(.warn, source, r, try Log.allocPrint(allocator, fmt, args), notes, true, false);
+    }
+
+pub fn addRangeErrorFmtWithNote(self: *Log, source: ?*const Source, r: Range, allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype, comptime note_fmt: []const u8, note_args: anytype, note_range: Range) OOM!void {
+            @branchHint(.cold);
+            if ((!Kind.shouldPrint(.err, self.level))) {
+                return;
+            }
+            self.errors = (self.errors + 1);
+            var notes = try allocator.alloc(Data, 1);
+            _ = &notes;
+            notes[cp_cast_int(usize, 0)] = rangeData(source, note_range, try Log.allocPrint(allocator, note_fmt, note_args));
+            _ = try self.addMsg(Msg{ .kind = .err, .data = rangeData(source, r, try Log.allocPrint(allocator, fmt, args)), .notes = notes });
+    }
+
+pub fn addWarning(self: *Log, source: ?*const Source, l: Loc, text: []const u8) OOM!void {
+            @branchHint(.cold);
+            if ((!Kind.shouldPrint(.warn, self.level))) {
+                return;
+            }
+            self.warnings = (self.warnings + 1);
+            _ = try self.addMsg(Msg{ .kind = .warn, .data = rangeData(source, Range{ .loc = l }, text) });
+    }
+
+pub fn addWarningWithNote(self: *Log, source: ?*const Source, l: Loc, allocator: std.mem.Allocator, warn: []const u8, comptime note_fmt: []const u8, note_args: anytype) OOM!void {
+            @branchHint(.cold);
+            if ((!Kind.shouldPrint(.warn, self.level))) {
+                return;
+            }
+            self.warnings = (self.warnings + 1);
+            var notes = try allocator.alloc(Data, 1);
+            _ = &notes;
+            notes[cp_cast_int(usize, 0)] = rangeData(source, Range{ .loc = l }, try Log.allocPrint(allocator, note_fmt, note_args));
+            _ = try self.addMsg(Msg{ .kind = .warn, .data = rangeData(null, Range.None, warn), .notes = notes });
+    }
+
+pub fn addRangeDebug(self: *Log, source: ?*const Source, r: Range, text: []const u8) OOM!void {
+            @branchHint(.cold);
+            if ((!Kind.shouldPrint(.debug, self.level))) {
+                return;
+            }
+            _ = try self.addMsg(Msg{ .kind = .debug, .data = rangeData(source, r, text) });
+    }
+
+pub fn addRangeDebugWithNotes(self: *Log, source: ?*const Source, r: Range, text: []const u8, notes: []Data) OOM!void {
+            @branchHint(.cold);
+            if ((!Kind.shouldPrint(.debug, self.level))) {
+                return;
+            }
+            _ = try self.addMsg(Msg{ .kind = Kind.debug, .data = rangeData(source, r, text), .notes = notes });
+    }
+
+pub fn addRangeErrorWithNotes(self: *Log, source: ?*const Source, r: Range, text: []const u8, notes: []Data) OOM!void {
+            @branchHint(.cold);
+            self.errors = (self.errors + 1);
+            _ = try self.addMsg(Msg{ .kind = Kind.err, .data = rangeData(source, r, text), .notes = notes });
+    }
+
+pub fn addRangeWarningWithNotes(self: *Log, source: ?*const Source, r: Range, text: []const u8, notes: []Data) OOM!void {
+            @branchHint(.cold);
+            if ((!Kind.shouldPrint(.warn, self.level))) {
+                return;
+            }
+            self.warnings = (self.warnings + 1);
+            _ = try self.addMsg(Msg{ .kind = .warn, .data = rangeData(source, r, text), .notes = notes });
+    }
+
+pub fn addMsg(self: *Log, msg: Msg) OOM!void {
+            _ = try self.msgs.append(msg);
+    }
+
+pub fn addError(self: *Log, _source: ?*const Source, loc: Loc, text: []const u8) OOM!void {
+            @branchHint(.cold);
+            self.errors = (self.errors + 1);
+            _ = try self.addMsg(Msg{ .kind = .err, .data = rangeData(_source, Range{ .loc = loc }, text) });
+    }
+
+pub fn addErrorOpts(self: *Log, text: []const u8, opts: AddErrorOptions) OOM!void {
+            @branchHint(.cold);
+            self.errors = (self.errors + 1);
+            _ = try self.addMsg(Msg{ .kind = .err, .data = rangeData(opts.source, Range{ .loc = opts.loc, .len = opts.len }, text), .redact_sensitive_information = opts.redact_sensitive_information });
+    }
+
+pub fn addSymbolAlreadyDeclaredError(self: *Log, allocator: std.mem.Allocator, source: *const Source, name: []const u8, new_loc: Loc, old_loc: Loc) OOM!void {
+            var notes = try allocator.alloc(Data, 1);
+            _ = &notes;
+            notes[cp_cast_int(usize, 0)] = rangeData(source, source.rangeOfIdentifier(old_loc), try std.fmt.allocPrint(allocator, "\"{s}\" was originally declared here", .{ name }));
+            _ = try self.addRangeErrorFmtWithNotes(source, source.rangeOfIdentifier(new_loc), allocator, notes, "\"{s}\" has already been declared", .{ name });
+    }
+
+pub fn print(self: Log, to: *std.Io.Writer) !void {
+            if (Output.enable_ansi_colors_stderr) {
+                return try self.printWithEnableAnsiColors(to, true);
+            } else {
+                return try self.printWithEnableAnsiColors(to, false);
+            }
+    }
+
+pub fn printWithEnableAnsiColors(self: Log, to: *std.Io.Writer, comptime enable_ansi_colors: bool) !void {
+            var needs_newline = false;
+            _ = &needs_newline;
+            if (((self.warnings > 0) and (self.errors > 0))) {
+                for (self.msgs.items) |msg| {
+                    _ = &msg;
+                    if ((msg.kind != .err)) {
+                        if (msg.kind.shouldPrint(self.level)) {
+                            if (needs_newline) {
+                                _ = try to.writeAll("\n\n");
+                            }
+                            _ = try msg.writeFormat(to, enable_ansi_colors);
+                            needs_newline = true;
+                        }
+                    }
+                }
+                for (self.msgs.items) |msg| {
+                    _ = &msg;
+                    if ((msg.kind == .err)) {
+                        if (msg.kind.shouldPrint(self.level)) {
+                            if (needs_newline) {
+                                _ = try to.writeAll("\n\n");
+                            }
+                            _ = try msg.writeFormat(to, enable_ansi_colors);
+                            needs_newline = true;
+                        }
+                    }
+                }
+            } else {
+                for (self.msgs.items) |msg| {
+                    _ = &msg;
+                    if (msg.kind.shouldPrint(self.level)) {
+                        if (needs_newline) {
+                            _ = try to.writeAll("\n\n");
+                        }
+                        _ = try msg.writeFormat(to, enable_ansi_colors);
+                        needs_newline = true;
+                    }
+                }
+            }
+            if (needs_newline) {
+                _ = try to.write("\n");
+            }
+    }
+    pub const Level = LogLevel;
+    pub const AddErrorOptions = LogAddErrorOptions;
+    pub const toJS = logger_jsc.logToJS;
+    pub const toJSAggregateError = logger_jsc.logToJSAggregateError;
+    pub const toJSArray = logger_jsc.logToJSArray;
+    pub const clearAndFree = deinit;
+};
+
+pub const SourceErrorPosition = struct {
+    line_start: usize,
+    line_end: usize,
+    column_count: usize,
+    line_count: usize,
+};
+
+pub const Source = struct {
+    path: fs.Path,
+    contents: []const u8,
+    contents_is_recycled: bool = false,
+    identifier_name: []const u8 = "",
+    index: Index = Index.source(0),
+
+pub fn fmtIdentifier(self: Source) bun.fmt.FormatValidIdentifier {
+            return (if (@typeInfo(@TypeOf(self.path)) == .@"enum" or @typeInfo(@TypeOf(self.path)) == .@"union") @tagName(self.path) else self.path.name).fmtIdentifier();
+    }
+
+pub fn identifierName(self: *Source, allocator: std.mem.Allocator) ![]const u8 {
+            if ((self.identifier_name.len > 0)) {
+                return self.identifier_name;
+            }
+            _ = assert((self.path.text.len > 0));
+            const name = try (if (@typeInfo(@TypeOf(self.path)) == .@"enum" or @typeInfo(@TypeOf(self.path)) == .@"union") @tagName(self.path) else self.path.name).nonUniqueNameString(allocator);
+            self.identifier_name = name;
+            return name;
+    }
+
+pub fn rangeOfIdentifier(self: Source, loc: Loc) Range {
+            return js_lexer.rangeOfIdentifier(self, loc);
+    }
+
+pub fn isWebAssembly(self: Source) bool {
+            if ((self.contents.len < 4)) {
+                return false;
+            }
+            const bytes = @as(u32, @bitCast((self.contents[0..4]).*));
+            return (bytes == 1836278016);
+    }
+
+pub fn initEmptyFile(filepath: []const u8) Source {
+            const path = fs.Path.init(filepath);
+            return Source{ .path = path, .contents = "" };
+    }
+
+pub fn initFile(file: fs.PathContentsPair, allocator: std.mem.Allocator) !Source {
+            _ = allocator;
+            var source = Source{ .path = file.path, .contents = file.contents };
+            _ = &source;
+            source.path.namespace = "file";
+            return source;
+    }
+
+pub fn initRecycledFile(file: fs.PathContentsPair, allocator: std.mem.Allocator) !Source {
+            _ = allocator;
+            var source = Source{ .path = file.path, .contents = file.contents, .contents_is_recycled = true };
+            _ = &source;
+            source.path.namespace = "file";
+            return source;
+    }
+
+pub fn initPathString(pathString: []const u8, contents: []const u8) Source {
+            const path = fs.Path.init(pathString);
+            return Source{ .path = path, .contents = contents };
+    }
+
+pub fn textForRange(self: Source, r: Range) []const u8 {
+            return self.contents[r.loc.i()..r.endI()];
+    }
+
+pub fn rangeOfOperatorBefore(self: Source, loc: Loc, op: []const u8) Range {
+            const text = self.contents[0..loc.i()];
+            const index = strings.index(text, op);
+            if ((index >= 0)) {
+                return Range{ .loc = Loc{ .start = (loc.start + index) }, .len = (if (comptime @typeInfo(@TypeOf(op.len)) == .@"enum") cp_cast_int(i32, @intFromEnum(op.len)) else cp_cast_int(i32, op.len)) };
+            }
+            return Range{ .loc = loc };
+    }
+
+pub fn rangeOfString(self: Source, loc: Loc) Range {
+            if ((loc.start < 0)) {
+                return Range.None;
+            }
+            const text = self.contents[loc.i()..];
+            if ((text.len == 0)) {
+                return Range.None;
+            }
+            const quote = text[0];
+            if (((quote == 34) or (quote == 39))) {
+                var i: usize = 1;
+                _ = &i;
+                var c: u8 = 0;
+                _ = &c;
+                while ((i < text.len)) {
+                    c = text[@as(usize, @intCast(i))];
+                    if ((c == quote)) {
+                        return Range{ .loc = loc, .len = (if (comptime @typeInfo(@TypeOf((i + 1))) == .@"enum") cp_cast_int(i32, @intFromEnum((i + 1))) else cp_cast_int(i32, (i + 1))) };
+                    } else {
+                        if ((c == 92)) {
+                            i = (i + 1);
+                        }
+                    }
+                    i = (i + 1);
+                }
+            }
+            return Range{ .loc = loc, .len = 0 };
+    }
+
+pub fn rangeOfOperatorAfter(self: Source, loc: Loc, op: []const u8) Range {
+            const text = self.contents[loc.i()..];
+            const index = strings.index(text, op);
+            if ((index >= 0)) {
+                return Range{ .loc = Loc{ .start = (loc.start + index) }, .len = (if (comptime @typeInfo(@TypeOf(op.len)) == .@"enum") cp_cast_int(i32, @intFromEnum(op.len)) else cp_cast_int(i32, op.len)) };
+            }
+            return Range{ .loc = loc };
+    }
+
+pub fn initErrorPosition(self: Source, offset_loc: Loc) ErrorPosition {
+            _ = assert((!offset_loc.isEmpty()));
+            var prev_code_point: i32 = 0;
+            _ = &prev_code_point;
+            const offset: usize = @min((if (comptime @typeInfo(@TypeOf(offset_loc.start)) == .@"enum") cp_cast_int(usize, @intFromEnum(offset_loc.start)) else cp_cast_int(usize, offset_loc.start)), (@max(self.contents.len, 1) - 1));
+            const contents = self.contents;
+            var iter_ = strings.CodepointIterator{ .bytes = self.contents[0..offset], .i = 0 };
+            _ = &iter_;
+            var iter = strings.CodepointIterator.Cursor{  };
+            _ = &iter;
+            var line_start: usize = 0;
+            _ = &line_start;
+            var line_count: usize = 1;
+            _ = &line_count;
+            var column_number: usize = 1;
+            _ = &column_number;
+            while (iter_.next((&iter))) {
+                switch (iter.c) {
+10 => {
+column_number = 1;
+                line_start = (iter.width + iter.i);
+                if ((prev_code_point != 13)) {
+                    line_count = (line_count + 1);
+                }
+},
+13 => {
+column_number = 0;
+                line_start = (iter.width + iter.i);
+                line_count = (line_count + 1);
+},
+8232, 8233 => {
+line_start = (iter.width + iter.i);
+                line_count = (line_count + 1);
+                column_number = 1;
+},
+else => {
+column_number = (column_number + 1);
+},
+}
+                prev_code_point = iter.c;
+            }
+            iter_ = strings.CodepointIterator{ .bytes = self.contents[offset..], .i = 0 };
+            iter = strings.CodepointIterator.Cursor{  };
+            var line_end: usize = contents.len;
+            _ = &line_end;
+            loop: while (iter_.next((&iter))) {
+                switch (iter.c) {
+13, 10, 8232, 8233 => {
+line_end = (offset + iter.i);
+                break :loop;
+},
+else => {
+
+},
+}
+            }
+            return ErrorPosition{ .line_start = (if ((line_start > 0)) (line_start - 1) else line_start), .line_end = line_end, .line_count = line_count, .column_count = column_number };
+    }
+
+pub fn lineColToByteOffset(source_contents: []const u8, start_line: usize, start_col: usize, line: usize, col: usize) ?usize {
+            var iter_ = strings.CodepointIterator{ .bytes = source_contents, .i = 0 };
+            _ = &iter_;
+            var iter = strings.CodepointIterator.Cursor{  };
+            _ = &iter;
+            var line_count: usize = start_line;
+            _ = &line_count;
+            var column_number: usize = start_col;
+            _ = &column_number;
+            _ = iter_.next((&iter));
+            while (true) {
+                const c = iter.c;
+                if ((!iter_.next((&iter)))) {
+                    break;
+                }
+                switch (c) {
+10 => {
+column_number = 1;
+                line_count = (line_count + 1);
+},
+13 => {
+column_number = 1;
+                line_count = (line_count + 1);
+                if ((iter.c == 10)) {
+                    _ = iter_.next((&iter));
+                }
+},
+8232, 8233 => {
+line_count = (line_count + 1);
+                column_number = 1;
+},
+else => {
+column_number = (column_number + 1);
+},
+}
+                if (((line_count == line) and (column_number == col))) {
+                    return iter.i;
+                }
+                if ((line_count > line)) {
+                    return null;
+                }
+            }
+            return null;
+    }
+    pub const ErrorPosition = SourceErrorPosition;
+};
+
+
+pub inline fn usize2Loc(loc: usize) Loc {
+        return Loc{ .start = (if (comptime @typeInfo(@TypeOf(loc)) == .@"enum") cp_cast_int(i32, @intFromEnum(loc)) else cp_cast_int(i32, loc)) };
+}
+
+pub fn rangeData(source: ?*const Source, r: Range, text: []const u8) Data {
+        return Data{ .text = text, .location = Location.initOrNull(source, r) };
+}

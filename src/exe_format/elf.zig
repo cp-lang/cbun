@@ -1,534 +1,439 @@
-/// ELF file manipulation for `bun build --compile` on Linux.
-///
-/// Analogous to `macho.zig` (macOS) and `pe.zig` (Windows).
-/// Finds the `.bun` ELF section (placed by a linker symbol in c-bindings.cpp)
-/// and expands it to hold the standalone module graph data.
-///
-/// Must work on any host platform (macOS, Windows, Linux) for cross-compilation.
-pub const ElfFile = struct {
-    data: std.array_list.Managed(u8),
-    allocator: Allocator,
-
-    pub fn init(allocator: Allocator, elf_data: []const u8) !*ElfFile {
-        if (elf_data.len < @sizeOf(Elf64_Ehdr)) return error.InvalidElfFile;
-
-        const ehdr = readEhdr(elf_data);
-
-        // Validate ELF magic
-        if (!bun.strings.eqlComptime(ehdr.e_ident[0..4], "\x7fELF")) return error.InvalidElfFile;
-
-        // Must be 64-bit
-        if (ehdr.e_ident[elf.EI_CLASS] != elf.ELFCLASS64) return error.Not64Bit;
-
-        // Must be little-endian (bun only supports x64 + arm64, both LE)
-        if (ehdr.e_ident[elf.EI_DATA] != elf.ELFDATA2LSB) return error.NotLittleEndian;
-
-        var data = try std.array_list.Managed(u8).initCapacity(allocator, elf_data.len);
-        errdefer data.deinit();
-        try data.appendSlice(elf_data);
-
-        const self = try allocator.create(ElfFile);
-        errdefer allocator.destroy(self);
-
-        self.* = .{
-            .data = data,
-            .allocator = allocator,
-        };
-
-        return self;
-    }
-
-    pub fn deinit(self: *ElfFile) void {
-        self.data.deinit();
-        self.allocator.destroy(self);
-    }
-
-    /// If PT_INTERP points into a Nix/Guix store path, rewrite it to the
-    /// standard FHS path so `bun build --compile` output stays portable when
-    /// the bun binary itself was patchelf'd (NixOS autoPatchelfHook). See #24742.
-    ///
-    /// Skipped when the host system itself uses a Nix/Guix store interpreter
-    /// (i.e. the running bun process has a store-path PT_INTERP): on NixOS
-    /// `/lib64/ld-linux-x86-64.so.2` is a stub that refuses to run generic
-    /// binaries, so normalizing there would break locally-run compiled output
-    /// (#29290). Cross-compile-style portability is preserved on any non-Nix
-    /// Linux host that happens to have a patchelf'd bun installed.
-    ///
-    /// Store paths are always longer than the FHS path, so this is an in-place
-    /// shrink — no segment moves. No-op for any other interpreter.
-    pub fn normalizeInterpreter(self: *ElfFile) void {
-        // Don't rewrite on Nix/Guix hosts — the FHS path is a stub loader there.
-        if (hostUsesNixStoreInterpreter()) return;
-
-        const ehdr = readEhdr(self.data.items);
-        const phdr_size = @sizeOf(Elf64_Phdr);
-
-        // Bounds-check the program header table up-front; --compile-executable-path
-        // accepts arbitrary files, so a corrupt e_phoff/e_phnum must not panic.
-        const phdr_table_end = @as(u64, ehdr.e_phoff) +| @as(u64, ehdr.e_phnum) *| @as(u64, phdr_size);
-        if (phdr_table_end > self.data.items.len) return;
-
-        for (0..ehdr.e_phnum) |i| {
-            const phdr_offset = @as(usize, @intCast(ehdr.e_phoff)) + i * phdr_size;
-            const phdr = std.mem.bytesAsValue(Elf64_Phdr, self.data.items[phdr_offset..][0..phdr_size]).*;
-            if (phdr.p_type != elf.PT_INTERP) continue;
-
-            const interp_offset: usize = @intCast(phdr.p_offset);
-            const interp_filesz: usize = @intCast(phdr.p_filesz);
-            if (interp_offset + interp_filesz > self.data.items.len) return;
-
-            const interp_region = self.data.items[interp_offset..][0..interp_filesz];
-            const current = std.mem.sliceTo(interp_region, 0);
-
-            if (!bun.strings.hasPrefixComptime(current, "/nix/store/") and
-                !bun.strings.hasPrefixComptime(current, "/gnu/store/"))
-            {
-                return;
-            }
-
-            const last_slash = std.mem.lastIndexOfScalar(u8, current, '/') orelse return;
-            const basename = current[last_slash + 1 ..];
-
-            const replacement: []const u8 = inline for (interp_map) |entry| {
-                if (bun.strings.eqlComptime(basename, entry[0])) break entry[1];
-            } else return;
-
-            // FHS path + NUL must fit in the existing segment (always true for
-            // store paths: 32-char hash + pname + "/lib/" alone exceeds any FHS path).
-            if (replacement.len + 1 > interp_filesz) return;
-
-            log("rewriting PT_INTERP {s} -> {s}", .{ current, replacement });
-
-            @memcpy(interp_region[0..replacement.len], replacement);
-            @memset(interp_region[replacement.len..], 0);
-
-            const new_size: u64 = replacement.len + 1;
-            // p_filesz @ +32, p_memsz @ +40 in Elf64_Phdr
-            std.mem.writeInt(u64, self.data.items[phdr_offset + 32 ..][0..8], new_size, .little);
-            std.mem.writeInt(u64, self.data.items[phdr_offset + 40 ..][0..8], new_size, .little);
-
-            self.updateInterpSectionSize(ehdr, new_size);
-            return;
-        }
-    }
-
-    /// Best-effort: keep the `.interp` section header's `sh_size` consistent with
-    /// the rewritten PT_INTERP so `readelf -S` shows accurate metadata. The kernel
-    /// only consults PT_INTERP, so any failure here is silently ignored.
-    fn updateInterpSectionSize(self: *ElfFile, ehdr: Elf64_Ehdr, new_size: u64) void {
-        const shdr_size = @sizeOf(Elf64_Shdr);
-        const shnum = ehdr.e_shnum;
-        if (shnum == 0 or ehdr.e_shstrndx >= shnum) return;
-
-        const shdr_table_end = @as(u64, ehdr.e_shoff) +| @as(u64, shnum) *| @as(u64, shdr_size);
-        if (shdr_table_end > self.data.items.len) return;
-
-        const strtab_shdr = self.readShdr(ehdr.e_shoff, ehdr.e_shstrndx);
-        const strtab_end = strtab_shdr.sh_offset +| strtab_shdr.sh_size;
-        if (strtab_end > self.data.items.len) return;
-        const strtab = self.data.items[@intCast(strtab_shdr.sh_offset)..][0..@intCast(strtab_shdr.sh_size)];
-
-        for (0..shnum) |i| {
-            const shdr = self.readShdr(ehdr.e_shoff, @intCast(i));
-            if (shdr.sh_name >= strtab.len) continue;
-            const name = std.mem.sliceTo(strtab[shdr.sh_name..], 0);
-            if (!bun.strings.eqlComptime(name, ".interp")) continue;
-
-            // sh_size @ +32 in Elf64_Shdr
-            const shdr_offset = @as(usize, @intCast(ehdr.e_shoff)) + i * shdr_size;
-            std.mem.writeInt(u64, self.data.items[shdr_offset + 32 ..][0..8], new_size, .little);
-            return;
-        }
-    }
-
-    const interp_map = .{
-        .{ "ld-linux-x86-64.so.2", "/lib64/ld-linux-x86-64.so.2" },
-        .{ "ld-linux-aarch64.so.1", "/lib/ld-linux-aarch64.so.1" },
-        .{ "ld-musl-x86_64.so.1", "/lib/ld-musl-x86_64.so.1" },
-        .{ "ld-musl-aarch64.so.1", "/lib/ld-musl-aarch64.so.1" },
-    };
-
-    /// Find the `.bun` section and write `payload` so the kernel `mmap`s it at
-    /// exec time alongside the rest of the binary. Stores the data's vaddr at
-    /// the original BUN_COMPILED location so the runtime can dereference it
-    /// directly.
-    ///
-    /// We extend the existing writable `PT_LOAD` to cover the appended payload
-    /// rather than creating a new segment (by repurposing `PT_GNU_STACK`).
-    /// Earlier versions added a late `PT_LOAD`; WSL1's kernel ELF loader
-    /// rejects that shape with `ENOEXEC` at `execve` time before anything in
-    /// the binary runs (#29963). Growing an already-valid `PT_LOAD` — the shape
-    /// a linker would natively produce — keeps compiled binaries loadable on
-    /// WSL1 while preserving the mmap-at-execve contract (no file I/O at
-    /// startup, works with execute-only permissions).
-    ///
-    /// We always append rather than writing in-place because `.bun` is in the
-    /// middle of a `PT_LOAD` segment — sections like `.dynamic`, `.got`,
-    /// `.got.plt` come after it, and expanding in-place would invalidate their
-    /// absolute virtual addresses.
-    pub fn writeBunSection(self: *ElfFile, payload: []const u8) !void {
-        const ehdr = readEhdr(self.data.items);
-        const bun_section = try self.findBunSection(ehdr);
-        const bun_section_offset = bun_section.file_offset;
-        const page_size = pageSize(ehdr);
-
-        const header_size: u64 = @sizeOf(u64);
-        const new_content_size: u64 = header_size + payload.len;
-        const aligned_new_size = alignUp(new_content_size, page_size);
-
-        // Locate the writable PT_LOAD we'll extend. .bun lives in this
-        // segment already (BlobHeader is `aligned(16K)` + PROGBITS with WA
-        // flags). Growing an existing PT_LOAD is the layout a linker would
-        // naturally produce; WSL1's kernel loader rejects binaries that
-        // instead add a late PT_LOAD by repurposing PT_GNU_STACK (#29963).
-        const phdr_size = @sizeOf(Elf64_Phdr);
-        var rw_phdr_index: ?usize = null;
-        var rw_phdr: Elf64_Phdr = undefined;
-        var max_vaddr_end: u64 = 0;
-        for (0..ehdr.e_phnum) |i| {
-            const phdr_offset = @as(usize, @intCast(ehdr.e_phoff)) + i * phdr_size;
-            const phdr = std.mem.bytesAsValue(Elf64_Phdr, self.data.items[phdr_offset..][0..phdr_size]).*;
-            if (phdr.p_type != elf.PT_LOAD) continue;
-
-            const vaddr_end = phdr.p_vaddr + phdr.p_memsz;
-            if (vaddr_end > max_vaddr_end) max_vaddr_end = vaddr_end;
-
-            if ((phdr.p_flags & elf.PF_W) != 0 and rw_phdr_index == null) {
-                rw_phdr_index = i;
-                rw_phdr = phdr;
-            }
-        }
-
-        const rw_index = rw_phdr_index orelse return error.NoWritableLoadSegment;
-
-        // Place the new data at a page-aligned virtual address past every
-        // existing mapping. page_size is ≥ 128 so this also guarantees the
-        // 128-byte alignment that JSC's bytecode cache requires — see
-        // `target_mod = 120` in StandaloneModuleGraph.zig, which assumes the
-        // payload starts on a 128-byte boundary so bytecode at payload-offset
-        // 120 lands 128-aligned once the 8-byte `[u64 size]` header is
-        // accounted for. A non-page-aligned `new_vaddr` (e.g. one inheriting
-        // `rw_phdr.p_vaddr`'s residue mod 128) would SIGSEGV in JSC bytecode
-        // deserialization on aarch64.
-        //
-        // `new_file_offset` follows the segment's existing (vaddr - offset)
-        // delta, so the kernel's mmap at `rw_phdr.p_offset → rw_phdr.p_vaddr`
-        // covers our new payload continuously once we grow p_filesz.
-        const new_vaddr = alignUp(max_vaddr_end, page_size);
-        const offset_in_segment = new_vaddr - rw_phdr.p_vaddr;
-        const new_file_offset = rw_phdr.p_offset + offset_in_segment;
-
-        // Sanity: `max_vaddr_end` already reflects the RW segment's full
-        // memsz range (the loop above folds every PT_LOAD), so new_vaddr is
-        // past it by construction. This guard catches pathological inputs
-        // (e.g. corrupt ELF with rw_phdr.p_vaddr past max_vaddr_end).
-        if (new_vaddr < rw_phdr.p_vaddr + rw_phdr.p_memsz) return error.NewVaddrCollides;
-
-        // File layout after this function returns:
-        //
-        //   [0, old_rw_file_end)                      original content, unchanged
-        //                                             (RW segment's file-backed bytes)
-        //   [old_rw_file_end, new_file_offset)        zero fill
-        //                                             (becomes file-backed inside the
-        //                                              extended RW PT_LOAD; must read as
-        //                                              zero to keep BSS semantics)
-        //   [new_file_offset, +aligned_new_size)      [u64 LE size][payload][zero pad]
-        //                                             (new .bun contents — vaddr = new_vaddr)
-        //   [payload_end, +moved_tail_size)           relocated non-ALLOC sections + old
-        //                                             section header table
-        //
-        // Anything past `old_rw_file_end` in the input — non-ALLOC sections
-        // like `.comment`, `.symtab`, `.strtab`, `.shstrtab`, debug info,
-        // plus the section header table — has to be moved out of the way
-        // because that file range now lives inside the extended RW PT_LOAD.
-        // Leaving it in place would mmap it into what was previously BSS
-        // (zero-initialized statics), corrupting the process.
-        const old_rw_file_end = rw_phdr.p_offset + rw_phdr.p_filesz;
-        const old_file_size: u64 = self.data.items.len;
-        if (old_rw_file_end > old_file_size) return error.InvalidElfFile;
-
-        const move_src_start: u64 = old_rw_file_end;
-        const move_src_end: u64 = old_file_size;
-        const moved_tail_size: u64 = move_src_end - move_src_start;
-        const move_dst_start: u64 = new_file_offset + aligned_new_size;
-        const move_dst_end: u64 = move_dst_start + moved_tail_size;
-
-        const total_new_size: u64 = move_dst_end;
-
-        try self.data.ensureTotalCapacity(total_new_size);
-        self.data.items.len = total_new_size;
-
-        // Relocate the tail (non-ALLOC sections + old shdr table) past the
-        // payload. Do this BEFORE zero-filling and writing the payload — if
-        // `new_file_offset < old_file_size` (debug binaries with hundreds of
-        // MB of debug info past the RW segment), the destination overlaps
-        // the source, so memmove is required.
-        if (moved_tail_size != 0) {
-            bun.memmove(
-                self.data.items[move_dst_start..move_dst_end],
-                self.data.items[move_src_start..move_src_end],
-            );
-        }
-
-        // Zero the bytes between the old RW file-content end and the payload
-        // start. This entire range is now inside the extended PT_LOAD's
-        // file-backed region; keeping it zero preserves BSS semantics.
-        @memset(self.data.items[move_src_start..new_file_offset], 0);
-
-        // Write the payload at the new location: [u64 LE size][data][zero padding]
-        std.mem.writeInt(u64, self.data.items[new_file_offset..][0..8], @intCast(payload.len), .little);
-        @memcpy(self.data.items[new_file_offset + header_size ..][0..payload.len], payload);
-
-        // Zero the padding between payload end and the relocated tail
-        const payload_end = new_file_offset + new_content_size;
-        if (move_dst_start > payload_end) {
-            @memset(self.data.items[payload_end..move_dst_start], 0);
-        }
-
-        // Write the vaddr of the appended data at the ORIGINAL .bun section location
-        // (where BUN_COMPILED symbol points). At runtime, BUN_COMPILED.size will be
-        // this vaddr (always non-zero), which the runtime dereferences as a pointer.
-        // Non-standalone binaries have BUN_COMPILED.size = 0, so 0 means "no data".
-        std.mem.writeInt(u64, self.data.items[bun_section_offset..][0..8], new_vaddr, .little);
-
-        // Update every section header whose sh_offset pointed into the moved
-        // tail so tools like `readelf -S`, `objdump`, and `gdb` still find
-        // the right bytes. Special-case the .bun header — it moves to the
-        // payload's new position, not to the shifted tail.
-        //
-        // The section header table itself is part of the moved tail, so we
-        // compute its new location from e_shoff's old value.
-        const old_shdr_offset: u64 = ehdr.e_shoff;
-        const shdr_table_size = @as(u64, ehdr.e_shnum) * @sizeOf(Elf64_Shdr);
-        if (old_shdr_offset < move_src_start or old_shdr_offset + shdr_table_size > move_src_end) {
-            return error.InvalidElfFile;
-        }
-        const new_shdr_offset: u64 = old_shdr_offset + (move_dst_start - move_src_start);
-        self.writeEhdrShoff(new_shdr_offset);
-
-        const shnum = ehdr.e_shnum;
-        for (0..shnum) |i| {
-            const shdr_file_offset: u64 = new_shdr_offset + @as(u64, @intCast(i)) * @sizeOf(Elf64_Shdr);
-            const shdr_bytes = self.data.items[shdr_file_offset..][0..@sizeOf(Elf64_Shdr)];
-            var shdr = std.mem.bytesAsValue(Elf64_Shdr, shdr_bytes).*;
-
-            if (i == bun_section.section_index) {
-                shdr.sh_offset = new_file_offset;
-                shdr.sh_size = new_content_size;
-                shdr.sh_addr = new_vaddr;
-            } else if (shdr.sh_type != elf.SHT_NOBITS and
-                shdr.sh_offset >= move_src_start and
-                shdr.sh_offset < move_src_end)
-            {
-                shdr.sh_offset += move_dst_start - move_src_start;
-            }
-
-            @memcpy(shdr_bytes, std.mem.asBytes(&shdr));
-        }
-
-        // Extend the existing writable PT_LOAD to cover the appended payload.
-        // Keep p_offset/p_vaddr/p_paddr/p_align unchanged; only grow filesz
-        // and memsz. Equal values are fine — the extension is entirely
-        // file-backed (no new BSS gap).
-        //
-        // PT_GNU_STACK is deliberately left alone; repurposing it into a
-        // separate late PT_LOAD is what breaks WSL1 (#29963).
-        {
-            const new_segment_size = offset_in_segment + aligned_new_size;
-            const extended: Elf64_Phdr = .{
-                .p_type = rw_phdr.p_type,
-                .p_flags = rw_phdr.p_flags,
-                .p_offset = rw_phdr.p_offset,
-                .p_vaddr = rw_phdr.p_vaddr,
-                .p_paddr = rw_phdr.p_paddr,
-                .p_filesz = new_segment_size,
-                .p_memsz = new_segment_size,
-                .p_align = rw_phdr.p_align,
-            };
-            const phdr_offset = @as(usize, @intCast(ehdr.e_phoff)) + rw_index * phdr_size;
-            @memcpy(self.data.items[phdr_offset..][0..phdr_size], std.mem.asBytes(&extended));
-        }
-    }
-
-    pub fn write(self: *const ElfFile, writer: anytype) !void {
-        try writer.writeAll(self.data.items);
-    }
-
-    // --- Internal helpers ---
-
-    const BunSectionInfo = struct {
-        /// File offset of the .bun section's data (sh_offset).
-        file_offset: u64,
-        /// Index of the .bun section in the section header table.
-        section_index: u16,
-    };
-
-    /// Returns the file offset and section index of the `.bun` section.
-    fn findBunSection(self: *const ElfFile, ehdr: Elf64_Ehdr) !BunSectionInfo {
-        const shdr_size = @sizeOf(Elf64_Shdr);
-        const shdr_table_offset = ehdr.e_shoff;
-        const shnum = ehdr.e_shnum;
-
-        if (shnum == 0) return error.BunSectionNotFound;
-        if (shdr_table_offset + @as(u64, shnum) * shdr_size > self.data.items.len)
-            return error.InvalidElfFile;
-
-        // Read the .shstrtab section to get section names
-        const shstrtab_shdr = self.readShdr(shdr_table_offset, ehdr.e_shstrndx);
-        const strtab_offset = shstrtab_shdr.sh_offset;
-        const strtab_size = shstrtab_shdr.sh_size;
-
-        if (strtab_offset + strtab_size > self.data.items.len) return error.InvalidElfFile;
-        const strtab = self.data.items[strtab_offset..][0..strtab_size];
-
-        // Search for .bun section
-        for (0..shnum) |i| {
-            const shdr = self.readShdr(shdr_table_offset, @intCast(i));
-            const name_offset = shdr.sh_name;
-
-            if (name_offset < strtab.len) {
-                const name = std.mem.sliceTo(strtab[name_offset..], 0);
-                if (bun.strings.eqlComptime(name, ".bun")) {
-                    return .{
-                        .file_offset = shdr.sh_offset,
-                        .section_index = @intCast(i),
-                    };
-                }
-            }
-        }
-
-        return error.BunSectionNotFound;
-    }
-
-    fn readShdr(self: *const ElfFile, table_offset: u64, index: u16) Elf64_Shdr {
-        const offset = table_offset + @as(u64, index) * @sizeOf(Elf64_Shdr);
-        return std.mem.bytesAsValue(Elf64_Shdr, self.data.items[offset..][0..@sizeOf(Elf64_Shdr)]).*;
-    }
-
-    fn writeEhdrShoff(self: *ElfFile, new_shoff: u64) void {
-        // e_shoff is at offset 40 in Elf64_Ehdr
-        std.mem.writeInt(u64, self.data.items[40..][0..8], new_shoff, .little);
-    }
-
-    fn pageSize(ehdr: Elf64_Ehdr) u64 {
-        return switch (ehdr.e_machine) {
-            .AARCH64, .PPC64 => 0x10000, // 64KB
-            else => 0x1000, // 4KB
-        };
-    }
-};
-
-fn readEhdr(data: []const u8) Elf64_Ehdr {
-    return std.mem.bytesAsValue(Elf64_Ehdr, data[0..@sizeOf(Elf64_Ehdr)]).*;
-}
-
-fn alignUp(value: u64, alignment: u64) u64 {
-    if (alignment == 0) return value;
-    const mask = alignment - 1;
-    return (value + mask) & ~mask;
-}
-
-/// True iff the host bun is running on is managed by Nix or Guix — in which
-/// case the "generic" FHS linker path `/lib64/ld-linux-x86-64.so.2` is a stub
-/// that rejects generic binaries, and rewriting PT_INTERP to it would break
-/// locally-run `bun build --compile` output. See #29290.
-///
-/// Checks (any one is sufficient):
-///   1. `BUN_DEBUG_FORCE_NIX_HOST` — test-only override used by #29290's
-///      regression test to exercise this branch without writing to `/etc`.
-///   2. The running bun process's own PT_INTERP (via `/proc/self/exe`). NixOS
-///      `autoPatchelfHook` rewrites installed binaries to `/nix/store/...`
-///      loaders; this is the most precise signal.
-///   3. `/etc/NIXOS` — canonical NixOS marker, present on every NixOS system
-///      regardless of how bun itself was installed (e.g. a statically-linked
-///      bun built elsewhere).
-///   4. `/gnu/store` directory — Guix's equivalent of /nix/store.
-///
-/// Result is cached — this is called once per `bun build --compile`.
-///
-/// Always `false` on non-Linux hosts: `bun build --compile` for a Linux target
-/// can run on macOS/Windows, in which case the host's linker layout is
-/// irrelevant and we want to normalize for portability (#24742).
-fn hostUsesNixStoreInterpreter() bool {
-    if (comptime !bun.Environment.isLinux) return false;
-
-    const cache = struct {
-        var computed: std.atomic.Value(u8) = .init(0); // 0 unknown, 1 no, 2 yes
-        fn check() bool {
-            // Test-only override: lets #29290's regression test force the
-            // Nix-host branch without mutating `/etc/NIXOS` on the shared
-            // rootfs (which would poison concurrent test workers).
-            if (bun.env_var.BUN_DEBUG_FORCE_NIX_HOST.get()) return true;
-            if (selfInterpIsNixStore()) return true;
-            // Canonical NixOS marker — present even when bun itself was not
-            // installed via Nix (statically-linked bun, downloaded tarball).
-            if (bun.sys.exists("/etc/NIXOS")) return true;
-            // Guix equivalent.
-            if (bun.sys.directoryExistsAt(bun.FD.cwd(), "/gnu/store").unwrapOr(false)) return true;
-            return false;
-        }
-
-        fn selfInterpIsNixStore() bool {
-            // 4 KiB is enough: PT_INTERP on a glibc-linked binary points into
-            // the first page. Read just the leading bytes to avoid slurping
-            // the whole bun binary.
-            var buf: [4096]u8 = undefined;
-            const fd = switch (bun.sys.open("/proc/self/exe", bun.O.RDONLY, 0)) {
-                .result => |fd| fd,
-                .err => return false,
-            };
-            defer fd.close();
-            const n = switch (bun.sys.read(fd, &buf)) {
-                .result => |n| n,
-                .err => return false,
-            };
-            if (n < @sizeOf(Elf64_Ehdr)) return false;
-            const data = buf[0..n];
-
-            if (!bun.strings.eqlComptime(data[0..4], "\x7fELF")) return false;
-            if (data[elf.EI_CLASS] != elf.ELFCLASS64) return false;
-            if (data[elf.EI_DATA] != elf.ELFDATA2LSB) return false;
-
-            const ehdr = readEhdr(data);
-            const phdr_size = @sizeOf(Elf64_Phdr);
-            const table_end = @as(u64, ehdr.e_phoff) +| @as(u64, ehdr.e_phnum) *| @as(u64, phdr_size);
-            if (table_end > data.len) return false;
-
-            for (0..ehdr.e_phnum) |i| {
-                const off = @as(usize, @intCast(ehdr.e_phoff)) + i * phdr_size;
-                const phdr = std.mem.bytesAsValue(Elf64_Phdr, data[off..][0..phdr_size]).*;
-                if (phdr.p_type != elf.PT_INTERP) continue;
-
-                const interp_off: usize = @intCast(phdr.p_offset);
-                const interp_sz: usize = @intCast(phdr.p_filesz);
-                if (interp_off + interp_sz > data.len) return false;
-
-                const interp = std.mem.sliceTo(data[interp_off..][0..interp_sz], 0);
-                return bun.strings.hasPrefixComptime(interp, "/nix/store/") or
-                    bun.strings.hasPrefixComptime(interp, "/gnu/store/");
-            }
-            return false;
-        }
-    };
-
-    switch (cache.computed.load(.acquire)) {
-        1 => return false,
-        2 => return true,
-        else => {},
-    }
-    const result = cache.check();
-    cache.computed.store(if (result) 2 else 1, .release);
-    return result;
-}
-
-const log = bun.Output.scoped(.elf, .visible);
-
-const bun = @import("bun");
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
-const Allocator = std.mem.Allocator;
+const string = []const u8;
 
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const Allocator = std.mem.Allocator;
 const elf = std.elf;
 const Elf64_Ehdr = elf.Elf64_Ehdr;
 const Elf64_Phdr = elf.Elf64_Phdr;
 const Elf64_Shdr = elf.Elf64_Shdr;
+const log = bun.Output.scoped(.elf, .visible);
+var host_nix_computed: std.atomic.Value(u8) = std.atomic.Value(u8).init(0);
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime __T: type, comptime idx: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") return ti.@"struct".field_types[idx]; return @FieldType(__T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime __T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .array)) { return v[idx]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") return @field(v, ti.@"struct".field_names[idx]); return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime __T: type, comptime offset_from_end: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return ti.@"struct".field_types[n - offset_from_end]; } return @FieldType(__T, std.fmt.comptimePrint("{d}", .{1})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime __T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .array)) { return v[v.len - offset_from_end]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return @field(v, ti.@"struct".field_names[n - offset_from_end]); } return @field(v, std.fmt.comptimePrint("{d}", .{0})); } }
+pub fn CpUnpackSliceType(comptime __T: type, comptime start_idx: usize) type { if (__T == ?Message or __T == Message) return []const Message; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return __T; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return []const @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return []const @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const types = ti.@"struct".field_types; if (types.len == 0) return []const i32; const Elem = if (start_idx < types.len) types[start_idx] else types[0]; return []const CpValType(Elem); } return []const i32; }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime __T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const names = ti.@"struct".field_names; const types = ti.@"struct".field_types; const end = names.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < types.len) CpValType(types[start_idx]) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, names[f_idx])); } return buf; } return &[_]i32{}; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const BunSectionInfo = struct {
+    file_offset: u64,
+    section_index: u16,
+};
+
+pub const ElfFile = struct {
+    data: std.array_list.Managed(u8),
+    allocator: Allocator,
+
+pub fn init(allocator: Allocator, elf_data: []const u8) !*ElfFile {
+            if ((elf_data.len < @sizeOf(Elf64_Ehdr))) {
+                return error.InvalidElfFile;
+            }
+            const ehdr = readEhdr(elf_data);
+            if ((!bun.strings.eqlComptime(ehdr.e_ident[0..4], "\x7fELF"))) {
+                return error.InvalidElfFile;
+            }
+            if ((ehdr.e_ident[@as(usize, @intCast(elf.EI_CLASS))] != elf.ELFCLASS64)) {
+                return error.Not64Bit;
+            }
+            if ((ehdr.e_ident[@as(usize, @intCast(elf.EI_DATA))] != elf.ELFDATA2LSB)) {
+                return error.NotLittleEndian;
+            }
+            var data = try std.array_list.Managed(u8).initCapacity(allocator, elf_data.len);
+            _ = &data;
+            errdefer {
+            _ = data.deinit();
+            }
+            _ = try data.appendSlice(elf_data);
+            var res = try allocator.create(ElfFile);
+            _ = &res;
+            errdefer {
+            _ = allocator.destroy(res);
+            }
+            {
+                res.* = ElfFile{ .data = data, .allocator = allocator };
+            }
+            return res;
+    }
+
+pub fn deinit(self: *ElfFile) void {
+            _ = self.data.deinit();
+            _ = self.allocator.destroy(self);
+    }
+
+pub fn normalizeInterpreter(self: *ElfFile) void {
+            if (hostUsesNixStoreInterpreter()) {
+                return;
+            }
+            const ehdr = readEhdr(self.data.items);
+            const phdr_size: usize = @sizeOf(Elf64_Phdr);
+            const phdr_table_end = ((if (comptime @typeInfo(@TypeOf(ehdr.e_phoff)) == .@"enum") cp_cast_int(u64, @intFromEnum(ehdr.e_phoff)) else cp_cast_int(u64, ehdr.e_phoff)) +| ((if (comptime @typeInfo(@TypeOf(ehdr.e_phnum)) == .@"enum") cp_cast_int(u64, @intFromEnum(ehdr.e_phnum)) else cp_cast_int(u64, ehdr.e_phnum)) * (if (comptime @typeInfo(@TypeOf(phdr_size)) == .@"enum") cp_cast_int(u64, @intFromEnum(phdr_size)) else cp_cast_int(u64, phdr_size))));
+            if ((phdr_table_end > self.data.items.len)) {
+                return;
+            }
+            var i: usize = 0;
+            _ = &i;
+            while ((i < ehdr.e_phnum)) : (i = (i + 1)) {
+                const phdr_offset = ((if (comptime @typeInfo(@TypeOf(ehdr.e_phoff)) == .@"enum") cp_cast_int(usize, @intFromEnum(ehdr.e_phoff)) else cp_cast_int(usize, ehdr.e_phoff)) + (i * phdr_size));
+                const phdr = (blk: {
+                break :blk (std.mem.bytesAsValue(Elf64_Phdr, self.data.items[phdr_offset..][0..phdr_size])).*;
+
+});
+                if ((phdr.p_type != elf.PT_INTERP)) {
+                    continue;
+                }
+                const interp_offset = (if (comptime @typeInfo(@TypeOf(phdr.p_offset)) == .@"enum") cp_cast_int(usize, @intFromEnum(phdr.p_offset)) else cp_cast_int(usize, phdr.p_offset));
+                const interp_filesz = (if (comptime @typeInfo(@TypeOf(phdr.p_filesz)) == .@"enum") cp_cast_int(usize, @intFromEnum(phdr.p_filesz)) else cp_cast_int(usize, phdr.p_filesz));
+                if (((interp_offset + interp_filesz) > self.data.items.len)) {
+                    return;
+                }
+                const interp_region = self.data.items[interp_offset..][0..interp_filesz];
+                const current = std.mem.sliceTo(interp_region, 0);
+                if (((!bun.strings.hasPrefixComptime(current, "/nix/store/")) and (!bun.strings.hasPrefixComptime(current, "/gnu/store/")))) {
+                    return;
+                }
+                const last_slash = ((std.mem.lastIndexOfScalar(u8, current, 47)) orelse { return; });
+                const basename = current[(last_slash + 1)..];
+                const replacement = ((lookupInterpReplacement(basename)) orelse { return; });
+                if (((replacement.len + 1) > interp_filesz)) {
+                    return;
+                }
+                _ = log("rewriting PT_INTERP {s} -> {s}", .{ current, replacement });
+                _ = @memcpy(interp_region[0..replacement.len], replacement);
+                _ = @memset(interp_region[replacement.len..], 0);
+                const new_size: u64 = (replacement.len + 1);
+                _ = std.mem.writeInt(u64, self.data.items[(phdr_offset + 32)..][0..8], new_size, .little);
+                _ = std.mem.writeInt(u64, self.data.items[(phdr_offset + 40)..][0..8], new_size, .little);
+                _ = self.updateInterpSectionSize(ehdr, new_size);
+                return;
+            }
+    }
+
+pub fn updateInterpSectionSize(self: *ElfFile, ehdr: Elf64_Ehdr, new_size: u64) void {
+            const shdr_size: usize = @sizeOf(Elf64_Shdr);
+            const shnum = ehdr.e_shnum;
+            if (((shnum == 0) or (ehdr.e_shstrndx >= shnum))) {
+                return;
+            }
+            const shdr_table_end = ((if (comptime @typeInfo(@TypeOf(ehdr.e_shoff)) == .@"enum") cp_cast_int(u64, @intFromEnum(ehdr.e_shoff)) else cp_cast_int(u64, ehdr.e_shoff)) +| ((if (comptime @typeInfo(@TypeOf(shnum)) == .@"enum") cp_cast_int(u64, @intFromEnum(shnum)) else cp_cast_int(u64, shnum)) * (if (comptime @typeInfo(@TypeOf(shdr_size)) == .@"enum") cp_cast_int(u64, @intFromEnum(shdr_size)) else cp_cast_int(u64, shdr_size))));
+            if ((shdr_table_end > self.data.items.len)) {
+                return;
+            }
+            const strtab_shdr = self.readShdr(ehdr.e_shoff, ehdr.e_shstrndx);
+            const strtab_end = (strtab_shdr.sh_offset +| strtab_shdr.sh_size);
+            if ((strtab_end > self.data.items.len)) {
+                return;
+            }
+            const strtab = self.data.items[(if (comptime @typeInfo(@TypeOf(strtab_shdr.sh_offset)) == .@"enum") cp_cast_int(usize, @intFromEnum(strtab_shdr.sh_offset)) else cp_cast_int(usize, strtab_shdr.sh_offset))..][0..(if (comptime @typeInfo(@TypeOf(strtab_shdr.sh_size)) == .@"enum") cp_cast_int(usize, @intFromEnum(strtab_shdr.sh_size)) else cp_cast_int(usize, strtab_shdr.sh_size))];
+            var i: usize = 0;
+            _ = &i;
+            while ((i < shnum)) : (i = (i + 1)) {
+                const shdr = self.readShdr(ehdr.e_shoff, (if (comptime @typeInfo(@TypeOf(i)) == .@"enum") cp_cast_int(u16, @intFromEnum(i)) else cp_cast_int(u16, i)));
+                if ((shdr.sh_name >= strtab.len)) {
+                    continue;
+                }
+                const name = std.mem.sliceTo(strtab[shdr.sh_name..], 0);
+                if ((!bun.strings.eqlComptime(name, ".interp"))) {
+                    continue;
+                }
+                const shdr_offset = ((if (comptime @typeInfo(@TypeOf(ehdr.e_shoff)) == .@"enum") cp_cast_int(usize, @intFromEnum(ehdr.e_shoff)) else cp_cast_int(usize, ehdr.e_shoff)) + (i * shdr_size));
+                _ = std.mem.writeInt(u64, self.data.items[(shdr_offset + 32)..][0..8], new_size, .little);
+                return;
+            }
+    }
+
+pub fn writeBunSection(self: *ElfFile, payload: []const u8) !void {
+            const ehdr = readEhdr(self.data.items);
+            const bun_section = try self.findBunSection(ehdr);
+            const bun_section_offset = bun_section.file_offset;
+            const page_size = ElfFile.pageSize(ehdr);
+            const header_size: u64 = @sizeOf(u64);
+            const new_content_size: u64 = (header_size + payload.len);
+            const aligned_new_size = alignUp(new_content_size, page_size);
+            const phdr_size: usize = @sizeOf(Elf64_Phdr);
+            var rw_phdr_index: ?usize = null;
+            _ = &rw_phdr_index;
+            var rw_phdr: Elf64_Phdr = undefined;
+            _ = &rw_phdr;
+            var max_vaddr_end: u64 = 0;
+            _ = &max_vaddr_end;
+            var i: usize = 0;
+            _ = &i;
+            while ((i < ehdr.e_phnum)) : (i = (i + 1)) {
+                const phdr_offset = ((if (comptime @typeInfo(@TypeOf(ehdr.e_phoff)) == .@"enum") cp_cast_int(usize, @intFromEnum(ehdr.e_phoff)) else cp_cast_int(usize, ehdr.e_phoff)) + (i * phdr_size));
+                const phdr = (blk: {
+                break :blk (std.mem.bytesAsValue(Elf64_Phdr, self.data.items[phdr_offset..][0..phdr_size])).*;
+
+});
+                if ((phdr.p_type != elf.PT_LOAD)) {
+                    continue;
+                }
+                const vaddr_end = (phdr.p_vaddr + phdr.p_memsz);
+                if ((vaddr_end > max_vaddr_end)) {
+                    max_vaddr_end = vaddr_end;
+                }
+                if ((((phdr.p_flags & elf.PF_W) != 0) and (rw_phdr_index == null))) {
+                    rw_phdr_index = i;
+                    rw_phdr = phdr;
+                }
+            }
+            const rw_index = ((rw_phdr_index) orelse { return error.NoWritableLoadSegment; });
+            const new_vaddr = alignUp(max_vaddr_end, page_size);
+            const offset_in_segment = (new_vaddr - rw_phdr.p_vaddr);
+            const new_file_offset = (rw_phdr.p_offset + offset_in_segment);
+            if ((new_vaddr < (rw_phdr.p_vaddr + rw_phdr.p_memsz))) {
+                return error.NewVaddrCollides;
+            }
+            const old_rw_file_end = (rw_phdr.p_offset + rw_phdr.p_filesz);
+            const old_file_size: u64 = self.data.items.len;
+            if ((old_rw_file_end > old_file_size)) {
+                return error.InvalidElfFile;
+            }
+            const move_src_start: u64 = old_rw_file_end;
+            const move_src_end: u64 = old_file_size;
+            const moved_tail_size: u64 = (move_src_end - move_src_start);
+            const move_dst_start: u64 = (new_file_offset + aligned_new_size);
+            const move_dst_end: u64 = (move_dst_start + moved_tail_size);
+            const total_new_size: u64 = move_dst_end;
+            _ = try self.data.ensureTotalCapacity((if (comptime @typeInfo(@TypeOf(total_new_size)) == .@"enum") cp_cast_int(usize, @intFromEnum(total_new_size)) else cp_cast_int(usize, total_new_size)));
+            self.data.items.len = (if (comptime @typeInfo(@TypeOf(total_new_size)) == .@"enum") cp_cast_int(usize, @intFromEnum(total_new_size)) else cp_cast_int(usize, total_new_size));
+            if ((moved_tail_size != 0)) {
+                _ = bun.memmove(self.data.items[(if (comptime @typeInfo(@TypeOf(move_dst_start)) == .@"enum") cp_cast_int(usize, @intFromEnum(move_dst_start)) else cp_cast_int(usize, move_dst_start))..(if (comptime @typeInfo(@TypeOf(move_dst_end)) == .@"enum") cp_cast_int(usize, @intFromEnum(move_dst_end)) else cp_cast_int(usize, move_dst_end))], self.data.items[(if (comptime @typeInfo(@TypeOf(move_src_start)) == .@"enum") cp_cast_int(usize, @intFromEnum(move_src_start)) else cp_cast_int(usize, move_src_start))..(if (comptime @typeInfo(@TypeOf(move_src_end)) == .@"enum") cp_cast_int(usize, @intFromEnum(move_src_end)) else cp_cast_int(usize, move_src_end))]);
+            }
+            _ = @memset(self.data.items[(if (comptime @typeInfo(@TypeOf(move_src_start)) == .@"enum") cp_cast_int(usize, @intFromEnum(move_src_start)) else cp_cast_int(usize, move_src_start))..(if (comptime @typeInfo(@TypeOf(new_file_offset)) == .@"enum") cp_cast_int(usize, @intFromEnum(new_file_offset)) else cp_cast_int(usize, new_file_offset))], 0);
+            _ = std.mem.writeInt(u64, self.data.items[(if (comptime @typeInfo(@TypeOf(new_file_offset)) == .@"enum") cp_cast_int(usize, @intFromEnum(new_file_offset)) else cp_cast_int(usize, new_file_offset))..][0..8], (if (comptime @typeInfo(@TypeOf(payload.len)) == .@"enum") cp_cast_int(u64, @intFromEnum(payload.len)) else cp_cast_int(u64, payload.len)), .little);
+            _ = @memcpy(self.data.items[(if (comptime @typeInfo(@TypeOf((new_file_offset + header_size))) == .@"enum") cp_cast_int(usize, @intFromEnum((new_file_offset + header_size))) else cp_cast_int(usize, (new_file_offset + header_size)))..][0..payload.len], payload);
+            const payload_end = (new_file_offset + new_content_size);
+            if ((move_dst_start > payload_end)) {
+                _ = @memset(self.data.items[(if (comptime @typeInfo(@TypeOf(payload_end)) == .@"enum") cp_cast_int(usize, @intFromEnum(payload_end)) else cp_cast_int(usize, payload_end))..(if (comptime @typeInfo(@TypeOf(move_dst_start)) == .@"enum") cp_cast_int(usize, @intFromEnum(move_dst_start)) else cp_cast_int(usize, move_dst_start))], 0);
+            }
+            _ = std.mem.writeInt(u64, self.data.items[(if (comptime @typeInfo(@TypeOf(bun_section_offset)) == .@"enum") cp_cast_int(usize, @intFromEnum(bun_section_offset)) else cp_cast_int(usize, bun_section_offset))..][0..8], new_vaddr, .little);
+            const old_shdr_offset: u64 = ehdr.e_shoff;
+            const shdr_table_size = ((if (comptime @typeInfo(@TypeOf(ehdr.e_shnum)) == .@"enum") cp_cast_int(u64, @intFromEnum(ehdr.e_shnum)) else cp_cast_int(u64, ehdr.e_shnum)) * @sizeOf(Elf64_Shdr));
+            if (((old_shdr_offset < move_src_start) or ((old_shdr_offset + shdr_table_size) > move_src_end))) {
+                return error.InvalidElfFile;
+            }
+            const new_shdr_offset: u64 = (old_shdr_offset + (move_dst_start - move_src_start));
+            _ = self.writeEhdrShoff(new_shdr_offset);
+            const shnum = ehdr.e_shnum;
+            var sh_idx: usize = 0;
+            _ = &sh_idx;
+            while ((sh_idx < shnum)) : (sh_idx = (sh_idx + 1)) {
+                const shdr_file_offset: u64 = (new_shdr_offset + ((if (comptime @typeInfo(@TypeOf(sh_idx)) == .@"enum") cp_cast_int(u64, @intFromEnum(sh_idx)) else cp_cast_int(u64, sh_idx)) * @sizeOf(Elf64_Shdr)));
+                const shdr_bytes = self.data.items[(if (comptime @typeInfo(@TypeOf(shdr_file_offset)) == .@"enum") cp_cast_int(usize, @intFromEnum(shdr_file_offset)) else cp_cast_int(usize, shdr_file_offset))..][0..@sizeOf(Elf64_Shdr)];
+                var shdr = (blk: {
+                break :blk (std.mem.bytesAsValue(Elf64_Shdr, shdr_bytes)).*;
+
+});
+                _ = &shdr;
+                if ((sh_idx == bun_section.section_index)) {
+                    shdr.sh_offset = new_file_offset;
+                    shdr.sh_size = new_content_size;
+                    shdr.sh_addr = new_vaddr;
+                } else {
+                    if ((((shdr.sh_type != elf.SHT_NOBITS) and (shdr.sh_offset >= move_src_start)) and (shdr.sh_offset < move_src_end))) {
+                        shdr.sh_offset = (shdr.sh_offset + (move_dst_start - move_src_start));
+                    }
+                }
+                const shdr_const: Elf64_Shdr = shdr;
+                _ = @memcpy(shdr_bytes, std.mem.asBytes((&shdr_const)));
+            }
+            const new_segment_size = (offset_in_segment + aligned_new_size);
+            const extended = Elf64_Phdr{ .p_type = rw_phdr.p_type, .p_flags = rw_phdr.p_flags, .p_offset = rw_phdr.p_offset, .p_vaddr = rw_phdr.p_vaddr, .p_paddr = rw_phdr.p_paddr, .p_filesz = new_segment_size, .p_memsz = new_segment_size, .p_align = rw_phdr.p_align };
+            const phdr_offset = ((if (comptime @typeInfo(@TypeOf(ehdr.e_phoff)) == .@"enum") cp_cast_int(usize, @intFromEnum(ehdr.e_phoff)) else cp_cast_int(usize, ehdr.e_phoff)) + (rw_index * phdr_size));
+            _ = @memcpy(self.data.items[phdr_offset..][0..phdr_size], std.mem.asBytes((&extended)));
+    }
+
+pub fn write(self: ElfFile, writer: anytype) !void {
+            _ = try writer.writeAll(self.data.items);
+    }
+
+pub fn findBunSection(self: ElfFile, ehdr: Elf64_Ehdr) !BunSectionInfo {
+            const shdr_size: u64 = @sizeOf(Elf64_Shdr);
+            const shdr_table_offset = ehdr.e_shoff;
+            const shnum = ehdr.e_shnum;
+            if ((shnum == 0)) {
+                return error.BunSectionNotFound;
+            }
+            if (((shdr_table_offset + ((if (comptime @typeInfo(@TypeOf(shnum)) == .@"enum") cp_cast_int(u64, @intFromEnum(shnum)) else cp_cast_int(u64, shnum)) * shdr_size)) > self.data.items.len)) {
+                return error.InvalidElfFile;
+            }
+            const shstrtab_shdr = self.readShdr(shdr_table_offset, ehdr.e_shstrndx);
+            const strtab_offset = shstrtab_shdr.sh_offset;
+            const strtab_size = shstrtab_shdr.sh_size;
+            if (((strtab_offset + strtab_size) > self.data.items.len)) {
+                return error.InvalidElfFile;
+            }
+            const strtab = self.data.items[(if (comptime @typeInfo(@TypeOf(strtab_offset)) == .@"enum") cp_cast_int(usize, @intFromEnum(strtab_offset)) else cp_cast_int(usize, strtab_offset))..][0..(if (comptime @typeInfo(@TypeOf(strtab_size)) == .@"enum") cp_cast_int(usize, @intFromEnum(strtab_size)) else cp_cast_int(usize, strtab_size))];
+            var i: usize = 0;
+            _ = &i;
+            while ((i < shnum)) : (i = (i + 1)) {
+                const shdr = self.readShdr(shdr_table_offset, (if (comptime @typeInfo(@TypeOf(i)) == .@"enum") cp_cast_int(u16, @intFromEnum(i)) else cp_cast_int(u16, i)));
+                const name_offset = shdr.sh_name;
+                if ((name_offset < strtab.len)) {
+                    const name = std.mem.sliceTo(strtab[name_offset..], 0);
+                    if (bun.strings.eqlComptime(name, ".bun")) {
+                        return BunSectionInfo{ .file_offset = shdr.sh_offset, .section_index = (if (comptime @typeInfo(@TypeOf(i)) == .@"enum") cp_cast_int(u16, @intFromEnum(i)) else cp_cast_int(u16, i)) };
+                    }
+                }
+            }
+            return error.BunSectionNotFound;
+    }
+
+pub fn readShdr(self: ElfFile, table_offset: u64, index: u16) Elf64_Shdr {
+            const offset = (table_offset + ((if (comptime @typeInfo(@TypeOf(index)) == .@"enum") cp_cast_int(u64, @intFromEnum(index)) else cp_cast_int(u64, index)) * @sizeOf(Elf64_Shdr)));
+            return (blk: {
+            break :blk (std.mem.bytesAsValue(Elf64_Shdr, self.data.items[(if (comptime @typeInfo(@TypeOf(offset)) == .@"enum") cp_cast_int(usize, @intFromEnum(offset)) else cp_cast_int(usize, offset))..][0..@sizeOf(Elf64_Shdr)])).*;
+
+});
+    }
+
+pub fn writeEhdrShoff(self: *ElfFile, new_shoff: u64) void {
+            _ = std.mem.writeInt(u64, self.data.items[40..][0..8], new_shoff, .little);
+    }
+
+pub fn pageSize(ehdr: Elf64_Ehdr) u64 {
+            return (switch (ehdr.e_machine) {
+.AARCH64, .PPC64 => 65536,
+else => 4096,
+});
+    }
+};
+
+
+pub fn lookupInterpReplacement(basename: []const u8) ?[]const u8 {
+        if (bun.strings.eqlComptime(basename, "ld-linux-x86-64.so.2")) {
+            return "/lib64/ld-linux-x86-64.so.2";
+        }
+        if (bun.strings.eqlComptime(basename, "ld-linux-aarch64.so.1")) {
+            return "/lib/ld-linux-aarch64.so.1";
+        }
+        if (bun.strings.eqlComptime(basename, "ld-musl-x86_64.so.1")) {
+            return "/lib/ld-musl-x86_64.so.1";
+        }
+        if (bun.strings.eqlComptime(basename, "ld-musl-aarch64.so.1")) {
+            return "/lib/ld-musl-aarch64.so.1";
+        }
+        return null;
+}
+
+pub fn readEhdr(data: []const u8) Elf64_Ehdr {
+        return (blk: {
+        break :blk (std.mem.bytesAsValue(Elf64_Ehdr, data[0..@sizeOf(Elf64_Ehdr)])).*;
+
+});
+}
+
+pub fn alignUp(value: u64, alignment: u64) u64 {
+        if ((alignment == 0)) {
+            return value;
+        }
+        const mask = (alignment - 1);
+        return ((value + mask) & (~mask));
+}
+
+pub fn checkNixHost() bool {
+        if (bun.env_var.BUN_DEBUG_FORCE_NIX_HOST.get()) {
+            return true;
+        }
+        if (selfInterpIsNixStore()) {
+            return true;
+        }
+        if (bun.sys.exists("/etc/NIXOS")) {
+            return true;
+        }
+        if (bun.sys.directoryExistsAt(bun.FD.cwd(), "/gnu/store").unwrapOr(false)) {
+            return true;
+        }
+        return false;
+}
+
+pub fn selfInterpIsNixStore() bool {
+        var buf: [4096]u8 = undefined;
+        _ = &buf;
+        const fd = (switch (bun.sys.open("/proc/self/exe", bun.O.RDONLY, 0)) {
+.result => |fd_val| fd_val,
+.err => {
+return false;
+},
+});
+        defer {
+        _ = fd.close();
+        }
+        const n = (switch (bun.sys.read(fd, (&buf))) {
+.result => |n_val| n_val,
+.err => {
+return false;
+},
+});
+        if ((n < @sizeOf(Elf64_Ehdr))) {
+            return false;
+        }
+        const data = buf[0..n];
+        if ((!bun.strings.eqlComptime(data[0..4], "\x7fELF"))) {
+            return false;
+        }
+        if ((data[@as(usize, @intCast(elf.EI_CLASS))] != elf.ELFCLASS64)) {
+            return false;
+        }
+        if ((data[@as(usize, @intCast(elf.EI_DATA))] != elf.ELFDATA2LSB)) {
+            return false;
+        }
+        const ehdr = readEhdr(data);
+        const phdr_size: usize = @sizeOf(Elf64_Phdr);
+        const table_end = ((if (comptime @typeInfo(@TypeOf(ehdr.e_phoff)) == .@"enum") cp_cast_int(u64, @intFromEnum(ehdr.e_phoff)) else cp_cast_int(u64, ehdr.e_phoff)) +| ((if (comptime @typeInfo(@TypeOf(ehdr.e_phnum)) == .@"enum") cp_cast_int(u64, @intFromEnum(ehdr.e_phnum)) else cp_cast_int(u64, ehdr.e_phnum)) * (if (comptime @typeInfo(@TypeOf(phdr_size)) == .@"enum") cp_cast_int(u64, @intFromEnum(phdr_size)) else cp_cast_int(u64, phdr_size))));
+        if ((table_end > data.len)) {
+            return false;
+        }
+        var i: usize = 0;
+        _ = &i;
+        while ((i < ehdr.e_phnum)) : (i = (i + 1)) {
+            const off = ((if (comptime @typeInfo(@TypeOf(ehdr.e_phoff)) == .@"enum") cp_cast_int(usize, @intFromEnum(ehdr.e_phoff)) else cp_cast_int(usize, ehdr.e_phoff)) + (i * phdr_size));
+            const phdr = (blk: {
+            break :blk (std.mem.bytesAsValue(Elf64_Phdr, data[off..][0..phdr_size])).*;
+
+});
+            if ((phdr.p_type != elf.PT_INTERP)) {
+                continue;
+            }
+            const interp_off = (if (comptime @typeInfo(@TypeOf(phdr.p_offset)) == .@"enum") cp_cast_int(usize, @intFromEnum(phdr.p_offset)) else cp_cast_int(usize, phdr.p_offset));
+            const interp_sz = (if (comptime @typeInfo(@TypeOf(phdr.p_filesz)) == .@"enum") cp_cast_int(usize, @intFromEnum(phdr.p_filesz)) else cp_cast_int(usize, phdr.p_filesz));
+            if (((interp_off + interp_sz) > data.len)) {
+                return false;
+            }
+            const interp = std.mem.sliceTo(data[interp_off..][0..interp_sz], 0);
+            return (bun.strings.hasPrefixComptime(interp, "/nix/store/") or bun.strings.hasPrefixComptime(interp, "/gnu/store/"));
+        }
+        return false;
+}
+
+pub fn hostUsesNixStoreInterpreter() bool {
+        if ((!bun.Environment.isLinux)) {
+            return false;
+        }
+        switch (host_nix_computed.load(.acquire)) {
+1 => {
+return false;
+},
+2 => {
+return true;
+},
+else => {
+
+},
+}
+        const result = checkNixHost();
+        const store_val: u8 = (if (result) (if (comptime @typeInfo(@TypeOf(2)) == .@"enum") cp_cast_int(u8, @intFromEnum(2)) else cp_cast_int(u8, 2)) else (if (comptime @typeInfo(@TypeOf(1)) == .@"enum") cp_cast_int(u8, @intFromEnum(1)) else cp_cast_int(u8, 1)));
+        _ = host_nix_computed.store(store_val, .release);
+        return result;
+}
