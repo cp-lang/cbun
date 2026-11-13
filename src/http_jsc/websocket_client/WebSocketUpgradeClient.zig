@@ -1,1560 +1,1257 @@
-/// WebSocketUpgradeClient handles the HTTP upgrade process for WebSocket connections.
-///
-/// This module implements the client-side of the WebSocket protocol handshake as defined in RFC 6455.
-/// It manages the initial HTTP request that upgrades the connection from HTTP to WebSocket protocol.
-///
-/// The process works as follows:
-/// 1. Client sends an HTTP request with special headers indicating a WebSocket upgrade
-/// 2. Server responds with HTTP 101 Switching Protocols
-/// 3. After successful handshake, the connection is handed off to the WebSocket implementation
-///
-/// This client handles both secure (TLS) and non-secure connections.
-/// It manages connection timeouts, protocol negotiation, and error handling during the upgrade process.
-///
-/// Note: This implementation is only used during the initial connection phase.
-/// Once the WebSocket connection is established, control is passed to the WebSocket client.
-///
-/// For more information about the WebSocket handshaking process, see:
-/// - RFC 6455 (The WebSocket Protocol): https://datatracker.ietf.org/doc/html/rfc6455#section-1.3
-/// - MDN WebSocket API: https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API
-/// - WebSocket Handshake: https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers#the_websocket_handshake
-pub fn NewHTTPUpgradeClient(comptime ssl: bool) type {
-    return struct {
-        pub const RefCount = bun.ptr.RefCount(@This(), "ref_count", deinit, .{});
-        pub const ref = RefCount.ref;
-        pub const deref = RefCount.deref;
-        pub const Socket = uws.NewSocketHandler(ssl);
-
-        pub const DeflateNegotiationResult = struct {
-            enabled: bool = false,
-            params: WebSocketDeflate.Params = .{},
-        };
-
-        ref_count: RefCount,
-        tcp: Socket,
-        outgoing_websocket: ?*CppWebSocket,
-        input_body_buf: []u8 = &[_]u8{},
-        to_send: []const u8 = "",
-        read_length: usize = 0,
-        headers_buf: [128]PicoHTTP.Header = undefined,
-        body: std.ArrayListUnmanaged(u8) = .{},
-        hostname: [:0]const u8 = "",
-        poll_ref: Async.KeepAlive = Async.KeepAlive.init(),
-        state: State = .initializing,
-        subprotocols: bun.StringSet,
-
-        /// Proxy state (null when not using proxy)
-        proxy: ?WebSocketProxy = null,
-
-        // TLS options (full SSLConfig for complete TLS customization)
-        ssl_config: ?*SSLConfig = null,
-
-        /// `us_ssl_ctx_t` built from `ssl_config` when it carries a custom CA.
-        /// Heap-allocated because ownership transfers to the connected
-        /// `WebSocket` after the upgrade completes (so the `SSL_CTX` outlives
-        /// this struct).
-        secure: ?*uws.SslCtx = null,
-
-        // Expected Sec-WebSocket-Accept value for handshake validation per RFC 6455 §4.2.2.
-        // This is base64(SHA-1(Sec-WebSocket-Key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")).
-        expected_accept: [28]u8 = .{0} ** 28,
-
-        // Whether the upgrade request offered `permessage-deflate`. When this is
-        // false (opt-out via `perMessageDeflate: false`) and the server responds
-        // with a `Sec-WebSocket-Extensions` header anyway, `processResponse`
-        // fails the handshake per RFC 6455 §9.1 — matching upstream `ws`.
-        offered_permessage_deflate: bool = true,
-
-        const State = enum {
-            initializing,
-            reading,
-            failed,
-            // Proxy states
-            proxy_handshake, // Sent CONNECT, waiting for 200
-            proxy_tls_handshake, // TLS inside tunnel (for wss:// through proxy)
-            done, // WebSocket upgrade complete, forwarding data through tunnel
-        };
-
-        const HTTPClient = @This();
-
-        /// Handler set referenced by `dispatch.zig` (kind = `.ws_client_upgrade[_tls]`).
-        /// The `register()` C++ round-trip that previously installed these on a
-        /// shared `us_socket_context_t` is gone — sockets are stamped with the
-        /// kind at connect time and routed here statically.
-        pub const onOpen = handleOpen;
-        pub const onClose = handleClose;
-        pub const onData = handleData;
-        pub const onWritable = handleWritable;
-        pub const onTimeout = handleTimeout;
-        pub const onLongTimeout = handleTimeout;
-        pub const onConnectError = handleConnectError;
-        pub const onEnd = handleEnd;
-        pub const onHandshake = handleHandshake;
-
-        fn deinit(this: *HTTPClient) void {
-            this.clearData();
-            bun.debugAssert(this.tcp.isDetached());
-            bun.destroy(this);
-        }
-
-        /// On error, this returns null.
-        /// Returning null signals to the parent function that the connection failed.
-        pub fn connect(
-            global: *jsc.JSGlobalObject,
-            websocket: *CppWebSocket,
-            host: *const bun.String,
-            port: u16,
-            pathname: *const bun.String,
-            client_protocol: *const bun.String,
-            header_names: ?[*]const bun.String,
-            header_values: ?[*]const bun.String,
-            header_count: usize,
-            // Proxy parameters
-            proxy_host: ?*const bun.String,
-            proxy_port: u16,
-            proxy_authorization: ?*const bun.String,
-            proxy_header_names: ?[*]const bun.String,
-            proxy_header_values: ?[*]const bun.String,
-            proxy_header_count: usize,
-            // TLS options (full SSLConfig for complete TLS customization)
-            ssl_config: ?*SSLConfig,
-            // Whether the target URL is wss:// (separate from ssl template parameter)
-            target_is_secure: bool,
-            // Target URL authorization (Basic auth from ws://user:pass@host)
-            target_authorization: ?*const bun.String,
-            // Unix domain socket path for ws+unix:// / wss+unix:// (null for TCP)
-            unix_socket_path: ?*const bun.String,
-            // Whether to advertise `permessage-deflate` in the upgrade request
-            // (ws.WebSocket's `perMessageDeflate` option; true by default).
-            offer_permessage_deflate: bool,
-        ) callconv(.c) ?*HTTPClient {
-            const vm = global.bunVM();
-
-            bun.assert(vm.event_loop_handle != null);
-
-            // Decode all BunString inputs into UTF-8 slices. The underlying
-            // JavaScript strings may be Latin1 or UTF-16; `String.toUTF8()` either
-            // borrows the 8-bit ASCII backing (no allocation) or allocates a
-            // UTF-8 copy. All slices live until `deinit_slices()` below.
-            const allocator = bun.default_allocator;
-
-            var host_slice = host.toUTF8(allocator);
-            var pathname_slice = pathname.toUTF8(allocator);
-            var client_protocol_slice = client_protocol.toUTF8(allocator);
-
-            // Headers8Bit.init only returns Allocator.Error; handle OOM as a
-            // crash per the OOM contract instead of masking it as a connection
-            // failure.
-            const extra_headers = Headers8Bit.init(allocator, header_names, header_values, header_count) catch |err| bun.handleOom(err);
-            defer extra_headers.deinit();
-
-            defer host_slice.deinit();
-            defer pathname_slice.deinit();
-            defer client_protocol_slice.deinit();
-
-            var proxy_host_slice: ?jsc.ZigString.Slice = null;
-            defer if (proxy_host_slice) |s| s.deinit();
-            if (proxy_host) |ph| proxy_host_slice = ph.toUTF8(allocator);
-
-            var target_authorization_slice: ?jsc.ZigString.Slice = null;
-            defer if (target_authorization_slice) |s| s.deinit();
-            if (target_authorization) |ta| target_authorization_slice = ta.toUTF8(allocator);
-
-            var unix_socket_path_slice: ?jsc.ZigString.Slice = null;
-            defer if (unix_socket_path_slice) |s| s.deinit();
-            if (unix_socket_path) |usp| unix_socket_path_slice = usp.toUTF8(allocator);
-
-            const using_proxy = proxy_host != null;
-
-            // Check if user provided a custom protocol for subprotocols validation
-            var protocol_for_subprotocols: []const u8 = client_protocol_slice.slice();
-            for (extra_headers.names(), extra_headers.values()) |name, value| {
-                if (strings.eqlCaseInsensitiveASCII(name, "sec-websocket-protocol", true)) {
-                    protocol_for_subprotocols = value;
-                    break;
-                }
-            }
-
-            const request_result = buildRequestBody(
-                vm,
-                pathname_slice.slice(),
-                target_is_secure,
-                host_slice.slice(),
-                port,
-                client_protocol_slice.slice(),
-                extra_headers,
-                if (target_authorization_slice) |s| s.slice() else null,
-                offer_permessage_deflate,
-            ) catch return null;
-            const body = request_result.body;
-
-            // Build proxy state if using proxy
-            // The CONNECT request is built using local variables for proxy_authorization and proxy_headers
-            // which are freed immediately after building the request (not stored on the client).
-            var proxy_state: ?WebSocketProxy = null;
-            var connect_request: []u8 = &[_]u8{};
-            if (using_proxy) {
-                // Parse proxy authorization (temporary, freed after building CONNECT request)
-                var proxy_auth_slice: ?[]const u8 = null;
-                var proxy_auth_decoded: ?jsc.ZigString.Slice = null;
-                defer if (proxy_auth_decoded) |s| s.deinit();
-
-                if (proxy_authorization) |auth| {
-                    proxy_auth_decoded = auth.toUTF8(allocator);
-                    proxy_auth_slice = proxy_auth_decoded.?.slice();
-                }
-
-                // Parse proxy headers (temporary, freed after building CONNECT request)
-                var proxy_hdrs: ?Headers = null;
-                defer if (proxy_hdrs) |*hdrs| hdrs.deinit();
-
-                // Headers8Bit.init / toHeaders only return Allocator.Error;
-                // OOM should crash, not silently become a connection failure.
-                const proxy_extra_headers = Headers8Bit.init(allocator, proxy_header_names, proxy_header_values, proxy_header_count) catch |err| bun.handleOom(err);
-                defer proxy_extra_headers.deinit();
-
-                if (proxy_header_count > 0) {
-                    proxy_hdrs = proxy_extra_headers.toHeaders(allocator) catch |err| bun.handleOom(err);
-                }
-
-                // Build CONNECT request (proxy_auth and proxy_hdrs are freed by defer after this).
-                // buildConnectRequest only returns Allocator.Error; crash on OOM.
-                connect_request = buildConnectRequest(
-                    host_slice.slice(),
-                    port,
-                    proxy_auth_slice,
-                    proxy_hdrs,
-                ) catch |err| bun.handleOom(err);
-
-                // Duplicate target_host (needed for SNI during TLS handshake).
-                // allocator.dupe only returns Allocator.Error; crash on OOM.
-                const target_host_dup = allocator.dupe(u8, host_slice.slice()) catch |err| bun.handleOom(err);
-
-                proxy_state = WebSocketProxy.init(
-                    target_host_dup,
-                    // Use target_is_secure from C++, not ssl template parameter
-                    // (ssl may be true for HTTPS proxy even with ws:// target)
-                    target_is_secure,
-                    body,
-                );
-            }
-
-            var client = bun.new(HTTPClient, .{
-                .ref_count = .init(),
-                .tcp = .{ .socket = .{ .detached = {} } },
-                .outgoing_websocket = websocket,
-                .input_body_buf = if (using_proxy) connect_request else body,
-                .state = .initializing,
-                .proxy = proxy_state,
-                .expected_accept = request_result.expected_accept,
-                .offered_permessage_deflate = offer_permessage_deflate,
-                .subprotocols = brk: {
-                    var subprotocols = bun.StringSet.init(bun.default_allocator);
-                    var it = bun.http.HeaderValueIterator.init(protocol_for_subprotocols);
-                    while (it.next()) |protocol| {
-                        subprotocols.insert(protocol) catch |e| bun.handleOom(e);
-                    }
-                    break :brk subprotocols;
-                },
-            });
-
-            // Store TLS config if provided (ownership transferred to client)
-            client.ssl_config = ssl_config;
-
-            const display_host_ = if (using_proxy) proxy_host_slice.?.slice() else host_slice.slice();
-            const connect_port = if (using_proxy) proxy_port else port;
-
-            client.poll_ref.ref(vm);
-            const display_host = if (bun.FeatureFlags.hardcode_localhost_to_127_0_0_1 and strings.eqlComptime(display_host_, "localhost"))
-                "127.0.0.1"
-            else
-                display_host_;
-
-            log("connect: ssl={}, has_ssl_config={}, using_proxy={}", .{ ssl, ssl_config != null, using_proxy });
-
-            const group = vm.rareData().wsUpgradeGroup(vm, ssl);
-            const kind: uws.SocketKind = if (ssl) .ws_client_upgrade_tls else .ws_client_upgrade;
-            // Default-TLS shares the VM-wide client SSL_CTX; a custom CA
-            // builds a per-connection one that the connected WebSocket
-            // inherits so it isn't rebuilt on adopt.
-            const secure_ptr: ?*uws.SslCtx = if (comptime ssl) brk: {
-                if (ssl_config) |config| if (config.requires_custom_request_ctx) {
-                    var err: uws.create_bun_socket_error_t = .none;
-                    // Per-VM weak cache: every `new WebSocket(wss://, {tls:{ca}})`
-                    // with the same CA shares one CTX with each other and with
-                    // any `Bun.connect`/Postgres/etc. that named it.
-                    const ctx = vm.rareData().sslCtxCache().getOrCreateOpts(config.asUSocketsForClientVerification(), &err) orelse {
-                        // Do NOT fall through to the default trust store — the
-                        // user passed an explicit CA/cert and BoringSSL
-                        // rejected it. Swapping in system roots would let the
-                        // connection succeed against a host the user didn't
-                        // trust. The C++ caller emits an `error` event on null.
-                        log("createSSLContext failed for WebSocket: {s}", .{@tagName(err)});
-                        client.poll_ref.unref(vm);
-                        client.deref();
-                        return null;
-                    };
-                    // Owned ref; transferred to the connected WebSocket on
-                    // upgrade, freed in `deinit` if we never get that far.
-                    client.secure = ctx;
-                    break :brk ctx;
-                };
-                break :brk vm.rareData().defaultClientSslCtx();
-            } else null;
-
-            // Unix domain socket path (ws+unix:// / wss+unix://)
-            if (unix_socket_path_slice) |usp| {
-                if (Socket.connectUnixGroup(
-                    group,
-                    kind,
-                    secure_ptr,
-                    usp.slice(),
-                    client,
-                    false,
-                )) |socket| {
-                    client.tcp = socket;
-                    if (client.state == .failed) {
-                        client.deref();
-                        return null;
-                    }
-                    bun.analytics.Features.WebSocket += 1;
-
-                    if (comptime ssl) {
-                        // SNI uses the URL host (defaulted to "localhost" in
-                        // C++ when absent), mirroring the TCP path below. A
-                        // user-supplied Host header does NOT affect SNI; use
-                        // `tls: { checkServerIdentity }` or put the hostname
-                        // in the URL (wss+unix://name/path) to verify against
-                        // a specific certificate name.
-                        if (host_slice.slice().len > 0 and !strings.isIPAddress(host_slice.slice())) {
-                            client.hostname = bun.default_allocator.dupeZ(u8, host_slice.slice()) catch "";
-                        }
-                    }
-
-                    client.tcp.timeout(120);
-                    client.state = .reading;
-                    // +1 for cpp_websocket
-                    client.ref();
-                    return client;
-                } else |_| {
-                    client.deref();
-                }
-                return null;
-            }
-
-            if (Socket.connectGroup(
-                group,
-                kind,
-                secure_ptr,
-                display_host,
-                connect_port,
-                client,
-                false,
-            )) |sock| {
-                client.tcp = sock;
-                const out = client;
-                // I don't think this case gets reached.
-                if (out.state == .failed) {
-                    client.deref();
-                    return null;
-                }
-                bun.analytics.Features.WebSocket += 1;
-
-                if (comptime ssl) {
-                    // SNI for the outer TLS socket must use the host we actually
-                    // dialed. For HTTPS proxy connections, that's the proxy host,
-                    // not the wss:// target.
-                    if (!strings.isIPAddress(display_host_)) {
-                        out.hostname = bun.default_allocator.dupeZ(u8, display_host_) catch "";
-                    }
-                }
-
-                out.tcp.timeout(120);
-                out.state = .reading;
-                // +1 for cpp_websocket
-                out.ref();
-                return out;
-            } else |_| {
-                client.deref();
-            }
-
-            return null;
-        }
-
-        pub fn clearInput(this: *HTTPClient) void {
-            if (this.input_body_buf.len > 0) bun.default_allocator.free(this.input_body_buf);
-            this.input_body_buf.len = 0;
-        }
-        pub fn clearData(this: *HTTPClient) void {
-            this.poll_ref.unref(jsc.VirtualMachine.get());
-
-            this.subprotocols.clearAndFree();
-            this.clearInput();
-            this.body.clearAndFree(bun.default_allocator);
-
-            if (this.hostname.len > 0) {
-                bun.default_allocator.free(this.hostname);
-                this.hostname = "";
-            }
-
-            // Clean up proxy state. Null the field and detach the tunnel's
-            // back-reference before deinit so that SSLWrapper shutdown callbacks
-            // cannot re-enter clearData() while the proxy is still reachable.
-            if (this.proxy != null) {
-                var proxy = this.proxy.?;
-                this.proxy = null;
-                if (proxy.getTunnel()) |tunnel| {
-                    tunnel.detachUpgradeClient();
-                }
-                proxy.deinit();
-            }
-            if (this.ssl_config) |config| {
-                config.deinit();
-                bun.default_allocator.destroy(config);
-                this.ssl_config = null;
-            }
-            if (this.secure) |s| {
-                bun.BoringSSL.c.SSL_CTX_free(s);
-                this.secure = null;
-            }
-        }
-        pub fn cancel(this: *HTTPClient) callconv(.c) void {
-            this.clearData();
-
-            // Either of the below two operations - closing the TCP socket or clearing the C++ reference could trigger a deref
-            // Therefore, we need to make sure the `this` pointer is valid until the end of the function.
-            this.ref();
-            defer this.deref();
-
-            // The C++ end of the socket is no longer holding a reference to this, so we must clear it.
-            if (this.outgoing_websocket != null) {
-                this.outgoing_websocket = null;
-                this.deref();
-            }
-
-            // no need to be .failure we still wanna to send pending SSL buffer + close_notify
-            if (comptime ssl) {
-                this.tcp.close(.normal);
-            } else {
-                this.tcp.close(.failure);
-            }
-        }
-
-        pub fn fail(this: *HTTPClient, code: ErrorCode) void {
-            log("onFail: {s}", .{@tagName(code)});
-            jsc.markBinding(@src());
-            this.dispatchAbruptClose(code);
-
-            if (comptime ssl) {
-                this.tcp.close(.normal);
-            } else {
-                this.tcp.close(.failure);
-            }
-        }
-
-        fn dispatchAbruptClose(this: *HTTPClient, code: ErrorCode) void {
-            if (this.outgoing_websocket) |ws| {
-                this.outgoing_websocket = null;
-                ws.didAbruptClose(code);
-                this.deref();
-            }
-        }
-
-        pub fn handleClose(this: *HTTPClient, _: Socket, _: c_int, _: ?*anyopaque) void {
-            log("onClose", .{});
-            jsc.markBinding(@src());
-            this.clearData();
-            this.tcp.detach();
-            this.dispatchAbruptClose(ErrorCode.ended);
-
-            this.deref();
-        }
-
-        pub fn terminate(this: *HTTPClient, code: ErrorCode) void {
-            this.fail(code);
-
-            // We cannot access the pointer after fail is called.
-        }
-
-        pub fn handleHandshake(this: *HTTPClient, socket: Socket, success: i32, ssl_error: uws.us_bun_verify_error_t) void {
-            log("onHandshake({d}) ssl_error.error_no={d}", .{ success, ssl_error.error_no });
-
-            const handshake_success = if (success == 1) true else false;
-            var reject_unauthorized = false;
-            if (this.outgoing_websocket) |ws| {
-                reject_unauthorized = ws.rejectUnauthorized();
-            }
-
-            if (handshake_success) {
-                // handshake completed but we may have ssl errors
-                if (reject_unauthorized) {
-                    // only reject the connection if reject_unauthorized == true
-                    if (ssl_error.error_no != 0) {
-                        log("TLS handshake failed: ssl_error={d}, has_custom_ctx={}", .{ ssl_error.error_no, this.secure != null });
-                        this.fail(ErrorCode.tls_handshake_failed);
-                        return;
-                    }
-                    const ssl_ptr = @as(*BoringSSL.c.SSL, @ptrCast(socket.getNativeHandle()));
-                    if (BoringSSL.c.SSL_get_servername(ssl_ptr, 0)) |servername| {
-                        const hostname = servername[0..bun.len(servername)];
-                        if (!BoringSSL.checkServerIdentity(ssl_ptr, hostname)) {
-                            this.fail(ErrorCode.tls_handshake_failed);
-                        }
-                    }
-                }
-            } else {
-                // if we are here is because server rejected us, and the error_no is the cause of this
-                // if we set reject_unauthorized == false this means the server requires custom CA aka NODE_EXTRA_CA_CERTS
-                this.fail(ErrorCode.tls_handshake_failed);
-            }
-        }
-
-        pub fn handleOpen(this: *HTTPClient, socket: Socket) void {
-            log("onOpen", .{});
-            this.tcp = socket;
-
-            bun.assert(this.input_body_buf.len > 0);
-            bun.assert(this.to_send.len == 0);
-
-            if (comptime ssl) {
-                if (this.hostname.len > 0) {
-                    if (socket.getNativeHandle()) |handle| {
-                        handle.configureHTTPClient(this.hostname);
-                    }
-                    bun.default_allocator.free(this.hostname);
-                    this.hostname = "";
-                }
-            }
-
-            // If using proxy, set state to proxy_handshake
-            if (this.proxy != null) {
-                this.state = .proxy_handshake;
-            }
-
-            const wrote = socket.write(this.input_body_buf);
-            if (wrote < 0) {
-                this.terminate(ErrorCode.failed_to_write);
-                return;
-            }
-
-            this.to_send = this.input_body_buf[@as(usize, @intCast(wrote))..];
-        }
-
-        pub fn isSameSocket(this: *HTTPClient, socket: Socket) bool {
-            return socket.socket.eq(this.tcp.socket);
-        }
-
-        pub fn handleData(this: *HTTPClient, socket: Socket, data: []const u8) void {
-            log("onData", .{});
-
-            // For tunnel mode after successful upgrade, forward all data to the tunnel
-            // The tunnel will decrypt and pass to the WebSocket client
-            if (this.state == .done) {
-                if (this.proxy) |*p| {
-                    if (p.getTunnel()) |tunnel| {
-                        // Ref the tunnel to keep it alive during this call
-                        // (in case the WebSocket client closes during processing)
-                        tunnel.ref();
-                        defer tunnel.deref();
-                        tunnel.receive(data);
-                    }
-                }
-                return;
-            }
-
-            if (this.outgoing_websocket == null) {
-                this.state = .failed;
-                this.clearData();
-                socket.close(.failure);
-                return;
-            }
-            this.ref();
-            defer this.deref();
-
-            bun.assert(this.isSameSocket(socket));
-
-            if (comptime Environment.allow_assert)
-                bun.assert(!socket.isShutdown());
-
-            // Handle proxy handshake response
-            if (this.state == .proxy_handshake) {
-                this.handleProxyResponse(socket, data);
-                return;
-            }
-
-            // Route through proxy tunnel if TLS handshake is in progress or complete
-            if (this.proxy) |*p| {
-                if (p.getTunnel()) |tunnel| {
-                    tunnel.receive(data);
-                    return;
-                }
-            }
-
-            var body = data;
-            if (this.body.items.len > 0) {
-                bun.handleOom(this.body.appendSlice(bun.default_allocator, data));
-                body = this.body.items;
-            }
-
-            const is_first = this.body.items.len == 0;
-            const http_101 = "HTTP/1.1 101 ";
-            if (is_first and body.len > http_101.len) {
-                // fail early if we receive a non-101 status code
-                if (!strings.hasPrefixComptime(body, http_101)) {
-                    this.terminate(ErrorCode.expected_101_status_code);
-                    return;
-                }
-            }
-
-            const response = PicoHTTP.Response.parse(body, &this.headers_buf) catch |err| {
-                switch (err) {
-                    error.Malformed_HTTP_Response => {
-                        this.terminate(ErrorCode.invalid_response);
-                        return;
-                    },
-                    error.ShortRead => {
-                        if (this.body.items.len == 0) {
-                            bun.handleOom(this.body.appendSlice(bun.default_allocator, data));
-                        }
-                        return;
-                    },
-                }
-            };
-
-            this.processResponse(response, body[@as(usize, @intCast(response.bytes_read))..]);
-        }
-
-        fn handleProxyResponse(this: *HTTPClient, socket: Socket, data: []const u8) void {
-            log("handleProxyResponse", .{});
-
-            var body = data;
-            if (this.body.items.len > 0) {
-                bun.handleOom(this.body.appendSlice(bun.default_allocator, data));
-                body = this.body.items;
-            }
-
-            // Check for HTTP 200 response from proxy
-            const is_first = this.body.items.len == 0;
-            const http_200 = "HTTP/1.1 200 ";
-            const http_200_alt = "HTTP/1.0 200 ";
-            if (is_first and body.len > http_200.len) {
-                if (!strings.hasPrefixComptime(body, http_200) and !strings.hasPrefixComptime(body, http_200_alt)) {
-                    // Proxy connection failed
-                    this.terminate(ErrorCode.proxy_connect_failed);
-                    return;
-                }
-            }
-
-            // Parse the response to find the end of headers
-            const response = PicoHTTP.Response.parse(body, &this.headers_buf) catch |err| {
-                switch (err) {
-                    error.Malformed_HTTP_Response => {
-                        this.terminate(ErrorCode.invalid_response);
-                        return;
-                    },
-                    error.ShortRead => {
-                        if (this.body.items.len == 0) {
-                            bun.handleOom(this.body.appendSlice(bun.default_allocator, data));
-                        }
-                        return;
-                    },
-                }
-            };
-
-            // Proxy returned non-200 status
-            if (response.status_code != 200) {
-                if (response.status_code == 407) {
-                    this.terminate(ErrorCode.proxy_authentication_required);
-                } else {
-                    this.terminate(ErrorCode.proxy_connect_failed);
-                }
-                return;
-            }
-
-            // Proxy tunnel established
-            log("Proxy tunnel established", .{});
-
-            // Clear the body buffer for WebSocket handshake
-            this.body.clearRetainingCapacity();
-
-            const remain_buf = body[@as(usize, @intCast(response.bytes_read))..];
-
-            // Safely unwrap proxy state - it must exist if we're in proxy_handshake state
-            const p = if (this.proxy) |*proxy| proxy else {
-                this.terminate(ErrorCode.proxy_tunnel_failed);
-                return;
-            };
-
-            // For wss:// through proxy, we need to do TLS handshake inside the tunnel
-            if (p.isTargetHttps()) {
-                this.startProxyTLSHandshake(socket, remain_buf);
-                return;
-            }
-
-            // For ws:// through proxy, send the WebSocket upgrade request
-            this.state = .reading;
-
-            // Free the CONNECT request buffer
-            if (this.input_body_buf.len > 0) {
-                bun.default_allocator.free(this.input_body_buf);
-            }
-
-            // Use the WebSocket upgrade request from proxy state
-            this.input_body_buf = p.takeWebsocketRequestBuf();
-
-            // Send the WebSocket upgrade request
-            const wrote = socket.write(this.input_body_buf);
-            if (wrote < 0) {
-                this.terminate(ErrorCode.failed_to_write);
-                return;
-            }
-
-            this.to_send = this.input_body_buf[@as(usize, @intCast(wrote))..];
-
-            // If there's remaining data after the proxy response, process it
-            if (remain_buf.len > 0) {
-                this.handleData(socket, remain_buf);
-            }
-        }
-
-        /// Start TLS handshake inside the proxy tunnel for wss:// connections
-        fn startProxyTLSHandshake(this: *HTTPClient, socket: Socket, initial_data: []const u8) void {
-            log("startProxyTLSHandshake", .{});
-
-            // Safely unwrap proxy state - it must exist if we're called from handleProxyResponse
-            const p = if (this.proxy) |*proxy| proxy else {
-                this.terminate(ErrorCode.proxy_tunnel_failed);
-                return;
-            };
-
-            // Get certificate verification setting
-            const reject_unauthorized = if (this.outgoing_websocket) |ws| ws.rejectUnauthorized() else true;
-
-            // Create proxy tunnel with all parameters
-            const tunnel = WebSocketProxyTunnel.init(ssl, this, socket, p.getTargetHost(), reject_unauthorized) catch {
-                this.terminate(ErrorCode.proxy_tunnel_failed);
-                return;
-            };
-
-            // Use ssl_config if available, otherwise use defaults
-            const ssl_options: SSLConfig = if (this.ssl_config) |config| config.* else SSLConfig{
-                .reject_unauthorized = 0, // We verify manually
-                .request_cert = 1,
-            };
-
-            // Start TLS handshake
-            tunnel.start(ssl_options, initial_data) catch {
-                tunnel.deref();
-                this.terminate(ErrorCode.proxy_tunnel_failed);
-                return;
-            };
-
-            p.setTunnel(tunnel);
-            this.state = .proxy_tls_handshake;
-        }
-
-        /// Called by WebSocketProxyTunnel when TLS handshake completes successfully
-        pub fn onProxyTLSHandshakeComplete(this: *HTTPClient) void {
-            log("onProxyTLSHandshakeComplete", .{});
-
-            // TLS handshake done - send WebSocket upgrade request through tunnel
-            this.state = .reading;
-
-            // Free the CONNECT request buffer
-            if (this.input_body_buf.len > 0) {
-                bun.default_allocator.free(this.input_body_buf);
-                this.input_body_buf = &[_]u8{};
-            }
-
-            // Safely unwrap proxy state and send through the tunnel
-            const p = if (this.proxy) |*proxy| proxy else {
-                this.terminate(ErrorCode.proxy_tunnel_failed);
-                return;
-            };
-
-            // Take the WebSocket upgrade request from proxy state (transfers ownership).
-            // Store it in input_body_buf so handleWritable can retry on drain.
-            this.input_body_buf = p.takeWebsocketRequestBuf();
-            if (this.input_body_buf.len == 0) {
-                this.terminate(ErrorCode.failed_to_write);
-                return;
-            }
-
-            // Send through the tunnel (will be encrypted). Buffer any unwritten
-            // portion in to_send so handleWritable retries when the socket drains.
-            if (p.getTunnel()) |tunnel| {
-                const wrote = tunnel.write(this.input_body_buf) catch {
-                    this.terminate(ErrorCode.failed_to_write);
-                    return;
-                };
-                this.to_send = this.input_body_buf[wrote..];
-            } else {
-                this.terminate(ErrorCode.proxy_tunnel_failed);
-            }
-        }
-
-        /// Called by WebSocketProxyTunnel with decrypted data from the TLS tunnel
-        pub fn handleDecryptedData(this: *HTTPClient, data: []const u8) void {
-            log("handleDecryptedData: {} bytes", .{data.len});
-
-            // Process as if it came directly from the socket
-            var body = data;
-            if (this.body.items.len > 0) {
-                bun.handleOom(this.body.appendSlice(bun.default_allocator, data));
-                body = this.body.items;
-            }
-
-            const is_first = this.body.items.len == 0;
-            const http_101 = "HTTP/1.1 101 ";
-            if (is_first and body.len > http_101.len) {
-                // fail early if we receive a non-101 status code
-                if (!strings.hasPrefixComptime(body, http_101)) {
-                    this.terminate(ErrorCode.expected_101_status_code);
-                    return;
-                }
-            }
-
-            const response = PicoHTTP.Response.parse(body, &this.headers_buf) catch |err| {
-                switch (err) {
-                    error.Malformed_HTTP_Response => {
-                        this.terminate(ErrorCode.invalid_response);
-                        return;
-                    },
-                    error.ShortRead => {
-                        if (this.body.items.len == 0) {
-                            bun.handleOom(this.body.appendSlice(bun.default_allocator, data));
-                        }
-                        return;
-                    },
-                }
-            };
-
-            this.processResponse(response, body[@as(usize, @intCast(response.bytes_read))..]);
-        }
-
-        pub fn handleEnd(this: *HTTPClient, _: Socket) void {
-            log("onEnd", .{});
-            this.terminate(ErrorCode.ended);
-        }
-
-        pub fn processResponse(this: *HTTPClient, response: PicoHTTP.Response, remain_buf: []const u8) void {
-            var upgrade_header = PicoHTTP.Header{ .name = "", .value = "" };
-            var connection_header = PicoHTTP.Header{ .name = "", .value = "" };
-            var websocket_accept_header = PicoHTTP.Header{ .name = "", .value = "" };
-            var protocol_header_seen = false;
-
-            // var visited_version = false;
-            var deflate_result = DeflateNegotiationResult{};
-
-            if (response.status_code != 101) {
-                this.terminate(ErrorCode.expected_101_status_code);
-                return;
-            }
-
-            for (response.headers.list) |header| {
-                switch (header.name.len) {
-                    "Connection".len => {
-                        if (connection_header.name.len == 0 and strings.eqlCaseInsensitiveASCII(header.name, "Connection", false)) {
-                            connection_header = header;
-                        }
-                    },
-                    "Upgrade".len => {
-                        if (upgrade_header.name.len == 0 and strings.eqlCaseInsensitiveASCII(header.name, "Upgrade", false)) {
-                            upgrade_header = header;
-                        }
-                    },
-                    "Sec-WebSocket-Version".len => {
-                        if (strings.eqlCaseInsensitiveASCII(header.name, "Sec-WebSocket-Version", false)) {
-                            if (!strings.eqlComptimeIgnoreLen(header.value, "13")) {
-                                this.terminate(ErrorCode.invalid_websocket_version);
-                                return;
-                            }
-                        }
-                    },
-                    "Sec-WebSocket-Accept".len => {
-                        if (websocket_accept_header.name.len == 0 and strings.eqlCaseInsensitiveASCII(header.name, "Sec-WebSocket-Accept", false)) {
-                            websocket_accept_header = header;
-                        }
-                    },
-                    "Sec-WebSocket-Protocol".len => {
-                        if (strings.eqlCaseInsensitiveASCII(header.name, "Sec-WebSocket-Protocol", false)) {
-                            const valid = brk: {
-                                // Can't have multiple protocol headers in the response.
-                                if (protocol_header_seen) break :brk false;
-
-                                protocol_header_seen = true;
-
-                                var iterator = bun.http.HeaderValueIterator.init(header.value);
-
-                                const protocol = iterator.next()
-                                    // Can't be empty.
-                                    orelse break :brk false;
-
-                                // Can't have multiple protocols.
-                                if (iterator.next() != null) break :brk false;
-
-                                // Protocol must be in the list of allowed protocols.
-                                if (!this.subprotocols.contains(protocol)) break :brk false;
-
-                                if (this.outgoing_websocket) |ws| {
-                                    var protocol_str = bun.String.cloneLatin1(protocol);
-                                    defer protocol_str.deref();
-                                    ws.setProtocol(&protocol_str);
-                                }
-                                break :brk true;
-                            };
-
-                            if (!valid) {
-                                this.terminate(ErrorCode.mismatch_client_protocol);
-                                return;
-                            }
-                        }
-                    },
-                    "Sec-WebSocket-Extensions".len => {
-                        if (strings.eqlCaseInsensitiveASCII(header.name, "Sec-WebSocket-Extensions", false)) {
-                            // Per RFC 6455 §9.1, the server MUST NOT respond with an
-                            // extension the client did not offer. Match upstream `ws`
-                            // (lib/websocket.js: "Server sent a Sec-WebSocket-Extensions
-                            // header but no extension was requested") and fail the
-                            // handshake instead of silently accepting it.
-                            if (!this.offered_permessage_deflate) {
-                                this.terminate(ErrorCode.invalid_response);
-                                return;
-                            }
-                            // This is a simplified parser. A full parser would handle multiple extensions and quoted values.
-                            var it = std.mem.splitScalar(u8, header.value, ',');
-                            while (it.next()) |ext_str| {
-                                var ext_it = std.mem.splitScalar(u8, std.mem.trim(u8, ext_str, " \t"), ';');
-                                const ext_name = std.mem.trim(u8, ext_it.next() orelse "", " \t");
-                                if (strings.eqlComptime(ext_name, "permessage-deflate")) {
-                                    deflate_result.enabled = true;
-                                    while (ext_it.next()) |param_str| {
-                                        var param_it = std.mem.splitScalar(u8, std.mem.trim(u8, param_str, " \t"), '=');
-                                        const key = std.mem.trim(u8, param_it.next() orelse "", " \t");
-                                        const value = std.mem.trim(u8, param_it.next() orelse "", " \t");
-
-                                        if (strings.eqlComptime(key, "server_no_context_takeover")) {
-                                            deflate_result.params.server_no_context_takeover = 1;
-                                        } else if (strings.eqlComptime(key, "client_no_context_takeover")) {
-                                            deflate_result.params.client_no_context_takeover = 1;
-                                        } else if (strings.eqlComptime(key, "server_max_window_bits")) {
-                                            if (value.len > 0) {
-                                                // Remove quotes if present
-                                                const trimmed_value = if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"')
-                                                    value[1 .. value.len - 1]
-                                                else
-                                                    value;
-
-                                                if (std.fmt.parseInt(u8, trimmed_value, 10) catch null) |bits| {
-                                                    if (bits >= WebSocketDeflate.Params.MIN_WINDOW_BITS and bits <= WebSocketDeflate.Params.MAX_WINDOW_BITS) {
-                                                        deflate_result.params.server_max_window_bits = bits;
-                                                    }
-                                                }
-                                            }
-                                        } else if (strings.eqlComptime(key, "client_max_window_bits")) {
-                                            if (value.len > 0) {
-                                                // Remove quotes if present
-                                                const trimmed_value = if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"')
-                                                    value[1 .. value.len - 1]
-                                                else
-                                                    value;
-
-                                                if (std.fmt.parseInt(u8, trimmed_value, 10) catch null) |bits| {
-                                                    if (bits >= WebSocketDeflate.Params.MIN_WINDOW_BITS and bits <= WebSocketDeflate.Params.MAX_WINDOW_BITS) {
-                                                        deflate_result.params.client_max_window_bits = bits;
-                                                    }
-                                                }
-                                            } else {
-                                                // client_max_window_bits without value means use default (15)
-                                                deflate_result.params.client_max_window_bits = 15;
-                                            }
-                                        }
-                                    }
-                                    break; // Found and parsed permessage-deflate, stop.
-                                }
-                            }
-                        }
-                    },
-                    else => {},
-                }
-            }
-
-            // if (!visited_version) {
-            //     this.terminate(ErrorCode.invalid_websocket_version);
-            //     return;
-            // }
-
-            if (@min(upgrade_header.name.len, upgrade_header.value.len) == 0) {
-                this.terminate(ErrorCode.missing_upgrade_header);
-                return;
-            }
-
-            if (@min(connection_header.name.len, connection_header.value.len) == 0) {
-                this.terminate(ErrorCode.missing_connection_header);
-                return;
-            }
-
-            if (@min(websocket_accept_header.name.len, websocket_accept_header.value.len) == 0) {
-                this.terminate(ErrorCode.missing_websocket_accept_header);
-                return;
-            }
-
-            if (!strings.eqlCaseInsensitiveASCII(connection_header.value, "Upgrade", true)) {
-                this.terminate(ErrorCode.invalid_connection_header);
-                return;
-            }
-
-            if (!strings.eqlCaseInsensitiveASCII(upgrade_header.value, "websocket", true)) {
-                this.terminate(ErrorCode.invalid_upgrade_header);
-                return;
-            }
-
-            if (!std.mem.eql(u8, websocket_accept_header.value, &this.expected_accept)) {
-                this.terminate(ErrorCode.mismatch_websocket_accept_header);
-                return;
-            }
-
-            const overflow_len = remain_buf.len;
-            var overflow: []u8 = &.{};
-            if (overflow_len > 0) {
-                overflow = bun.default_allocator.alloc(u8, overflow_len) catch {
-                    this.terminate(ErrorCode.invalid_response);
-                    return;
-                };
-                @memcpy(overflow, remain_buf);
-            }
-
-            // Check if we're using a proxy tunnel (wss:// through HTTP proxy)
-            if (this.proxy) |*p| {
-                if (p.getTunnel()) |tunnel| {
-                    // wss:// through HTTP proxy: use tunnel mode
-                    // For tunnel mode, the upgrade client STAYS ALIVE to forward socket data to the tunnel.
-                    // The socket continues to call handleData on the upgrade client, which forwards to tunnel.
-                    // The tunnel forwards decrypted data to the WebSocket client.
-                    jsc.markBinding(@src());
-                    if (!this.tcp.isClosed() and this.outgoing_websocket != null) {
-                        this.tcp.timeout(0);
-                        log("onDidConnect (tunnel mode)", .{});
-
-                        // Release the ref that paired with C++'s m_upgradeClient: C++
-                        // nulls m_upgradeClient inside didConnectWithTunnel() so it will
-                        // never call cancel() to drop it. The TCP socket's ref (released
-                        // in handleClose) is what keeps this struct alive to forward
-                        // socket data to the tunnel after we switch to .done.
-                        defer this.deref();
-                        const ws = bun.take(&this.outgoing_websocket).?;
-
-                        // Create the WebSocket client with the tunnel
-                        ws.didConnectWithTunnel(tunnel, overflow.ptr, overflow.len, if (deflate_result.enabled) &deflate_result.params else null);
-
-                        // Switch state to connected - handleData will forward to tunnel
-                        this.state = .done;
-                    } else if (this.tcp.isClosed()) {
-                        this.terminate(ErrorCode.cancel);
-                    } else if (this.outgoing_websocket == null) {
-                        this.tcp.close(.failure);
-                    }
-                    return;
-                }
-            }
-
-            // Normal (non-tunnel) mode — original code path. Transfer the
-            // custom `us_ssl_ctx_t` to the connected WebSocket (it must outlive
-            // the upgrade client because the socket's SSL* still references the
-            // SSL_CTX inside it).
-            var saved_secure = this.secure;
-            this.secure = null; // prevent clearData from freeing it
-            // Any arm below that doesn't hand `saved_secure` to didConnect must
-            // drop the ref it took out of `this`; do it once on scope exit.
-            defer if (saved_secure) |s| bun.BoringSSL.c.SSL_CTX_free(s);
-            this.clearData();
-            jsc.markBinding(@src());
-            if (!this.tcp.isClosed() and this.outgoing_websocket != null) {
-                this.tcp.timeout(0);
-                log("onDidConnect", .{});
-
-                // Once for the outgoing_websocket.
-                defer this.deref();
-                const ws = bun.take(&this.outgoing_websocket).?;
-                const socket = this.tcp;
-
-                // Normal mode: pass socket directly to WebSocket client
-                this.tcp.detach();
-                // Once again for the TCP socket.
-                defer this.deref();
-                if (socket.socket.get()) |native_socket| {
-                    ws.didConnect(native_socket, overflow.ptr, overflow.len, if (deflate_result.enabled) &deflate_result.params else null, saved_secure);
-                    saved_secure = null; // ownership transferred; suppress the defer-free above
-                } else {
-                    this.terminate(ErrorCode.failed_to_connect);
-                }
-            } else if (this.tcp.isClosed()) {
-                this.terminate(ErrorCode.cancel);
-            } else if (this.outgoing_websocket == null) {
-                this.tcp.close(.failure);
-            }
-        }
-
-        pub fn memoryCost(this: *HTTPClient) callconv(.c) usize {
-            var cost: usize = @sizeOf(HTTPClient);
-            cost += this.body.capacity;
-            cost += this.to_send.len;
-            return cost;
-        }
-
-        pub fn handleWritable(
-            this: *HTTPClient,
-            socket: Socket,
-        ) void {
-            bun.assert(this.isSameSocket(socket));
-
-            // Forward to proxy tunnel if active
-            if (this.proxy) |*p| {
-                if (p.getTunnel()) |tunnel| {
-                    tunnel.onWritable();
-                    // In .done state (after WebSocket upgrade), just handle tunnel writes
-                    if (this.state == .done) return;
-
-                    // Flush any unwritten upgrade request bytes through the tunnel
-                    if (this.to_send.len == 0) return;
-                    this.ref();
-                    defer this.deref();
-                    const wrote = tunnel.write(this.to_send) catch {
-                        this.terminate(ErrorCode.failed_to_write);
-                        return;
-                    };
-                    this.to_send = this.to_send[@min(wrote, this.to_send.len)..];
-                    return;
-                }
-            }
-
-            if (this.to_send.len == 0)
-                return;
-
-            this.ref();
-            defer this.deref();
-
-            const wrote = socket.write(this.to_send);
-            if (wrote < 0) {
-                this.terminate(ErrorCode.failed_to_write);
-                return;
-            }
-            this.to_send = this.to_send[@min(@as(usize, @intCast(wrote)), this.to_send.len)..];
-        }
-        pub fn handleTimeout(
-            this: *HTTPClient,
-            _: Socket,
-        ) void {
-            this.terminate(ErrorCode.timeout);
-        }
-
-        // In theory, this could be called immediately
-        // In that case, we set `state` to `failed` and return, expecting the parent to call `destroy`.
-        pub fn handleConnectError(this: *HTTPClient, _: Socket, _: c_int) void {
-            this.tcp.detach();
-
-            // For the TCP socket.
-            defer this.deref();
-
-            if (this.state == .reading) {
-                this.terminate(ErrorCode.failed_to_connect);
-            } else {
-                this.state = .failed;
-            }
-        }
-
-        pub fn exportAll() void {
-            comptime {
-                const name = if (ssl) "WebSocketHTTPSClient" else "WebSocketHTTPClient";
-                @export(&connect, .{
-                    .name = "Bun__" ++ name ++ "__connect",
-                });
-                @export(&cancel, .{
-                    .name = "Bun__" ++ name ++ "__cancel",
-                });
-                @export(&memoryCost, .{
-                    .name = "Bun__" ++ name ++ "__memoryCost",
-                });
-            }
-        }
-    };
-}
-
-/// Decodes an array of BunString header name/value pairs to UTF-8 up front.
-///
-/// The BunString values may be backed by 8-bit Latin1 or 16-bit UTF-16
-/// `WTFStringImpl`s. Calling `.slice()` on a ZigString wrapper that was built
-/// from a non-ASCII WTFStringImpl returns raw Latin1 or UTF-16 code units,
-/// which then corrupts the HTTP upgrade request and can cause heap corruption.
-///
-/// Using `bun.String.toUTF8(allocator)` either borrows the 8-bit ASCII backing
-/// (no allocation) or allocates a UTF-8 copy. The resulting slices are stored
-/// here so buildRequestBody / buildConnectRequest can index them by []const u8.
-const Headers8Bit = struct {
-    slices: []jsc.ZigString.Slice,
-    name_slices: [][]const u8,
-    value_slices: [][]const u8,
-    allocator: std.mem.Allocator,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        names_ptr: ?[*]const bun.String,
-        values_ptr: ?[*]const bun.String,
-        len: usize,
-    ) std.mem.Allocator.Error!Headers8Bit {
-        if (len == 0) {
-            return .{
-                .slices = &.{},
-                .name_slices = &.{},
-                .value_slices = &.{},
-                .allocator = allocator,
-            };
-        }
-        const names_in = names_ptr.?[0..len];
-        const values_in = values_ptr.?[0..len];
-
-        const slices = try allocator.alloc(jsc.ZigString.Slice, len * 2);
-        errdefer allocator.free(slices);
-
-        const name_slices = try allocator.alloc([]const u8, len);
-        errdefer allocator.free(name_slices);
-
-        const value_slices = try allocator.alloc([]const u8, len);
-        errdefer allocator.free(value_slices);
-
-        var decoded: usize = 0;
-        errdefer {
-            var j: usize = 0;
-            while (j < decoded) : (j += 1) slices[j].deinit();
-        }
-        var i: usize = 0;
-        while (i < len) : (i += 1) {
-            slices[i * 2] = names_in[i].toUTF8(allocator);
-            decoded += 1;
-            slices[i * 2 + 1] = values_in[i].toUTF8(allocator);
-            decoded += 1;
-            name_slices[i] = slices[i * 2].slice();
-            value_slices[i] = slices[i * 2 + 1].slice();
-        }
-
-        return .{
-            .slices = slices,
-            .name_slices = name_slices,
-            .value_slices = value_slices,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: Headers8Bit) void {
-        for (self.slices) |*s| s.deinit();
-        if (self.slices.len > 0) {
-            self.allocator.free(self.slices);
-            self.allocator.free(self.name_slices);
-            self.allocator.free(self.value_slices);
-        }
-    }
-
-    pub fn names(self: Headers8Bit) []const []const u8 {
-        return self.name_slices;
-    }
-
-    pub fn values(self: Headers8Bit) []const []const u8 {
-        return self.value_slices;
-    }
-
-    /// Convert Headers8Bit to bun.http.Headers
-    pub fn toHeaders(self: Headers8Bit, allocator: std.mem.Allocator) !Headers {
-        var headers = Headers{
-            .allocator = allocator,
-        };
-        errdefer headers.deinit();
-
-        for (self.name_slices, self.value_slices) |name, value| {
-            try headers.append(name, value);
-        }
-
-        return headers;
-    }
-};
-
-/// Build HTTP CONNECT request for proxy tunneling
-fn buildConnectRequest(
-    target_host: []const u8,
-    target_port: u16,
-    proxy_authorization: ?[]const u8,
-    proxy_headers: ?Headers,
-) std.mem.Allocator.Error![]u8 {
-    const allocator = bun.default_allocator;
-
-    // Calculate size for the CONNECT request
-    var buf = std.array_list.Managed(u8).init(allocator);
-    errdefer buf.deinit();
-    const writer = buf.writer();
-
-    // CONNECT host:port HTTP/1.1\r\n
-    try writer.print("CONNECT {s}:{d} HTTP/1.1\r\n", .{ target_host, target_port });
-
-    // Host: host:port\r\n
-    try writer.print("Host: {s}:{d}\r\n", .{ target_host, target_port });
-
-    // Proxy-Connection: Keep-Alive\r\n
-    try writer.writeAll("Proxy-Connection: Keep-Alive\r\n");
-
-    // Proxy-Authorization if provided
-    if (proxy_authorization) |auth| {
-        try writer.print("Proxy-Authorization: {s}\r\n", .{auth});
-    }
-
-    // Custom proxy headers
-    if (proxy_headers) |hdrs| {
-        const slice = hdrs.entries.slice();
-        const names = slice.items(.name);
-        const values = slice.items(.value);
-        for (names, 0..) |name_ptr, idx| {
-            // Skip Proxy-Authorization if user provided one (we already added it)
-            const name = hdrs.asStr(name_ptr);
-            if (proxy_authorization != null and strings.eqlCaseInsensitiveASCII(name, "proxy-authorization", true)) {
-                continue;
-            }
-            try writer.print("{s}: {s}\r\n", .{ name, hdrs.asStr(values[idx]) });
-        }
-    }
-
-    // End of headers
-    try writer.writeAll("\r\n");
-
-    return buf.toOwnedSlice();
-}
-
-const BuildRequestResult = struct {
-    body: []u8,
-    expected_accept: [28]u8,
-};
-
-fn buildRequestBody(
-    vm: *jsc.VirtualMachine,
-    pathname: []const u8,
-    is_https: bool,
-    host: []const u8,
-    port: u16,
-    client_protocol: []const u8,
-    extra_headers: Headers8Bit,
-    target_authorization: ?[]const u8,
-    /// When false, don't advertise `permessage-deflate` (matches `ws` with
-    /// `perMessageDeflate: false`). When true, send the default extension
-    /// offer `permessage-deflate; client_max_window_bits`.
-    offer_permessage_deflate: bool,
-) std.mem.Allocator.Error!BuildRequestResult {
-    const allocator = bun.default_allocator;
-
-    // Check for user overrides
-    var user_host: ?[]const u8 = null;
-    var user_key: ?[]const u8 = null;
-    var user_protocol: ?[]const u8 = null;
-    var user_authorization: bool = false;
-
-    for (extra_headers.names(), extra_headers.values()) |name_slice, value| {
-        if (user_host == null and strings.eqlCaseInsensitiveASCII(name_slice, "host", true)) {
-            user_host = value;
-        } else if (user_key == null and strings.eqlCaseInsensitiveASCII(name_slice, "sec-websocket-key", true)) {
-            user_key = value;
-        } else if (user_protocol == null and strings.eqlCaseInsensitiveASCII(name_slice, "sec-websocket-protocol", true)) {
-            user_protocol = value;
-        } else if (!user_authorization and strings.eqlCaseInsensitiveASCII(name_slice, "authorization", true)) {
-            user_authorization = true;
-        }
-    }
-
-    // Validate and use user key, or generate a new one
-    var encoded_buf: [24]u8 = undefined;
-    const key = blk: {
-        if (user_key) |k_slice| {
-            // Validate that it's a valid base64-encoded 16-byte value
-            var decoded_buf: [24]u8 = undefined; // Max possible decoded size
-            const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(k_slice) catch {
-                // Invalid base64, fall through to generate
-                break :blk std.base64.standard.Encoder.encode(&encoded_buf, &vm.rareData().nextUUID().bytes);
-            };
-
-            if (decoded_len == 16) {
-                // Try to decode to verify it's valid base64
-                _ = std.base64.standard.Decoder.decode(&decoded_buf, k_slice) catch {
-                    // Invalid base64, fall through to generate
-                    break :blk std.base64.standard.Encoder.encode(&encoded_buf, &vm.rareData().nextUUID().bytes);
-                };
-                // Valid 16-byte key, use it as-is
-                break :blk k_slice;
-            }
-        }
-        // Generate a new key if user key is invalid or not provided
-        break :blk std.base64.standard.Encoder.encode(&encoded_buf, &vm.rareData().nextUUID().bytes);
-    };
-
-    // Compute the expected Sec-WebSocket-Accept value per RFC 6455 §4.2.2:
-    // base64(SHA-1(Sec-WebSocket-Key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
-    const expected_accept = computeAcceptValue(key);
-
-    const protocol = if (user_protocol) |p| p else client_protocol;
-
-    const host_fmt = bun.fmt.HostFormatter{
-        .is_https = is_https,
-        .host = host,
-        .port = port,
-    };
-
-    var static_headers = [_]PicoHTTP.Header{
-        .{ .name = "Sec-WebSocket-Key", .value = key },
-        .{ .name = "Sec-WebSocket-Protocol", .value = protocol },
-    };
-
-    const headers_ = static_headers[0 .. 1 + @as(usize, @intFromBool(protocol.len > 0))];
-    const pico_headers = PicoHTTP.Headers{ .headers = headers_ };
-
-    // Build extra headers string, skipping the ones we handle
-    var extra_headers_buf = std.array_list.Managed(u8).init(allocator);
-    defer extra_headers_buf.deinit();
-    const writer = extra_headers_buf.writer();
-
-    // Add Authorization header from URL credentials if user didn't provide one
-    if (!user_authorization) {
-        if (target_authorization) |auth| {
-            try writer.print("Authorization: {s}\r\n", .{auth});
-        }
-    }
-
-    for (extra_headers.names(), extra_headers.values()) |name_slice, value| {
-        if (strings.eqlCaseInsensitiveASCII(name_slice, "host", true) or
-            strings.eqlCaseInsensitiveASCII(name_slice, "connection", true) or
-            strings.eqlCaseInsensitiveASCII(name_slice, "upgrade", true) or
-            strings.eqlCaseInsensitiveASCII(name_slice, "sec-websocket-version", true) or
-            strings.eqlCaseInsensitiveASCII(name_slice, "sec-websocket-extensions", true) or
-            strings.eqlCaseInsensitiveASCII(name_slice, "sec-websocket-key", true) or
-            strings.eqlCaseInsensitiveASCII(name_slice, "sec-websocket-protocol", true))
-        {
-            continue;
-        }
-        try writer.print("{s}: {s}\r\n", .{ name_slice, value });
-    }
-
-    const extensions_line: []const u8 = if (offer_permessage_deflate)
-        "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n"
-    else
-        "";
-
-    // Build request with user overrides
-    if (user_host) |h| {
-        return .{
-            .body = try std.fmt.allocPrint(
-                allocator,
-                "GET {s} HTTP/1.1\r\n" ++
-                    "Host: {s}\r\n" ++
-                    "Connection: Upgrade\r\n" ++
-                    "Upgrade: websocket\r\n" ++
-                    "Sec-WebSocket-Version: 13\r\n" ++
-                    "{s}" ++
-                    "{f}" ++
-                    "{s}" ++
-                    "\r\n",
-                .{ pathname, h, extensions_line, pico_headers, extra_headers_buf.items },
-            ),
-            .expected_accept = expected_accept,
-        };
-    }
-
-    return .{
-        .body = try std.fmt.allocPrint(
-            allocator,
-            "GET {s} HTTP/1.1\r\n" ++
-                "Host: {f}\r\n" ++
-                "Connection: Upgrade\r\n" ++
-                "Upgrade: websocket\r\n" ++
-                "Sec-WebSocket-Version: 13\r\n" ++
-                "{s}" ++
-                "{f}" ++
-                "{s}" ++
-                "\r\n",
-            .{ pathname, host_fmt, extensions_line, pico_headers, extra_headers_buf.items },
-        ),
-        .expected_accept = expected_accept,
-    };
-}
-
-/// Compute the expected Sec-WebSocket-Accept value per RFC 6455 §4.2.2:
-/// base64(SHA-1(key ++ "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
-fn computeAcceptValue(key: []const u8) [28]u8 {
-    const websocket_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    var hasher = bun.sha.Hashers.SHA1.init();
-    hasher.update(key);
-    hasher.update(websocket_guid);
-    var hash: bun.sha.Hashers.SHA1.Digest = undefined;
-    hasher.final(&hash);
-    var result: [28]u8 = undefined;
-    _ = bun.base64.encode(&result, &hash);
-    return result;
-}
-
-const log = Output.scoped(.WebSocketUpgradeClient, .visible);
-
-/// Parse SSLConfig from a JavaScript TLS options object.
-/// This function is exported for C++ to call from JSWebSocket.cpp.
-/// Returns null if parsing fails (an exception will be set on globalThis).
-/// The returned SSLConfig is heap-allocated and ownership is transferred to the caller.
-pub fn parseSSLConfig(
-    globalThis: *jsc.JSGlobalObject,
-    tls_value: jsc.JSValue,
-) callconv(.c) ?*SSLConfig {
-    const vm = globalThis.bunVM();
-
-    // Use SSLConfig.fromJS for clean and safe parsing
-    const config_opt = SSLConfig.fromJS(vm, globalThis, tls_value) catch {
-        // Exception is already set on globalThis
-        return null;
-    };
-
-    if (config_opt) |config| {
-        // Allocate on heap and return pointer (ownership transferred to caller)
-        const config_ptr = bun.handleOom(bun.default_allocator.create(SSLConfig));
-        config_ptr.* = config;
-        return config_ptr;
-    }
-
-    // No TLS options provided or all defaults, return null
-    return null;
-}
-
-/// Free an SSLConfig previously returned by `parseSSLConfig`.
-/// Exported for C++ so error/early-return paths in JSWebSocket.cpp and
-/// WebSocket.cpp can release ownership without leaking the heap allocation
-/// (and all duped cert/key/CA strings inside it) when `connect()` never
-/// hands the pointer off to a Zig upgrade client.
-pub fn freeSSLConfig(config: *SSLConfig) callconv(.c) void {
-    config.deinit();
-    bun.default_allocator.destroy(config);
-}
-
-comptime {
-    @export(&parseSSLConfig, .{ .name = "Bun__WebSocket__parseSSLConfig" });
-    @export(&freeSSLConfig, .{ .name = "Bun__WebSocket__freeSSLConfig" });
-}
-
-const WebSocketDeflate = @import("./WebSocketDeflate.zig");
-const WebSocketProxy = @import("./WebSocketProxy.zig");
-const WebSocketProxyTunnel = @import("./WebSocketProxyTunnel.zig");
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
-const CppWebSocket = @import("./CppWebSocket.zig").CppWebSocket;
+const string = []const u8;
 
-const websocket_client = @import("../websocket_client.zig");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const CppWebSocket = CppWebSocketPkg.CppWebSocket;
 const ErrorCode = websocket_client.ErrorCode;
-
-const bun = @import("bun");
 const Async = bun.Async;
 const BoringSSL = bun.BoringSSL;
 const Environment = bun.Environment;
 const Output = bun.Output;
 const PicoHTTP = bun.picohttp;
+const PicoHeader = PicoHTTP.Header;
 const default_allocator = bun.default_allocator;
 const jsc = bun.jsc;
 const strings = bun.strings;
 const uws = bun.uws;
 const Headers = bun.http.Headers;
 const SSLConfig = jsc.API.ServerConfig.SSLConfig;
+const DeflateParams = WebSocketDeflate.Params;
+const ByteList = std.ArrayListUnmanaged(u8);
+const ZigSlice = jsc.ZigString.Slice;
+const log = Output.scoped(.WebSocketUpgradeClient, .visible);
+const empty_u8: [0]u8 = .{  };
+const empty_zig_slices: [0]ZigSlice = .{  };
+const empty_byte_slices: [0][]const u8 = .{  };
+comptime {
+    _ = @export((&parseSSLConfig), .{ .name = "Bun__WebSocket__parseSSLConfig" });
+    _ = @export((&freeSSLConfig), .{ .name = "Bun__WebSocket__freeSSLConfig" });
+
+}
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const WebSocketDeflate = @import("./WebSocketDeflate.zig");
+pub const WebSocketProxy = @import("./WebSocketProxy.zig");
+pub const WebSocketProxyTunnel = @import("./WebSocketProxyTunnel.zig");
+pub const CppWebSocketPkg = @import("./CppWebSocket.zig");
+pub const websocket_client = @import("../websocket_client.zig");
+pub const UpgradeState = enum {
+    initializing,
+    reading,
+    failed,
+    proxy_handshake,
+    proxy_tls_handshake,
+    done,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
+
+pub const TopDeflateNegotiationResult = struct {
+    enabled: bool = false,
+    params: DeflateParams = DeflateParams{  },
+};
+
+pub const Headers8Bit = struct {
+    slices: []ZigSlice,
+    name_slices: [][]const u8,
+    value_slices: [][]const u8,
+    allocator: std.mem.Allocator,
+
+pub fn init(allocator: std.mem.Allocator, names_ptr: ?[*]const bun.String, values_ptr: ?[*]const bun.String, len: usize) std.mem.Allocator.Error!Headers8Bit {
+            if ((len == 0)) {
+                return Headers8Bit{ .slices = empty_zig_slices[0..0], .name_slices = empty_byte_slices[0..0], .value_slices = empty_byte_slices[0..0], .allocator = allocator };
+            }
+            const names_in = (blk: {
+            break :blk names_ptr.?[0..len];
+
+});
+            const values_in = (blk: {
+            break :blk values_ptr.?[0..len];
+
+});
+            var slices = try allocator.alloc(ZigSlice, (len * 2));
+            _ = &slices;
+            errdefer {
+            _ = allocator.free(slices);
+            }
+            var name_slices = try allocator.alloc(string, len);
+            _ = &name_slices;
+            errdefer {
+            _ = allocator.free(name_slices);
+            }
+            var value_slices = try allocator.alloc(string, len);
+            _ = &value_slices;
+            errdefer {
+            _ = allocator.free(value_slices);
+            }
+            var decoded: usize = 0;
+            _ = &decoded;
+            errdefer {
+            {
+                var j: usize = 0;
+                _ = &j;
+                while ((j < decoded)) {
+                    _ = slices[@as(usize, @intCast(j))].deinit();
+                    j = (j + 1);
+                }
+            }
+            }
+            var i: usize = 0;
+            _ = &i;
+            while ((i < len)) {
+                slices[cp_cast_int(usize, (i * 2))] = names_in[@as(usize, @intCast(i))].toUTF8(allocator);
+                decoded = (decoded + 1);
+                slices[cp_cast_int(usize, ((i * 2) + 1))] = values_in[@as(usize, @intCast(i))].toUTF8(allocator);
+                decoded = (decoded + 1);
+                name_slices[cp_cast_int(usize, i)] = slices[@as(usize, @intCast((i * 2)))].slice();
+                value_slices[cp_cast_int(usize, i)] = slices[@as(usize, @intCast(((i * 2) + 1)))].slice();
+                i = (i + 1);
+            }
+            return Headers8Bit{ .slices = slices, .name_slices = name_slices, .value_slices = value_slices, .allocator = allocator };
+    }
+
+pub fn deinit(self: Headers8Bit) void {
+            const slices = self.slices;
+            for (slices) |*s| {
+                _ = s.deinit();
+            }
+            if ((self.slices.len > 0)) {
+                _ = self.allocator.free(self.slices);
+                _ = self.allocator.free(self.name_slices);
+                _ = self.allocator.free(self.value_slices);
+            }
+    }
+
+pub fn names(self: Headers8Bit) []const []const u8 {
+            return self.name_slices;
+    }
+
+pub fn values(self: Headers8Bit) []const []const u8 {
+            return self.value_slices;
+    }
+
+pub fn toHeaders(self: Headers8Bit, allocator: std.mem.Allocator) anyerror!Headers {
+            var headers = Headers{ .allocator = allocator };
+            _ = &headers;
+            errdefer {
+            _ = headers.deinit();
+            }
+            const n_slices = self.name_slices;
+            const v_slices = self.value_slices;
+            for (n_slices, v_slices) |name, value| {
+                _ = try headers.append(name, value);
+            }
+            return headers;
+    }
+};
+
+pub const BuildRequestResult = struct {
+    body: []u8,
+    expected_accept: [28]u8,
+};
+
+
+pub fn buildConnectRequest(target_host: []const u8, target_port: u16, proxy_authorization: ?[]const u8, proxy_headers: ?Headers) std.mem.Allocator.Error![]u8 {
+        const allocator = bun.default_allocator;
+        var buf = std.array_list.Managed(u8).init(allocator);
+        _ = &buf;
+        errdefer {
+        _ = buf.deinit();
+        }
+        const writer = buf.writer();
+        _ = try writer.print("CONNECT {s}:{d} HTTP/1.1\r\n", .{ target_host, target_port });
+        _ = try writer.print("Host: {s}:{d}\r\n", .{ target_host, target_port });
+        _ = try writer.writeAll("Proxy-Connection: Keep-Alive\r\n");
+        if (proxy_authorization) |auth| {
+            _ = &auth;
+            _ = try writer.print("Proxy-Authorization: {s}\r\n", .{ auth });
+        }
+        if (proxy_headers) |hdrs| {
+            _ = &hdrs;
+            const slice = hdrs.entries.slice();
+            const hdr_names = slice.items(.name);
+            const hdr_values = slice.items(.value);
+            for (hdr_names, 0..) |name_ptr, idx| {
+                const name = hdrs.asStr(name_ptr);
+                if (((proxy_authorization != null) and strings.eqlCaseInsensitiveASCII(name, "proxy-authorization", true))) {
+                    continue;
+                }
+                _ = try writer.print("{s}: {s}\r\n", .{ name, hdrs.asStr(hdr_values[@as(usize, @intCast(idx))]) });
+            }
+        }
+        _ = try writer.writeAll("\r\n");
+        return buf.toOwnedSlice();
+}
+
+pub fn computeAcceptValue(key: []const u8) [28]u8 {
+        const websocket_guid: []const u8 = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+        var hasher = bun.sha.Hashers.SHA1.init();
+        _ = &hasher;
+        _ = hasher.update(key);
+        _ = hasher.update(websocket_guid);
+        var hash: bun.sha.Hashers.SHA1.Digest = undefined;
+        _ = &hash;
+        _ = hasher.final((&hash));
+        var result: [28]u8 = undefined;
+        _ = &result;
+        _ = bun.base64.encode((&result), (&hash));
+        return result;
+}
+
+pub fn buildRequestBody(vm: *jsc.VirtualMachine, pathname: []const u8, is_https: bool, host: []const u8, port: u16, client_protocol: []const u8, extra_headers: Headers8Bit, target_authorization: ?[]const u8, offer_permessage_deflate: bool) std.mem.Allocator.Error!BuildRequestResult {
+        const allocator = bun.default_allocator;
+        var user_host: ?[]const u8 = null;
+        _ = &user_host;
+        var user_key: ?[]const u8 = null;
+        _ = &user_key;
+        var user_protocol: ?[]const u8 = null;
+        _ = &user_protocol;
+        var user_authorization: bool = false;
+        _ = &user_authorization;
+        const extra_names = extra_headers.names();
+        const extra_values = extra_headers.values();
+        for (extra_names, extra_values) |name_slice, value| {
+            if (((user_host == null) and strings.eqlCaseInsensitiveASCII(name_slice, "host", true))) {
+                user_host = value;
+            } else {
+                if (((user_key == null) and strings.eqlCaseInsensitiveASCII(name_slice, "sec-websocket-key", true))) {
+                    user_key = value;
+                } else {
+                    if (((user_protocol == null) and strings.eqlCaseInsensitiveASCII(name_slice, "sec-websocket-protocol", true))) {
+                        user_protocol = value;
+                    } else {
+                        if (((!user_authorization) and strings.eqlCaseInsensitiveASCII(name_slice, "authorization", true))) {
+                            user_authorization = true;
+                        }
+                    }
+                }
+            }
+        }
+        var encoded_buf: [24]u8 = undefined;
+        _ = &encoded_buf;
+        const key = blk: {
+        if (user_key) |k_slice| {
+            _ = &k_slice;
+            var decoded_buf: [24]u8 = undefined;
+            _ = &decoded_buf;
+            const decoded_len = (blk_catch_0: { break :blk_catch_0 ((std.base64.standard.Decoder.calcSizeForSlice(k_slice)) catch |__ce_0| { _ = &__ce_0; break :blk_catch_0 0; }); });
+            if ((decoded_len == 16)) {
+                var decode_ok = true;
+                _ = &decode_ok;
+                _ = (blk_catch_1: { break :blk_catch_1 ((std.base64.standard.Decoder.decode((&decoded_buf), k_slice)) catch |__ce_1| { _ = &__ce_1; decode_ok = false;
+                break :blk_catch_1 {}; }); });
+                if (decode_ok) {
+                    break :blk k_slice;
+                }
+            }
+        }
+        break :blk std.base64.standard.Encoder.encode((&encoded_buf), (&vm.rareData().nextUUID().bytes));
+};
+        const expected_accept = computeAcceptValue(key);
+        const protocol = (if ((user_protocol != null)) user_protocol.? else client_protocol);
+        const host_fmt = bun.fmt.HostFormatter{ .is_https = is_https, .host = host, .port = port };
+        var static_headers: [2]PicoHeader = .{ PicoHeader{ .name = "Sec-WebSocket-Key", .value = key }, PicoHeader{ .name = "Sec-WebSocket-Protocol", .value = protocol } };
+        _ = &static_headers;
+        const headers_ = static_headers[0..(1 + (if (comptime @typeInfo(@TypeOf(@intFromBool((protocol.len > 0)))) == .@"enum") cp_cast_int(usize, @intFromEnum(@intFromBool((protocol.len > 0)))) else cp_cast_int(usize, @intFromBool((protocol.len > 0)))))];
+        const pico_headers = PicoHTTP.Headers{ .headers = headers_ };
+        var extra_headers_buf = std.array_list.Managed(u8).init(allocator);
+        _ = &extra_headers_buf;
+        defer {
+        _ = extra_headers_buf.deinit();
+        }
+        const writer = extra_headers_buf.writer();
+        if ((!user_authorization)) {
+            if (target_authorization) |auth| {
+                _ = &auth;
+                _ = try writer.print("Authorization: {s}\r\n", .{ auth });
+            }
+        }
+        for (extra_names, extra_values) |name_slice, value| {
+            if (((((((strings.eqlCaseInsensitiveASCII(name_slice, "host", true) or strings.eqlCaseInsensitiveASCII(name_slice, "connection", true)) or strings.eqlCaseInsensitiveASCII(name_slice, "upgrade", true)) or strings.eqlCaseInsensitiveASCII(name_slice, "sec-websocket-version", true)) or strings.eqlCaseInsensitiveASCII(name_slice, "sec-websocket-extensions", true)) or strings.eqlCaseInsensitiveASCII(name_slice, "sec-websocket-key", true)) or strings.eqlCaseInsensitiveASCII(name_slice, "sec-websocket-protocol", true))) {
+                continue;
+            }
+            _ = try writer.print("{s}: {s}\r\n", .{ name_slice, value });
+        }
+        const extensions_line: []const u8 = (if (offer_permessage_deflate) "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n" else "");
+        if (user_host) |h| {
+            _ = &h;
+            return BuildRequestResult{ .body = try std.fmt.allocPrint(allocator, "GET {s} HTTP/1.1\r\nHost: {s}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n{s}{f}{s}\r\n", .{ pathname, h, extensions_line, pico_headers, extra_headers_buf.items }), .expected_accept = expected_accept };
+        }
+        return BuildRequestResult{ .body = try std.fmt.allocPrint(allocator, "GET {s} HTTP/1.1\r\nHost: {f}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n{s}{f}{s}\r\n", .{ pathname, host_fmt, extensions_line, pico_headers, extra_headers_buf.items }), .expected_accept = expected_accept };
+}
+
+pub fn parseSSLConfig(globalThis: *jsc.JSGlobalObject, tls_value: jsc.JSValue) callconv(.c) ?*SSLConfig {
+        const vm = globalThis.bunVM();
+        const config_opt = (blk_catch_2: { break :blk_catch_2 ((SSLConfig.fromJS(vm, globalThis, tls_value)) catch |__ce_2| { _ = &__ce_2; return null; }); });
+        if (config_opt) |config| {
+            _ = &config;
+            var config_ptr = bun.handleOom(bun.default_allocator.create(SSLConfig));
+            _ = &config_ptr;
+            {
+                config_ptr.* = config;
+            }
+            return config_ptr;
+        }
+        return null;
+}
+
+pub fn freeSSLConfig(config: *SSLConfig) callconv(.c) void {
+        _ = config.deinit();
+        _ = bun.default_allocator.destroy(config);
+}
+
+pub fn NewHTTPUpgradeClient(comptime ssl: bool) type {
+        return struct {
+    ref_count: RefCount,
+    tcp: Socket,
+    outgoing_websocket: ?*CppWebSocket,
+    input_body_buf: []u8 = empty_u8[0..0],
+    to_send: []const u8 = "",
+    read_length: usize = 0,
+    headers_buf: [128]PicoHTTP.Header = undefined,
+    body: ByteList = ByteList{  },
+    hostname: [:0]const u8 = "",
+    poll_ref: Async.KeepAlive = Async.KeepAlive.init(),
+    state: UpgradeState = .initializing,
+    subprotocols: bun.StringSet,
+    proxy: ?WebSocketProxy = null,
+    ssl_config: ?*SSLConfig = null,
+    secure: ?*uws.SslCtx = null,
+    expected_accept: [28]u8 = @as([28]u8, @splat(@as(u8, 0))),
+    offered_permessage_deflate: bool = true,
+
+pub fn deinit(self: *@This()) void {
+            _ = self.clearData();
+            _ = bun.debugAssert(self.tcp.isDetached());
+            _ = bun.destroy(self);
+    }
+
+pub fn connect(global: *jsc.JSGlobalObject, websocket: *CppWebSocket, host: *const bun.String, port: u16, pathname: *const bun.String, client_protocol: *const bun.String, header_names: ?[*]const bun.String, header_values: ?[*]const bun.String, header_count: usize, proxy_host: ?*const bun.String, proxy_port: u16, proxy_authorization: ?*const bun.String, proxy_header_names: ?[*]const bun.String, proxy_header_values: ?[*]const bun.String, proxy_header_count: usize, ssl_config: ?*SSLConfig, target_is_secure: bool, target_authorization: ?*const bun.String, unix_socket_path: ?*const bun.String, offer_permessage_deflate: bool) callconv(.c) ?*HTTPClient {
+            const vm = global.bunVM();
+            _ = bun.assert((vm.event_loop_handle != null));
+            const allocator = bun.default_allocator;
+            var host_slice = host.toUTF8(allocator);
+            _ = &host_slice;
+            var pathname_slice = pathname.toUTF8(allocator);
+            _ = &pathname_slice;
+            var client_protocol_slice = client_protocol.toUTF8(allocator);
+            _ = &client_protocol_slice;
+            const extra_headers = (blk_catch_0: { break :blk_catch_0 ((Headers8Bit.init(allocator, header_names, header_values, header_count)) catch |e| { _ = &e; break :blk_catch_0 @as(Headers8Bit, bun.handleOom(e)); }); });
+            defer {
+            _ = extra_headers.deinit();
+            }
+            defer {
+            _ = host_slice.deinit();
+            }
+            defer {
+            _ = pathname_slice.deinit();
+            }
+            defer {
+            _ = client_protocol_slice.deinit();
+            }
+            var proxy_host_slice: ?ZigSlice = null;
+            _ = &proxy_host_slice;
+            defer {
+            if (proxy_host_slice) |s| {
+                _ = &s;
+                _ = s.deinit();
+            }
+            }
+            if (proxy_host) |ph| {
+                _ = &ph;
+                proxy_host_slice = ph.toUTF8(allocator);
+            }
+            var target_authorization_slice: ?ZigSlice = null;
+            _ = &target_authorization_slice;
+            defer {
+            if (target_authorization_slice) |s| {
+                _ = &s;
+                _ = s.deinit();
+            }
+            }
+            if (target_authorization) |ta| {
+                _ = &ta;
+                target_authorization_slice = ta.toUTF8(allocator);
+            }
+            var unix_socket_path_slice: ?ZigSlice = null;
+            _ = &unix_socket_path_slice;
+            defer {
+            if (unix_socket_path_slice) |s| {
+                _ = &s;
+                _ = s.deinit();
+            }
+            }
+            if (unix_socket_path) |usp| {
+                _ = &usp;
+                unix_socket_path_slice = usp.toUTF8(allocator);
+            }
+            const using_proxy = (proxy_host != null);
+            var protocol_for_subprotocols: []const u8 = client_protocol_slice.slice();
+            _ = &protocol_for_subprotocols;
+            const hdr_names = extra_headers.names();
+            const hdr_values = extra_headers.values();
+            for (hdr_names, hdr_values) |name, value| {
+                if (strings.eqlCaseInsensitiveASCII(name, "sec-websocket-protocol", true)) {
+                    protocol_for_subprotocols = value;
+                    break;
+                }
+            }
+            const target_auth_str: ?[]const u8 = (if ((target_authorization_slice != null)) target_authorization_slice.?.slice() else null);
+            const request_result = (blk_catch_1: { break :blk_catch_1 ((buildRequestBody(vm, pathname_slice.slice(), target_is_secure, host_slice.slice(), port, client_protocol_slice.slice(), extra_headers, target_auth_str, offer_permessage_deflate)) catch |__ce_1| { _ = &__ce_1; return null; }); });
+            const req_body = request_result.body;
+            var proxy_state: ?WebSocketProxy = null;
+            _ = &proxy_state;
+            var connect_request: []u8 = empty_u8[0..0];
+            _ = &connect_request;
+            if (using_proxy) {
+                var proxy_auth_slice: ?[]const u8 = null;
+                _ = &proxy_auth_slice;
+                var proxy_auth_decoded: ?ZigSlice = null;
+                _ = &proxy_auth_decoded;
+                defer {
+                if (proxy_auth_decoded) |s| {
+                    _ = &s;
+                    _ = s.deinit();
+                }
+                }
+                if (proxy_authorization) |auth| {
+                    _ = &auth;
+                    proxy_auth_decoded = auth.toUTF8(allocator);
+                    proxy_auth_slice = proxy_auth_decoded.?.slice();
+                }
+                var proxy_hdrs: ?Headers = null;
+                _ = &proxy_hdrs;
+                defer {
+                if (proxy_hdrs) |*hdrs| {
+                    _ = &hdrs;
+                    _ = (hdrs.*).deinit();
+                }
+                }
+                const proxy_extra_headers = (blk_catch_2: { break :blk_catch_2 ((Headers8Bit.init(allocator, proxy_header_names, proxy_header_values, proxy_header_count)) catch |e| { _ = &e; break :blk_catch_2 @as(Headers8Bit, bun.handleOom(e)); }); });
+                defer {
+                _ = proxy_extra_headers.deinit();
+                }
+                if ((proxy_header_count > 0)) {
+                    proxy_hdrs = (blk_catch_3: { break :blk_catch_3 ((proxy_extra_headers.toHeaders(allocator)) catch |e| { _ = &e; break :blk_catch_3 @as(Headers, bun.handleOom(e)); }); });
+                }
+                connect_request = (blk_catch_4: { break :blk_catch_4 ((buildConnectRequest(host_slice.slice(), port, proxy_auth_slice, proxy_hdrs)) catch |e| { _ = &e; break :blk_catch_4 @as([]u8, bun.handleOom(e)); }); });
+                const target_host_dup = (blk_catch_5: { break :blk_catch_5 ((allocator.dupe(u8, host_slice.slice())) catch |e| { _ = &e; break :blk_catch_5 bun.handleOom(e); }); });
+                proxy_state = WebSocketProxy.init(target_host_dup, target_is_secure, req_body);
+            }
+            var client = bun.new(HTTPClient, .{ .ref_count = RefCount.init(), .tcp = Socket{ .socket = .{ .detached = .{} } }, .outgoing_websocket = websocket, .input_body_buf = (if (using_proxy) connect_request else req_body), .state = .initializing, .proxy = proxy_state, .expected_accept = request_result.expected_accept, .offered_permessage_deflate = offer_permessage_deflate, .subprotocols = brk: {
+            var subprotocols = bun.StringSet.init(bun.default_allocator);
+            _ = &subprotocols;
+            var it = bun.http.HeaderValueIterator.init(protocol_for_subprotocols);
+            _ = &it;
+            while (it.next()) |protocol| {
+                _ = (blk_catch_6: { break :blk_catch_6 ((subprotocols.insert(protocol)) catch |e| { _ = &e; break :blk_catch_6 bun.handleOom(e); }); });
+            }
+            break :brk subprotocols;
+} });
+            _ = &client;
+            client.ssl_config = ssl_config;
+            const display_host_ = (if (using_proxy) proxy_host_slice.?.slice() else host_slice.slice());
+            const connect_port = (if (using_proxy) proxy_port else port);
+            _ = client.poll_ref.ref(vm);
+            const display_host = (if ((bun.FeatureFlags.hardcode_localhost_to_127_0_0_1 and strings.eqlComptime(display_host_, "localhost"))) "127.0.0.1" else display_host_);
+            _ = log("connect: ssl={}, has_ssl_config={}, using_proxy={}", .{ ssl, (ssl_config != null), using_proxy });
+            const group = vm.rareData().wsUpgradeGroup(vm, ssl);
+            const kind: uws.SocketKind = (if (ssl) .ws_client_upgrade_tls else .ws_client_upgrade);
+            const secure_ptr: ?*uws.SslCtx = (if (comptime ssl) brk: {
+            if (ssl_config) |config| {
+                _ = &config;
+                if (config.requires_custom_request_ctx) {
+                    var create_err: uws.create_bun_socket_error_t = .none;
+                    _ = &create_err;
+                    const ctx_opt = vm.rareData().sslCtxCache().getOrCreateOpts(config.asUSocketsForClientVerification(), (&create_err));
+                    if (ctx_opt) |ctx| {
+                        _ = &ctx;
+                        client.secure = ctx;
+                        break :brk ctx;
+                    }
+                    _ = log("createSSLContext failed for WebSocket: {s}", .{ @tagName(create_err) });
+                    _ = client.poll_ref.unref(vm);
+                    _ = client.deref();
+                    return null;
+                }
+            }
+            break :brk vm.rareData().defaultClientSslCtx();
+} else null);
+            if (unix_socket_path_slice) |usp| {
+                _ = &usp;
+                if ((blk_catch_7: { break :blk_catch_7 ((Socket.connectUnixGroup(group, kind, secure_ptr, usp.slice(), client, false)) catch |__ce_7| { _ = &__ce_7; break :blk_catch_7 null; }); })) |socket| {
+                    _ = &socket;
+                    client.tcp = socket;
+                    if ((client.state == .failed)) {
+                        _ = client.deref();
+                        return null;
+                    }
+                    bun.analytics.Features.WebSocket = (bun.analytics.Features.WebSocket + 1);
+                    if (comptime ssl) {
+                        if (((host_slice.slice().len > 0) and (!strings.isIPAddress(host_slice.slice())))) {
+                            client.hostname = (blk_catch_8: { break :blk_catch_8 ((bun.default_allocator.dupeZ(u8, host_slice.slice())) catch |__ce_8| { _ = &__ce_8; break :blk_catch_8 ""; }); });
+                        }
+                    }
+                    _ = client.tcp.timeout(120);
+                    client.state = .reading;
+                    _ = client.ref();
+                    return client;
+                } else {
+                    _ = client.deref();
+                }
+                return null;
+            }
+            if ((blk_catch_9: { break :blk_catch_9 ((Socket.connectGroup(group, kind, secure_ptr, display_host, connect_port, client, false)) catch |__ce_9| { _ = &__ce_9; break :blk_catch_9 null; }); })) |sock| {
+                _ = &sock;
+                client.tcp = sock;
+                var out = client;
+                _ = &out;
+                if ((out.state == .failed)) {
+                    _ = client.deref();
+                    return null;
+                }
+                bun.analytics.Features.WebSocket = (bun.analytics.Features.WebSocket + 1);
+                if (comptime ssl) {
+                    if ((!strings.isIPAddress(display_host_))) {
+                        out.hostname = (blk_catch_10: { break :blk_catch_10 ((bun.default_allocator.dupeZ(u8, display_host_)) catch |__ce_10| { _ = &__ce_10; break :blk_catch_10 ""; }); });
+                    }
+                }
+                _ = out.tcp.timeout(120);
+                out.state = .reading;
+                _ = out.ref();
+                return out;
+            } else {
+                _ = client.deref();
+            }
+            return null;
+    }
+
+pub fn clearInput(self: *@This()) void {
+            if ((self.input_body_buf.len > 0)) {
+                _ = bun.default_allocator.free(self.input_body_buf);
+            }
+            self.input_body_buf.len = 0;
+    }
+
+pub fn clearData(self: *@This()) void {
+            const vm: *jsc.VirtualMachine = jsc.VirtualMachine.get();
+            _ = self.poll_ref.unref(vm);
+            _ = self.subprotocols.clearAndFree();
+            _ = self.clearInput();
+            _ = self.body.clearAndFree(bun.default_allocator);
+            if ((self.hostname.len > 0)) {
+                _ = bun.default_allocator.free(self.hostname);
+                self.hostname = "";
+            }
+            if ((self.proxy != null)) {
+                var proxy = self.proxy.?;
+                _ = &proxy;
+                self.proxy = null;
+                if (proxy.getTunnel()) |tunnel| {
+                    _ = &tunnel;
+                    _ = tunnel.detachUpgradeClient();
+                }
+                _ = proxy.deinit();
+            }
+            if (self.ssl_config) |config| {
+                _ = &config;
+                _ = config.deinit();
+                _ = bun.default_allocator.destroy(config);
+                self.ssl_config = null;
+            }
+            if (self.secure) |s| {
+                _ = &s;
+                _ = bun.BoringSSL.c.SSL_CTX_free(s);
+                self.secure = null;
+            }
+    }
+
+pub fn cancel(self: *@This()) callconv(.c) void {
+            _ = self.clearData();
+            _ = self.ref();
+            defer {
+            _ = self.deref();
+            }
+            if ((self.outgoing_websocket != null)) {
+                self.outgoing_websocket = null;
+                _ = self.deref();
+            }
+            if (comptime ssl) {
+                _ = self.tcp.close(.normal);
+            } else {
+                _ = self.tcp.close(.failure);
+            }
+    }
+
+pub fn fail(self: *@This(), code: ErrorCode) void {
+            _ = log("onFail: {s}", .{ @tagName(code) });
+            _ = jsc.markBinding(@src());
+            _ = self.dispatchAbruptClose(code);
+            if (comptime ssl) {
+                _ = self.tcp.close(.normal);
+            } else {
+                _ = self.tcp.close(.failure);
+            }
+    }
+
+pub fn dispatchAbruptClose(self: *@This(), code: ErrorCode) void {
+            if (self.outgoing_websocket) |ws| {
+                _ = &ws;
+                self.outgoing_websocket = null;
+                _ = ws.didAbruptClose(code);
+                _ = self.deref();
+            }
+    }
+
+pub fn handleClose(self: *@This()) void {
+            _ = log("onClose", .{});
+            _ = jsc.markBinding(@src());
+            _ = self.clearData();
+            _ = self.tcp.detach();
+            _ = self.dispatchAbruptClose(ErrorCode.ended);
+            _ = self.deref();
+    }
+
+pub fn terminate(self: *@This(), code: ErrorCode) void {
+            _ = self.fail(code);
+    }
+
+pub fn handleHandshake(self: *@This(), socket: Socket, success: i32, ssl_error: uws.us_bun_verify_error_t) void {
+            _ = log("onHandshake({d}) ssl_error.error_no={d}", .{ success, ssl_error.error_no });
+            const handshake_success = (if ((success == 1)) true else false);
+            var reject_unauthorized = false;
+            _ = &reject_unauthorized;
+            if (self.outgoing_websocket) |ws| {
+                _ = &ws;
+                reject_unauthorized = ws.rejectUnauthorized();
+            }
+            if (handshake_success) {
+                if (reject_unauthorized) {
+                    if ((ssl_error.error_no != 0)) {
+                        _ = log("TLS handshake failed: ssl_error={d}, has_custom_ctx={}", .{ ssl_error.error_no, (self.secure != null) });
+                        _ = self.fail(ErrorCode.tls_handshake_failed);
+                        return;
+                    }
+                    const ssl_ptr = (blk: {
+                    break :blk @as(*BoringSSL.c.SSL, @ptrCast(@alignCast(socket.getNativeHandle())));
+
+});
+                    if (BoringSSL.c.SSL_get_servername(ssl_ptr, 0)) |servername| {
+                        _ = &servername;
+                        const hostname = (blk: {
+                        break :blk servername[0..bun.len(servername)];
+
+});
+                        if ((!BoringSSL.checkServerIdentity(ssl_ptr, hostname))) {
+                            _ = self.fail(ErrorCode.tls_handshake_failed);
+                        }
+                    }
+                }
+            } else {
+                _ = self.fail(ErrorCode.tls_handshake_failed);
+            }
+    }
+
+pub fn handleOpen(self: *@This(), socket: Socket) void {
+            _ = log("onOpen", .{});
+            self.tcp = socket;
+            _ = bun.assert((self.input_body_buf.len > 0));
+            _ = bun.assert((self.to_send.len == 0));
+            if (comptime ssl) {
+                if ((self.hostname.len > 0)) {
+                    if (socket.getNativeHandle()) |handle| {
+                        _ = &handle;
+                        _ = handle.configureHTTPClient(self.hostname);
+                    }
+                    _ = bun.default_allocator.free(self.hostname);
+                    self.hostname = "";
+                }
+            }
+            if ((self.proxy != null)) {
+                self.state = .proxy_handshake;
+            }
+            const wrote = socket.write(self.input_body_buf);
+            if ((wrote < 0)) {
+                _ = self.terminate(ErrorCode.failed_to_write);
+                return;
+            }
+            self.to_send = self.input_body_buf[@as(usize, @intCast(wrote))..];
+    }
+
+pub fn isSameSocket(self: *@This(), socket: Socket) bool {
+            return socket.socket.eq(self.tcp.socket);
+    }
+
+pub fn handleData(self: *@This(), socket: Socket, data: []const u8) void {
+            _ = log("onData", .{});
+            if ((self.state == .done)) {
+                if (self.proxy) |*p| {
+                    _ = &p;
+                    if ((p.*).getTunnel()) |tunnel| {
+                        _ = &tunnel;
+                        _ = tunnel.ref();
+                        defer {
+                        _ = tunnel.deref();
+                        }
+                        _ = tunnel.receive(data);
+                    }
+                }
+                return;
+            }
+            if ((self.outgoing_websocket == null)) {
+                self.state = .failed;
+                _ = self.clearData();
+                _ = socket.close(.failure);
+                return;
+            }
+            _ = self.ref();
+            defer {
+            _ = self.deref();
+            }
+            _ = bun.assert(self.isSameSocket(socket));
+            if (comptime Environment.allow_assert) {
+                _ = bun.assert((!socket.isShutdown()));
+            }
+            if ((self.state == .proxy_handshake)) {
+                _ = self.handleProxyResponse(socket, data);
+                return;
+            }
+            if (self.proxy) |*p| {
+                _ = &p;
+                if ((p.*).getTunnel()) |tunnel| {
+                    _ = &tunnel;
+                    _ = tunnel.receive(data);
+                    return;
+                }
+            }
+            var body = data;
+            _ = &body;
+            if ((self.body.items.len > 0)) {
+                _ = bun.handleOom(self.body.appendSlice(bun.default_allocator, data));
+                body = self.body.items;
+            }
+            const is_first = (self.body.items.len == 0);
+            const http_101: []const u8 = "HTTP/1.1 101 ";
+            if ((is_first and (body.len > http_101.len))) {
+                if ((!strings.hasPrefixComptime(body, http_101))) {
+                    _ = self.terminate(ErrorCode.expected_101_status_code);
+                    return;
+                }
+            }
+            const response = (blk_catch_11: { break :blk_catch_11 ((PicoHTTP.Response.parse(body, (&self.headers_buf))) catch |e| { _ = &e; break :blk_catch_11 (switch (e) {
+error.Malformed_HTTP_Response => {
+{
+                _ = self.terminate(ErrorCode.invalid_response);
+                return;
+            }
+},
+error.ShortRead => {
+{
+                if ((self.body.items.len == 0)) {
+                    _ = bun.handleOom(self.body.appendSlice(bun.default_allocator, data));
+                }
+                return;
+            }
+},
+}); }); });
+            _ = self.processResponse(response, body[@as(usize, @intCast(response.bytes_read))..]);
+    }
+
+pub fn handleProxyResponse(self: *@This(), socket: Socket, data: []const u8) void {
+            _ = log("handleProxyResponse", .{});
+            var body = data;
+            _ = &body;
+            if ((self.body.items.len > 0)) {
+                _ = bun.handleOom(self.body.appendSlice(bun.default_allocator, data));
+                body = self.body.items;
+            }
+            const is_first = (self.body.items.len == 0);
+            const http_200: []const u8 = "HTTP/1.1 200 ";
+            const http_200_alt: []const u8 = "HTTP/1.0 200 ";
+            if ((is_first and (body.len > http_200.len))) {
+                if (((!strings.hasPrefixComptime(body, http_200)) and (!strings.hasPrefixComptime(body, http_200_alt)))) {
+                    _ = self.terminate(ErrorCode.proxy_connect_failed);
+                    return;
+                }
+            }
+            const response = (blk_catch_12: { break :blk_catch_12 ((PicoHTTP.Response.parse(body, (&self.headers_buf))) catch |e| { _ = &e; break :blk_catch_12 (switch (e) {
+error.Malformed_HTTP_Response => {
+{
+                _ = self.terminate(ErrorCode.invalid_response);
+                return;
+            }
+},
+error.ShortRead => {
+{
+                if ((self.body.items.len == 0)) {
+                    _ = bun.handleOom(self.body.appendSlice(bun.default_allocator, data));
+                }
+                return;
+            }
+},
+}); }); });
+            if ((response.status_code != 200)) {
+                if ((response.status_code == 407)) {
+                    _ = self.terminate(ErrorCode.proxy_authentication_required);
+                } else {
+                    _ = self.terminate(ErrorCode.proxy_connect_failed);
+                }
+                return;
+            }
+            _ = log("Proxy tunnel established", .{});
+            _ = self.body.clearRetainingCapacity();
+            const remain_buf = body[@as(usize, @intCast(response.bytes_read))..];
+            if (self.proxy) |*p| {
+                _ = &p;
+                if ((p.*).isTargetHttps()) {
+                    _ = self.startProxyTLSHandshake(socket, remain_buf);
+                    return;
+                }
+                self.state = .reading;
+                if ((self.input_body_buf.len > 0)) {
+                    _ = bun.default_allocator.free(self.input_body_buf);
+                }
+                self.input_body_buf = (p.*).takeWebsocketRequestBuf();
+                const wrote = socket.write(self.input_body_buf);
+                if ((wrote < 0)) {
+                    _ = self.terminate(ErrorCode.failed_to_write);
+                    return;
+                }
+                self.to_send = self.input_body_buf[@as(usize, @intCast(wrote))..];
+                if ((remain_buf.len > 0)) {
+                    _ = self.handleData(socket, remain_buf);
+                }
+            } else {
+                _ = self.terminate(ErrorCode.proxy_tunnel_failed);
+            }
+    }
+
+pub fn startProxyTLSHandshake(self: *@This(), socket: Socket, initial_data: []const u8) void {
+            _ = log("startProxyTLSHandshake", .{});
+            if (self.proxy) |*p| {
+                _ = &p;
+                const reject_unauthorized = (if ((self.outgoing_websocket != null)) self.outgoing_websocket.?.rejectUnauthorized() else true);
+                const tunnel = (blk_catch_13: { break :blk_catch_13 ((WebSocketProxyTunnel.init(ssl, self, socket, (p.*).getTargetHost(), reject_unauthorized)) catch |__ce_13| { _ = &__ce_13; _ = self.terminate(ErrorCode.proxy_tunnel_failed);
+                return; }); });
+                const ssl_options: SSLConfig = (if ((self.ssl_config != null)) (blk: {
+                break :blk (self.ssl_config.?).*;
+
+}) else SSLConfig{ .reject_unauthorized = 0, .request_cert = 1 });
+                _ = (blk_catch_14: { break :blk_catch_14 ((tunnel.start(ssl_options, initial_data)) catch |__ce_14| { _ = &__ce_14; _ = tunnel.deref();
+                _ = self.terminate(ErrorCode.proxy_tunnel_failed);
+                return; }); });
+                _ = (p.*).setTunnel(tunnel);
+                self.state = .proxy_tls_handshake;
+            } else {
+                _ = self.terminate(ErrorCode.proxy_tunnel_failed);
+            }
+    }
+
+pub fn onProxyTLSHandshakeComplete(self: *@This()) void {
+            _ = log("onProxyTLSHandshakeComplete", .{});
+            self.state = .reading;
+            if ((self.input_body_buf.len > 0)) {
+                _ = bun.default_allocator.free(self.input_body_buf);
+                self.input_body_buf = empty_u8[0..0];
+            }
+            if (self.proxy) |*p| {
+                _ = &p;
+                self.input_body_buf = (p.*).takeWebsocketRequestBuf();
+                if ((self.input_body_buf.len == 0)) {
+                    _ = self.terminate(ErrorCode.failed_to_write);
+                    return;
+                }
+                if ((p.*).getTunnel()) |tunnel| {
+                    _ = &tunnel;
+                    const wrote = (blk_catch_15: { break :blk_catch_15 ((tunnel.write(self.input_body_buf)) catch |__ce_15| { _ = &__ce_15; _ = self.terminate(ErrorCode.failed_to_write);
+                    return; }); });
+                    self.to_send = self.input_body_buf[wrote..];
+                } else {
+                    _ = self.terminate(ErrorCode.proxy_tunnel_failed);
+                }
+            } else {
+                _ = self.terminate(ErrorCode.proxy_tunnel_failed);
+            }
+    }
+
+pub fn handleDecryptedData(self: *@This(), data: []const u8) void {
+            _ = log("handleDecryptedData: {} bytes", .{ data.len });
+            var body = data;
+            _ = &body;
+            if ((self.body.items.len > 0)) {
+                _ = bun.handleOom(self.body.appendSlice(bun.default_allocator, data));
+                body = self.body.items;
+            }
+            const is_first = (self.body.items.len == 0);
+            const http_101: []const u8 = "HTTP/1.1 101 ";
+            if ((is_first and (body.len > http_101.len))) {
+                if ((!strings.hasPrefixComptime(body, http_101))) {
+                    _ = self.terminate(ErrorCode.expected_101_status_code);
+                    return;
+                }
+            }
+            const response = (blk_catch_16: { break :blk_catch_16 ((PicoHTTP.Response.parse(body, (&self.headers_buf))) catch |e| { _ = &e; break :blk_catch_16 (switch (e) {
+error.Malformed_HTTP_Response => {
+{
+                _ = self.terminate(ErrorCode.invalid_response);
+                return;
+            }
+},
+error.ShortRead => {
+{
+                if ((self.body.items.len == 0)) {
+                    _ = bun.handleOom(self.body.appendSlice(bun.default_allocator, data));
+                }
+                return;
+            }
+},
+}); }); });
+            _ = self.processResponse(response, body[@as(usize, @intCast(response.bytes_read))..]);
+    }
+
+pub fn handleEnd(self: *@This()) void {
+            _ = log("onEnd", .{});
+            _ = self.terminate(ErrorCode.ended);
+    }
+
+pub fn processResponse(self: *@This(), response: PicoHTTP.Response, remain_buf: []const u8) void {
+            var upgrade_header = PicoHTTP.Header{ .name = "", .value = "" };
+            _ = &upgrade_header;
+            var connection_header = PicoHTTP.Header{ .name = "", .value = "" };
+            _ = &connection_header;
+            var websocket_accept_header = PicoHTTP.Header{ .name = "", .value = "" };
+            _ = &websocket_accept_header;
+            var protocol_header_seen = false;
+            _ = &protocol_header_seen;
+            var deflate_result = DeflateNegotiationResult{  };
+            _ = &deflate_result;
+            if ((response.status_code != 101)) {
+                _ = self.terminate(ErrorCode.expected_101_status_code);
+                return;
+            }
+            const hdr_list = response.headers.list;
+            for (hdr_list) |header| {
+                switch ((if (@typeInfo(@TypeOf(header)) == .@"enum" or @typeInfo(@TypeOf(header)) == .@"union") @tagName(header) else header.name).len) {
+10 => {
+if ((((if (@typeInfo(@TypeOf(connection_header)) == .@"enum" or @typeInfo(@TypeOf(connection_header)) == .@"union") @tagName(connection_header) else connection_header.name).len == 0) and strings.eqlCaseInsensitiveASCII((if (@typeInfo(@TypeOf(header)) == .@"enum" or @typeInfo(@TypeOf(header)) == .@"union") @tagName(header) else header.name), "Connection", false))) {
+                    connection_header = header;
+                }
+},
+7 => {
+if ((((if (@typeInfo(@TypeOf(upgrade_header)) == .@"enum" or @typeInfo(@TypeOf(upgrade_header)) == .@"union") @tagName(upgrade_header) else upgrade_header.name).len == 0) and strings.eqlCaseInsensitiveASCII((if (@typeInfo(@TypeOf(header)) == .@"enum" or @typeInfo(@TypeOf(header)) == .@"union") @tagName(header) else header.name), "Upgrade", false))) {
+                    upgrade_header = header;
+                }
+},
+21 => {
+if (strings.eqlCaseInsensitiveASCII((if (@typeInfo(@TypeOf(header)) == .@"enum" or @typeInfo(@TypeOf(header)) == .@"union") @tagName(header) else header.name), "Sec-WebSocket-Version", false)) {
+                    if ((!strings.eqlComptimeIgnoreLen((if (@typeInfo(@TypeOf(header)) == .@"enum") @intFromEnum(header) else header.value), "13"))) {
+                        _ = self.terminate(ErrorCode.invalid_websocket_version);
+                        return;
+                    }
+                }
+},
+20 => {
+if ((((if (@typeInfo(@TypeOf(websocket_accept_header)) == .@"enum" or @typeInfo(@TypeOf(websocket_accept_header)) == .@"union") @tagName(websocket_accept_header) else websocket_accept_header.name).len == 0) and strings.eqlCaseInsensitiveASCII((if (@typeInfo(@TypeOf(header)) == .@"enum" or @typeInfo(@TypeOf(header)) == .@"union") @tagName(header) else header.name), "Sec-WebSocket-Accept", false))) {
+                    websocket_accept_header = header;
+                }
+},
+22 => {
+if (strings.eqlCaseInsensitiveASCII((if (@typeInfo(@TypeOf(header)) == .@"enum" or @typeInfo(@TypeOf(header)) == .@"union") @tagName(header) else header.name), "Sec-WebSocket-Protocol", false)) {
+                    const valid = brk: {
+                    if (protocol_header_seen) {
+                        break :brk false;
+                    }
+                    protocol_header_seen = true;
+                    var iterator = bun.http.HeaderValueIterator.init((if (@typeInfo(@TypeOf(header)) == .@"enum") @intFromEnum(header) else header.value));
+                    _ = &iterator;
+                    if (iterator.next()) |protocol| {
+                        _ = &protocol;
+                        if ((iterator.next() != null)) {
+                            break :brk false;
+                        }
+                        if ((!self.subprotocols.contains(protocol))) {
+                            break :brk false;
+                        }
+                        if (self.outgoing_websocket) |ws| {
+                            _ = &ws;
+                            var protocol_str = bun.String.cloneLatin1(protocol);
+                            _ = &protocol_str;
+                            defer {
+                            _ = protocol_str.deref();
+                            }
+                            _ = ws.setProtocol((&protocol_str));
+                        }
+                        break :brk true;
+                    }
+                    break :brk false;
+};
+                    if ((!valid)) {
+                        _ = self.terminate(ErrorCode.mismatch_client_protocol);
+                        return;
+                    }
+                }
+},
+24 => {
+if (strings.eqlCaseInsensitiveASCII((if (@typeInfo(@TypeOf(header)) == .@"enum" or @typeInfo(@TypeOf(header)) == .@"union") @tagName(header) else header.name), "Sec-WebSocket-Extensions", false)) {
+                    if ((!self.offered_permessage_deflate)) {
+                        _ = self.terminate(ErrorCode.invalid_response);
+                        return;
+                    }
+                    var it = std.mem.splitScalar(u8, (if (@typeInfo(@TypeOf(header)) == .@"enum") @intFromEnum(header) else header.value), 44);
+                    _ = &it;
+                    while (it.next()) |ext_str| {
+                        var ext_it = std.mem.splitScalar(u8, std.mem.trim(u8, ext_str, " \t"), 59);
+                        _ = &ext_it;
+                        const ext_name = std.mem.trim(u8, ((ext_it.next()) orelse ("")), " \t");
+                        if (strings.eqlComptime(ext_name, "permessage-deflate")) {
+                            deflate_result.enabled = true;
+                            while (ext_it.next()) |param_str| {
+                                var param_it = std.mem.splitScalar(u8, std.mem.trim(u8, param_str, " \t"), 61);
+                                _ = &param_it;
+                                const key = std.mem.trim(u8, ((param_it.next()) orelse ("")), " \t");
+                                const value = std.mem.trim(u8, ((param_it.next()) orelse ("")), " \t");
+                                if (strings.eqlComptime(key, "server_no_context_takeover")) {
+                                    deflate_result.params.server_no_context_takeover = 1;
+                                } else {
+                                    if (strings.eqlComptime(key, "client_no_context_takeover")) {
+                                        deflate_result.params.client_no_context_takeover = 1;
+                                    } else {
+                                        if (strings.eqlComptime(key, "server_max_window_bits")) {
+                                            if ((value.len > 0)) {
+                                                const trimmed_value = (if ((((value.len >= 2) and (value[0] == 34)) and (value[@as(usize, @intCast((value.len - 1)))] == 34))) value[1..(value.len - 1)] else value);
+                                                if ((blk_catch_17: { break :blk_catch_17 ((std.fmt.parseInt(u8, trimmed_value, 10)) catch |__ce_17| { _ = &__ce_17; break :blk_catch_17 null; }); })) |bits| {
+                                                    _ = &bits;
+                                                    if (((bits >= DeflateParams.MIN_WINDOW_BITS) and (bits <= DeflateParams.MAX_WINDOW_BITS))) {
+                                                        deflate_result.params.server_max_window_bits = bits;
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            if (strings.eqlComptime(key, "client_max_window_bits")) {
+                                                if ((value.len > 0)) {
+                                                    const trimmed_value = (if ((((value.len >= 2) and (value[0] == 34)) and (value[@as(usize, @intCast((value.len - 1)))] == 34))) value[1..(value.len - 1)] else value);
+                                                    if ((blk_catch_18: { break :blk_catch_18 ((std.fmt.parseInt(u8, trimmed_value, 10)) catch |__ce_18| { _ = &__ce_18; break :blk_catch_18 null; }); })) |bits| {
+                                                        _ = &bits;
+                                                        if (((bits >= DeflateParams.MIN_WINDOW_BITS) and (bits <= DeflateParams.MAX_WINDOW_BITS))) {
+                                                            deflate_result.params.client_max_window_bits = bits;
+                                                        }
+                                                    }
+                                                } else {
+                                                    deflate_result.params.client_max_window_bits = 15;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+},
+else => {
+
+},
+}
+            }
+            if ((@min((if (@typeInfo(@TypeOf(upgrade_header)) == .@"enum" or @typeInfo(@TypeOf(upgrade_header)) == .@"union") @tagName(upgrade_header) else upgrade_header.name).len, (if (@typeInfo(@TypeOf(upgrade_header)) == .@"enum") @intFromEnum(upgrade_header) else upgrade_header.value).len) == 0)) {
+                _ = self.terminate(ErrorCode.missing_upgrade_header);
+                return;
+            }
+            if ((@min((if (@typeInfo(@TypeOf(connection_header)) == .@"enum" or @typeInfo(@TypeOf(connection_header)) == .@"union") @tagName(connection_header) else connection_header.name).len, (if (@typeInfo(@TypeOf(connection_header)) == .@"enum") @intFromEnum(connection_header) else connection_header.value).len) == 0)) {
+                _ = self.terminate(ErrorCode.missing_connection_header);
+                return;
+            }
+            if ((@min((if (@typeInfo(@TypeOf(websocket_accept_header)) == .@"enum" or @typeInfo(@TypeOf(websocket_accept_header)) == .@"union") @tagName(websocket_accept_header) else websocket_accept_header.name).len, (if (@typeInfo(@TypeOf(websocket_accept_header)) == .@"enum") @intFromEnum(websocket_accept_header) else websocket_accept_header.value).len) == 0)) {
+                _ = self.terminate(ErrorCode.missing_websocket_accept_header);
+                return;
+            }
+            if ((!strings.eqlCaseInsensitiveASCII((if (@typeInfo(@TypeOf(connection_header)) == .@"enum") @intFromEnum(connection_header) else connection_header.value), "Upgrade", true))) {
+                _ = self.terminate(ErrorCode.invalid_connection_header);
+                return;
+            }
+            if ((!strings.eqlCaseInsensitiveASCII((if (@typeInfo(@TypeOf(upgrade_header)) == .@"enum") @intFromEnum(upgrade_header) else upgrade_header.value), "websocket", true))) {
+                _ = self.terminate(ErrorCode.invalid_upgrade_header);
+                return;
+            }
+            if ((!std.mem.eql(u8, (if (@typeInfo(@TypeOf(websocket_accept_header)) == .@"enum") @intFromEnum(websocket_accept_header) else websocket_accept_header.value), (&self.expected_accept)))) {
+                _ = self.terminate(ErrorCode.mismatch_websocket_accept_header);
+                return;
+            }
+            const overflow_len = remain_buf.len;
+            var overflow: []u8 = empty_u8[0..0];
+            _ = &overflow;
+            if ((overflow_len > 0)) {
+                overflow = (blk_catch_19: { break :blk_catch_19 ((bun.default_allocator.alloc(u8, overflow_len)) catch |__ce_19| { _ = &__ce_19; _ = self.terminate(ErrorCode.invalid_response);
+                return; }); });
+                _ = @memcpy(overflow, remain_buf);
+            }
+            if (self.proxy) |*p| {
+                _ = &p;
+                if ((p.*).getTunnel()) |tunnel| {
+                    _ = &tunnel;
+                    _ = jsc.markBinding(@src());
+                    if (((!self.tcp.isClosed()) and (self.outgoing_websocket != null))) {
+                        _ = self.tcp.timeout(0);
+                        _ = log("onDidConnect (tunnel mode)", .{});
+                        defer {
+                        _ = self.deref();
+                        }
+                        const ws = (bun.take((&self.outgoing_websocket))).?;
+                        _ = ws.didConnectWithTunnel(tunnel, overflow.ptr, overflow.len, (if (deflate_result.enabled) (&deflate_result.params) else null));
+                        self.state = .done;
+                    } else {
+                        if (self.tcp.isClosed()) {
+                            _ = self.terminate(ErrorCode.cancel);
+                        } else {
+                            if ((self.outgoing_websocket == null)) {
+                                _ = self.tcp.close(.failure);
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+            var saved_secure = self.secure;
+            _ = &saved_secure;
+            self.secure = null;
+            defer {
+            if (saved_secure) |s| {
+                _ = &s;
+                _ = bun.BoringSSL.c.SSL_CTX_free(s);
+            }
+            }
+            _ = self.clearData();
+            _ = jsc.markBinding(@src());
+            if (((!self.tcp.isClosed()) and (self.outgoing_websocket != null))) {
+                _ = self.tcp.timeout(0);
+                _ = log("onDidConnect", .{});
+                defer {
+                _ = self.deref();
+                }
+                const ws = (bun.take((&self.outgoing_websocket))).?;
+                const socket = self.tcp;
+                _ = self.tcp.detach();
+                defer {
+                _ = self.deref();
+                }
+                if (socket.socket.get()) |native_socket| {
+                    _ = &native_socket;
+                    _ = ws.didConnect(native_socket, overflow.ptr, overflow.len, (if (deflate_result.enabled) (&deflate_result.params) else null), saved_secure);
+                    saved_secure = null;
+                } else {
+                    _ = self.terminate(ErrorCode.failed_to_connect);
+                }
+            } else {
+                if (self.tcp.isClosed()) {
+                    _ = self.terminate(ErrorCode.cancel);
+                } else {
+                    if ((self.outgoing_websocket == null)) {
+                        _ = self.tcp.close(.failure);
+                    }
+                }
+            }
+    }
+
+pub fn memoryCost(self: *@This()) callconv(.c) usize {
+            var cost: usize = @sizeOf(HTTPClient);
+            _ = &cost;
+            cost = (cost + self.body.capacity);
+            cost = (cost + self.to_send.len);
+            return cost;
+    }
+
+pub fn handleWritable(self: *@This(), socket: Socket) void {
+            _ = bun.assert(self.isSameSocket(socket));
+            if (self.proxy) |*p| {
+                _ = &p;
+                if ((p.*).getTunnel()) |tunnel| {
+                    _ = &tunnel;
+                    _ = tunnel.onWritable();
+                    if ((self.state == .done)) {
+                        return;
+                    }
+                    if ((self.to_send.len == 0)) {
+                        return;
+                    }
+                    _ = self.ref();
+                    defer {
+                    _ = self.deref();
+                    }
+                    const wrote = (blk_catch_20: { break :blk_catch_20 ((tunnel.write(self.to_send)) catch |__ce_20| { _ = &__ce_20; _ = self.terminate(ErrorCode.failed_to_write);
+                    return; }); });
+                    self.to_send = self.to_send[@min(wrote, self.to_send.len)..];
+                    return;
+                }
+            }
+            if ((self.to_send.len == 0)) {
+                return;
+            }
+            _ = self.ref();
+            defer {
+            _ = self.deref();
+            }
+            const wrote = socket.write(self.to_send);
+            if ((wrote < 0)) {
+                _ = self.terminate(ErrorCode.failed_to_write);
+                return;
+            }
+            self.to_send = self.to_send[@min(@as(usize, @intCast(wrote)), self.to_send.len)..];
+    }
+
+pub fn handleTimeout(self: *@This()) void {
+            _ = self.terminate(ErrorCode.timeout);
+    }
+
+pub fn handleConnectError(self: *@This()) void {
+            _ = self.tcp.detach();
+            defer {
+            _ = self.deref();
+            }
+            if ((self.state == .reading)) {
+                _ = self.terminate(ErrorCode.failed_to_connect);
+            } else {
+                self.state = .failed;
+            }
+    }
+
+pub fn exportAll() void {
+            if (comptime ssl) {
+                _ = @export((&connect), .{ .name = "Bun__WebSocketHTTPSClient__connect" });
+                _ = @export((&cancel), .{ .name = "Bun__WebSocketHTTPSClient__cancel" });
+                _ = @export((&memoryCost), .{ .name = "Bun__WebSocketHTTPSClient__memoryCost" });
+            } else {
+                _ = @export((&connect), .{ .name = "Bun__WebSocketHTTPClient__connect" });
+                _ = @export((&cancel), .{ .name = "Bun__WebSocketHTTPClient__cancel" });
+                _ = @export((&memoryCost), .{ .name = "Bun__WebSocketHTTPClient__memoryCost" });
+            }
+    }
+    pub const HTTPClient = @This();
+    pub const RefCount = bun.ptr.RefCount(@This(), "ref_count", deinit, .{});
+    pub const ref = RefCount.ref;
+    pub const deref = RefCount.deref;
+    pub const Socket = uws.NewSocketHandler(ssl);
+    pub const DeflateNegotiationResult = TopDeflateNegotiationResult;
+    pub const State = UpgradeState;
+    pub const onOpen = handleOpen;
+    pub const onClose = handleClose;
+    pub const onData = handleData;
+    pub const onWritable = handleWritable;
+    pub const onTimeout = handleTimeout;
+    pub const onLongTimeout = handleTimeout;
+    pub const onConnectError = handleConnectError;
+    pub const onEnd = handleEnd;
+    pub const onHandshake = handleHandshake;
+};
+}

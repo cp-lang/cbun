@@ -202,3 +202,11 @@
 - **关键工程经验**：
   - `JSBundleCompletionTask.cp` 中利用 CP 的 NLL（Non-Lexical Lifetimes）借用释放特性，将对 `this.config.compile` 的可变修改调整至只读借用 `config` 最后一次读取之后，零开销消除 `E0202` 借用冲突。
   - `WindowsWatcher.cp` 中使用 `type OptionalEventIterator = EventIterator?;` 类型别名传入 `bun.sys.Maybe(OptionalEventIterator)`，以及 `(*w.OVERLAPPED)?` 表示可空指针类型，确保生成的 Zig 类型签名 100% 精确。
+
+
+## 2026-11-14: Milestone 7 Phase 8 闭环（`js_parser_jsc`, `watcher`, `http_jsc` 全量闭合）
+- **新增 16 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - `src/js_parser_jsc/Macro.cp`、`src/watcher/Watcher.cp`、`src/http_jsc/` (9/9)、`src/resolver/` (5/8)。
+- **关键工程经验**：
+  - `WebSocketUpgradeClient.cp` (1,310 vs 1,560 行，精简 16%) 与 `websocket_client.cp` (1,539 vs 1,792 行，精简 14.1%) 中将内部辅助结构体提升至顶层，使 `NewHTTPUpgradeClient(comptime ssl: bool): type` 等大型编译期泛型工厂函数内所有方法 100% 走纯 CP lowering。
+  - `Watcher.cp` 中通过 `Watcher.indexOf(this, hash)` 显式限定关联函数调用，避免与内置切片 `.indexOf` 扩展方法产生签名冲突。

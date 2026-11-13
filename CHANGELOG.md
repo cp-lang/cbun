@@ -249,3 +249,13 @@
   - `src/bundler_jsc/{analyze_jsc,JSBundleCompletionTask,options_jsc,output_file_jsc,PluginRunner,source_map_mode_jsc}.cp` (6/6 100% 闭合)
   - `src/install_jsc/{dependency_jsc,hosted_git_info_jsc,ini_jsc,install_binding,npm_jsc,update_request_jsc}.cp` (6/6 100% 闭合)
   - `src/watcher/{INotifyWatcher,KEventWatcher,WatcherTrace,WindowsWatcher}.cp` (4/5)
+
+
+## 2026-11-14 (Milestone 7 Phase 8: 闭合 js_parser_jsc, watcher, http_jsc 全量及 resolver 5 模块)
+- **新增 16 个 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/js_parser_jsc/Macro.cp` (2/2 100% 闭合)
+  - `src/watcher/Watcher.cp` (5/5 100% 闭合)
+  - `src/http_jsc/{fetch_enums_jsc,headers_jsc,method_jsc,websocket_client}.cp`
+  - `src/http_jsc/websocket_client/{CppWebSocket,WebSocketDeflate,WebSocketProxy,WebSocketProxyTunnel,WebSocketUpgradeClient}.cp` (9/9 100% 闭合)
+  - `src/resolver/fs/stat_hash.cp` (1/1 100% 闭合)
+  - `src/resolver/{node_fallbacks,dir_info,data_url,tsconfig_json}.cp` (5/8)

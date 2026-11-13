@@ -1,622 +1,13 @@
-pub const namespace: string = "macro";
-pub const namespaceWithColon: string = namespace ++ ":";
-
-pub fn isMacroPath(str: string) bool {
-    return strings.hasPrefixComptime(str, namespaceWithColon);
-}
-
-pub const MacroContext = struct {
-    pub const MacroMap = std.AutoArrayHashMap(i32, Macro);
-
-    resolver: *Resolver,
-    env: *DotEnv.Loader,
-    macros: MacroMap,
-    remap: MacroRemap,
-    javascript_object: jsc.JSValue = jsc.JSValue.zero,
-
-    pub fn getRemap(this: MacroContext, path: string) ?MacroRemapEntry {
-        if (this.remap.entries.len == 0) return null;
-        return this.remap.get(path);
-    }
-
-    pub fn init(transpiler: *Transpiler) MacroContext {
-        return MacroContext{
-            .macros = MacroMap.init(default_allocator),
-            .resolver = &transpiler.resolver,
-            .env = transpiler.env,
-            .remap = transpiler.options.macro_remap,
-        };
-    }
-
-    pub fn call(
-        this: *MacroContext,
-        import_record_path: string,
-        source_dir: string,
-        log: *logger.Log,
-        source: *const logger.Source,
-        import_range: logger.Range,
-        caller: Expr,
-        function_name: string,
-    ) anyerror!Expr {
-        Expr.Data.Store.disable_reset = true;
-        Stmt.Data.Store.disable_reset = true;
-        defer Expr.Data.Store.disable_reset = false;
-        defer Stmt.Data.Store.disable_reset = false;
-        // const is_package_path = isPackagePath(specifier);
-        const import_record_path_without_macro_prefix = if (isMacroPath(import_record_path))
-            import_record_path[namespaceWithColon.len..]
-        else
-            import_record_path;
-
-        bun.assert(!isMacroPath(import_record_path_without_macro_prefix));
-
-        const input_specifier = brk: {
-            if (jsc.ModuleLoader.HardcodedModule.Alias.get(import_record_path, .bun, .{})) |replacement| {
-                break :brk replacement.path;
-            }
-
-            const resolve_result = this.resolver.resolve(source_dir, import_record_path_without_macro_prefix, .stmt) catch |err| {
-                switch (err) {
-                    error.ModuleNotFound => {
-                        log.addResolveError(
-                            source,
-                            import_range,
-                            log.msgs.allocator,
-                            "Macro \"{s}\" not found",
-                            .{import_record_path},
-                            .stmt,
-                            err,
-                        ) catch unreachable;
-                        return error.MacroNotFound;
-                    },
-                    else => {
-                        log.addRangeErrorFmt(
-                            source,
-                            import_range,
-                            log.msgs.allocator,
-                            "{s} resolving macro \"{s}\"",
-                            .{ @errorName(err), import_record_path },
-                        ) catch unreachable;
-                        return err;
-                    },
-                }
-            };
-            break :brk resolve_result.path_pair.primary.text;
-        };
-
-        var specifier_buf: [64]u8 = undefined;
-        var specifier_buf_len: u32 = 0;
-        const hash = MacroEntryPoint.generateID(
-            input_specifier,
-            function_name,
-            &specifier_buf,
-            &specifier_buf_len,
-        );
-
-        const macro_entry = this.macros.getOrPut(hash) catch unreachable;
-        if (!macro_entry.found_existing) {
-            macro_entry.value_ptr.* = Macro.init(
-                default_allocator,
-                this.resolver,
-                input_specifier,
-                log,
-                this.env,
-                function_name,
-                specifier_buf[0..specifier_buf_len],
-                hash,
-            ) catch |err| {
-                macro_entry.value_ptr.* = Macro{ .resolver = undefined, .disabled = true };
-                return err;
-            };
-            Output.flush();
-        }
-        defer Output.flush();
-
-        const macro = macro_entry.value_ptr.*;
-        if (macro.disabled) {
-            return caller;
-        }
-        macro.vm.enableMacroMode();
-        defer macro.vm.disableMacroMode();
-        macro.vm.eventLoop().ensureWaker();
-
-        const Wrapper = struct {
-            args: std.meta.ArgsTuple(@TypeOf(Macro.Runner.run)),
-            ret: Runner.MacroError!Expr,
-
-            pub fn call(self: *@This()) void {
-                self.ret = @call(.auto, Macro.Runner.run, self.args);
-            }
-        };
-        var wrapper = Wrapper{
-            .args = .{
-                macro,
-                log,
-                default_allocator,
-                function_name,
-                caller,
-                source,
-                hash,
-                this.javascript_object,
-            },
-            .ret = undefined,
-        };
-
-        macro.vm.runWithAPILock(Wrapper, &wrapper, Wrapper.call);
-        return try wrapper.ret;
-        // this.macros.getOrPut(key: K)
-    }
-};
-
-pub const MacroResult = struct {
-    import_statements: []S.Import = &[_]S.Import{},
-    replacement: Expr,
-};
-
-resolver: *Resolver,
-vm: *JavaScript.VirtualMachine = undefined,
-
-resolved: ResolveResult = undefined,
-disabled: bool = false,
-
-pub fn init(
-    _: std.mem.Allocator,
-    resolver: *Resolver,
-    input_specifier: []const u8,
-    log: *logger.Log,
-    env: *DotEnv.Loader,
-    function_name: string,
-    specifier: string,
-    hash: i32,
-) !Macro {
-    var vm: *JavaScript.VirtualMachine = if (JavaScript.VirtualMachine.isLoaded())
-        JavaScript.VirtualMachine.get()
-    else brk: {
-        const old_transform_options = resolver.opts.transform_options;
-        defer resolver.opts.transform_options = old_transform_options;
-
-        // JSC needs to be initialized if building from CLI
-        jsc.initialize(false);
-
-        var _vm = try JavaScript.VirtualMachine.init(.{
-            .allocator = default_allocator,
-            .args = resolver.opts.transform_options,
-            .log = log,
-            .is_main_thread = false,
-            .env_loader = env,
-        });
-
-        _vm.enableMacroMode();
-        _vm.eventLoop().ensureWaker();
-
-        try _vm.transpiler.configureDefines();
-        break :brk _vm;
-    };
-
-    vm.enableMacroMode();
-    vm.eventLoop().ensureWaker();
-
-    const loaded_result = try vm.loadMacroEntryPoint(input_specifier, function_name, specifier, hash);
-
-    switch (loaded_result.unwrap(vm.jsc_vm, .leave_unhandled)) {
-        .rejected => |result| {
-            vm.unhandledRejection(vm.global, result, loaded_result.toJS());
-            vm.disableMacroMode();
-            return error.MacroLoadError;
-        },
-        else => {},
-    }
-
-    return Macro{
-        .vm = vm,
-        .resolver = resolver,
-    };
-}
-
-pub const Runner = struct {
-    const VisitMap = std.AutoHashMapUnmanaged(jsc.JSValue, Expr);
-
-    threadlocal var args_buf: [3]js.JSObjectRef = undefined;
-    threadlocal var exception_holder: jsc.ZigException.Holder = undefined;
-    pub const MacroError = error{ MacroFailed, OutOfMemory } || ToJSError || bun.JSError;
-
-    pub const Run = struct {
-        caller: Expr,
-        function_name: string,
-        macro: *const Macro,
-        global: *jsc.JSGlobalObject,
-        allocator: std.mem.Allocator,
-        id: i32,
-        log: *logger.Log,
-        source: *const logger.Source,
-        visited: VisitMap = VisitMap{},
-        is_top_level: bool = false,
-
-        pub fn runAsync(
-            macro: Macro,
-            log: *logger.Log,
-            allocator: std.mem.Allocator,
-            function_name: string,
-            caller: Expr,
-            args: []jsc.JSValue,
-            source: *const logger.Source,
-            id: i32,
-        ) MacroError!Expr {
-            const macro_callback = macro.vm.macros.get(id) orelse return caller;
-
-            const result = js.JSObjectCallAsFunctionReturnValueHoldingAPILock(
-                macro.vm.global,
-                macro_callback,
-                null,
-                args.len,
-                @as([*]js.JSObjectRef, @ptrCast(args.ptr)),
-            );
-
-            var runner = Run{
-                .caller = caller,
-                .function_name = function_name,
-                .macro = &macro,
-                .allocator = allocator,
-                .global = macro.vm.global,
-                .id = id,
-                .log = log,
-                .source = source,
-                .visited = VisitMap{},
-            };
-
-            defer runner.visited.deinit(allocator);
-
-            return try runner.run(
-                result,
-            );
-        }
-
-        pub fn run(
-            this: *Run,
-            value: jsc.JSValue,
-        ) MacroError!Expr {
-            return switch ((try jsc.ConsoleObject.Formatter.Tag.get(value, this.global)).tag) {
-                .Error => this.coerce(value, .Error),
-                .Undefined => this.coerce(value, .Undefined),
-                .Null => this.coerce(value, .Null),
-                .Private => this.coerce(value, .Private),
-                .Boolean => this.coerce(value, .Boolean),
-                .Array => this.coerce(value, .Array),
-                .Object => this.coerce(value, .Object),
-                .toJSON, .JSON => this.coerce(value, .JSON),
-                .Integer => this.coerce(value, .Integer),
-                .Double => this.coerce(value, .Double),
-                .String => this.coerce(value, .String),
-                .Promise => this.coerce(value, .Promise),
-                else => brk: {
-                    const name = value.getClassInfoName() orelse "unknown";
-
-                    this.log.addErrorFmt(
-                        this.source,
-                        this.caller.loc,
-                        this.allocator,
-                        "cannot coerce {s} ({s}) to Bun's AST. Please return a simpler type",
-                        .{ name, @tagName(value.jsType()) },
-                    ) catch unreachable;
-                    break :brk error.MacroFailed;
-                },
-            };
-        }
-
-        pub fn coerce(
-            this: *Run,
-            value: jsc.JSValue,
-            comptime tag: jsc.ConsoleObject.Formatter.Tag,
-        ) MacroError!Expr {
-            switch (comptime tag) {
-                .Error => {
-                    _ = this.macro.vm.uncaughtException(this.global, value, false);
-                    return this.caller;
-                },
-                .Undefined => if (this.is_top_level)
-                    return this.caller
-                else
-                    return Expr.init(E.Undefined, E.Undefined{}, this.caller.loc),
-                .Null => return Expr.init(E.Null, E.Null{}, this.caller.loc),
-                .Private => {
-                    this.is_top_level = false;
-                    if (this.visited.get(value)) |cached| {
-                        return cached;
-                    }
-
-                    var blob_: ?*const jsc.WebCore.Blob = null;
-                    const mime_type: ?MimeType = null;
-
-                    if (value.jsType() == .DOMWrapper) {
-                        if (value.as(jsc.WebCore.Response)) |resp| {
-                            return this.run(try resp.getBlobWithoutCallFrame(this.global));
-                        } else if (value.as(jsc.WebCore.Request)) |resp| {
-                            return this.run(try resp.getBlobWithoutCallFrame(this.global));
-                        } else if (value.as(jsc.WebCore.Blob)) |resp| {
-                            blob_ = resp;
-                        } else if (value.as(bun.api.ResolveMessage) != null or value.as(bun.api.BuildMessage) != null) {
-                            _ = this.macro.vm.uncaughtException(this.global, value, false);
-                            return error.MacroFailed;
-                        }
-                    }
-
-                    if (blob_) |blob| {
-                        return Expr.fromBlob(
-                            blob,
-                            this.allocator,
-                            mime_type,
-                            this.log,
-                            this.caller.loc,
-                        ) catch {
-                            return error.MacroFailed;
-                        };
-                    }
-
-                    return Expr.init(E.String, E.String.empty, this.caller.loc);
-                },
-
-                .Boolean => {
-                    return Expr{ .data = .{ .e_boolean = .{ .value = value.toBoolean() } }, .loc = this.caller.loc };
-                },
-                jsc.ConsoleObject.Formatter.Tag.Array => {
-                    this.is_top_level = false;
-
-                    const _entry = this.visited.getOrPut(this.allocator, value) catch unreachable;
-                    if (_entry.found_existing) {
-                        return _entry.value_ptr.*;
-                    }
-
-                    var iter = try jsc.JSArrayIterator.init(value, this.global);
-
-                    // Process all array items
-                    var array = this.allocator.alloc(Expr, iter.len) catch unreachable;
-                    errdefer this.allocator.free(array);
-                    const expr = Expr.init(
-                        E.Array,
-                        E.Array{ .items = ExprNodeList.empty, .was_originally_macro = true },
-                        this.caller.loc,
-                    );
-                    _entry.value_ptr.* = expr;
-                    var i: usize = 0;
-                    while (try iter.next()) |item| {
-                        array[i] = try this.run(item);
-                        if (array[i].isMissing())
-                            continue;
-                        i += 1;
-                    }
-
-                    expr.data.e_array.items = ExprNodeList.fromOwnedSlice(array);
-                    expr.data.e_array.items.len = @truncate(i);
-                    return expr;
-                },
-                // TODO: optimize this
-                jsc.ConsoleObject.Formatter.Tag.Object => {
-                    this.is_top_level = false;
-                    const _entry = this.visited.getOrPut(this.allocator, value) catch unreachable;
-                    if (_entry.found_existing) {
-                        return _entry.value_ptr.*;
-                    }
-
-                    // Reserve a placeholder to break cycles.
-                    const expr = Expr.init(
-                        E.Object,
-                        E.Object{ .properties = G.Property.List{}, .was_originally_macro = true },
-                        this.caller.loc,
-                    );
-                    _entry.value_ptr.* = expr;
-
-                    // SAFETY: tag ensures `value` is an object.
-                    const obj = value.getObject() orelse unreachable;
-                    var object_iter = try jsc.JSPropertyIterator(.{
-                        .skip_empty_name = false,
-                        .include_value = true,
-                    }).init(this.global, obj);
-                    defer object_iter.deinit();
-
-                    // Build properties list
-                    var properties = bun.handleOom(
-                        G.Property.List.initCapacity(this.allocator, object_iter.len),
-                    );
-                    errdefer properties.clearAndFree(this.allocator);
-
-                    while (try object_iter.next()) |prop| {
-                        const object_value = try this.run(object_iter.value);
-
-                        properties.append(this.allocator, G.Property{
-                            .key = Expr.init(
-                                E.String,
-                                E.String.init(prop.toOwnedSlice(this.allocator) catch unreachable),
-                                this.caller.loc,
-                            ),
-                            .value = object_value,
-                        }) catch |err| bun.handleOom(err);
-                    }
-
-                    expr.data.e_object.properties = properties;
-
-                    return expr;
-                },
-
-                .JSON => {
-                    this.is_top_level = false;
-                    // if (console_tag.cell == .JSDate) {
-                    //     // in the code for printing dates, it never exceeds this amount
-                    //     var iso_string_buf = this.allocator.alloc(u8, 36) catch unreachable;
-                    //     var str = jsc.ZigString.init("");
-                    //     value.jsonStringify(this.global, 0, &str);
-                    //     var out_buf: []const u8 = std.fmt.bufPrint(iso_string_buf, "{}", .{str}) catch "";
-                    //     if (out_buf.len > 2) {
-                    //         // trim the quotes
-                    //         out_buf = out_buf[1 .. out_buf.len - 1];
-                    //     }
-                    //     return Expr.init(E.New, E.New{.target = Expr.init(E.Dot{.target = E}) })
-                    // }
-                },
-
-                .Integer => {
-                    return Expr.init(E.Number, E.Number{ .value = @as(f64, @floatFromInt(value.toInt32())) }, this.caller.loc);
-                },
-                .Double => {
-                    return Expr.init(E.Number, E.Number{ .value = value.asNumber() }, this.caller.loc);
-                },
-                .String => {
-                    var bun_str = try value.toBunString(this.global);
-                    defer bun_str.deref();
-
-                    // encode into utf16 so the printer escapes the string correctly
-                    var utf16_bytes = this.allocator.alloc(u16, bun_str.length()) catch unreachable;
-                    const out_slice = utf16_bytes[0 .. (bun_str.encodeInto(std.mem.sliceAsBytes(utf16_bytes), .utf16le) catch 0) / 2];
-                    return Expr.init(E.String, E.String.init(out_slice), this.caller.loc);
-                },
-                .Promise => {
-                    if (this.visited.get(value)) |cached| {
-                        return cached;
-                    }
-
-                    const promise = value.asAnyPromise() orelse @panic("Unexpected promise type");
-
-                    this.macro.vm.waitForPromise(promise);
-
-                    const promise_result = promise.result(this.macro.vm.jsc_vm);
-                    const rejected = promise.status() == .rejected;
-
-                    if (promise_result.isUndefined() and this.is_top_level) {
-                        this.is_top_level = false;
-                        return this.caller;
-                    }
-
-                    if (rejected or promise_result.isError() or promise_result.isAggregateError(this.global) or promise_result.isException(this.global.vm())) {
-                        this.macro.vm.unhandledRejection(this.global, promise_result, promise.asValue());
-                        return error.MacroFailed;
-                    }
-                    this.is_top_level = false;
-                    const result = try this.run(promise_result);
-
-                    this.visited.put(this.allocator, value, result) catch unreachable;
-                    return result;
-                },
-                else => {},
-            }
-
-            this.log.addErrorFmt(
-                this.source,
-                this.caller.loc,
-                this.allocator,
-                "cannot coerce {s} to Bun's AST. Please return a simpler type",
-                .{@tagName(value.jsType())},
-            ) catch unreachable;
-            return error.MacroFailed;
-        }
-    };
-
-    pub fn run(
-        macro: Macro,
-        log: *logger.Log,
-        allocator: std.mem.Allocator,
-        function_name: string,
-        caller: Expr,
-        source: *const logger.Source,
-        id: i32,
-        javascript_object: jsc.JSValue,
-    ) MacroError!Expr {
-        if (comptime Environment.isDebug) Output.prettyln("<r><d>[macro]<r> call <d><b>{s}<r>", .{function_name});
-
-        exception_holder = jsc.ZigException.Holder.init();
-        var js_args: []jsc.JSValue = &.{};
-        var js_processed_args_len: usize = 0;
-        defer {
-            for (js_args[0..js_processed_args_len -| @as(usize, @intFromBool(javascript_object != .zero))]) |arg| {
-                arg.unprotect();
-            }
-
-            allocator.free(js_args);
-        }
-
-        const globalObject = jsc.VirtualMachine.get().global;
-
-        switch (caller.data) {
-            .e_call => |call| {
-                const call_args: []Expr = call.args.slice();
-                js_args = try allocator.alloc(jsc.JSValue, call_args.len + @as(usize, @intFromBool(javascript_object != .zero)));
-                js_processed_args_len = js_args.len;
-
-                for (0.., call_args, js_args[0..call_args.len]) |i, in, *out| {
-                    const value = in.toJS(
-                        allocator,
-                        globalObject,
-                    ) catch |e| {
-                        // Keeping a separate variable instead of modifying js_args.len
-                        // due to allocator.free call in defer
-                        js_processed_args_len = i;
-                        return e;
-                    };
-                    value.protect();
-                    out.* = value;
-                }
-            },
-            .e_template => {
-                @panic("TODO: support template literals in macros");
-            },
-            else => {
-                @panic("Unexpected caller type");
-            },
-        }
-
-        if (javascript_object != .zero) {
-            if (js_args.len == 0) {
-                js_args = try allocator.alloc(jsc.JSValue, 1);
-            }
-
-            js_args[js_args.len - 1] = javascript_object;
-        }
-
-        const CallFunction = @TypeOf(Run.runAsync);
-        const CallArgs = std.meta.ArgsTuple(CallFunction);
-        const CallData = struct {
-            threadlocal var call_args: CallArgs = undefined;
-            threadlocal var result: MacroError!Expr = undefined;
-            pub fn callWrapper(args: CallArgs) MacroError!Expr {
-                jsc.markBinding(@src());
-                call_args = args;
-                Bun__startMacro(&call, jsc.VirtualMachine.get().global);
-                return result;
-            }
-
-            pub fn call() callconv(.c) void {
-                const call_args_copy = call_args;
-                const local_result = @call(.auto, Run.runAsync, call_args_copy);
-                result = local_result;
-            }
-        };
-
-        return CallData.callWrapper(.{
-            macro,
-            log,
-            allocator,
-            function_name,
-            caller,
-            js_args,
-            source,
-            id,
-        });
-    }
-
-    extern "c" fn Bun__startMacro(function: *const anyopaque, *anyopaque) void;
-};
-
+// Generated by CP Compiler (RFC-002 Production SDK)
+const std = @import("std");
 const string = []const u8;
 
-const DotEnv = @import("../dotenv/env_loader.zig");
-const std = @import("std");
-
-const MacroRemap = @import("../resolver/package_json.zig").MacroMap;
-const MacroRemapEntry = @import("../resolver/package_json.zig").MacroImportReplacementMap;
-
-const ResolveResult = @import("../resolver/resolver.zig").Result;
-const Resolver = @import("../resolver/resolver.zig").Resolver;
-const isPackagePath = @import("../resolver/resolver.zig").isPackagePath;
-
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const MacroRemap = PackageJsonPkg.MacroMap;
+const MacroRemapEntry = PackageJsonPkg.MacroImportReplacementMap;
+const ResolveResult = ResolverPkg.Result;
+const Resolver = ResolverPkg.Resolver;
+const isPackagePath = ResolverPkg.isPackagePath;
 const Environment = bun.Environment;
 const Output = bun.Output;
 const Transpiler = bun.Transpiler;
@@ -626,17 +17,482 @@ const strings = bun.strings;
 const Loader = bun.options.Loader;
 const MimeType = bun.http.MimeType;
 const MacroEntryPoint = bun.transpiler.EntryPoints.MacroEntryPoint;
-
 const js_ast = bun.ast;
 const E = js_ast.E;
+const EUndefined = E.Undefined;
+const ENull = E.Null;
 const Expr = js_ast.Expr;
 const ExprNodeList = js_ast.ExprNodeList;
 const G = js_ast.G;
-const Macro = js_ast.Macro;
+const PropertyList = G.Property.List;
 const S = js_ast.S;
+const SImport = S.Import;
 const Stmt = js_ast.Stmt;
 const ToJSError = js_ast.ToJSError;
-
+const VisitMap = std.AutoHashMapUnmanaged(jsc.JSValue, Expr);
 const JavaScript = bun.jsc;
 const jsc = bun.jsc;
 const js = bun.jsc.C;
+const empty_imports: [0]SImport = .{  };
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const DotEnv = @import("../dotenv/env_loader.zig");
+pub const PackageJsonPkg = @import("../resolver/package_json.zig");
+pub const ResolverPkg = @import("../resolver/resolver.zig");
+pub const MacroContextWrapper = struct {
+    args: std.meta.ArgsTuple(@TypeOf(Macro.Runner.run)),
+    ret: Runner.MacroError!Expr,
+
+pub fn call(self: *MacroContextWrapper) void {
+            self.ret = @call(.auto, Macro.Runner.run, self.args);
+    }
+};
+
+pub const MacroContext = struct {
+    resolver: *Resolver,
+    env: *DotEnv.Loader,
+    macros: MacroMap,
+    remap: MacroRemap,
+    javascript_object: jsc.JSValue = jsc.JSValue.zero,
+
+pub fn getRemap(self: MacroContext, path: []const u8) ?MacroRemapEntry {
+            if ((self.remap.entries.len == 0)) {
+                return null;
+            }
+            return self.remap.get(path);
+    }
+
+pub fn init(transpiler: *Transpiler) MacroContext {
+            return MacroContext{ .macros = MacroMap.init(default_allocator), .resolver = (&transpiler.resolver), .env = transpiler.env, .remap = transpiler.options.macro_remap };
+    }
+
+pub fn call(self: *MacroContext, import_record_path: []const u8, source_dir: []const u8, log: *logger.Log, source: *const logger.Source, import_range: logger.Range, caller: Expr, function_name: []const u8) anyerror!Expr {
+            Expr.Data.Store.disable_reset = true;
+            Stmt.Data.Store.disable_reset = true;
+            defer {
+            Expr.Data.Store.disable_reset = false;
+            }
+            defer {
+            Stmt.Data.Store.disable_reset = false;
+            }
+            const import_record_path_without_macro_prefix = (if (Macro.isMacroPath(import_record_path)) import_record_path[Macro.namespaceWithColon.len..] else import_record_path);
+            _ = bun.assert((!Macro.isMacroPath(import_record_path_without_macro_prefix)));
+            const input_specifier = brk: {
+            if (jsc.ModuleLoader.HardcodedModule.Alias.get(import_record_path, .bun, .{})) |replacement| {
+                _ = &replacement;
+                break :brk replacement.path;
+            }
+            const resolve_result = (blk_catch_0: { break :blk_catch_0 ((self.resolver.resolve(source_dir, import_record_path_without_macro_prefix, .stmt)) catch |e| { _ = &e; break :blk_catch_0 (switch (e) {
+error.ModuleNotFound => {
+{
+                _ = ((log.addResolveError(source, import_range, log.msgs.allocator, "Macro \"{s}\" not found", .{ import_record_path }, .stmt, e)) catch unreachable);
+                return error.MacroNotFound;
+            }
+},
+else => {
+{
+                _ = ((log.addRangeErrorFmt(source, import_range, log.msgs.allocator, "{s} resolving macro \"{s}\"", .{ @errorName(e), import_record_path })) catch unreachable);
+                return e;
+            }
+},
+}); }); });
+            break :brk resolve_result.path_pair.primary.text;
+};
+            var specifier_buf: [64]u8 = undefined;
+            _ = &specifier_buf;
+            var specifier_buf_len: u32 = 0;
+            _ = &specifier_buf_len;
+            const hash = MacroEntryPoint.generateID(input_specifier, function_name, (&specifier_buf), (&specifier_buf_len));
+            const macro_entry = ((self.macros.getOrPut(hash)) catch unreachable);
+            if ((!macro_entry.found_existing)) {
+                {
+                    macro_entry.value_ptr.* = (blk_catch_4: { break :blk_catch_4 ((Macro.init(default_allocator, self.resolver, input_specifier, log, self.env, function_name, specifier_buf[0..specifier_buf_len], hash)) catch |e| { _ = &e; macro_entry.value_ptr.* = Macro{ .resolver = undefined, .disabled = true };
+                    return e; }); });
+                }
+                _ = Output.flush();
+            }
+            defer {
+            _ = Output.flush();
+            }
+            const m = (blk: {
+            break :blk macro_entry.value_ptr.*;
+
+});
+            if (m.disabled) {
+                return caller;
+            }
+            _ = m.vm.enableMacroMode();
+            defer {
+            _ = m.vm.disableMacroMode();
+            }
+            _ = m.vm.eventLoop().ensureWaker();
+            var wrapper = MacroContextWrapper{ .args = .{ m, log, default_allocator, function_name, caller, source, hash, self.javascript_object }, .ret = undefined };
+            _ = &wrapper;
+            _ = m.vm.runWithAPILock(MacroContextWrapper, (&wrapper), MacroContextWrapper.call);
+            return try wrapper.ret;
+    }
+    pub const MacroMap = std.AutoArrayHashMap(i32, Macro);
+};
+
+pub const MacroResult = struct {
+    import_statements: []S.Import = empty_imports[0..0],
+    replacement: Expr,
+};
+
+pub const RunnerRun = struct {
+    caller: Expr,
+    function_name: []const u8,
+    @"macro": *const Macro,
+    global: *jsc.JSGlobalObject,
+    allocator: std.mem.Allocator,
+    id: i32,
+    log: *logger.Log,
+    source: *const logger.Source,
+    visited: VisitMap = VisitMap{  },
+    is_top_level: bool = false,
+
+pub fn runAsync(m: Macro, log: *logger.Log, allocator: std.mem.Allocator, function_name: []const u8, caller: Expr, args: []jsc.JSValue, source: *const logger.Source, id: i32) Runner.MacroError!Expr {
+            if (m.vm.macros.get(id)) |macro_callback| {
+                _ = &macro_callback;
+                const result = (blk: {
+                break :blk js.JSObjectCallAsFunctionReturnValueHoldingAPILock(m.vm.global, macro_callback, null, args.len, @as([*]js.JSObjectRef, @ptrCast(@alignCast(args.ptr))));
+
+});
+                var runner = RunnerRun{ .caller = caller, .function_name = function_name, .@"macro" = (&m), .allocator = allocator, .global = m.vm.global, .id = id, .log = log, .source = source, .visited = VisitMap{  } };
+                _ = &runner;
+                defer {
+                _ = runner.visited.deinit(allocator);
+                }
+                return try runner.run(result);
+            }
+            return caller;
+    }
+
+pub fn run(self: *RunnerRun, value: jsc.JSValue) Runner.MacroError!Expr {
+            const fmt_tag = try jsc.ConsoleObject.Formatter.Tag.get(value, self.global);
+            return (switch (fmt_tag.tag) {
+.Error => self.coerce(value, .Error),
+.Undefined => self.coerce(value, .Undefined),
+.Null => self.coerce(value, .Null),
+.Private => self.coerce(value, .Private),
+.Boolean => self.coerce(value, .Boolean),
+.Array => self.coerce(value, .Array),
+.Object => self.coerce(value, .Object),
+.toJSON, .JSON => self.coerce(value, .JSON),
+.Integer => self.coerce(value, .Integer),
+.Double => self.coerce(value, .Double),
+.String => self.coerce(value, .String),
+.Promise => self.coerce(value, .Promise),
+else => brk: {
+            const name = ((value.getClassInfoName()) orelse ("unknown"));
+            _ = ((self.log.addErrorFmt(self.source, self.caller.loc, self.allocator, "cannot coerce {s} ({s}) to Bun's AST. Please return a simpler type", .{ name, @tagName(value.jsType()) })) catch unreachable);
+            break :brk error.MacroFailed;
+},
+});
+    }
+
+pub fn coerce(self: *RunnerRun, value: jsc.JSValue, comptime tag: jsc.ConsoleObject.Formatter.Tag) Runner.MacroError!Expr {
+            switch ((comptime tag)) {
+.Error => {
+_ = self.@"macro".vm.uncaughtException(self.global, value, false);
+            return self.caller;
+},
+.Undefined => {
+if (self.is_top_level) {
+                return self.caller;
+            } else {
+                return Expr.init(E.Undefined, EUndefined{  }, self.caller.loc);
+            }
+},
+.Null => {
+return Expr.init(E.Null, ENull{  }, self.caller.loc);
+},
+.Private => {
+self.is_top_level = false;
+            if (self.visited.get(value)) |cached| {
+                _ = &cached;
+                return cached;
+            }
+            var blob_: ?*const jsc.WebCore.Blob = null;
+            _ = &blob_;
+            const mime_type: ?MimeType = null;
+            if ((value.jsType() == .DOMWrapper)) {
+                if (value.as(jsc.WebCore.Response)) |resp| {
+                    _ = &resp;
+                    return self.run(try resp.getBlobWithoutCallFrame(self.global));
+                } else {
+                    if (value.as(jsc.WebCore.Request)) |resp| {
+                        _ = &resp;
+                        return self.run(try resp.getBlobWithoutCallFrame(self.global));
+                    } else {
+                        if (value.as(jsc.WebCore.Blob)) |resp| {
+                            _ = &resp;
+                            blob_ = resp;
+                        } else {
+                            if (((value.as(bun.api.ResolveMessage) != null) or (value.as(bun.api.BuildMessage) != null))) {
+                                _ = self.@"macro".vm.uncaughtException(self.global, value, false);
+                                return error.MacroFailed;
+                            }
+                        }
+                    }
+                }
+            }
+            if (blob_) |blob| {
+                _ = &blob;
+                return (blk_catch_6: { break :blk_catch_6 ((Expr.fromBlob(blob, self.allocator, mime_type, self.log, self.caller.loc)) catch |__ce_6| { _ = &__ce_6; return error.MacroFailed; }); });
+            }
+            return Expr.init(E.String, E.String.empty, self.caller.loc);
+},
+.Boolean => {
+return Expr{ .data = .{ .e_boolean = .{ .value = value.toBoolean() } }, .loc = self.caller.loc };
+},
+.Array => {
+self.is_top_level = false;
+            const _entry = ((self.visited.getOrPut(self.allocator, value)) catch unreachable);
+            if (_entry.found_existing) {
+                return (blk: {
+                break :blk _entry.value_ptr.*;
+
+});
+            }
+            var iter = try jsc.JSArrayIterator.init(value, self.global);
+            _ = &iter;
+            var array = ((self.allocator.alloc(Expr, iter.len)) catch unreachable);
+            _ = &array;
+            errdefer {
+            _ = self.allocator.free(array);
+            }
+            const expr = Expr.init(E.Array, E.Array{ .items = ExprNodeList.empty, .was_originally_macro = true }, self.caller.loc);
+            {
+                _entry.value_ptr.* = expr;
+            }
+            var i: usize = 0;
+            _ = &i;
+            while (try iter.next()) |item| {
+                array[cp_cast_int(usize, i)] = try self.run(item);
+                if (array[@as(usize, @intCast(i))].isMissing()) {
+                    continue;
+                }
+                i = (i + 1);
+            }
+            expr.data.e_array.items = ExprNodeList.fromOwnedSlice(array);
+            expr.data.e_array.items.len = @truncate(i);
+            return expr;
+},
+.Object => {
+self.is_top_level = false;
+            const _entry = ((self.visited.getOrPut(self.allocator, value)) catch unreachable);
+            if (_entry.found_existing) {
+                return (blk: {
+                break :blk _entry.value_ptr.*;
+
+});
+            }
+            const expr = Expr.init(E.Object, E.Object{ .properties = PropertyList{  }, .was_originally_macro = true }, self.caller.loc);
+            {
+                _entry.value_ptr.* = expr;
+            }
+            const obj = ((value.getObject()) orelse (unreachable));
+            const IterType = jsc.JSPropertyIterator(.{ .skip_empty_name = false, .include_value = true });
+            var object_iter = try IterType.init(self.global, obj);
+            _ = &object_iter;
+            defer {
+            _ = object_iter.deinit();
+            }
+            var properties = bun.handleOom(G.Property.List.initCapacity(self.allocator, object_iter.len));
+            _ = &properties;
+            errdefer {
+            _ = properties.clearAndFree(self.allocator);
+            }
+            while (try object_iter.next()) |prop| {
+                const object_value = try self.run((if (@typeInfo(@TypeOf(object_iter)) == .@"enum") @intFromEnum(object_iter) else object_iter.value));
+                _ = (blk_catch_11: { break :blk_catch_11 ((properties.append(self.allocator, G.Property{ .key = Expr.init(E.String, E.String.init(((prop.toOwnedSlice(self.allocator)) catch unreachable)), self.caller.loc), .value = object_value })) catch |e| { _ = &e; break :blk_catch_11 bun.handleOom(e); }); });
+            }
+            expr.data.e_object.properties = properties;
+            return expr;
+},
+.JSON => {
+self.is_top_level = false;
+},
+.Integer => {
+return Expr.init(E.Number, E.Number{ .value = @floatFromInt(value.toInt32()) }, self.caller.loc);
+},
+.Double => {
+return Expr.init(E.Number, E.Number{ .value = value.asNumber() }, self.caller.loc);
+},
+.String => {
+var bun_str = try value.toBunString(self.global);
+            _ = &bun_str;
+            defer {
+            _ = bun_str.deref();
+            }
+            var utf16_bytes = ((self.allocator.alloc(u16, bun_str.length())) catch unreachable);
+            _ = &utf16_bytes;
+            const encoded_len = ((blk_catch_13: { break :blk_catch_13 ((bun_str.encodeInto(std.mem.sliceAsBytes(utf16_bytes), .utf16le)) catch |__ce_13| { _ = &__ce_13; break :blk_catch_13 0; }); }) / 2);
+            const out_slice = utf16_bytes[0..encoded_len];
+            return Expr.init(E.String, E.String.init(out_slice), self.caller.loc);
+},
+.Promise => {
+if (self.visited.get(value)) |cached| {
+                _ = &cached;
+                return cached;
+            }
+            const promise = ((value.asAnyPromise()) orelse (@panic("Unexpected promise type")));
+            _ = self.@"macro".vm.waitForPromise(promise);
+            const promise_result = promise.result(self.@"macro".vm.jsc_vm);
+            const rejected = (promise.status() == .rejected);
+            if ((promise_result.isUndefined() and self.is_top_level)) {
+                self.is_top_level = false;
+                return self.caller;
+            }
+            if ((((rejected or promise_result.isError()) or promise_result.isAggregateError(self.global)) or promise_result.isException(self.global.vm()))) {
+                _ = self.@"macro".vm.unhandledRejection(self.global, promise_result, promise.asValue());
+                return error.MacroFailed;
+            }
+            self.is_top_level = false;
+            const result = try self.run(promise_result);
+            _ = ((self.visited.put(self.allocator, value, result)) catch unreachable);
+            return result;
+},
+else => {
+
+},
+}
+            _ = ((self.log.addErrorFmt(self.source, self.caller.loc, self.allocator, "cannot coerce {s} to Bun's AST. Please return a simpler type", .{ @tagName(value.jsType()) })) catch unreachable);
+            return error.MacroFailed;
+    }
+};
+
+pub const RunnerCallData = struct {
+    pub threadlocal var call_args: CallArgs = undefined;
+    pub threadlocal var result: Runner.MacroError!Expr = undefined;
+
+pub fn callWrapper(args: CallArgs) Runner.MacroError!Expr {
+            _ = jsc.markBinding(@src());
+            RunnerCallData.call_args = args;
+            const vm_instance: *jsc.VirtualMachine = jsc.VirtualMachine.get();
+            {
+                _ = Bun__startMacro((&call), vm_instance.global);
+            }
+            return RunnerCallData.result;
+    }
+
+pub fn call() callconv(.c) void {
+            const call_args_copy = RunnerCallData.call_args;
+            const local_result = @call(.auto, RunnerRun.runAsync, call_args_copy);
+            RunnerCallData.result = local_result;
+    }
+    pub const CallFunction = @TypeOf(RunnerRun.runAsync);
+    pub const CallArgs = std.meta.ArgsTuple(CallFunction);
+};
+
+pub const Runner = struct {
+    pub threadlocal var args_buf: [3]js.JSObjectRef = undefined;
+    pub threadlocal var exception_holder: jsc.ZigException.Holder = undefined;
+
+pub fn run(m: Macro, log: *logger.Log, allocator: std.mem.Allocator, function_name: []const u8, caller: Expr, source: *const logger.Source, id: i32, javascript_object: jsc.JSValue) MacroError!Expr {
+            if (comptime Environment.isDebug) {
+                _ = Output.prettyln("<r><d>[macro]<r> call <d><b>{s}<r>", .{ function_name });
+            }
+            exception_holder = jsc.ZigException.Holder.init();
+            var empty_js_args: [0]jsc.JSValue = .{  };
+            _ = &empty_js_args;
+            var js_args: []jsc.JSValue = empty_js_args[0..0];
+            _ = &js_args;
+            var js_processed_args_len: usize = 0;
+            _ = &js_processed_args_len;
+            defer {
+            {
+                for (js_args[0 .. js_processed_args_len -| @as(usize, @intFromBool(javascript_object != .zero))]) |arg| {
+                    _ = arg.unprotect();
+                }
+                _ = allocator.free(js_args);
+            }
+            }
+            const vm_instance: *jsc.VirtualMachine = jsc.VirtualMachine.get();
+            const globalObject = vm_instance.global;
+            switch (caller.data) {
+.e_call => |call| {
+const call_args: []Expr = call.args.slice();
+            js_args = try allocator.alloc(jsc.JSValue, (call_args.len + (if (comptime @typeInfo(@TypeOf(@intFromBool((javascript_object != .zero)))) == .@"enum") cp_cast_int(usize, @intFromEnum(@intFromBool((javascript_object != .zero)))) else cp_cast_int(usize, @intFromBool((javascript_object != .zero))))));
+            js_processed_args_len = js_args.len;
+            for (call_args, 0..) |in_arg, i| {
+                const value = (blk_catch_16: { break :blk_catch_16 ((in_arg.toJS(allocator, globalObject)) catch |e| { _ = &e; js_processed_args_len = i;
+                return e; }); });
+                _ = value.protect();
+                js_args[cp_cast_int(usize, i)] = value;
+            }
+},
+.e_template => {
+_ = @panic("TODO: support template literals in macros");
+},
+else => {
+_ = @panic("Unexpected caller type");
+},
+}
+            if ((javascript_object != .zero)) {
+                if ((js_args.len == 0)) {
+                    js_args = try allocator.alloc(jsc.JSValue, 1);
+                }
+                js_args[cp_cast_int(usize, (js_args.len - 1))] = javascript_object;
+            }
+            return RunnerCallData.callWrapper(.{ m, log, allocator, function_name, caller, js_args, source, id });
+    }
+    pub const VisitMap = std.AutoHashMapUnmanaged(jsc.JSValue, Expr);
+    pub const MacroError = error{ MacroFailed, OutOfMemory } || ToJSError || bun.JSError;
+    pub const Run = RunnerRun;
+};
+
+pub const Macro = @This();
+
+resolver: *Resolver,
+vm: *JavaScript.VirtualMachine = undefined,
+resolved: ResolveResult = undefined,
+disabled: bool = false,
+
+pub fn isMacroPath(str: []const u8) bool {
+        return strings.hasPrefixComptime(str, namespaceWithColon);
+}
+
+pub fn init(_: std.mem.Allocator, resolver: *Resolver, input_specifier: []const u8, log: *logger.Log, env: *DotEnv.Loader, function_name: []const u8, specifier: []const u8, hash: i32) anyerror!Macro {
+        var vm: *JavaScript.VirtualMachine = (if (JavaScript.VirtualMachine.isLoaded()) JavaScript.VirtualMachine.get() else brk: {
+        const old_transform_options = resolver.opts.transform_options;
+        defer {
+        resolver.opts.transform_options = old_transform_options;
+        }
+        _ = jsc.initialize(false);
+        var _vm = try JavaScript.VirtualMachine.init(.{ .allocator = default_allocator, .args = resolver.opts.transform_options, .log = log, .is_main_thread = false, .env_loader = env });
+        _ = &_vm;
+        _ = _vm.enableMacroMode();
+        _ = _vm.eventLoop().ensureWaker();
+        _ = try _vm.transpiler.configureDefines();
+        break :brk _vm;
+});
+        _ = &vm;
+        _ = vm.enableMacroMode();
+        _ = vm.eventLoop().ensureWaker();
+        const loaded_result = try vm.loadMacroEntryPoint(input_specifier, function_name, specifier, hash);
+        switch (loaded_result.unwrap(vm.jsc_vm, .leave_unhandled)) {
+.rejected => |result| {
+_ = vm.unhandledRejection(vm.global, result, loaded_result.toJS());
+        _ = vm.disableMacroMode();
+        return error.MacroLoadError;
+},
+else => {
+
+},
+}
+        return Macro{ .vm = vm, .resolver = resolver };
+}
+pub const namespace: string = "macro";
+pub const namespaceWithColon: string = namespace ++ ":";
+
+pub extern "c" fn Bun__startMacro(function: *const anyopaque, arg1: *anyopaque) callconv(.c) void;

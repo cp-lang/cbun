@@ -1,1480 +1,38 @@
-/// This is the Zig implementation of the WebSocket client.
-///
-/// It manages the WebSocket connection, including sending and receiving data,
-/// handling connection events, and managing the WebSocket state.
-///
-/// The WebSocket client supports both secure (TLS) and non-secure connections.
-///
-/// This is only used **after** the websocket handshaking step is completed.
-pub fn NewWebSocketClient(comptime ssl: bool) type {
-    return struct {
-        pub const Socket = uws.NewSocketHandler(ssl);
-
-        const RefCount = bun.ptr.RefCount(@This(), "ref_count", deinit, .{});
-        pub const ref = RefCount.ref;
-        pub const deref = RefCount.deref;
-
-        ref_count: RefCount,
-
-        tcp: Socket,
-        outgoing_websocket: ?*CppWebSocket = null,
-
-        receive_state: ReceiveState = ReceiveState.need_header,
-        receiving_type: Opcode = Opcode.ResB,
-        // we need to start with final so we validate the first frame
-        receiving_is_final: bool = true,
-
-        ping_frame_bytes: [128 + 6]u8 = [_]u8{0} ** (128 + 6),
-        ping_len: u8 = 0,
-        ping_received: bool = false,
-        pong_received: bool = false,
-        close_received: bool = false,
-        close_frame_buffering: bool = false,
-
-        receive_frame: usize = 0,
-        receive_body_remain: usize = 0,
-        receive_pending_chunk_len: usize = 0,
-        receive_buffer: bun.LinearFifo(u8, .Dynamic),
-
-        send_buffer: bun.LinearFifo(u8, .Dynamic),
-
-        globalThis: *jsc.JSGlobalObject,
-        poll_ref: Async.KeepAlive = Async.KeepAlive.init(),
-
-        header_fragment: ?u8 = null,
-
-        payload_length_frame_bytes: [8]u8 = [_]u8{0} ** 8,
-        payload_length_frame_len: u8 = 0,
-
-        initial_data_handler: ?*InitialDataHandler = null,
-        event_loop: *jsc.EventLoop = undefined,
-        deflate: ?*WebSocketDeflate = null,
-
-        // Track if current message is compressed
-        receiving_compressed: bool = false,
-        // Track compression state of the entire message (across fragments)
-        message_is_compressed: bool = false,
-
-        /// `us_ssl_ctx_t` inherited from the upgrade client when it was built
-        /// with a custom CA. The socket's `SSL*` references the `SSL_CTX`
-        /// inside, so this must outlive the connection. Null when the upgrade
-        /// used the shared default context.
-        secure: ?*uws.SslCtx = null,
-
-        // Proxy tunnel for wss:// through HTTP proxy.
-        // When set, all I/O goes through the tunnel (TLS encryption/decryption).
-        // The tunnel handles the TLS layer, so this is used with ssl=false.
-        proxy_tunnel: ?*WebSocketProxyTunnel = null,
-
-        const stack_frame_size = 1024;
-        // Minimum message size to compress (RFC 7692 recommendation)
-        const MIN_COMPRESS_SIZE = 860;
-        // DEFLATE overhead
-        const COMPRESSION_OVERHEAD = 4;
-
-        const WebSocket = @This();
-
-        fn shouldCompress(this: *const WebSocket, data_len: usize, opcode: Opcode) bool {
-            // Check if compression is available
-            if (this.deflate == null) return false;
-
-            // Only compress Text and Binary messages
-            if (opcode != .Text and opcode != .Binary) return false;
-
-            // Don't compress small messages where overhead exceeds benefit
-            if (data_len < MIN_COMPRESS_SIZE) return false;
-
-            return true;
-        }
-
-        /// Handler set referenced by `dispatch.zig` (kind = `.ws_client[_tls]`).
-        /// Replaces the C++→`register()`→`us_socket_context_on_*` round-trip.
-        pub const onClose = handleClose;
-        pub const onData = handleData;
-        pub const onWritable = handleWritable;
-        pub const onTimeout = handleTimeout;
-        pub const onLongTimeout = handleTimeout;
-        pub const onConnectError = handleConnectError;
-        pub const onEnd = handleEnd;
-        pub const onHandshake = handleHandshake;
-
-        pub fn clearData(this: *WebSocket) void {
-            log("clearData", .{});
-            this.poll_ref.unref(this.globalThis.bunVM());
-            this.clearReceiveBuffers(true);
-            this.clearSendBuffers(true);
-            this.ping_received = false;
-            this.pong_received = false;
-            this.ping_len = 0;
-            this.close_frame_buffering = false;
-            this.receive_pending_chunk_len = 0;
-            this.receiving_compressed = false;
-            this.message_is_compressed = false;
-            if (this.deflate) |d| d.deinit();
-            this.deflate = null;
-            if (this.secure) |s| {
-                bun.BoringSSL.c.SSL_CTX_free(s);
-                this.secure = null;
-            }
-            // Clean up proxy tunnel if we own one
-            // Set to null FIRST to prevent re-entrancy (shutdown can trigger callbacks)
-            if (this.proxy_tunnel) |tunnel| {
-                this.proxy_tunnel = null;
-                // Detach the websocket from the tunnel before shutdown so the
-                // tunnel's onClose callback doesn't dispatch a spurious 1006
-                // after we've already handled a clean close.
-                tunnel.clearConnectedWebSocket();
-                tunnel.shutdown();
-                tunnel.deref();
-                // Release the I/O-layer ref taken in initWithTunnel() — the
-                // tunnel was this struct's socket-equivalent owner. In the
-                // non-tunnel path this same ref is released by handleClose()
-                // when the adopted uSockets socket fires its close event, but
-                // tunnel mode never adopts a socket so that callback never runs.
-                // Callers that touch `this` after clearData() must hold a local
-                // ref guard (see cancel/finalize).
-                this.deref();
-            }
-        }
-
-        pub fn cancel(this: *WebSocket) callconv(.c) void {
-            log("cancel", .{});
-            // clearData() may drop the tunnel's I/O-layer ref; keep `this`
-            // alive until we've finished closing the socket below.
-            this.ref();
-            defer this.deref();
-
-            const had_tunnel = this.proxy_tunnel != null;
-            this.clearData();
-
-            if (comptime ssl) {
-                // we still want to send pending SSL buffer + close_notify
-                this.tcp.close(.normal);
-            } else {
-                this.tcp.close(.failure);
-            }
-
-            // In tunnel mode tcp is .detached so close() above is a no-op and
-            // handleClose() never fires. Mirror what handleClose() does for
-            // the non-tunnel path: drop the C++ ref (if still held) via
-            // dispatchAbruptClose so e.g. ws.terminate() — which calls
-            // cancel() then sets m_connectedWebSocketKind = None, bypassing
-            // the destructor's finalize() — does not leak. When reached via
-            // fail(), outgoing_websocket is already null and this is a no-op.
-            if (had_tunnel) {
-                this.dispatchAbruptClose(ErrorCode.ended);
-            }
-        }
-
-        pub fn fail(this: *WebSocket, code: ErrorCode) void {
-            jsc.markBinding(@src());
-            if (this.outgoing_websocket) |ws| {
-                this.outgoing_websocket = null;
-                log("fail ({s})", .{@tagName(code)});
-                ws.didAbruptClose(code);
-                this.deref();
-            }
-
-            this.cancel();
-        }
-
-        pub fn handleHandshake(this: *WebSocket, socket: Socket, success: i32, ssl_error: uws.us_bun_verify_error_t) void {
-            jsc.markBinding(@src());
-
-            const authorized = if (success == 1) true else false;
-
-            log("onHandshake({d})", .{success});
-
-            if (this.outgoing_websocket) |ws| {
-                const reject_unauthorized = ws.rejectUnauthorized();
-
-                // Only reject the connection if reject_unauthorized is true
-                if (reject_unauthorized) {
-                    // Check for SSL errors
-                    if (ssl_error.error_no != 0) {
-                        this.outgoing_websocket = null;
-                        ws.didAbruptClose(ErrorCode.failed_to_connect);
-                        return;
-                    }
-
-                    // Check authorization status
-                    if (!authorized) {
-                        this.outgoing_websocket = null;
-                        ws.didAbruptClose(ErrorCode.failed_to_connect);
-                        return;
-                    }
-
-                    // Check server identity
-                    const ssl_ptr = @as(*BoringSSL.c.SSL, @ptrCast(socket.getNativeHandle()));
-                    if (BoringSSL.c.SSL_get_servername(ssl_ptr, 0)) |servername| {
-                        const hostname = servername[0..bun.len(servername)];
-                        if (!BoringSSL.checkServerIdentity(ssl_ptr, hostname)) {
-                            this.outgoing_websocket = null;
-                            ws.didAbruptClose(ErrorCode.failed_to_connect);
-                        }
-                    }
-                }
-                // If reject_unauthorized is false, we accept the connection regardless of SSL errors
-            }
-        }
-        pub fn handleClose(this: *WebSocket, _: Socket, _: c_int, _: ?*anyopaque) void {
-            log("onClose", .{});
-            jsc.markBinding(@src());
-            this.clearData();
-            this.tcp.detach();
-
-            this.dispatchAbruptClose(ErrorCode.ended);
-
-            // For the socket.
-            this.deref();
-        }
-
-        pub fn terminate(this: *WebSocket, code: ErrorCode) void {
-            log("terminate", .{});
-            this.fail(code);
-        }
-
-        fn clearReceiveBuffers(this: *WebSocket, free: bool) void {
-            this.receive_buffer.head = 0;
-            this.receive_buffer.count = 0;
-
-            if (free) {
-                this.receive_buffer.deinit();
-                this.receive_buffer.buf.len = 0;
-            }
-
-            this.receive_pending_chunk_len = 0;
-            this.receive_body_remain = 0;
-        }
-
-        fn clearSendBuffers(this: *WebSocket, free: bool) void {
-            this.send_buffer.head = 0;
-            this.send_buffer.count = 0;
-            if (free) {
-                this.send_buffer.deinit();
-                this.send_buffer.buf.len = 0;
-            }
-        }
-
-        fn dispatchCompressedData(this: *WebSocket, data_: []const u8, kind: Opcode) void {
-            const deflate = this.deflate orelse {
-                this.terminate(ErrorCode.compression_unsupported);
-                return;
-            };
-
-            // Decompress the data
-            var decompressed = deflate.rare_data.arrayList();
-            defer decompressed.deinit();
-
-            deflate.decompress(data_, &decompressed) catch |err| {
-                const error_code = switch (err) {
-                    error.InflateFailed => ErrorCode.invalid_compressed_data,
-                    error.TooLarge => ErrorCode.message_too_big,
-                    error.OutOfMemory => ErrorCode.failed_to_allocate_memory,
-                };
-                this.terminate(error_code);
-                return;
-            };
-
-            this.dispatchData(decompressed.items, kind);
-        }
-
-        /// Data will be cloned in C++.
-        fn dispatchData(this: *WebSocket, data_: []const u8, kind: Opcode) void {
-            var out = this.outgoing_websocket orelse {
-                this.clearData();
-                return;
-            };
-
-            switch (kind) {
-                .Text => {
-                    // this function encodes to UTF-16 if > 127
-                    // so we don't need to worry about latin1 non-ascii code points
-                    // we avoid trim since we wanna keep the utf8 validation intact
-                    const utf16_bytes_ = strings.toUTF16Alloc(bun.default_allocator, data_, true, false) catch {
-                        this.terminate(ErrorCode.invalid_utf8);
-                        return;
-                    };
-                    var outstring = jsc.ZigString.Empty;
-                    if (utf16_bytes_) |utf16| {
-                        outstring = jsc.ZigString.from16Slice(utf16);
-                        outstring.markGlobal();
-                        jsc.markBinding(@src());
-                        out.didReceiveText(false, &outstring);
-                    } else {
-                        outstring = jsc.ZigString.init(data_);
-                        jsc.markBinding(@src());
-                        out.didReceiveText(true, &outstring);
-                    }
-                },
-                .Binary, .Ping, .Pong => {
-                    jsc.markBinding(@src());
-                    out.didReceiveBytes(data_.ptr, data_.len, @as(u8, @intFromEnum(kind)));
-                },
-                else => {
-                    this.terminate(ErrorCode.unexpected_opcode);
-                },
-            }
-        }
-
-        pub fn consume(this: *WebSocket, data_: []const u8, left_in_fragment: usize, kind: Opcode, is_final: bool) usize {
-            bun.assert(data_.len <= left_in_fragment);
-
-            // For compressed messages, we must buffer all fragments until the message is complete
-            if (this.receiving_compressed) {
-                // Always buffer compressed data
-                if (data_.len > 0) {
-                    var writable = this.receive_buffer.writableWithSize(data_.len) catch {
-                        this.terminate(ErrorCode.closed);
-                        return 0;
-                    };
-                    @memcpy(writable[0..data_.len], data_);
-                    this.receive_buffer.update(data_.len);
-                }
-
-                if (left_in_fragment >= data_.len and left_in_fragment - data_.len - this.receive_pending_chunk_len == 0) {
-                    this.receive_pending_chunk_len = 0;
-                    this.receive_body_remain = 0;
-                    if (is_final) {
-                        // Decompress the complete message
-                        this.dispatchCompressedData(this.receive_buffer.readableSlice(0), kind);
-                        this.clearReceiveBuffers(false);
-                        this.receiving_compressed = false;
-                        this.message_is_compressed = false;
-                    }
-                } else {
-                    this.receive_pending_chunk_len -|= left_in_fragment;
-                }
-                return data_.len;
-            }
-
-            // Non-compressed path remains the same
-            // did all the data fit in the buffer?
-            // we can avoid copying & allocating a temporary buffer
-            if (is_final and data_.len == left_in_fragment and this.receive_pending_chunk_len == 0) {
-                if (this.receive_buffer.count == 0) {
-                    this.dispatchData(data_, kind);
-                    this.message_is_compressed = false;
-                    return data_.len;
-                } else if (data_.len == 0) {
-                    this.dispatchData(this.receive_buffer.readableSlice(0), kind);
-                    this.clearReceiveBuffers(false);
-                    this.message_is_compressed = false;
-                    return 0;
-                }
-            }
-
-            // this must come after the above check
-            if (data_.len == 0) return 0;
-
-            var writable = this.receive_buffer.writableWithSize(data_.len) catch unreachable;
-            @memcpy(writable[0..data_.len], data_);
-            this.receive_buffer.update(data_.len);
-
-            if (left_in_fragment >= data_.len and left_in_fragment - data_.len - this.receive_pending_chunk_len == 0) {
-                this.receive_pending_chunk_len = 0;
-                this.receive_body_remain = 0;
-                if (is_final) {
-                    this.dispatchData(this.receive_buffer.readableSlice(0), kind);
-                    this.clearReceiveBuffers(false);
-                    this.message_is_compressed = false;
-                }
-            } else {
-                this.receive_pending_chunk_len -|= left_in_fragment;
-            }
-            return data_.len;
-        }
-
-        pub fn handleData(this: *WebSocket, socket: Socket, data_: []const u8) void {
-
-            // after receiving close we should ignore the data
-            if (this.close_received) return;
-            this.ref();
-            defer this.deref();
-
-            // Due to scheduling, it is possible for the websocket onData
-            // handler to run with additional data before the microtask queue is
-            // drained.
-            if (this.initial_data_handler) |initial_handler| {
-                // This calls `handleData`
-                // We deliberately do not set this.initial_data_handler to null here, that's done in handleWithoutDeinit.
-                // We do not free the memory here since the lifetime is managed by the microtask queue (it should free when called from there)
-                initial_handler.handleWithoutDeinit();
-
-                // handleWithoutDeinit is supposed to clear the handler from WebSocket*
-                // to prevent an infinite loop
-                bun.assert(this.initial_data_handler == null);
-
-                // If we disconnected for any reason in the re-entrant case, we should just ignore the data
-                if (this.outgoing_websocket == null or !this.hasTCP())
-                    return;
-            }
-
-            var data = data_;
-            var receive_state = this.receive_state;
-            var terminated = false;
-            var is_fragmented = false;
-            var receiving_type = this.receiving_type;
-            var receive_body_remain = this.receive_body_remain;
-            var is_final = this.receiving_is_final;
-            var last_receive_data_type = receiving_type;
-
-            defer {
-                if (terminated) {
-                    this.close_received = true;
-                } else {
-                    this.receive_state = receive_state;
-                    this.receiving_type = last_receive_data_type;
-                    this.receive_body_remain = receive_body_remain;
-                }
-            }
-
-            var header_bytes: [@sizeOf(usize)]u8 = [_]u8{0} ** @sizeOf(usize);
-
-            // In the WebSocket specification, control frames may not be fragmented.
-            // However, the frame parser should handle fragmented control frames nonetheless.
-            // Whether or not the frame parser is given a set of fragmented bytes to parse is subject
-            // to the strategy in which the client buffers and coalesces received bytes.
-
-            while (true) {
-                log("onData ({s})", .{@tagName(receive_state)});
-
-                switch (receive_state) {
-                    // 0                   1                   2                   3
-                    // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-                    // +-+-+-+-+-------+-+-------------+-------------------------------+
-                    // |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
-                    // |I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
-                    // |N|V|V|V|       |S|             |   (if payload len==126/127)   |
-                    // | |1|2|3|       |K|             |                               |
-                    // +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
-                    // |     Extended payload length continued, if payload len == 127  |
-                    // + - - - - - - - - - - - - - - - +-------------------------------+
-                    // |                               |Masking-key, if MASK set to 1  |
-                    // +-------------------------------+-------------------------------+
-                    // | Masking-key (continued)       |          Payload Data         |
-                    // +-------------------------------- - - - - - - - - - - - - - - - +
-                    // :                     Payload Data continued ...                :
-                    // + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
-                    // |                     Payload Data continued ...                |
-                    // +---------------------------------------------------------------+
-                    .need_header => {
-                        if (data.len < 2) {
-                            bun.assert(data.len > 0);
-                            if (this.header_fragment == null) {
-                                this.header_fragment = data[0];
-                                break;
-                            }
-                        }
-
-                        if (this.header_fragment) |header_fragment| {
-                            header_bytes[0] = header_fragment;
-                            header_bytes[1] = data[0];
-                            data = data[1..];
-                        } else {
-                            header_bytes[0..2].* = data[0..2].*;
-                            data = data[2..];
-                        }
-                        this.header_fragment = null;
-
-                        receive_body_remain = 0;
-                        var need_compression = false;
-                        is_final = false;
-
-                        receive_state = parseWebSocketHeader(
-                            header_bytes[0..2].*,
-                            &receiving_type,
-                            &receive_body_remain,
-                            &is_fragmented,
-                            &is_final,
-                            &need_compression,
-                        );
-                        if (receiving_type == .Continue) {
-                            // if is final is true continue is invalid
-                            if (this.receiving_is_final) {
-                                // nothing to continue here
-                                // Per Autobahn test case 5.9: "The connection is failed immediately, since there is no message to continue."
-                                this.terminate(ErrorCode.unexpected_opcode);
-                                terminated = true;
-                                break;
-                            }
-                            // only update final if is a valid continue
-                            this.receiving_is_final = is_final;
-                        } else if (receiving_type == .Text or receiving_type == .Binary) {
-                            // if the last one is not final this is invalid because we are waiting a continue
-                            if (!this.receiving_is_final) {
-                                this.terminate(ErrorCode.unexpected_opcode);
-                                terminated = true;
-                                break;
-                            }
-                            // for text and binary frames we need to keep track of final and type
-                            this.receiving_is_final = is_final;
-                            last_receive_data_type = receiving_type;
-                        } else if (receiving_type.isControl() and is_fragmented) {
-                            // Control frames must not be fragmented.
-                            this.terminate(ErrorCode.control_frame_is_fragmented);
-                            terminated = true;
-                            break;
-                        }
-
-                        switch (receiving_type) {
-                            .Continue, .Text, .Binary, .Ping, .Pong, .Close => {},
-                            else => {
-                                this.terminate(ErrorCode.unsupported_control_frame);
-                                terminated = true;
-                                break;
-                            },
-                        }
-
-                        if (need_compression and this.deflate == null) {
-                            this.terminate(ErrorCode.compression_unsupported);
-                            terminated = true;
-                            break;
-                        }
-
-                        // Control frames must not be compressed
-                        if (need_compression and receiving_type.isControl()) {
-                            this.terminate(ErrorCode.invalid_control_frame);
-                            terminated = true;
-                            break;
-                        }
-
-                        // Track compression state for this message
-                        if (receiving_type == .Text or receiving_type == .Binary) {
-                            // New message starts - set both compression states
-                            this.message_is_compressed = need_compression;
-                            this.receiving_compressed = need_compression;
-                        } else if (receiving_type == .Continue) {
-                            // Continuation frame - use the compression state from the message start
-                            this.receiving_compressed = this.message_is_compressed;
-                        }
-
-                        // Handle when the payload length is 0, but it is a message
-                        //
-                        // This should become
-                        //
-                        // - ArrayBuffer(0)
-                        // - ""
-                        // - Buffer(0) (etc)
-                        //
-                        if (receive_body_remain == 0 and receive_state == .need_body and is_final) {
-                            _ = this.consume(
-                                "",
-                                receive_body_remain,
-                                last_receive_data_type,
-                                is_final,
-                            );
-
-                            // Return to the header state to read the next frame
-                            receive_state = .need_header;
-                            is_fragmented = false;
-                            this.receiving_compressed = false;
-                            this.message_is_compressed = false;
-
-                            // Bail out if there's nothing left to read
-                            if (data.len == 0) break;
-                        }
-                    },
-                    .need_mask => {
-                        this.terminate(.unexpected_mask_from_server);
-                        terminated = true;
-                        break;
-                    },
-                    .extended_payload_length_64, .extended_payload_length_16 => |rc| {
-                        const byte_size = switch (rc) {
-                            .extended_payload_length_64 => @as(usize, 8),
-                            .extended_payload_length_16 => @as(usize, 2),
-                            else => unreachable,
-                        };
-
-                        // we need to wait for more data
-                        if (data.len == 0) {
-                            break;
-                        }
-
-                        // copy available payload length bytes to a buffer held on this client instance
-                        const total_received = @min(byte_size - this.payload_length_frame_len, data.len);
-                        @memcpy(this.payload_length_frame_bytes[this.payload_length_frame_len..][0..total_received], data[0..total_received]);
-                        this.payload_length_frame_len += @intCast(total_received);
-                        data = data[total_received..];
-
-                        // short read on payload length - we need to wait for more data
-                        // whatever bytes were returned from the short read are kept in `payload_length_frame_bytes`
-                        if (this.payload_length_frame_len < byte_size) {
-                            break;
-                        }
-
-                        // Multibyte length quantities are expressed in network byte order
-                        receive_body_remain = switch (byte_size) {
-                            8 => @as(usize, std.mem.readInt(u64, this.payload_length_frame_bytes[0..8], .big)),
-                            2 => @as(usize, std.mem.readInt(u16, this.payload_length_frame_bytes[0..2], .big)),
-                            else => unreachable,
-                        };
-
-                        this.payload_length_frame_len = 0;
-
-                        receive_state = .need_body;
-
-                        if (receive_body_remain == 0) {
-                            // this is an error
-                            // the server should've set length to zero
-                            this.terminate(ErrorCode.invalid_control_frame);
-                            terminated = true;
-                            break;
-                        }
-                    },
-                    .ping => {
-                        if (!this.ping_received) {
-                            if (receive_body_remain > 125) {
-                                this.terminate(ErrorCode.invalid_control_frame);
-                                terminated = true;
-                                break;
-                            }
-                            this.ping_len = @truncate(receive_body_remain);
-                            receive_body_remain = 0;
-                            this.ping_received = true;
-                        }
-                        const ping_len = this.ping_len;
-
-                        if (data.len > 0) {
-                            // copy the data to the ping frame
-                            const total_received = @min(ping_len, receive_body_remain + data.len);
-                            const slice = this.ping_frame_bytes[6..][receive_body_remain..total_received];
-                            @memcpy(slice, data[0..slice.len]);
-                            receive_body_remain = total_received;
-                            data = data[slice.len..];
-                        }
-                        const pending_body = ping_len - receive_body_remain;
-                        if (pending_body > 0) {
-                            // wait for more data it can be fragmented
-                            break;
-                        }
-
-                        const ping_data = this.ping_frame_bytes[6..][0..ping_len];
-                        this.dispatchData(ping_data, .Ping);
-
-                        receive_state = .need_header;
-                        receive_body_remain = 0;
-                        receiving_type = last_receive_data_type;
-                        this.ping_received = false;
-
-                        // we need to send all pongs to pass autobahn tests
-                        _ = this.sendPong(socket);
-                        if (data.len == 0) break;
-                    },
-                    .pong => {
-                        if (!this.pong_received) {
-                            if (receive_body_remain > 125) {
-                                this.terminate(ErrorCode.invalid_control_frame);
-                                terminated = true;
-                                break;
-                            }
-                            this.ping_len = @truncate(receive_body_remain);
-                            receive_body_remain = 0;
-                            this.pong_received = true;
-                        }
-                        const pong_len = this.ping_len;
-
-                        if (data.len > 0) {
-                            const total_received = @min(pong_len, receive_body_remain + data.len);
-                            const slice = this.ping_frame_bytes[6..][receive_body_remain..total_received];
-                            @memcpy(slice, data[0..slice.len]);
-                            receive_body_remain = total_received;
-                            data = data[slice.len..];
-                        }
-                        const pending_body = pong_len - receive_body_remain;
-                        if (pending_body > 0) {
-                            // wait for more data - pong payload is fragmented across TCP segments
-                            break;
-                        }
-
-                        const pong_data = this.ping_frame_bytes[6..][0..pong_len];
-                        this.dispatchData(pong_data, .Pong);
-
-                        receive_state = .need_header;
-                        receive_body_remain = 0;
-                        receiving_type = last_receive_data_type;
-                        this.pong_received = false;
-
-                        if (data.len == 0) break;
-                    },
-                    .need_body => {
-                        const to_consume = @min(receive_body_remain, data.len);
-
-                        const consumed = this.consume(data[0..to_consume], receive_body_remain, last_receive_data_type, is_final);
-
-                        receive_body_remain -= consumed;
-                        data = data[to_consume..];
-                        if (receive_body_remain == 0) {
-                            receive_state = .need_header;
-                            is_fragmented = false;
-                        }
-
-                        if (data.len == 0) break;
-                    },
-
-                    .close => {
-                        if (receive_body_remain == 1 or receive_body_remain > 125) {
-                            this.terminate(ErrorCode.invalid_control_frame);
-                            terminated = true;
-                            break;
-                        }
-
-                        if (receive_body_remain > 0) {
-                            if (!this.close_frame_buffering) {
-                                this.ping_len = @truncate(receive_body_remain);
-                                receive_body_remain = 0;
-                                this.close_frame_buffering = true;
-                            }
-                            const to_copy = @min(data.len, this.ping_len - receive_body_remain);
-                            @memcpy(this.ping_frame_bytes[6 + receive_body_remain ..][0..to_copy], data[0..to_copy]);
-                            receive_body_remain += to_copy;
-                            data = data[to_copy..];
-                            if (receive_body_remain < this.ping_len) break;
-
-                            this.close_received = true;
-                            const close_data = this.ping_frame_bytes[6..][0..this.ping_len];
-                            if (this.ping_len >= 2) {
-                                var code = std.mem.readInt(u16, close_data[0..2], .big);
-                                if (code == 1001) code = 1000;
-                                if ((code < 1000) or (code >= 1004 and code < 1007) or (code >= 1016 and code <= 2999)) code = 1002;
-                                var buf: [125]u8 = undefined;
-                                @memcpy(buf[0 .. this.ping_len - 2], close_data[2..this.ping_len]);
-                                this.sendCloseWithBody(socket, code, &buf, this.ping_len - 2);
-                            } else {
-                                this.sendClose();
-                            }
-                            this.close_frame_buffering = false;
-                            terminated = true;
-                            break;
-                        }
-
-                        this.close_received = true;
-                        this.sendClose();
-                        terminated = true;
-                        break;
-                    },
-                    .fail => {
-                        this.terminate(ErrorCode.unsupported_control_frame);
-                        terminated = true;
-                        break;
-                    },
-                }
-            }
-        }
-
-        pub fn sendClose(this: *WebSocket) void {
-            this.sendCloseWithBody(this.tcp, 1000, null, 0);
-        }
-
-        fn enqueueEncodedBytes(
-            this: *WebSocket,
-            socket: Socket,
-            bytes: []const u8,
-        ) bool {
-            // For tunnel mode, write through the tunnel instead of direct socket
-            if (this.proxy_tunnel) |tunnel| {
-                const wrote = tunnel.write(bytes) catch {
-                    this.terminate(ErrorCode.failed_to_write);
-                    return false;
-                };
-                // Buffer any data the tunnel couldn't accept
-                if (wrote < bytes.len) {
-                    _ = this.copyToSendBuffer(bytes[wrote..], false);
-                }
-                return true;
-            }
-
-            // fast path: no backpressure, no queue, just send the bytes.
-            if (!this.hasBackpressure()) {
-                // Do not set MSG_MORE, see https://github.com/oven-sh/bun/issues/4010
-                const wrote = socket.write(bytes);
-                const expected = @as(c_int, @intCast(bytes.len));
-                if (wrote == expected) {
-                    return true;
-                }
-
-                if (wrote < 0) {
-                    this.terminate(ErrorCode.failed_to_write);
-                    return false;
-                }
-
-                _ = this.copyToSendBuffer(bytes[@as(usize, @intCast(wrote))..], false);
-                return true;
-            }
-
-            return this.copyToSendBuffer(bytes, true);
-        }
-
-        fn copyToSendBuffer(this: *WebSocket, bytes: []const u8, do_write: bool) bool {
-            return this.sendData(.{ .raw = bytes }, do_write, .Binary);
-        }
-
-        fn sendData(this: *WebSocket, bytes: Copy, do_write: bool, opcode: Opcode) bool {
-            const should_compress = this.deflate != null and (opcode == .Text or opcode == .Binary) and bytes != .raw;
-
-            if (should_compress) {
-                // For compressed messages, we need to compress the content first
-                var temp_buffer: ?[]u8 = null;
-                const allocator = this.deflate.?.rare_data.allocator();
-                defer if (temp_buffer) |buf| allocator.free(buf);
-                const content_to_compress: []const u8 = switch (bytes) {
-                    .utf16 => |utf16| brk: {
-                        // Convert UTF16 to UTF8 for compression
-                        const content_byte_len: usize = strings.elementLengthUTF16IntoUTF8(utf16);
-                        temp_buffer = allocator.alloc(u8, content_byte_len) catch return false;
-                        const encode_result = strings.copyUTF16IntoUTF8(temp_buffer.?, utf16);
-                        break :brk temp_buffer.?[0..encode_result.written];
-                    },
-                    .latin1 => |latin1| brk: {
-                        // Convert Latin1 to UTF8 for compression
-                        const content_byte_len: usize = strings.elementLengthLatin1IntoUTF8(latin1);
-                        if (content_byte_len == latin1.len) {
-                            // It's all ascii, we don't need to copy it an extra time.
-                            break :brk latin1;
-                        }
-
-                        temp_buffer = allocator.alloc(u8, content_byte_len) catch return false;
-                        const encode_result = strings.copyLatin1IntoUTF8(temp_buffer.?, latin1);
-                        break :brk temp_buffer.?[0..encode_result.written];
-                    },
-                    .bytes => |b| b,
-                    .raw => unreachable,
-                };
-
-                // Check if compression is worth it
-                if (!this.shouldCompress(content_to_compress.len, opcode)) {
-                    return this.sendDataUncompressed(bytes, do_write, opcode);
-                }
-
-                {
-                    // Compress the content
-                    var compressed = std.array_list.Managed(u8).init(allocator);
-                    defer compressed.deinit();
-
-                    this.deflate.?.compress(content_to_compress, &compressed) catch {
-                        // If compression fails, fall back to uncompressed
-                        return this.sendDataUncompressed(bytes, do_write, opcode);
-                    };
-
-                    // Create the compressed frame
-                    const frame_size = WebsocketHeader.frameSizeIncludingMask(compressed.items.len);
-                    const writable = this.send_buffer.writableWithSize(frame_size) catch return false;
-                    Copy.copyCompressed(this.globalThis, writable[0..frame_size], compressed.items, opcode, true);
-                    this.send_buffer.update(frame_size);
-                }
-
-                if (do_write) {
-                    if (comptime Environment.allow_assert) {
-                        if (this.proxy_tunnel == null) {
-                            bun.assert(!this.tcp.isShutdown());
-                            bun.assert(!this.tcp.isClosed());
-                            bun.assert(this.tcp.isEstablished());
-                        }
-                    }
-                    return this.sendBuffer(this.send_buffer.readableSlice(0));
-                }
-            } else {
-                return this.sendDataUncompressed(bytes, do_write, opcode);
-            }
-
-            return true;
-        }
-
-        fn sendDataUncompressed(this: *WebSocket, bytes: Copy, do_write: bool, opcode: Opcode) bool {
-            var content_byte_len: usize = 0;
-            const write_len = bytes.len(&content_byte_len);
-            bun.assert(write_len > 0);
-
-            const writable = this.send_buffer.writableWithSize(write_len) catch unreachable;
-            bytes.copy(this.globalThis, writable[0..write_len], content_byte_len, opcode);
-            this.send_buffer.update(write_len);
-
-            if (do_write) {
-                if (comptime Environment.allow_assert) {
-                    if (this.proxy_tunnel == null) {
-                        bun.assert(!this.tcp.isShutdown());
-                        bun.assert(!this.tcp.isClosed());
-                        bun.assert(this.tcp.isEstablished());
-                    }
-                }
-                return this.sendBuffer(this.send_buffer.readableSlice(0));
-            }
-
-            return true;
-        }
-
-        fn sendBuffer(
-            this: *WebSocket,
-            out_buf: []const u8,
-        ) bool {
-            bun.assert(out_buf.len > 0);
-            // Do not use MSG_MORE, see https://github.com/oven-sh/bun/issues/4010
-            const wrote: usize = if (this.proxy_tunnel) |tunnel|
-                // In tunnel mode, route through the tunnel's TLS layer
-                // instead of the detached raw socket.
-                tunnel.write(out_buf) catch {
-                    this.terminate(ErrorCode.failed_to_write);
-                    return false;
-                }
-            else blk: {
-                if (this.tcp.isClosed()) {
-                    return false;
-                }
-                const w = this.tcp.write(out_buf);
-                if (w < 0) {
-                    this.terminate(ErrorCode.failed_to_write);
-                    return false;
-                }
-                break :blk @intCast(w);
-            };
-            const readable = this.send_buffer.readableSlice(0);
-            if (readable.ptr == out_buf.ptr) {
-                this.send_buffer.discard(wrote);
-            }
-            return true;
-        }
-
-        fn sendPong(this: *WebSocket, socket: Socket) bool {
-            if (!this.hasTCP()) {
-                this.dispatchAbruptClose(ErrorCode.ended);
-                return false;
-            }
-
-            var header = @as(WebsocketHeader, @bitCast(@as(u16, 0)));
-            header.final = true;
-            header.opcode = .Pong;
-
-            const to_mask = this.ping_frame_bytes[6..][0..this.ping_len];
-
-            header.mask = true;
-            header.len = @as(u7, @truncate(this.ping_len));
-            this.ping_frame_bytes[0..2].* = header.slice();
-
-            if (to_mask.len > 0) {
-                Mask.fill(this.globalThis, this.ping_frame_bytes[2..6], to_mask, to_mask);
-                return this.enqueueEncodedBytes(socket, this.ping_frame_bytes[0 .. 6 + @as(usize, this.ping_len)]);
-            } else {
-                @memset(this.ping_frame_bytes[2..6], 0); //autobahn tests require that we mask empty pongs
-                return this.enqueueEncodedBytes(socket, this.ping_frame_bytes[0..6]);
-            }
-        }
-
-        fn sendCloseWithBody(
-            this: *WebSocket,
-            socket: Socket,
-            code: u16,
-            body: ?*[125]u8,
-            body_len: usize,
-        ) void {
-            log("Sending close with code {d}", .{code});
-            if (!this.hasTCP()) {
-                this.dispatchAbruptClose(ErrorCode.ended);
-                this.clearData();
-                return;
-            }
-            // we dont wanna shutdownRead when SSL, because SSL handshake can happen when writting
-            // For tunnel mode, shutdownRead on the detached socket is a no-op; skip it.
-            if (comptime !ssl) {
-                if (this.proxy_tunnel == null) {
-                    socket.shutdownRead();
-                }
-            }
-            var final_body_bytes: [128 + 8]u8 = undefined;
-            var header = @as(WebsocketHeader, @bitCast(@as(u16, 0)));
-            header.final = true;
-            header.opcode = .Close;
-            header.mask = true;
-            header.len = @as(u7, @truncate(body_len + 2));
-            final_body_bytes[0..2].* = header.slice();
-            const mask_buf: *[4]u8 = final_body_bytes[2..6];
-            final_body_bytes[6..8].* = @bitCast(@byteSwap(code));
-
-            var reason = bun.String.empty;
-            if (body) |data| {
-                if (body_len > 0) {
-                    const body_slice = data[0..body_len];
-                    // close is always utf8
-                    if (!strings.isValidUTF8(body_slice)) {
-                        this.terminate(ErrorCode.invalid_utf8);
-                        return;
-                    }
-                    reason = bun.String.cloneUTF8(body_slice);
-                    @memcpy(final_body_bytes[8..][0..body_len], body_slice);
-                }
-            }
-
-            // we must mask the code
-            var slice = final_body_bytes[0..(8 + body_len)];
-            Mask.fill(this.globalThis, mask_buf, slice[6..], slice[6..]);
-
-            if (this.enqueueEncodedBytes(socket, slice)) {
-                this.clearData();
-                this.dispatchClose(code, &reason);
-            }
-        }
-        pub fn isSameSocket(this: *WebSocket, socket: Socket) bool {
-            return socket.socket.eq(this.tcp.socket);
-        }
-
-        pub fn handleEnd(this: *WebSocket, socket: Socket) void {
-            bun.assert(this.isSameSocket(socket));
-            this.terminate(ErrorCode.ended);
-        }
-
-        pub fn handleWritable(
-            this: *WebSocket,
-            socket: Socket,
-        ) void {
-            if (this.close_received) return;
-            bun.assert(this.isSameSocket(socket));
-            const send_buf = this.send_buffer.readableSlice(0);
-            if (send_buf.len == 0)
-                return;
-            _ = this.sendBuffer(send_buf);
-        }
-        pub fn handleTimeout(
-            this: *WebSocket,
-            _: Socket,
-        ) void {
-            this.terminate(ErrorCode.timeout);
-        }
-        pub fn handleConnectError(this: *WebSocket, _: Socket, _: c_int) void {
-            this.tcp.detach();
-            this.terminate(ErrorCode.failed_to_connect);
-        }
-
-        pub fn hasBackpressure(this: *const WebSocket) bool {
-            if (this.send_buffer.count > 0) return true;
-            if (this.proxy_tunnel) |tunnel| return tunnel.hasBackpressure();
-            return false;
-        }
-
-        pub fn writeBinaryData(
-            this: *WebSocket,
-            ptr: [*]const u8,
-            len: usize,
-            op: u8,
-        ) callconv(.c) void {
-            // In tunnel mode, SSLWrapper.writeData() can synchronously fire
-            // onClose → ws.fail() → cancel() → clearData() and free `this`
-            // before the catch block in enqueueEncodedBytes/sendBuffer runs.
-            this.ref();
-            defer this.deref();
-
-            if (!this.hasTCP() or op > 0xF) {
-                this.dispatchAbruptClose(ErrorCode.ended);
-                return;
-            }
-
-            const opcode: Opcode = @enumFromInt(op);
-            const slice = ptr[0..len];
-            const bytes = Copy{ .bytes = slice };
-            // fast path: small frame, no backpressure, attempt to send without allocating
-            const frame_size = WebsocketHeader.frameSizeIncludingMask(len);
-            if (!this.hasBackpressure() and frame_size < stack_frame_size) {
-                var inline_buf: [stack_frame_size]u8 = undefined;
-                bytes.copy(this.globalThis, inline_buf[0..frame_size], slice.len, opcode);
-                _ = this.enqueueEncodedBytes(this.tcp, inline_buf[0..frame_size]);
-                return;
-            }
-
-            _ = this.sendData(bytes, !this.hasBackpressure(), opcode);
-        }
-        fn hasTCP(this: *WebSocket) bool {
-            // For tunnel mode, we have an active connection through the tunnel
-            if (this.proxy_tunnel != null) return true;
-            return !this.tcp.isClosed() and !this.tcp.isShutdown();
-        }
-
-        pub fn writeBlob(
-            this: *WebSocket,
-            blob_value: jsc.JSValue,
-            op: u8,
-        ) callconv(.c) void {
-            // See writeBinaryData() — tunnel.write() can re-enter fail().
-            this.ref();
-            defer this.deref();
-
-            if (!this.hasTCP() or op > 0xF) {
-                this.dispatchAbruptClose(ErrorCode.ended);
-                return;
-            }
-
-            const opcode: Opcode = @enumFromInt(op);
-
-            // Cast the JSValue to a Blob
-            if (blob_value.as(jsc.WebCore.Blob)) |blob| {
-                // Get the shared view of the blob data
-                const data = blob.sharedView();
-                if (data.len == 0) {
-                    // Empty blob, send empty frame
-                    const bytes = Copy{ .bytes = &[0]u8{} };
-                    _ = this.sendData(bytes, !this.hasBackpressure(), opcode);
-                    return;
-                }
-
-                // Send the blob data similar to writeBinaryData
-                const bytes = Copy{ .bytes = data };
-
-                // Fast path for small blobs
-                const frame_size = WebsocketHeader.frameSizeIncludingMask(data.len);
-                if (!this.hasBackpressure() and frame_size < stack_frame_size) {
-                    var inline_buf: [stack_frame_size]u8 = undefined;
-                    bytes.copy(this.globalThis, inline_buf[0..frame_size], data.len, opcode);
-                    _ = this.enqueueEncodedBytes(this.tcp, inline_buf[0..frame_size]);
-                    return;
-                }
-
-                _ = this.sendData(bytes, !this.hasBackpressure(), opcode);
-            } else {
-                // Invalid blob, close connection
-                this.dispatchAbruptClose(ErrorCode.ended);
-            }
-        }
-
-        pub fn writeString(
-            this: *WebSocket,
-            str_: *const jsc.ZigString,
-            op: u8,
-        ) callconv(.c) void {
-            // See writeBinaryData() — tunnel.write() can re-enter fail().
-            this.ref();
-            defer this.deref();
-
-            const str = str_.*;
-            if (!this.hasTCP()) {
-                this.dispatchAbruptClose(ErrorCode.ended);
-                return;
-            }
-            const tcp = this.tcp;
-
-            // Note: 0 is valid
-
-            const opcode = @as(Opcode, @enumFromInt(@as(u4, @truncate(op))));
-            {
-                var inline_buf: [stack_frame_size]u8 = undefined;
-
-                // fast path: small frame, no backpressure, attempt to send without allocating
-                if (!str.is16Bit() and str.len < stack_frame_size) {
-                    const bytes = Copy{ .latin1 = str.slice() };
-                    var byte_len: usize = 0;
-                    const frame_size = bytes.len(&byte_len);
-                    if (!this.hasBackpressure() and frame_size < stack_frame_size) {
-                        bytes.copy(this.globalThis, inline_buf[0..frame_size], byte_len, opcode);
-                        _ = this.enqueueEncodedBytes(tcp, inline_buf[0..frame_size]);
-                        return;
-                    }
-                    // max length of a utf16 -> utf8 conversion is 4 times the length of the utf16 string
-                } else if ((str.len * 4) < (stack_frame_size) and !this.hasBackpressure()) {
-                    const bytes = Copy{ .utf16 = str.utf16SliceAligned() };
-                    var byte_len: usize = 0;
-                    const frame_size = bytes.len(&byte_len);
-                    bun.assert(frame_size <= stack_frame_size);
-                    bytes.copy(this.globalThis, inline_buf[0..frame_size], byte_len, opcode);
-                    _ = this.enqueueEncodedBytes(tcp, inline_buf[0..frame_size]);
-                    return;
-                }
-            }
-
-            _ = this.sendData(
-                if (str.is16Bit())
-                    Copy{ .utf16 = str.utf16SliceAligned() }
-                else
-                    Copy{ .latin1 = str.slice() },
-                !this.hasBackpressure(),
-                opcode,
-            );
-        }
-
-        fn dispatchAbruptClose(this: *WebSocket, code: ErrorCode) void {
-            var out = this.outgoing_websocket orelse return;
-            this.poll_ref.unref(this.globalThis.bunVM());
-            jsc.markBinding(@src());
-            this.outgoing_websocket = null;
-            out.didAbruptClose(code);
-            this.deref();
-        }
-
-        fn dispatchClose(this: *WebSocket, code: u16, reason: *bun.String) void {
-            var out = this.outgoing_websocket orelse return;
-            this.poll_ref.unref(this.globalThis.bunVM());
-            jsc.markBinding(@src());
-            this.outgoing_websocket = null;
-            out.didClose(code, reason);
-            this.deref();
-        }
-
-        pub fn close(this: *WebSocket, code: u16, reason: ?*const jsc.ZigString) callconv(.c) void {
-            // In tunnel mode, SSLWrapper.writeData() (via sendCloseWithBody →
-            // enqueueEncodedBytes → tunnel.write) can synchronously fire
-            // onClose → ws.fail() → cancel() → clearData() and free `this`
-            // before sendCloseWithBody's own clearData/dispatchClose run.
-            this.ref();
-            defer this.deref();
-
-            if (!this.hasTCP())
-                return;
-            const tcp = this.tcp;
-            var close_reason_buf: [128]u8 = undefined;
-            if (reason) |str| {
-                inner: {
-                    var fixed_buffer = std.heap.FixedBufferAllocator.init(&close_reason_buf);
-                    const allocator = fixed_buffer.allocator();
-                    const wrote = std.fmt.allocPrint(allocator, "{f}", .{str.*}) catch break :inner;
-                    this.sendCloseWithBody(tcp, code, wrote.ptr[0..125], wrote.len);
-                    return;
-                }
-            }
-
-            this.sendCloseWithBody(tcp, code, null, 0);
-        }
-
-        const InitialDataHandler = struct {
-            adopted: ?*WebSocket,
-            ws: *CppWebSocket,
-            slice: []u8,
-
-            pub const Handle = jsc.AnyTask.New(@This(), handle);
-
-            pub const new = bun.TrivialNew(@This());
-
-            pub fn handleWithoutDeinit(this: *@This()) void {
-                var this_socket = this.adopted orelse return;
-                this.adopted = null;
-                this_socket.initial_data_handler = null;
-                var ws = this.ws;
-                defer ws.unref();
-
-                // For tunnel mode, tcp is detached but connection is still active through the tunnel
-                const is_connected = !this_socket.tcp.isClosed() or this_socket.proxy_tunnel != null;
-                if (this_socket.outgoing_websocket != null and is_connected) {
-                    this_socket.handleData(this_socket.tcp, this.slice);
-                }
-            }
-
-            pub fn handle(this: *@This()) void {
-                this.handleWithoutDeinit();
-                this.deinit();
-            }
-
-            pub fn deinit(this: *@This()) void {
-                bun.default_allocator.free(this.slice);
-                bun.destroy(this);
-            }
-        };
-
-        pub fn init(
-            outgoing: *CppWebSocket,
-            input_socket: *anyopaque,
-            globalThis: *jsc.JSGlobalObject,
-            buffered_data: [*]u8,
-            buffered_data_len: usize,
-            deflate_params: ?*const WebSocketDeflate.Params,
-            secure_ptr: ?*anyopaque,
-        ) callconv(.c) ?*anyopaque {
-            const tcp = @as(*uws.us_socket_t, @ptrCast(input_socket));
-            const vm = globalThis.bunVM();
-            var ws = bun.new(WebSocket, .{
-                .ref_count = .init(),
-                .tcp = .{ .socket = .{ .detached = {} } },
-                .outgoing_websocket = outgoing,
-                .globalThis = globalThis,
-                .send_buffer = bun.LinearFifo(u8, .Dynamic).init(bun.default_allocator),
-                .receive_buffer = bun.LinearFifo(u8, .Dynamic).init(bun.default_allocator),
-                .event_loop = vm.eventLoop(),
-                .secure = if (secure_ptr) |ptr| @ptrCast(@alignCast(ptr)) else null,
-            });
-
-            if (deflate_params) |params| {
-                if (WebSocketDeflate.init(bun.default_allocator, params.*, vm.rareData())) |deflate| {
-                    ws.deflate = deflate;
-                } else |_| {
-                    ws.deflate = null;
-                }
-            }
-
-            if (!Socket.adoptGroup(
-                tcp,
-                vm.rareData().wsClientGroup(vm, ssl),
-                if (ssl) .ws_client_tls else .ws_client,
-                WebSocket,
-                "tcp",
-                ws,
-            )) {
-                ws.deref();
-                return null;
-            }
-
-            bun.handleOom(ws.send_buffer.ensureTotalCapacity(2048));
-            bun.handleOom(ws.receive_buffer.ensureTotalCapacity(2048));
-            ws.poll_ref.ref(globalThis.bunVM());
-
-            const buffered_slice: []u8 = buffered_data[0..buffered_data_len];
-            if (buffered_slice.len > 0) {
-                const initial_data = InitialDataHandler.new(.{
-                    .adopted = ws,
-                    .slice = buffered_slice,
-                    .ws = outgoing,
-                });
-
-                // Use a higher-priority callback for the initial onData handler
-                globalThis.queueMicrotaskCallback(initial_data, InitialDataHandler.handle);
-
-                // We need to ref the outgoing websocket so that it doesn't get finalized
-                // before the initial data handler is called
-                outgoing.ref();
-            }
-
-            // And lastly, ref the new websocket since C++ has a reference to it
-            ws.ref();
-
-            return @as(
-                *anyopaque,
-                @ptrCast(ws),
-            );
-        }
-
-        /// Initialize a WebSocket client that uses a proxy tunnel for I/O.
-        /// Used for wss:// through HTTP proxy where TLS is handled by the tunnel.
-        /// The tunnel takes ownership of socket I/O, and this client reads/writes through it.
-        pub fn initWithTunnel(
-            outgoing: *CppWebSocket,
-            tunnel_ptr: *anyopaque,
-            globalThis: *jsc.JSGlobalObject,
-            buffered_data: [*]u8,
-            buffered_data_len: usize,
-            deflate_params: ?*const WebSocketDeflate.Params,
-        ) callconv(.c) ?*anyopaque {
-            const tunnel: *WebSocketProxyTunnel = @ptrCast(@alignCast(tunnel_ptr));
-
-            // ref_count starts at 1: this is the I/O-layer ref, owned by the
-            // tunnel connection (analogous to the adopted-socket ref in init()
-            // that handleClose() releases). It is released in clearData() when
-            // proxy_tunnel is detached. The ws.ref() below adds the C++ ref
-            // paired with m_connectedWebSocket.
-            var ws = bun.new(WebSocket, .{
-                .ref_count = .init(),
-                .tcp = .{ .socket = .{ .detached = {} } }, // No direct socket - using tunnel
-                .outgoing_websocket = outgoing,
-                .globalThis = globalThis,
-                .send_buffer = bun.LinearFifo(u8, .Dynamic).init(bun.default_allocator),
-                .receive_buffer = bun.LinearFifo(u8, .Dynamic).init(bun.default_allocator),
-                .event_loop = globalThis.bunVM().eventLoop(),
-                .proxy_tunnel = tunnel,
-            });
-
-            // Take ownership of the tunnel
-            tunnel.ref();
-
-            if (deflate_params) |params| {
-                if (WebSocketDeflate.init(bun.default_allocator, params.*, globalThis.bunVM().rareData())) |deflate| {
-                    ws.deflate = deflate;
-                } else |_| {
-                    ws.deflate = null;
-                }
-            }
-
-            bun.handleOom(ws.send_buffer.ensureTotalCapacity(2048));
-            bun.handleOom(ws.receive_buffer.ensureTotalCapacity(2048));
-            ws.poll_ref.ref(globalThis.bunVM());
-
-            const buffered_slice: []u8 = buffered_data[0..buffered_data_len];
-            if (buffered_slice.len > 0) {
-                const initial_data = InitialDataHandler.new(.{
-                    .adopted = ws,
-                    .slice = buffered_slice,
-                    .ws = outgoing,
-                });
-                globalThis.queueMicrotaskCallback(initial_data, InitialDataHandler.handle);
-                outgoing.ref();
-            }
-
-            ws.ref();
-
-            return @as(*anyopaque, @ptrCast(ws));
-        }
-
-        /// Handle data received from the proxy tunnel (already decrypted).
-        /// Called by the WebSocketProxyTunnel when it receives and decrypts data.
-        pub fn handleTunnelData(this: *WebSocket, data: []const u8) void {
-            // Process the decrypted data as if it came from the socket
-            // hasTCP() now returns true for tunnel mode, so this will work correctly
-            this.handleData(this.tcp, data);
-        }
-
-        /// Called by the WebSocketProxyTunnel when the underlying socket drains.
-        /// Flushes any buffered plaintext data through the tunnel.
-        pub fn handleTunnelWritable(this: *WebSocket) void {
-            if (this.close_received) return;
-            // sendBuffer → tunnel.write() can re-enter fail() synchronously
-            // (see writeBinaryData). The tunnel ref-guards itself in
-            // onWritable() but not this struct.
-            this.ref();
-            defer this.deref();
-
-            const send_buf = this.send_buffer.readableSlice(0);
-            if (send_buf.len == 0) return;
-            _ = this.sendBuffer(send_buf);
-        }
-
-        pub fn finalize(this: *WebSocket) callconv(.c) void {
-            log("finalize", .{});
-            // clearData() may drop the tunnel's I/O-layer ref and the block
-            // below drops the C++ ref; keep `this` alive until we've finished
-            // the tcp close check.
-            this.ref();
-            defer this.deref();
-
-            this.clearData();
-
-            // This is only called by outgoing_websocket.
-            if (this.outgoing_websocket != null) {
-                this.outgoing_websocket = null;
-                this.deref();
-            }
-
-            if (!this.tcp.isClosed()) {
-                // no need to be .failure we still wanna to send pending SSL buffer + close_notify
-                if (comptime ssl) {
-                    this.tcp.close(.normal);
-                } else {
-                    this.tcp.close(.failure);
-                }
-            }
-        }
-
-        pub fn deinit(this: *WebSocket) void {
-            this.clearData();
-            if (this.deflate) |d| d.deinit();
-            this.deflate = null;
-            bun.destroy(this);
-        }
-
-        pub fn memoryCost(this: *WebSocket) callconv(.c) usize {
-            var cost: usize = @sizeOf(WebSocket);
-            cost += this.send_buffer.buf.len;
-            cost += this.receive_buffer.buf.len;
-            // This is under-estimated a little, as we don't include usockets context.
-            return cost;
-        }
-        pub fn exportAll() void {
-            comptime {
-                const name = if (ssl) "WebSocketClientTLS" else "WebSocketClient";
-                @export(&cancel, .{ .name = "Bun__" ++ name ++ "__cancel" });
-                @export(&close, .{ .name = "Bun__" ++ name ++ "__close" });
-                @export(&finalize, .{ .name = "Bun__" ++ name ++ "__finalize" });
-                @export(&init, .{ .name = "Bun__" ++ name ++ "__init" });
-                @export(&initWithTunnel, .{ .name = "Bun__" ++ name ++ "__initWithTunnel" });
-                @export(&memoryCost, .{ .name = "Bun__" ++ name ++ "__memoryCost" });
-                @export(&writeBinaryData, .{ .name = "Bun__" ++ name ++ "__writeBinaryData" });
-                @export(&writeBlob, .{ .name = "Bun__" ++ name ++ "__writeBlob" });
-                @export(&writeString, .{ .name = "Bun__" ++ name ++ "__writeString" });
-            }
-        }
-    };
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
+const std = @import("std");
+const string = []const u8;
+
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const Async = bun.Async;
+const BoringSSL = bun.BoringSSL;
+const Environment = bun.Environment;
+const Output = bun.Output;
+const default_allocator = bun.default_allocator;
+const jsc = bun.jsc;
+const strings = bun.strings;
+const uws = bun.uws;
+const log = Output.scoped(.WebSocketClient, .visible);
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime __T: type, comptime idx: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") return ti.@"struct".field_types[idx]; return @FieldType(__T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime __T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .array)) { return v[idx]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") return @field(v, ti.@"struct".field_names[idx]); return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime __T: type, comptime offset_from_end: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return ti.@"struct".field_types[n - offset_from_end]; } return @FieldType(__T, std.fmt.comptimePrint("{d}", .{1})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime __T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .array)) { return v[v.len - offset_from_end]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return @field(v, ti.@"struct".field_names[n - offset_from_end]); } return @field(v, std.fmt.comptimePrint("{d}", .{0})); } }
+pub fn CpUnpackSliceType(comptime __T: type, comptime start_idx: usize) type { if (__T == ?Message or __T == Message) return []const Message; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return __T; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return []const @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return []const @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const types = ti.@"struct".field_types; if (types.len == 0) return []const i32; const Elem = if (start_idx < types.len) types[start_idx] else types[0]; return []const CpValType(Elem); } return []const i32; }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime __T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const names = ti.@"struct".field_names; const types = ti.@"struct".field_types; const end = names.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < types.len) CpValType(types[start_idx]) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, names[f_idx])); } return buf; } return &[_]i32{}; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const WebSocketDeflate = @import("./websocket_client/WebSocketDeflate.zig");
+pub const WebSocketProxyTunnel = @import("./websocket_client/WebSocketProxyTunnel.zig");
+pub const CppWebSocket = @import("./websocket_client/CppWebSocket.zig").CppWebSocket;
+pub const Opcode = @import("../http/websocket.zig").Opcode;
+pub const WebsocketHeader = @import("../http/websocket.zig").WebsocketHeader;
+pub const bun = @import("bun");
 pub const ErrorCode = enum(i32) {
     cancel = 1,
     invalid_response = 2,
@@ -1508,34 +66,17 @@ pub const ErrorCode = enum(i32) {
     tls_handshake_failed = 30,
     message_too_big = 31,
     protocol_error = 32,
-    // Proxy error codes
     proxy_connect_failed = 33,
     proxy_authentication_required = 34,
     proxy_connection_refused = 35,
     proxy_tunnel_failed = 36,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 };
 
-pub const Mask = struct {
-    pub fn fill(globalThis: *jsc.JSGlobalObject, mask_buf: *[4]u8, output_: []u8, input_: []const u8) void {
-        mask_buf.* = globalThis.bunVM().rareData().entropySlice(4)[0..4].*;
-        const mask = mask_buf.*;
-
-        const skip_mask = @as(u32, @bitCast(mask)) == 0;
-        fillWithSkipMask(mask, output_, input_, skip_mask);
-    }
-
-    fn fillWithSkipMask(mask: [4]u8, output_: []u8, input_: []const u8, skip_mask: bool) void {
-        const input = input_;
-        const output = output_;
-        if (input.len == 0) {
-            @branchHint(.unlikely);
-            return;
-        }
-        return bun.highway.fillWithSkipMask(mask, output, input, skip_mask);
-    }
-};
-
-const ReceiveState = enum {
+pub const ReceiveState = enum {
     need_header,
     need_mask,
     need_body,
@@ -1545,248 +86,1476 @@ const ReceiveState = enum {
     pong,
     close,
     fail,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 
-    pub fn needControlFrame(this: ReceiveState) bool {
-        return this != .need_body;
+pub fn needControlFrame(self: ReceiveState) bool {
+            return (self != .need_body);
     }
 };
-const DataType = enum {
+
+pub const DataType = enum {
     none,
     text,
     binary,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 };
 
-fn parseWebSocketHeader(
-    bytes: [2]u8,
-    receiving_type: *Opcode,
-    payload_length: *usize,
-    is_fragmented: *bool,
-    is_final: *bool,
-    need_compression: *bool,
-) ReceiveState {
-    // 0                   1                   2                   3
-    // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-    // +-+-+-+-+-------+-+-------------+-------------------------------+
-    // |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
-    // |I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
-    // |N|V|V|V|       |S|             |   (if payload len==126/127)   |
-    // | |1|2|3|       |K|             |                               |
-    // +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
-    // |     Extended payload length continued, if payload len == 127  |
-    // + - - - - - - - - - - - - - - - +-------------------------------+
-    // |                               |Masking-key, if MASK set to 1  |
-    // +-------------------------------+-------------------------------+
-    // | Masking-key (continued)       |          Payload Data         |
-    // +-------------------------------- - - - - - - - - - - - - - - - +
-    // :                     Payload Data continued ...                :
-    // + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
-    // |                     Payload Data continued ...                |
-    // +---------------------------------------------------------------+
-    const header = WebsocketHeader.fromSlice(bytes);
-    const payload = @as(usize, header.len);
-    payload_length.* = payload;
-    receiving_type.* = header.opcode;
-    is_fragmented.* = switch (header.opcode) {
-        .Continue => true,
-        else => false,
-    } or !header.final;
-    is_final.* = header.final;
-
-    // Per RFC 7692, RSV1 bit indicates compression for the first fragment of a message
-    // For continuation frames, compression state is inherited from the first fragment
-    if (header.opcode == .Text or header.opcode == .Binary) {
-        need_compression.* = header.compressed;
-    } else if (header.opcode == .Continue) {
-        // Compression state for continuation frames should be inherited from the message start
-        // This needs to be tracked at a higher level, not determined by the continuation frame's RSV1
-        // For now, we don't set it here - it should be maintained by the WebSocket state
-        need_compression.* = false;
-    } else {
-        // Control frames cannot be compressed
-        if (header.compressed) {
-            return .fail; // Control frames with RSV1 set should fail
-        }
-        need_compression.* = false;
-    }
-
-    if (header.mask and (header.opcode == .Text or header.opcode == .Binary)) {
-        return .need_mask;
-    }
-
-    // Check RSV bits (rsv2 and rsv3 must always be 0 per RFC 6455)
-    // rsv1 (compressed bit) is handled separately above
-    if (header.rsv != 0) {
-        // RSV2 and RSV3 bits must always be 0
-        return .fail;
-    }
-
-    return switch (header.opcode) {
-        .Text, .Continue, .Binary => if (payload <= 125)
-            return .need_body
-        else if (payload == 126)
-            return .extended_payload_length_16
-        else if (payload == 127)
-            return .extended_payload_length_64
-        else
-            return .fail,
-        .Close => .close,
-        .Ping => .ping,
-        .Pong => .pong,
-        else => .fail,
-    };
-}
-
-const Copy = union(enum) {
+pub const Copy = union(enum) {
     utf16: []const u16,
     latin1: []const u8,
     bytes: []const u8,
     raw: []const u8,
+    pub fn has(s: []const u8) bool { if (comptime @typeInfo(@This()).@"union".tag_type) |TagType| { return std.meta.stringToEnum(TagType, s) != null; } return false; }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
 
-    pub fn len(this: @This(), byte_len: *usize) usize {
-        switch (this) {
-            .utf16 => {
-                byte_len.* = strings.elementLengthUTF16IntoUTF8(this.utf16);
-                return WebsocketHeader.frameSizeIncludingMask(byte_len.*);
-            },
-            .latin1 => {
-                byte_len.* = strings.elementLengthLatin1IntoUTF8(this.latin1);
-                return WebsocketHeader.frameSizeIncludingMask(byte_len.*);
-            },
-            .bytes => {
-                byte_len.* = this.bytes.len;
-                return WebsocketHeader.frameSizeIncludingMask(byte_len.*);
-            },
-            .raw => {
-                byte_len.* = this.raw.len;
-                return this.raw.len;
-            },
-        }
+pub fn len(self: Copy, byte_len: *usize) usize {
+            switch (self) {
+.utf16 => {
+{
+                byte_len.* = strings.elementLengthUTF16IntoUTF8(self.utf16);
+            }
+            return WebsocketHeader.frameSizeIncludingMask((blk: {
+            break :blk byte_len.*;
+
+}));
+},
+.latin1 => {
+{
+                byte_len.* = strings.elementLengthLatin1IntoUTF8(self.latin1);
+            }
+            return WebsocketHeader.frameSizeIncludingMask((blk: {
+            break :blk byte_len.*;
+
+}));
+},
+.bytes => {
+{
+                byte_len.* = self.bytes.len;
+            }
+            return WebsocketHeader.frameSizeIncludingMask((blk: {
+            break :blk byte_len.*;
+
+}));
+},
+.raw => {
+{
+                byte_len.* = self.raw.len;
+            }
+            return self.raw.len;
+},
+}
     }
 
-    pub fn copy(this: @This(), globalThis: *jsc.JSGlobalObject, buf: []u8, content_byte_len: usize, opcode: Opcode) void {
-        if (this == .raw) {
-            bun.assert(buf.len >= this.raw.len);
-            bun.assert(buf.ptr != this.raw.ptr);
-            @memcpy(buf[0..this.raw.len], this.raw);
-            return;
-        }
+pub fn copy(self: Copy, globalThis: *jsc.JSGlobalObject, buf: []u8, content_byte_len: usize, opcode: Opcode) void {
+            if ((self == .raw)) {
+                _ = bun.assert((buf.len >= self.raw.len));
+                _ = bun.assert((buf.ptr != self.raw.ptr));
+                _ = @memcpy(buf[0..self.raw.len], self.raw);
+                return;
+            }
+            const how_big_is_the_length_integer = WebsocketHeader.lengthByteCount(content_byte_len);
+            const how_big_is_the_mask: i32 = 4;
+            const mask_offset = (2 + how_big_is_the_length_integer);
+            const content_offset = (mask_offset + how_big_is_the_mask);
+            var to_mask = buf[content_offset..];
+            _ = &to_mask;
+            var header = @as(WebsocketHeader, @bitCast((if (comptime @typeInfo(@TypeOf(0)) == .@"enum") cp_cast_int(u16, @intFromEnum(0)) else cp_cast_int(u16, 0))));
+            _ = &header;
+            switch (how_big_is_the_length_integer) {
+0 => {
 
-        const how_big_is_the_length_integer = WebsocketHeader.lengthByteCount(content_byte_len);
-        const how_big_is_the_mask = 4;
-        const mask_offset = 2 + how_big_is_the_length_integer;
-        const content_offset = mask_offset + how_big_is_the_mask;
-
-        // 2 byte header
-        // 4 byte mask
-        // 0, 2, 8 byte length
-        var to_mask = buf[content_offset..];
-
-        var header = @as(WebsocketHeader, @bitCast(@as(u16, 0)));
-
-        // Write extended length if needed
-        switch (how_big_is_the_length_integer) {
-            0 => {},
-            2 => std.mem.writeInt(u16, buf[2..][0..2], @as(u16, @truncate(content_byte_len)), .big),
-            8 => std.mem.writeInt(u64, buf[2..][0..8], @as(u64, @truncate(content_byte_len)), .big),
-            else => unreachable,
-        }
-
-        header.mask = true;
-        header.compressed = false;
-        header.final = true;
-        header.opcode = opcode;
-
-        bun.assert(WebsocketHeader.frameSizeIncludingMask(content_byte_len) == buf.len);
-
-        switch (this) {
-            .utf16 => |utf16| {
-                header.len = WebsocketHeader.packLength(content_byte_len);
-                const encode_into_result = strings.copyUTF16IntoUTF8Impl(to_mask, utf16, true);
-                bun.assert(@as(usize, encode_into_result.written) == content_byte_len);
-                bun.assert(@as(usize, encode_into_result.read) == utf16.len);
-                header.len = WebsocketHeader.packLength(encode_into_result.written);
-                var fib = std.io.fixedBufferStream(buf);
-                header.writeHeader(fib.writer(), encode_into_result.written) catch unreachable;
-
-                Mask.fill(globalThis, buf[mask_offset..][0..4], to_mask[0..content_byte_len], to_mask[0..content_byte_len]);
-            },
-            .latin1 => |latin1| {
-                const encode_into_result = strings.copyLatin1IntoUTF8(to_mask, latin1);
-                bun.assert(@as(usize, encode_into_result.written) == content_byte_len);
-
-                // latin1 can contain non-ascii
-                bun.assert(@as(usize, encode_into_result.read) == latin1.len);
-
-                header.len = WebsocketHeader.packLength(encode_into_result.written);
-                var fib = std.io.fixedBufferStream(buf);
-                header.writeHeader(fib.writer(), encode_into_result.written) catch unreachable;
-                Mask.fill(globalThis, buf[mask_offset..][0..4], to_mask[0..content_byte_len], to_mask[0..content_byte_len]);
-            },
-            .bytes => |bytes| {
-                header.len = WebsocketHeader.packLength(bytes.len);
-                var fib = std.io.fixedBufferStream(buf);
-                header.writeHeader(fib.writer(), bytes.len) catch unreachable;
-                Mask.fill(globalThis, buf[mask_offset..][0..4], to_mask[0..content_byte_len], bytes);
-            },
-            .raw => unreachable,
-        }
+},
+2 => {
+_ = std.mem.writeInt(u16, buf[2..][0..2], @as(u16, @truncate(content_byte_len)), .big);
+},
+8 => {
+_ = std.mem.writeInt(u64, buf[2..][0..8], @as(u64, @truncate(content_byte_len)), .big);
+},
+else => {
+_ = unreachable;
+},
+}
+            header.mask = true;
+            header.compressed = false;
+            header.final = true;
+            header.opcode = opcode;
+            _ = bun.assert((WebsocketHeader.frameSizeIncludingMask(content_byte_len) == buf.len));
+            switch (self) {
+.utf16 => |utf16| {
+header.len = WebsocketHeader.packLength(content_byte_len);
+            const encode_into_result = strings.copyUTF16IntoUTF8Impl(to_mask, utf16, true);
+            _ = bun.assert(((if (comptime @typeInfo(@TypeOf(encode_into_result.written)) == .@"enum") cp_cast_int(usize, @intFromEnum(encode_into_result.written)) else cp_cast_int(usize, encode_into_result.written)) == content_byte_len));
+            _ = bun.assert(((if (comptime @typeInfo(@TypeOf(encode_into_result.read)) == .@"enum") cp_cast_int(usize, @intFromEnum(encode_into_result.read)) else cp_cast_int(usize, encode_into_result.read)) == utf16.len));
+            header.len = WebsocketHeader.packLength(encode_into_result.written);
+            var fib = std.io.fixedBufferStream(buf);
+            _ = &fib;
+            _ = ((header.writeHeader(fib.writer(), encode_into_result.written)) catch unreachable);
+            _ = Mask.fill(globalThis, buf[mask_offset..][0..4], to_mask[0..content_byte_len], to_mask[0..content_byte_len]);
+},
+.latin1 => |latin1| {
+const encode_into_result = strings.copyLatin1IntoUTF8(to_mask, latin1);
+            _ = bun.assert(((if (comptime @typeInfo(@TypeOf(encode_into_result.written)) == .@"enum") cp_cast_int(usize, @intFromEnum(encode_into_result.written)) else cp_cast_int(usize, encode_into_result.written)) == content_byte_len));
+            _ = bun.assert(((if (comptime @typeInfo(@TypeOf(encode_into_result.read)) == .@"enum") cp_cast_int(usize, @intFromEnum(encode_into_result.read)) else cp_cast_int(usize, encode_into_result.read)) == latin1.len));
+            header.len = WebsocketHeader.packLength(encode_into_result.written);
+            var fib = std.io.fixedBufferStream(buf);
+            _ = &fib;
+            _ = ((header.writeHeader(fib.writer(), encode_into_result.written)) catch unreachable);
+            _ = Mask.fill(globalThis, buf[mask_offset..][0..4], to_mask[0..content_byte_len], to_mask[0..content_byte_len]);
+},
+.bytes => |bytes| {
+header.len = WebsocketHeader.packLength(bytes.len);
+            var fib = std.io.fixedBufferStream(buf);
+            _ = &fib;
+            _ = ((header.writeHeader(fib.writer(), bytes.len)) catch unreachable);
+            _ = Mask.fill(globalThis, buf[mask_offset..][0..4], to_mask[0..content_byte_len], bytes);
+},
+.raw => {
+_ = unreachable;
+},
+}
     }
 
-    pub fn copyCompressed(globalThis: *jsc.JSGlobalObject, buf: []u8, compressed_data: []const u8, opcode: Opcode, is_first_fragment: bool) void {
-        const content_byte_len = compressed_data.len;
-        const how_big_is_the_length_integer = WebsocketHeader.lengthByteCount(content_byte_len);
-        const how_big_is_the_mask = 4;
-        const mask_offset = 2 + how_big_is_the_length_integer;
-        const content_offset = mask_offset + how_big_is_the_mask;
+pub fn copyCompressed(globalThis: *jsc.JSGlobalObject, buf: []u8, compressed_data: []const u8, opcode: Opcode, is_first_fragment: bool) void {
+            const content_byte_len = compressed_data.len;
+            const how_big_is_the_length_integer = WebsocketHeader.lengthByteCount(content_byte_len);
+            const how_big_is_the_mask: i32 = 4;
+            const mask_offset = (2 + how_big_is_the_length_integer);
+            const content_offset = (mask_offset + how_big_is_the_mask);
+            var to_mask = buf[content_offset..];
+            _ = &to_mask;
+            switch (how_big_is_the_length_integer) {
+0 => {
 
-        // 2 byte header
-        // 4 byte mask
-        // 0, 2, 8 byte length
-        var to_mask = buf[content_offset..];
-
-        // Write extended length if needed
-        switch (how_big_is_the_length_integer) {
-            0 => {},
-            2 => std.mem.writeInt(u16, buf[2..][0..2], @as(u16, @truncate(content_byte_len)), .big),
-            8 => std.mem.writeInt(u64, buf[2..][0..8], @as(u64, @truncate(content_byte_len)), .big),
-            else => unreachable,
-        }
-
-        var header = @as(WebsocketHeader, @bitCast(@as(u16, 0)));
-
-        header.mask = true;
-        header.compressed = is_first_fragment; // Only set compressed flag for first fragment
-        header.final = true;
-        header.opcode = opcode;
-        header.len = WebsocketHeader.packLength(content_byte_len);
-
-        bun.assert(WebsocketHeader.frameSizeIncludingMask(content_byte_len) == buf.len);
-
-        var fib = std.io.fixedBufferStream(buf);
-        header.writeHeader(fib.writer(), content_byte_len) catch unreachable;
-
-        Mask.fill(globalThis, buf[mask_offset..][0..4], to_mask[0..content_byte_len], compressed_data);
+},
+2 => {
+_ = std.mem.writeInt(u16, buf[2..][0..2], @as(u16, @truncate(content_byte_len)), .big);
+},
+8 => {
+_ = std.mem.writeInt(u64, buf[2..][0..8], @as(u64, @truncate(content_byte_len)), .big);
+},
+else => {
+_ = unreachable;
+},
+}
+            var header = @as(WebsocketHeader, @bitCast((if (comptime @typeInfo(@TypeOf(0)) == .@"enum") cp_cast_int(u16, @intFromEnum(0)) else cp_cast_int(u16, 0))));
+            _ = &header;
+            header.mask = true;
+            header.compressed = is_first_fragment;
+            header.final = true;
+            header.opcode = opcode;
+            header.len = WebsocketHeader.packLength(content_byte_len);
+            _ = bun.assert((WebsocketHeader.frameSizeIncludingMask(content_byte_len) == buf.len));
+            var fib = std.io.fixedBufferStream(buf);
+            _ = &fib;
+            _ = ((header.writeHeader(fib.writer(), content_byte_len)) catch unreachable);
+            _ = Mask.fill(globalThis, buf[mask_offset..][0..4], to_mask[0..content_byte_len], compressed_data);
     }
 };
 
-const log = Output.scoped(.WebSocketClient, .visible);
+pub const Mask = struct {
 
-const string = []const u8;
+pub fn fill(globalThis: *jsc.JSGlobalObject, mask_buf: *[4]u8, output_: []u8, input_: []const u8) void {
+            {
+                mask_buf.* = (globalThis.bunVM().rareData().entropySlice(4)[0..4]).*;
+            }
+            const mask = (blk: {
+            break :blk mask_buf.*;
 
-const WebSocketDeflate = @import("./websocket_client/WebSocketDeflate.zig");
-const WebSocketProxyTunnel = @import("./websocket_client/WebSocketProxyTunnel.zig");
-const std = @import("std");
-const CppWebSocket = @import("./websocket_client/CppWebSocket.zig").CppWebSocket;
+});
+            const skip_mask = (@as(u32, @bitCast(mask)) == 0);
+            _ = fillWithSkipMask(mask, output_, input_, skip_mask);
+    }
 
-const Opcode = @import("../http/websocket.zig").Opcode;
-const WebsocketHeader = @import("../http/websocket.zig").WebsocketHeader;
+pub fn fillWithSkipMask(mask: [4]u8, output_: []u8, input_: []const u8, skip_mask: bool) void {
+            const input = input_;
+            const output = output_;
+            if ((input.len == 0)) {
+                @branchHint(.unlikely);
+                return;
+            }
+            return bun.highway.fillWithSkipMask(mask, output, input, skip_mask);
+    }
+};
 
-const bun = @import("bun");
-const Async = bun.Async;
-const BoringSSL = bun.BoringSSL;
-const Environment = bun.Environment;
-const Output = bun.Output;
-const default_allocator = bun.default_allocator;
-const jsc = bun.jsc;
-const strings = bun.strings;
-const uws = bun.uws;
+
+pub fn parseWebSocketHeader(bytes: [2]u8, receiving_type: *Opcode, payload_length: *usize, is_fragmented: *bool, is_final: *bool, need_compression: *bool) ReceiveState {
+        const header = WebsocketHeader.fromSlice(bytes);
+        const payload = (if (comptime @typeInfo(@TypeOf(header.len)) == .@"enum") cp_cast_int(usize, @intFromEnum(header.len)) else cp_cast_int(usize, header.len));
+        {
+            payload_length.* = payload;
+            receiving_type.* = header.opcode;
+            is_fragmented.* = ((switch (header.opcode) {
+.Continue => true,
+else => false,
+}) or (!header.final));
+            is_final.* = header.final;
+        }
+        if (((header.opcode == .Text) or (header.opcode == .Binary))) {
+            {
+                need_compression.* = header.compressed;
+            }
+        } else {
+            if ((header.opcode == .Continue)) {
+                {
+                    need_compression.* = false;
+                }
+            } else {
+                if (header.compressed) {
+                    return .fail;
+                }
+                {
+                    need_compression.* = false;
+                }
+            }
+        }
+        if ((header.mask and ((header.opcode == .Text) or (header.opcode == .Binary)))) {
+            return .need_mask;
+        }
+        if ((header.rsv != 0)) {
+            return .fail;
+        }
+        return (switch (header.opcode) {
+.Text, .Continue, .Binary => (if ((payload <= 125)) .need_body else (if ((payload == 126)) .extended_payload_length_16 else (if ((payload == 127)) .extended_payload_length_64 else .fail))),
+.Close => .close,
+.Ping => .ping,
+.Pong => .pong,
+else => .fail,
+});
+}
+
+pub fn NewInitialDataHandler(comptime WebSocket: type) type {
+        return struct {
+    adopted: ?*WebSocket,
+    ws: *CppWebSocket,
+    slice: []u8,
+
+pub fn handleWithoutDeinit(self: *@This()) void {
+            var this_socket = ((self.adopted) orelse { return; });
+            _ = &this_socket;
+            self.adopted = null;
+            this_socket.initial_data_handler = null;
+            var ws = self.ws;
+            _ = &ws;
+            defer {
+            _ = ws.unref();
+            }
+            const is_connected = ((!this_socket.tcp.isClosed()) or (this_socket.proxy_tunnel != null));
+            if (((this_socket.outgoing_websocket != null) and is_connected)) {
+                _ = this_socket.handleData(this_socket.tcp, self.slice);
+            }
+    }
+
+pub fn handle(self: *@This()) void {
+            _ = self.handleWithoutDeinit();
+            _ = self.deinit();
+    }
+
+pub fn deinit(self: *@This()) void {
+            _ = bun.default_allocator.free(self.slice);
+            _ = bun.destroy(self);
+    }
+    pub const Handle = jsc.AnyTask.New(@This(), handle);
+    pub const @"new" = bun.TrivialNew(@This());
+};
+}
+
+pub fn NewWebSocketClient(comptime ssl: bool) type {
+        return struct {
+    ref_count: RefCount,
+    tcp: Socket,
+    outgoing_websocket: ?*CppWebSocket = null,
+    receive_state: ReceiveState = ReceiveState.need_header,
+    receiving_type: Opcode = Opcode.ResB,
+    receiving_is_final: bool = true,
+    ping_frame_bytes: [134]u8 = @as([134]u8, @splat(@as(u8, 0))),
+    ping_len: u8 = 0,
+    ping_received: bool = false,
+    pong_received: bool = false,
+    close_received: bool = false,
+    close_frame_buffering: bool = false,
+    receive_frame: usize = 0,
+    receive_body_remain: usize = 0,
+    receive_pending_chunk_len: usize = 0,
+    receive_buffer: bun.LinearFifo(u8,.Dynamic),
+    send_buffer: bun.LinearFifo(u8,.Dynamic),
+    globalThis: *jsc.JSGlobalObject,
+    poll_ref: Async.KeepAlive = Async.KeepAlive.init(),
+    header_fragment: ?u8 = null,
+    payload_length_frame_bytes: [8]u8 = @as([8]u8, @splat(@as(u8, 0))),
+    payload_length_frame_len: u8 = 0,
+    initial_data_handler: ?*InitialDataHandler = null,
+    event_loop: *jsc.EventLoop = undefined,
+    deflate: ?*WebSocketDeflate = null,
+    receiving_compressed: bool = false,
+    message_is_compressed: bool = false,
+    secure: ?*uws.SslCtx = null,
+    proxy_tunnel: ?*WebSocketProxyTunnel = null,
+
+pub fn shouldCompress(self: @This(), data_len: usize, opcode: Opcode) bool {
+            if ((self.deflate == null)) {
+                return false;
+            }
+            if (((opcode != .Text) and (opcode != .Binary))) {
+                return false;
+            }
+            if ((data_len < MIN_COMPRESS_SIZE)) {
+                return false;
+            }
+            return true;
+    }
+
+pub fn clearData(self: *@This()) void {
+            _ = log("clearData", .{});
+            _ = self.poll_ref.unref(self.globalThis.bunVM());
+            _ = self.clearReceiveBuffers(true);
+            _ = self.clearSendBuffers(true);
+            self.ping_received = false;
+            self.pong_received = false;
+            self.ping_len = 0;
+            self.close_frame_buffering = false;
+            self.receive_pending_chunk_len = 0;
+            self.receiving_compressed = false;
+            self.message_is_compressed = false;
+            if (self.deflate) |d| {
+                _ = &d;
+                _ = d.deinit();
+            }
+            self.deflate = null;
+            if (self.secure) |s| {
+                _ = &s;
+                _ = bun.BoringSSL.c.SSL_CTX_free(s);
+                self.secure = null;
+            }
+            if (self.proxy_tunnel) |tunnel| {
+                _ = &tunnel;
+                self.proxy_tunnel = null;
+                _ = tunnel.clearConnectedWebSocket();
+                _ = tunnel.shutdown();
+                _ = tunnel.deref();
+                _ = self.deref();
+            }
+    }
+
+pub fn cancel(self: *@This()) callconv(.c) void {
+            _ = log("cancel", .{});
+            _ = self.ref();
+            defer {
+            _ = self.deref();
+            }
+            const had_tunnel = (self.proxy_tunnel != null);
+            _ = self.clearData();
+            if (comptime ssl) {
+                _ = self.tcp.close(.normal);
+            } else {
+                _ = self.tcp.close(.failure);
+            }
+            if (had_tunnel) {
+                _ = self.dispatchAbruptClose(ErrorCode.ended);
+            }
+    }
+
+pub fn fail(self: *@This(), code: ErrorCode) void {
+            _ = jsc.markBinding(@src());
+            if (self.outgoing_websocket) |ws| {
+                _ = &ws;
+                self.outgoing_websocket = null;
+                _ = log("fail ({s})", .{ @tagName(code) });
+                _ = ws.didAbruptClose(code);
+                _ = self.deref();
+            }
+            _ = self.cancel();
+    }
+
+pub fn handleHandshake(self: *@This(), socket: Socket, success: i32, ssl_error: uws.us_bun_verify_error_t) void {
+            _ = jsc.markBinding(@src());
+            const authorized = (if ((success == 1)) true else false);
+            _ = log("onHandshake({d})", .{ success });
+            if (self.outgoing_websocket) |ws| {
+                _ = &ws;
+                const reject_unauthorized = ws.rejectUnauthorized();
+                if (reject_unauthorized) {
+                    if ((ssl_error.error_no != 0)) {
+                        self.outgoing_websocket = null;
+                        _ = ws.didAbruptClose(ErrorCode.failed_to_connect);
+                        return;
+                    }
+                    if ((!authorized)) {
+                        self.outgoing_websocket = null;
+                        _ = ws.didAbruptClose(ErrorCode.failed_to_connect);
+                        return;
+                    }
+                    const ssl_ptr = (blk: {
+                    break :blk @as(*BoringSSL.c.SSL, @ptrCast(@alignCast(socket.getNativeHandle())));
+
+});
+                    if (BoringSSL.c.SSL_get_servername(ssl_ptr, 0)) |servername| {
+                        _ = &servername;
+                        const hostname = (blk: {
+                        break :blk servername[0..bun.len(servername)];
+
+});
+                        if ((!BoringSSL.checkServerIdentity(ssl_ptr, hostname))) {
+                            self.outgoing_websocket = null;
+                            _ = ws.didAbruptClose(ErrorCode.failed_to_connect);
+                        }
+                    }
+                }
+            }
+    }
+
+pub fn handleClose(self: *@This()) void {
+            _ = log("onClose", .{});
+            _ = jsc.markBinding(@src());
+            _ = self.clearData();
+            _ = self.tcp.detach();
+            _ = self.dispatchAbruptClose(ErrorCode.ended);
+            _ = self.deref();
+    }
+
+pub fn terminate(self: *@This(), code: ErrorCode) void {
+            _ = log("terminate", .{});
+            _ = self.fail(code);
+    }
+
+pub fn clearReceiveBuffers(self: *@This(), free: bool) void {
+            self.receive_buffer.head = 0;
+            self.receive_buffer.count = 0;
+            if (free) {
+                _ = self.receive_buffer.deinit();
+                self.receive_buffer.buf.len = 0;
+            }
+            self.receive_pending_chunk_len = 0;
+            self.receive_body_remain = 0;
+    }
+
+pub fn clearSendBuffers(self: *@This(), free: bool) void {
+            self.send_buffer.head = 0;
+            self.send_buffer.count = 0;
+            if (free) {
+                _ = self.send_buffer.deinit();
+                self.send_buffer.buf.len = 0;
+            }
+    }
+
+pub fn dispatchCompressedData(self: *@This(), data_: []const u8, kind: Opcode) void {
+            if ((self.deflate == null)) {
+                _ = self.terminate(ErrorCode.compression_unsupported);
+                return;
+            }
+            const deflate = self.deflate.?;
+            var decompressed = deflate.rare_data.arrayList();
+            _ = &decompressed;
+            defer {
+            _ = decompressed.deinit();
+            }
+            _ = (blk_catch_0: { break :blk_catch_0 ((deflate.decompress(data_, decompressed)) catch |e| { _ = &e; const error_code = (switch (e) {
+error.InflateFailed => ErrorCode.invalid_compressed_data,
+error.TooLarge => ErrorCode.message_too_big,
+error.OutOfMemory => ErrorCode.failed_to_allocate_memory,
+});
+            _ = self.terminate(error_code);
+            return; }); });
+            _ = self.dispatchData(decompressed.items, kind);
+    }
+
+pub fn dispatchData(self: *@This(), data_: []const u8, kind: Opcode) void {
+            if ((self.outgoing_websocket == null)) {
+                _ = self.clearData();
+                return;
+            }
+            var out = self.outgoing_websocket.?;
+            _ = &out;
+            switch (kind) {
+.Text => {
+const utf16_bytes_ = (blk_catch_1: { break :blk_catch_1 ((strings.toUTF16Alloc(bun.default_allocator, data_, true, false)) catch |__ce_1| { _ = &__ce_1; _ = self.terminate(ErrorCode.invalid_utf8);
+            return; }); });
+            var outstring = jsc.ZigString.Empty;
+            _ = &outstring;
+            if (utf16_bytes_) |utf16| {
+                _ = &utf16;
+                outstring = jsc.ZigString.from16Slice(utf16);
+                _ = outstring.markGlobal();
+                _ = jsc.markBinding(@src());
+                _ = out.didReceiveText(false, outstring);
+            } else {
+                outstring = jsc.ZigString.init(data_);
+                _ = jsc.markBinding(@src());
+                _ = out.didReceiveText(true, outstring);
+            }
+},
+.Binary, .Ping, .Pong => {
+_ = jsc.markBinding(@src());
+            _ = out.didReceiveBytes(data_.ptr, data_.len, (if (comptime @typeInfo(@TypeOf(@intFromEnum(kind))) == .@"enum") cp_cast_int(u8, @intFromEnum(@intFromEnum(kind))) else cp_cast_int(u8, @intFromEnum(kind))));
+},
+else => {
+_ = self.terminate(ErrorCode.unexpected_opcode);
+},
+}
+    }
+
+pub fn consume(self: *@This(), data_: []const u8, left_in_fragment: usize, kind: Opcode, is_final: bool) usize {
+            _ = bun.assert((data_.len <= left_in_fragment));
+            if (self.receiving_compressed) {
+                if ((data_.len > 0)) {
+                    var writable = (blk_catch_2: { break :blk_catch_2 ((self.receive_buffer.writableWithSize(data_.len)) catch |__ce_2| { _ = &__ce_2; _ = self.terminate(ErrorCode.closed);
+                    return 0; }); });
+                    _ = &writable;
+                    _ = @memcpy(writable[0..data_.len], data_);
+                    _ = self.receive_buffer.update(data_.len);
+                }
+                if (((left_in_fragment >= data_.len) and (((left_in_fragment - data_.len) - self.receive_pending_chunk_len) == 0))) {
+                    self.receive_pending_chunk_len = 0;
+                    self.receive_body_remain = 0;
+                    if (is_final) {
+                        _ = self.dispatchCompressedData(self.receive_buffer.readableSlice(0), kind);
+                        _ = self.clearReceiveBuffers(false);
+                        self.receiving_compressed = false;
+                        self.message_is_compressed = false;
+                    }
+                } else {
+                    self.receive_pending_chunk_len = (self.receive_pending_chunk_len -| left_in_fragment);
+                }
+                return data_.len;
+            }
+            if (((is_final and (data_.len == left_in_fragment)) and (self.receive_pending_chunk_len == 0))) {
+                if ((self.receive_buffer.count == 0)) {
+                    _ = self.dispatchData(data_, kind);
+                    self.message_is_compressed = false;
+                    return data_.len;
+                } else {
+                    if ((data_.len == 0)) {
+                        _ = self.dispatchData(self.receive_buffer.readableSlice(0), kind);
+                        _ = self.clearReceiveBuffers(false);
+                        self.message_is_compressed = false;
+                        return 0;
+                    }
+                }
+            }
+            if ((data_.len == 0)) {
+                return 0;
+            }
+            var writable = ((self.receive_buffer.writableWithSize(data_.len)) catch unreachable);
+            _ = &writable;
+            _ = @memcpy(writable[0..data_.len], data_);
+            _ = self.receive_buffer.update(data_.len);
+            if (((left_in_fragment >= data_.len) and (((left_in_fragment - data_.len) - self.receive_pending_chunk_len) == 0))) {
+                self.receive_pending_chunk_len = 0;
+                self.receive_body_remain = 0;
+                if (is_final) {
+                    _ = self.dispatchData(self.receive_buffer.readableSlice(0), kind);
+                    _ = self.clearReceiveBuffers(false);
+                    self.message_is_compressed = false;
+                }
+            } else {
+                self.receive_pending_chunk_len = (self.receive_pending_chunk_len -| left_in_fragment);
+            }
+            return data_.len;
+    }
+
+pub fn handleData(self: *@This(), socket: Socket, data_: []const u8) void {
+            if (self.close_received) {
+                return;
+            }
+            _ = self.ref();
+            defer {
+            _ = self.deref();
+            }
+            if (self.initial_data_handler) |initial_handler| {
+                _ = &initial_handler;
+                _ = initial_handler.handleWithoutDeinit();
+                _ = bun.assert((self.initial_data_handler == null));
+                if (((self.outgoing_websocket == null) or (!self.hasTCP()))) {
+                    return;
+                }
+            }
+            var data = data_;
+            _ = &data;
+            var receive_state = self.receive_state;
+            _ = &receive_state;
+            var terminated = false;
+            _ = &terminated;
+            var is_fragmented = false;
+            _ = &is_fragmented;
+            var receiving_type = self.receiving_type;
+            _ = &receiving_type;
+            var receive_body_remain = self.receive_body_remain;
+            _ = &receive_body_remain;
+            var is_final = self.receiving_is_final;
+            _ = &is_final;
+            var last_receive_data_type = receiving_type;
+            _ = &last_receive_data_type;
+            defer {
+            {
+                if (terminated) {
+                    self.close_received = true;
+                } else {
+                    self.receive_state = receive_state;
+                    self.receiving_type = last_receive_data_type;
+                    self.receive_body_remain = receive_body_remain;
+                }
+            }
+            }
+            var header_bytes: struct { @sizeOf(usize) } = undefined;
+            _ = &header_bytes;
+            u8 = @as([@sizeOf(usize)]i32, @splat(@as(i32, 0)));
+            while (true) {
+                _ = log("onData ({s})", .{ @tagName(receive_state) });
+                switch (receive_state) {
+.need_header => {
+if ((data.len < 2)) {
+                    _ = bun.assert((data.len > 0));
+                    if ((self.header_fragment == null)) {
+                        self.header_fragment = data[0];
+                        break;
+                    }
+                }
+                if (self.header_fragment) |header_fragment| {
+                    _ = &header_fragment;
+                    header_bytes[cp_cast_int(usize, 0)] = header_fragment;
+                    header_bytes[cp_cast_int(usize, 1)] = data[0];
+                    data = data[1..];
+                } else {
+                    {
+                        (header_bytes[0..2]).* = (data[0..2]).*;
+                    }
+                    data = data[2..];
+                }
+                self.header_fragment = null;
+                receive_body_remain = 0;
+                var need_compression = false;
+                _ = &need_compression;
+                is_final = false;
+                receive_state = parseWebSocketHeader((blk: {
+                break :blk (header_bytes[0..2]).*;
+
+}), (&receiving_type), (&receive_body_remain), (&is_fragmented), (&is_final), (&need_compression));
+                if ((receiving_type == .Continue)) {
+                    if (self.receiving_is_final) {
+                        _ = self.terminate(ErrorCode.unexpected_opcode);
+                        terminated = true;
+                        break;
+                    }
+                    self.receiving_is_final = is_final;
+                } else {
+                    if (((receiving_type == .Text) or (receiving_type == .Binary))) {
+                        if ((!self.receiving_is_final)) {
+                            _ = self.terminate(ErrorCode.unexpected_opcode);
+                            terminated = true;
+                            break;
+                        }
+                        self.receiving_is_final = is_final;
+                        last_receive_data_type = receiving_type;
+                    } else {
+                        if ((receiving_type.isControl() and is_fragmented)) {
+                            _ = self.terminate(ErrorCode.control_frame_is_fragmented);
+                            terminated = true;
+                            break;
+                        }
+                    }
+                }
+                switch (receiving_type) {
+.Continue, .Text, .Binary, .Ping, .Pong, .Close => {
+
+},
+else => {
+_ = self.terminate(ErrorCode.unsupported_control_frame);
+                terminated = true;
+                break;
+},
+}
+                if ((need_compression and (self.deflate == null))) {
+                    _ = self.terminate(ErrorCode.compression_unsupported);
+                    terminated = true;
+                    break;
+                }
+                if ((need_compression and receiving_type.isControl())) {
+                    _ = self.terminate(ErrorCode.invalid_control_frame);
+                    terminated = true;
+                    break;
+                }
+                if (((receiving_type == .Text) or (receiving_type == .Binary))) {
+                    self.message_is_compressed = need_compression;
+                    self.receiving_compressed = need_compression;
+                } else {
+                    if ((receiving_type == .Continue)) {
+                        self.receiving_compressed = self.message_is_compressed;
+                    }
+                }
+                if ((((receive_body_remain == 0) and (receive_state == .need_body)) and is_final)) {
+                    _ = self.consume("", receive_body_remain, last_receive_data_type, is_final);
+                    receive_state = .need_header;
+                    is_fragmented = false;
+                    self.receiving_compressed = false;
+                    self.message_is_compressed = false;
+                    if ((data.len == 0)) {
+                        break;
+                    }
+                }
+},
+.need_mask => {
+_ = self.terminate(.unexpected_mask_from_server);
+                terminated = true;
+                break;
+},
+.extended_payload_length_64, .extended_payload_length_16 => {
+const byte_size = (switch (receive_state) {
+.extended_payload_length_64 => (if (comptime @typeInfo(@TypeOf(8)) == .@"enum") cp_cast_int(usize, @intFromEnum(8)) else cp_cast_int(usize, 8)),
+.extended_payload_length_16 => (if (comptime @typeInfo(@TypeOf(2)) == .@"enum") cp_cast_int(usize, @intFromEnum(2)) else cp_cast_int(usize, 2)),
+else => unreachable,
+});
+                if ((data.len == 0)) {
+                    break;
+                }
+                const total_received = @min((byte_size - self.payload_length_frame_len), data.len);
+                _ = @memcpy(self.payload_length_frame_bytes[self.payload_length_frame_len..][0..total_received], data[0..total_received]);
+                self.payload_length_frame_len = (self.payload_length_frame_len + @as(u8, @intCast(total_received)));
+                data = data[total_received..];
+                if ((self.payload_length_frame_len < byte_size)) {
+                    break;
+                }
+                receive_body_remain = (switch (byte_size) {
+8 => (if (comptime @typeInfo(@TypeOf(std.mem.readInt(u64, self.payload_length_frame_bytes[0..8], .big))) == .@"enum") cp_cast_int(usize, @intFromEnum(std.mem.readInt(u64, self.payload_length_frame_bytes[0..8], .big))) else cp_cast_int(usize, std.mem.readInt(u64, self.payload_length_frame_bytes[0..8], .big))),
+2 => (if (comptime @typeInfo(@TypeOf(std.mem.readInt(u16, self.payload_length_frame_bytes[0..2], .big))) == .@"enum") cp_cast_int(usize, @intFromEnum(std.mem.readInt(u16, self.payload_length_frame_bytes[0..2], .big))) else cp_cast_int(usize, std.mem.readInt(u16, self.payload_length_frame_bytes[0..2], .big))),
+else => unreachable,
+});
+                self.payload_length_frame_len = 0;
+                receive_state = .need_body;
+                if ((receive_body_remain == 0)) {
+                    _ = self.terminate(ErrorCode.invalid_control_frame);
+                    terminated = true;
+                    break;
+                }
+},
+.ping => {
+if ((!self.ping_received)) {
+                    if ((receive_body_remain > 125)) {
+                        _ = self.terminate(ErrorCode.invalid_control_frame);
+                        terminated = true;
+                        break;
+                    }
+                    self.ping_len = @truncate(receive_body_remain);
+                    receive_body_remain = 0;
+                    self.ping_received = true;
+                }
+                const ping_len = self.ping_len;
+                if ((data.len > 0)) {
+                    const total_received = @min(ping_len, (receive_body_remain + data.len));
+                    const slice = self.ping_frame_bytes[6..][receive_body_remain..total_received];
+                    _ = @memcpy(slice, data[0..slice.len]);
+                    receive_body_remain = total_received;
+                    data = data[slice.len..];
+                }
+                const pending_body = (ping_len - receive_body_remain);
+                if ((pending_body > 0)) {
+                    break;
+                }
+                const ping_data = self.ping_frame_bytes[6..][0..ping_len];
+                _ = self.dispatchData(ping_data, .Ping);
+                receive_state = .need_header;
+                receive_body_remain = 0;
+                receiving_type = last_receive_data_type;
+                self.ping_received = false;
+                _ = self.sendPong(socket);
+                if ((data.len == 0)) {
+                    break;
+                }
+},
+.pong => {
+if ((!self.pong_received)) {
+                    if ((receive_body_remain > 125)) {
+                        _ = self.terminate(ErrorCode.invalid_control_frame);
+                        terminated = true;
+                        break;
+                    }
+                    self.ping_len = @truncate(receive_body_remain);
+                    receive_body_remain = 0;
+                    self.pong_received = true;
+                }
+                const pong_len = self.ping_len;
+                if ((data.len > 0)) {
+                    const total_received = @min(pong_len, (receive_body_remain + data.len));
+                    const slice = self.ping_frame_bytes[6..][receive_body_remain..total_received];
+                    _ = @memcpy(slice, data[0..slice.len]);
+                    receive_body_remain = total_received;
+                    data = data[slice.len..];
+                }
+                const pending_body = (pong_len - receive_body_remain);
+                if ((pending_body > 0)) {
+                    break;
+                }
+                const pong_data = self.ping_frame_bytes[6..][0..pong_len];
+                _ = self.dispatchData(pong_data, .Pong);
+                receive_state = .need_header;
+                receive_body_remain = 0;
+                receiving_type = last_receive_data_type;
+                self.pong_received = false;
+                if ((data.len == 0)) {
+                    break;
+                }
+},
+.need_body => {
+const to_consume = @min(receive_body_remain, data.len);
+                const consumed = self.consume(data[0..to_consume], receive_body_remain, last_receive_data_type, is_final);
+                receive_body_remain = (receive_body_remain - consumed);
+                data = data[to_consume..];
+                if ((receive_body_remain == 0)) {
+                    receive_state = .need_header;
+                    is_fragmented = false;
+                }
+                if ((data.len == 0)) {
+                    break;
+                }
+},
+.close => {
+if (((receive_body_remain == 1) or (receive_body_remain > 125))) {
+                    _ = self.terminate(ErrorCode.invalid_control_frame);
+                    terminated = true;
+                    break;
+                }
+                if ((receive_body_remain > 0)) {
+                    if ((!self.close_frame_buffering)) {
+                        self.ping_len = @truncate(receive_body_remain);
+                        receive_body_remain = 0;
+                        self.close_frame_buffering = true;
+                    }
+                    const to_copy = @min(data.len, (self.ping_len - receive_body_remain));
+                    _ = @memcpy(self.ping_frame_bytes[(6 + receive_body_remain)..][0..to_copy], data[0..to_copy]);
+                    receive_body_remain = (receive_body_remain + to_copy);
+                    data = data[to_copy..];
+                    if ((receive_body_remain < self.ping_len)) {
+                        break;
+                    }
+                    self.close_received = true;
+                    const close_data = self.ping_frame_bytes[6..][0..self.ping_len];
+                    if ((self.ping_len >= 2)) {
+                        var code = std.mem.readInt(u16, close_data[0..2], .big);
+                        _ = &code;
+                        if ((code == 1001)) {
+                            code = 1000;
+                        }
+                        if ((((code < 1000) or ((code >= 1004) and (code < 1007))) or ((code >= 1016) and (code <= 2999)))) {
+                            code = 1002;
+                        }
+                        var buf: [125]u8 = undefined;
+                        _ = &buf;
+                        _ = @memcpy(buf[0..(self.ping_len - 2)], close_data[2..self.ping_len]);
+                        _ = self.sendCloseWithBody(socket, code, (&buf), (self.ping_len - 2));
+                    } else {
+                        _ = self.sendClose();
+                    }
+                    self.close_frame_buffering = false;
+                    terminated = true;
+                    break;
+                }
+                self.close_received = true;
+                _ = self.sendClose();
+                terminated = true;
+                break;
+},
+.fail => {
+_ = self.terminate(ErrorCode.unsupported_control_frame);
+                terminated = true;
+                break;
+},
+}
+            }
+    }
+
+pub fn sendClose(self: *@This()) void {
+            _ = self.sendCloseWithBody(self.tcp, 1000, null, 0);
+    }
+
+pub fn enqueueEncodedBytes(self: *@This(), socket: Socket, bytes: []const u8) bool {
+            if (self.proxy_tunnel) |tunnel| {
+                _ = &tunnel;
+                const wrote = (blk_catch_4: { break :blk_catch_4 ((tunnel.write(bytes)) catch |__ce_4| { _ = &__ce_4; _ = self.terminate(ErrorCode.failed_to_write);
+                return false; }); });
+                if ((wrote < bytes.len)) {
+                    _ = self.copyToSendBuffer(bytes[wrote..], false);
+                }
+                return true;
+            }
+            if ((!self.hasBackpressure())) {
+                const wrote = socket.write(bytes);
+                const expected = @as(c_int, @intCast(bytes.len));
+                if ((wrote == expected)) {
+                    return true;
+                }
+                if ((wrote < 0)) {
+                    _ = self.terminate(ErrorCode.failed_to_write);
+                    return false;
+                }
+                _ = self.copyToSendBuffer(bytes[@as(usize, @intCast(wrote))..], false);
+                return true;
+            }
+            return self.copyToSendBuffer(bytes, true);
+    }
+
+pub fn copyToSendBuffer(self: *@This(), bytes: []const u8, do_write: bool) bool {
+            return self.sendData(.{ .raw = bytes }, do_write, .Binary);
+    }
+
+pub fn sendData(self: *@This(), bytes: Copy, do_write: bool, opcode: Opcode) bool {
+            const should_compress = (((self.deflate != null) and ((opcode == .Text) or (opcode == .Binary))) and (bytes != .raw));
+            if (should_compress) {
+                var temp_buffer: ?[]u8 = null;
+                _ = &temp_buffer;
+                const allocator = self.deflate.?.rare_data.allocator();
+                defer {
+                if (temp_buffer) |buf| {
+                    _ = &buf;
+                    _ = allocator.free(buf);
+                }
+                }
+                const content_to_compress: []const u8 = (switch (bytes) {
+.utf16 => |utf16| blk: {
+                const content_byte_len: usize = strings.elementLengthUTF16IntoUTF8(utf16);
+                temp_buffer = (blk_catch_5: { break :blk_catch_5 ((allocator.alloc(u8, content_byte_len)) catch |__ce_5| { _ = &__ce_5; return false; }); });
+                const encode_result = strings.copyUTF16IntoUTF8(temp_buffer.?, utf16);
+                break :blk temp_buffer.?[0..encode_result.written];
+},
+.latin1 => |latin1| blk: {
+                const content_byte_len: usize = strings.elementLengthLatin1IntoUTF8(latin1);
+                if ((content_byte_len == latin1.len)) {
+                    break :blk latin1;
+                }
+                temp_buffer = (blk_catch_6: { break :blk_catch_6 ((allocator.alloc(u8, content_byte_len)) catch |__ce_6| { _ = &__ce_6; return false; }); });
+                const encode_result = strings.copyLatin1IntoUTF8(temp_buffer.?, latin1);
+                break :blk temp_buffer.?[0..encode_result.written];
+},
+.bytes => |b| b,
+.raw => unreachable,
+});
+                if ((!self.shouldCompress(content_to_compress.len, opcode))) {
+                    return self.sendDataUncompressed(bytes, do_write, opcode);
+                }
+                {
+                    var compressed = std.array_list.Managed(u8).init(allocator);
+                    _ = &compressed;
+                    defer {
+                    _ = compressed.deinit();
+                    }
+                    _ = (blk_catch_7: { break :blk_catch_7 ((self.deflate.?.compress(content_to_compress, (&compressed))) catch |__ce_7| { _ = &__ce_7; return self.sendDataUncompressed(bytes, do_write, opcode); }); });
+                    const frame_size = WebsocketHeader.frameSizeIncludingMask(compressed.items.len);
+                    const writable = (blk_catch_8: { break :blk_catch_8 ((self.send_buffer.writableWithSize(frame_size)) catch |__ce_8| { _ = &__ce_8; return false; }); });
+                    _ = Copy.copyCompressed(self.globalThis, writable[0..frame_size], compressed.items, opcode, true);
+                    _ = self.send_buffer.update(frame_size);
+                }
+                if (do_write) {
+                    if (comptime Environment.allow_assert) {
+                        if ((self.proxy_tunnel == null)) {
+                            _ = bun.assert((!self.tcp.isShutdown()));
+                            _ = bun.assert((!self.tcp.isClosed()));
+                            _ = bun.assert(self.tcp.isEstablished());
+                        }
+                    }
+                    return self.sendBuffer(self.send_buffer.readableSlice(0));
+                }
+            } else {
+                return self.sendDataUncompressed(bytes, do_write, opcode);
+            }
+            return true;
+    }
+
+pub fn sendDataUncompressed(self: *@This(), bytes: Copy, do_write: bool, opcode: Opcode) bool {
+            var content_byte_len: usize = 0;
+            _ = &content_byte_len;
+            const write_len = bytes.len((&content_byte_len));
+            _ = bun.assert((write_len > 0));
+            const writable = ((self.send_buffer.writableWithSize(write_len)) catch unreachable);
+            _ = bytes.copy(self.globalThis, writable[0..write_len], content_byte_len, opcode);
+            _ = self.send_buffer.update(write_len);
+            if (do_write) {
+                if (comptime Environment.allow_assert) {
+                    if ((self.proxy_tunnel == null)) {
+                        _ = bun.assert((!self.tcp.isShutdown()));
+                        _ = bun.assert((!self.tcp.isClosed()));
+                        _ = bun.assert(self.tcp.isEstablished());
+                    }
+                }
+                return self.sendBuffer(self.send_buffer.readableSlice(0));
+            }
+            return true;
+    }
+
+pub fn sendBuffer(self: *@This(), out_buf: []const u8) bool {
+            _ = bun.assert((out_buf.len > 0));
+            var wrote: usize = 0;
+            _ = &wrote;
+            if (self.proxy_tunnel) |tunnel| {
+                _ = &tunnel;
+                wrote = (blk_catch_10: { break :blk_catch_10 ((tunnel.write(out_buf)) catch |__ce_10| { _ = &__ce_10; _ = self.terminate(ErrorCode.failed_to_write);
+                return false; }); });
+            } else {
+                if (self.tcp.isClosed()) {
+                    return false;
+                }
+                const w = self.tcp.write(out_buf);
+                if ((w < 0)) {
+                    _ = self.terminate(ErrorCode.failed_to_write);
+                    return false;
+                }
+                wrote = @as(usize, @intCast(w));
+            }
+            const readable = self.send_buffer.readableSlice(0);
+            if ((readable.ptr == out_buf.ptr)) {
+                _ = self.send_buffer.discard(wrote);
+            }
+            return true;
+    }
+
+pub fn sendPong(self: *@This(), socket: Socket) bool {
+            if ((!self.hasTCP())) {
+                _ = self.dispatchAbruptClose(ErrorCode.ended);
+                return false;
+            }
+            var header = @as(WebsocketHeader, @bitCast((if (comptime @typeInfo(@TypeOf(0)) == .@"enum") cp_cast_int(u16, @intFromEnum(0)) else cp_cast_int(u16, 0))));
+            _ = &header;
+            header.final = true;
+            header.opcode = .Pong;
+            const to_mask = self.ping_frame_bytes[6..][0..self.ping_len];
+            header.mask = true;
+            header.len = @as(u7, @truncate(self.ping_len));
+            {
+                (self.ping_frame_bytes[0..2]).* = header.slice();
+            }
+            if ((to_mask.len > 0)) {
+                _ = Mask.fill(self.globalThis, self.ping_frame_bytes[2..6], to_mask, to_mask);
+                return self.enqueueEncodedBytes(socket, self.ping_frame_bytes[0..(6 + (if (comptime @typeInfo(@TypeOf(self.ping_len)) == .@"enum") cp_cast_int(usize, @intFromEnum(self.ping_len)) else cp_cast_int(usize, self.ping_len)))]);
+            } else {
+                _ = @memset(self.ping_frame_bytes[2..6], 0);
+                return self.enqueueEncodedBytes(socket, self.ping_frame_bytes[0..6]);
+            }
+    }
+
+pub fn sendCloseWithBody(self: *@This(), socket: Socket, code: u16, body: ?*[125]u8, body_len: usize) void {
+            _ = log("Sending close with code {d}", .{ code });
+            if ((!self.hasTCP())) {
+                _ = self.dispatchAbruptClose(ErrorCode.ended);
+                _ = self.clearData();
+                return;
+            }
+            if (comptime (!ssl)) {
+                if ((self.proxy_tunnel == null)) {
+                    _ = socket.shutdownRead();
+                }
+            }
+            var final_body_bytes: [136]u8 = undefined;
+            _ = &final_body_bytes;
+            var header = @as(WebsocketHeader, @bitCast((if (comptime @typeInfo(@TypeOf(0)) == .@"enum") cp_cast_int(u16, @intFromEnum(0)) else cp_cast_int(u16, 0))));
+            _ = &header;
+            header.final = true;
+            header.opcode = .Close;
+            header.mask = true;
+            header.len = @as(u7, @truncate((body_len + 2)));
+            {
+                (final_body_bytes[0..2]).* = header.slice();
+            }
+            const mask_buf: *[4]u8 = final_body_bytes[2..6];
+            {
+                (final_body_bytes[6..8]).* = @bitCast(@byteSwap(code));
+            }
+            var reason = bun.String.empty;
+            _ = &reason;
+            if (body) |data| {
+                _ = &data;
+                if ((body_len > 0)) {
+                    const body_slice = data[0..body_len];
+                    if ((!strings.isValidUTF8(body_slice))) {
+                        _ = self.terminate(ErrorCode.invalid_utf8);
+                        return;
+                    }
+                    reason = bun.String.cloneUTF8(body_slice);
+                    _ = @memcpy(final_body_bytes[8..][0..body_len], body_slice);
+                }
+            }
+            var slice = final_body_bytes[0..(8 + body_len)];
+            _ = &slice;
+            _ = Mask.fill(self.globalThis, mask_buf, slice[6..], slice[6..]);
+            if (self.enqueueEncodedBytes(socket, slice)) {
+                _ = self.clearData();
+                _ = self.dispatchClose(code, reason);
+            }
+    }
+
+pub fn isSameSocket(self: *@This(), socket: Socket) bool {
+            return socket.socket.eq(self.tcp.socket);
+    }
+
+pub fn handleEnd(self: *@This(), socket: Socket) void {
+            _ = bun.assert(self.isSameSocket(socket));
+            _ = self.terminate(ErrorCode.ended);
+    }
+
+pub fn handleWritable(self: *@This(), socket: Socket) void {
+            if (self.close_received) {
+                return;
+            }
+            _ = bun.assert(self.isSameSocket(socket));
+            const send_buf = self.send_buffer.readableSlice(0);
+            if ((send_buf.len == 0)) {
+                return;
+            }
+            _ = self.sendBuffer(send_buf);
+    }
+
+pub fn handleTimeout(self: *@This()) void {
+            _ = self.terminate(ErrorCode.timeout);
+    }
+
+pub fn handleConnectError(self: *@This()) void {
+            _ = self.tcp.detach();
+            _ = self.terminate(ErrorCode.failed_to_connect);
+    }
+
+pub fn hasBackpressure(self: @This()) bool {
+            if ((self.send_buffer.count > 0)) {
+                return true;
+            }
+            if (self.proxy_tunnel) |tunnel| {
+                _ = &tunnel;
+                return tunnel.hasBackpressure();
+            }
+            return false;
+    }
+
+pub fn writeBinaryData(self: *@This(), ptr: [*]const u8, len: usize, op: u8) callconv(.c) void {
+            _ = self.ref();
+            defer {
+            _ = self.deref();
+            }
+            if (((!self.hasTCP()) or (op > 15))) {
+                _ = self.dispatchAbruptClose(ErrorCode.ended);
+                return;
+            }
+            const opcode: Opcode = @enumFromInt(op);
+            const slice = (blk: {
+            break :blk ptr[0..len];
+
+});
+            const bytes: Copy = .{ .bytes = slice };
+            const frame_size = WebsocketHeader.frameSizeIncludingMask(len);
+            if (((!self.hasBackpressure()) and (frame_size < stack_frame_size))) {
+                var inline_buf: [stack_frame_size]u8 = undefined;
+                _ = &inline_buf;
+                _ = bytes.copy(self.globalThis, inline_buf[0..frame_size], slice.len, opcode);
+                _ = self.enqueueEncodedBytes(self.tcp, inline_buf[0..frame_size]);
+                return;
+            }
+            _ = self.sendData(bytes, (!self.hasBackpressure()), opcode);
+    }
+
+pub fn hasTCP(self: *@This()) bool {
+            if ((self.proxy_tunnel != null)) {
+                return true;
+            }
+            return ((!self.tcp.isClosed()) and (!self.tcp.isShutdown()));
+    }
+
+pub fn writeBlob(self: *@This(), blob_value: jsc.JSValue, op: u8) callconv(.c) void {
+            _ = self.ref();
+            defer {
+            _ = self.deref();
+            }
+            if (((!self.hasTCP()) or (op > 15))) {
+                _ = self.dispatchAbruptClose(ErrorCode.ended);
+                return;
+            }
+            const opcode: Opcode = @enumFromInt(op);
+            if (blob_value.as(jsc.WebCore.Blob)) |blob| {
+                _ = &blob;
+                const data = blob.sharedView();
+                if ((data.len == 0)) {
+                    const bytes: Copy = .{ .bytes = "" };
+                    _ = self.sendData(bytes, (!self.hasBackpressure()), opcode);
+                    return;
+                }
+                const bytes: Copy = .{ .bytes = data };
+                const frame_size = WebsocketHeader.frameSizeIncludingMask(data.len);
+                if (((!self.hasBackpressure()) and (frame_size < stack_frame_size))) {
+                    var inline_buf: [stack_frame_size]u8 = undefined;
+                    _ = &inline_buf;
+                    _ = bytes.copy(self.globalThis, inline_buf[0..frame_size], data.len, opcode);
+                    _ = self.enqueueEncodedBytes(self.tcp, inline_buf[0..frame_size]);
+                    return;
+                }
+                _ = self.sendData(bytes, (!self.hasBackpressure()), opcode);
+            } else {
+                _ = self.dispatchAbruptClose(ErrorCode.ended);
+            }
+    }
+
+pub fn writeString(self: *@This(), str_: *const jsc.ZigString, op: u8) callconv(.c) void {
+            _ = self.ref();
+            defer {
+            _ = self.deref();
+            }
+            const str = (blk: {
+            break :blk str_.*;
+
+});
+            if ((!self.hasTCP())) {
+                _ = self.dispatchAbruptClose(ErrorCode.ended);
+                return;
+            }
+            const tcp = self.tcp;
+            const opcode = @as(Opcode, @enumFromInt(@as(u4, @truncate(op))));
+            {
+                var inline_buf: [stack_frame_size]u8 = undefined;
+                _ = &inline_buf;
+                if (((!str.is16Bit()) and (str.len < stack_frame_size))) {
+                    const bytes: Copy = .{ .latin1 = str.slice() };
+                    var byte_len: usize = 0;
+                    _ = &byte_len;
+                    const frame_size = bytes.len((&byte_len));
+                    if (((!self.hasBackpressure()) and (frame_size < stack_frame_size))) {
+                        _ = bytes.copy(self.globalThis, inline_buf[0..frame_size], byte_len, opcode);
+                        _ = self.enqueueEncodedBytes(tcp, inline_buf[0..frame_size]);
+                        return;
+                    }
+                } else {
+                    if ((((str.len * 4) < stack_frame_size) and (!self.hasBackpressure()))) {
+                        const bytes: Copy = .{ .utf16 = str.utf16SliceAligned() };
+                        var byte_len: usize = 0;
+                        _ = &byte_len;
+                        const frame_size = bytes.len((&byte_len));
+                        _ = bun.assert((frame_size <= stack_frame_size));
+                        _ = bytes.copy(self.globalThis, inline_buf[0..frame_size], byte_len, opcode);
+                        _ = self.enqueueEncodedBytes(tcp, inline_buf[0..frame_size]);
+                        return;
+                    }
+                }
+            }
+            _ = self.sendData((if (str.is16Bit()) Copy{ .utf16 = str.utf16SliceAligned() } else Copy{ .latin1 = str.slice() }), (!self.hasBackpressure()), opcode);
+    }
+
+pub fn dispatchAbruptClose(self: *@This(), code: ErrorCode) void {
+            var out = ((self.outgoing_websocket) orelse { return; });
+            _ = &out;
+            _ = self.poll_ref.unref(self.globalThis.bunVM());
+            _ = jsc.markBinding(@src());
+            self.outgoing_websocket = null;
+            _ = out.didAbruptClose(code);
+            _ = self.deref();
+    }
+
+pub fn dispatchClose(self: *@This(), code: u16, reason: *bun.String) void {
+            var out = ((self.outgoing_websocket) orelse { return; });
+            _ = &out;
+            _ = self.poll_ref.unref(self.globalThis.bunVM());
+            _ = jsc.markBinding(@src());
+            self.outgoing_websocket = null;
+            _ = out.didClose(code, reason);
+            _ = self.deref();
+    }
+
+pub fn close(self: *@This(), code: u16, reason: ?*const jsc.ZigString) callconv(.c) void {
+            _ = self.ref();
+            defer {
+            _ = self.deref();
+            }
+            if ((!self.hasTCP())) {
+                return;
+            }
+            const tcp = self.tcp;
+            var close_reason_buf: [128]u8 = undefined;
+            _ = &close_reason_buf;
+            if (reason) |str| {
+                _ = &str;
+                var fixed_buffer = std.heap.FixedBufferAllocator.init((&close_reason_buf));
+                _ = &fixed_buffer;
+                const allocator = fixed_buffer.allocator();
+                if ((blk_catch_11: { break :blk_catch_11 ((std.fmt.allocPrint(allocator, "{f}", .{ (blk: {
+                break :blk str.*;
+
+}) })) catch |__ce_11| { _ = &__ce_11; break :blk_catch_11 null; }); })) |wrote| {
+                    _ = &wrote;
+                    _ = self.sendCloseWithBody(tcp, code, (blk: {
+                    break :blk wrote.ptr[0..125];
+
+}), wrote.len);
+                    return;
+                }
+            }
+            _ = self.sendCloseWithBody(tcp, code, null, 0);
+    }
+
+pub fn init(outgoing: *CppWebSocket, input_socket: *anyopaque, globalThis: *jsc.JSGlobalObject, buffered_data: [*]u8, buffered_data_len: usize, deflate_params: ?*const WebSocketDeflate.Params, secure_ptr: ?*anyopaque) callconv(.c) ?*anyopaque {
+            const tcp = (blk: {
+            break :blk @as(*uws.us_socket_t, @ptrCast(@alignCast(input_socket)));
+
+});
+            const vm = globalThis.bunVM();
+            var ws = bun.@"new"(WebSocket, .{ .ref_count = .init(), .tcp = .{ .socket = .{ .detached = .{} } }, .outgoing_websocket = outgoing, .globalThis = globalThis, .send_buffer = bun.LinearFifo(u8, .Dynamic).init(bun.default_allocator), .receive_buffer = bun.LinearFifo(u8, .Dynamic).init(bun.default_allocator), .event_loop = vm.eventLoop(), .secure = (if ((secure_ptr != null)) (blk: {
+            break :blk @ptrCast(@alignCast(secure_ptr.?));
+
+}) else null) });
+            _ = &ws;
+            if (deflate_params) |params| {
+                _ = &params;
+                if ((blk_catch_12: { break :blk_catch_12 ((WebSocketDeflate.init(bun.default_allocator, (blk: {
+                break :blk params.*;
+
+}), vm.rareData())) catch |__ce_12| { _ = &__ce_12; break :blk_catch_12 null; }); })) |deflate| {
+                    _ = &deflate;
+                    ws.deflate = deflate;
+                } else {
+                    ws.deflate = null;
+                }
+            }
+            if ((!Socket.adoptGroup(tcp, vm.rareData().wsClientGroup(vm, ssl), (if (ssl) .ws_client_tls else .ws_client), WebSocket, "tcp", ws))) {
+                _ = ws.deref();
+                return null;
+            }
+            _ = bun.handleOom(ws.send_buffer.ensureTotalCapacity(2048));
+            _ = bun.handleOom(ws.receive_buffer.ensureTotalCapacity(2048));
+            _ = ws.poll_ref.ref(globalThis.bunVM());
+            const buffered_slice: []u8 = (blk: {
+            break :blk buffered_data[0..buffered_data_len];
+
+});
+            if ((buffered_slice.len > 0)) {
+                const initial_data = InitialDataHandler.@"new"(.{ .adopted = ws, .slice = buffered_slice, .ws = outgoing });
+                _ = globalThis.queueMicrotaskCallback(initial_data, InitialDataHandler.handle);
+                _ = outgoing.ref();
+            }
+            _ = ws.ref();
+            return (blk: {
+            break :blk @as(*anyopaque, @ptrCast(@alignCast(ws)));
+
+});
+    }
+
+pub fn initWithTunnel(outgoing: *CppWebSocket, tunnel_ptr: *anyopaque, globalThis: *jsc.JSGlobalObject, buffered_data: [*]u8, buffered_data_len: usize, deflate_params: ?*const WebSocketDeflate.Params) callconv(.c) ?*anyopaque {
+            const tunnel: *WebSocketProxyTunnel = (blk: {
+            break :blk @ptrCast(@alignCast(tunnel_ptr));
+
+});
+            var ws = bun.@"new"(WebSocket, .{ .ref_count = .init(), .tcp = .{ .socket = .{ .detached = .{} } }, .outgoing_websocket = outgoing, .globalThis = globalThis, .send_buffer = bun.LinearFifo(u8, .Dynamic).init(bun.default_allocator), .receive_buffer = bun.LinearFifo(u8, .Dynamic).init(bun.default_allocator), .event_loop = globalThis.bunVM().eventLoop(), .proxy_tunnel = tunnel });
+            _ = &ws;
+            _ = tunnel.ref();
+            if (deflate_params) |params| {
+                _ = &params;
+                if ((blk_catch_13: { break :blk_catch_13 ((WebSocketDeflate.init(bun.default_allocator, (blk: {
+                break :blk params.*;
+
+}), globalThis.bunVM().rareData())) catch |__ce_13| { _ = &__ce_13; break :blk_catch_13 null; }); })) |deflate| {
+                    _ = &deflate;
+                    ws.deflate = deflate;
+                } else {
+                    ws.deflate = null;
+                }
+            }
+            _ = bun.handleOom(ws.send_buffer.ensureTotalCapacity(2048));
+            _ = bun.handleOom(ws.receive_buffer.ensureTotalCapacity(2048));
+            _ = ws.poll_ref.ref(globalThis.bunVM());
+            const buffered_slice: []u8 = (blk: {
+            break :blk buffered_data[0..buffered_data_len];
+
+});
+            if ((buffered_slice.len > 0)) {
+                const initial_data = InitialDataHandler.@"new"(.{ .adopted = ws, .slice = buffered_slice, .ws = outgoing });
+                _ = globalThis.queueMicrotaskCallback(initial_data, InitialDataHandler.handle);
+                _ = outgoing.ref();
+            }
+            _ = ws.ref();
+            return (blk: {
+            break :blk @as(*anyopaque, @ptrCast(@alignCast(ws)));
+
+});
+    }
+
+pub fn handleTunnelData(self: *@This(), data: []const u8) void {
+            _ = self.handleData(self.tcp, data);
+    }
+
+pub fn handleTunnelWritable(self: *@This()) void {
+            if (self.close_received) {
+                return;
+            }
+            _ = self.ref();
+            defer {
+            _ = self.deref();
+            }
+            const send_buf = self.send_buffer.readableSlice(0);
+            if ((send_buf.len == 0)) {
+                return;
+            }
+            _ = self.sendBuffer(send_buf);
+    }
+
+pub fn finalize(self: *@This()) callconv(.c) void {
+            _ = log("finalize", .{});
+            _ = self.ref();
+            defer {
+            _ = self.deref();
+            }
+            _ = self.clearData();
+            if ((self.outgoing_websocket != null)) {
+                self.outgoing_websocket = null;
+                _ = self.deref();
+            }
+            if ((!self.tcp.isClosed())) {
+                if (comptime ssl) {
+                    _ = self.tcp.close(.normal);
+                } else {
+                    _ = self.tcp.close(.failure);
+                }
+            }
+    }
+
+pub fn deinit(self: *@This()) void {
+            _ = self.clearData();
+            if (self.deflate) |d| {
+                _ = &d;
+                _ = d.deinit();
+            }
+            self.deflate = null;
+            _ = bun.destroy(self);
+    }
+
+pub fn memoryCost(self: *@This()) callconv(.c) usize {
+            var cost: usize = @sizeOf(WebSocket);
+            _ = &cost;
+            cost = (cost + self.send_buffer.buf.len);
+            cost = (cost + self.receive_buffer.buf.len);
+            return cost;
+    }
+
+pub fn exportAll() void {
+            const name = (comptime (if (ssl) "WebSocketClientTLS" else "WebSocketClient"));
+            _ = @export((&cancel), .{ .name = (("Bun__" + name) + "__cancel") });
+            _ = @export((&close), .{ .name = (("Bun__" + name) + "__close") });
+            _ = @export((&finalize), .{ .name = (("Bun__" + name) + "__finalize") });
+            _ = @export((&init), .{ .name = (("Bun__" + name) + "__init") });
+            _ = @export((&initWithTunnel), .{ .name = (("Bun__" + name) + "__initWithTunnel") });
+            _ = @export((&memoryCost), .{ .name = (("Bun__" + name) + "__memoryCost") });
+            _ = @export((&writeBinaryData), .{ .name = (("Bun__" + name) + "__writeBinaryData") });
+            _ = @export((&writeBlob), .{ .name = (("Bun__" + name) + "__writeBlob") });
+            _ = @export((&writeString), .{ .name = (("Bun__" + name) + "__writeString") });
+    }
+    pub const Socket = uws.NewSocketHandler(ssl);
+    const RefCount = bun.ptr.RefCount(@This(), "ref_count", deinit, {});
+    pub const ref = RefCount.ref;
+    pub const deref = RefCount.deref;
+    const stack_frame_size = 1024;
+    const MIN_COMPRESS_SIZE = 860;
+    const COMPRESSION_OVERHEAD = 4;
+    const WebSocket = @This();
+    const InitialDataHandler = NewInitialDataHandler(WebSocket);
+    pub const onClose = handleClose;
+    pub const onData = handleData;
+    pub const onWritable = handleWritable;
+    pub const onTimeout = handleTimeout;
+    pub const onLongTimeout = handleTimeout;
+    pub const onConnectError = handleConnectError;
+    pub const onEnd = handleEnd;
+    pub const onHandshake = handleHandshake;
+};
+}

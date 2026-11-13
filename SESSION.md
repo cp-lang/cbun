@@ -437,3 +437,15 @@
 - **继续推进（严格 <= 2 路子智能体并发）**：
   - 子智能体 1：收尾 `src/js_parser_jsc/Macro.zig` (2/2 闭合) + `src/watcher/Watcher.zig` (5/5 闭合)
   - 子智能体 2：迁移 `src/http_jsc/` (`fetch_enums_jsc`, `headers_jsc`, `method_jsc`, `websocket_client`) + `src/resolver/` 首批 5 个模块 (`data_url`, `dir_info`, `node_fallbacks`, `tsconfig_json`, `fs/stat_hash`)
+
+
+### 2026-11-14: Milestone 7 Phase 8 闭环提交（闭合 `js_parser_jsc`, `watcher`, `http_jsc` 及 `resolver` 首批 5 模块）
+- **Milestone 7 Phase 8 闭环成果（新增 16 个 100% 纯 CP 模块，闭合 3 个目录）**：
+  - `src/js_parser_jsc/` (2/2 100% 闭合): `Macro.cp` (647 vs 642 lines)
+  - `src/watcher/` (5/5 100% 闭合): `Watcher.cp` (717 vs 808 lines)
+  - `src/http_jsc/` (9/9 100% 闭合，含 `websocket_client/` 子目录): `fetch_enums_jsc.cp` (17 vs 21), `headers_jsc.cp` (38 vs 45), `method_jsc.cp` (7 vs 10), `websocket_client.cp` (1,539 vs 1,792), `websocket_client/CppWebSocket.cp` (91 vs 96), `websocket_client/WebSocketDeflate.cp` (228 vs 236), `websocket_client/WebSocketProxy.cp` (57 vs 71), `websocket_client/WebSocketProxyTunnel.cp` (320 vs 371), `websocket_client/WebSocketUpgradeClient.cp` (1,310 vs 1,560)
+  - `src/resolver/` (5/8，含 `resolver/fs/` 1/1 闭合): `fs/stat_hash.cp` (47 vs 49), `node_fallbacks.cp` (92 vs 99), `dir_info.cp` (104 vs 128), `data_url.cp` (222 vs 236), `tsconfig_json.cp` (421 vs 522)
+- **全仓累计进度**：**421 个纯 `.cp` 模块**，**73 个子目录 100% 闭合**；全部通过 `cpc --lib` + `vendor/zig/zig ast-check` + 0 违例静态门禁。
+- **继续推进（严格 <= 2 路子智能体并发）**：
+  - 子智能体 1 (`040f360c`)：迁移 `src/sql/mysql/protocol/` 全部 24 个模块
+  - 子智能体 2 (`c82d4539`)：迁移 `src/sql/{shared,mysql,postgres,postgres/types}/` 27 个基础模块
