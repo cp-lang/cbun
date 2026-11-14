@@ -368,6 +368,12 @@
   - `src/runtime/valkey_jsc/{index,protocol_jsc,ValkeyCommand,ValkeyContext,valkey}.cp` (5/7 模块闭环)
 
 
+## 2026-11-14 (Milestone 7 Phase 21: 闭合 runtime/valkey_jsc 全目录)
+- **新增 2 个大型 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/runtime/valkey_jsc/{js_valkey,js_valkey_functions}.cp` (7/7 100% 全目录闭合)
+
+
+
 
 
 

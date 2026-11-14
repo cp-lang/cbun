@@ -313,6 +313,16 @@
   - **短生命周期「用完即弃」子智能体高效调度**：严格遵循单批次短生命周期原则，单智能体在 25 步内精准拿下 3,746 行超大模块重构，避免历史上下文恶性累积。
 
 
+## 2026-11-14: Milestone 7 Phase 21 闭环（闭合 runtime/valkey_jsc 全目录，纯 CP 模块达 676 个，全仓闭合子目录达 137 个）
+- **新增 2 个大型纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - 覆盖 `src/runtime/valkey_jsc/` (7/7 100% 全目录闭合)：`js_valkey.cp` (1,665 行)、`js_valkey_functions.cp` (1,602 行)，源码共计 3,267 行。
+- **关键工程经验与 Lowering 深度沉淀**：
+  - **顶级 CP `struct` 与闭包降解**：将 `pub const SubscriptionCtx = struct {` 改为标准 CP `pub struct SubscriptionCtx {`，彻底激活 CP 编译器的 AST 级模式匹配与表达式 Lowering。
+  - **独立函数形参与 receiver 解耦**：在 `js_valkey_functions.cp` 顶层导出函数中，将首参由保留字 `this` 替换为普通具名参数 `client: *JSValkeyClient`，完全杜绝 `E0121` 废弃 receiver 错误，同时在 Zig 端无缝保留结构体方法调用契约。
+  - **双重解包与优先级歧义消解**：在处理 `(try fromJS(...)) orelse` 等表达式时，显式添加括号限定 `try` 与 `??` 的结合顺序，消除 CP 编译器推导为 ErrorUnion 的 `E0200` 假阳性报错。
+
+
+
 
 
 
