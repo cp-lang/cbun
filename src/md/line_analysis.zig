@@ -1,527 +1,537 @@
-pub fn isSetextUnderline(self: *const Parser, off: OFF) struct { is_setext: bool, level: u32 } {
-    const c = self.text[off];
-    if (c != '=' and c != '-') return .{ .is_setext = false, .level = 0 };
-
-    var pos = off;
-    while (pos < self.size and self.text[pos] == c) pos += 1;
-
-    // Skip trailing spaces
-    while (pos < self.size and helpers.isBlank(self.text[pos])) pos += 1;
-
-    if (pos >= self.size or helpers.isNewline(self.text[pos])) {
-        const level: u32 = if (c == '=') 1 else 2;
-        return .{ .is_setext = true, .level = level };
-    }
-
-    return .{ .is_setext = false, .level = 0 };
-}
-
-pub fn isHrLine(self: *const Parser, off: OFF) bool {
-    const c = self.text[off];
-    if (c != '-' and c != '_' and c != '*') return false;
-
-    var pos = off;
-    var count: u32 = 0;
-    while (pos < self.size and !helpers.isNewline(self.text[pos])) {
-        if (self.text[pos] == c) {
-            count += 1;
-        } else if (!helpers.isBlank(self.text[pos])) {
-            return false;
-        }
-        pos += 1;
-    }
-
-    return count >= 3;
-}
-
-pub fn isAtxHeaderLine(self: *const Parser, off: OFF) struct { is_atx: bool, level: u32, content_beg: OFF } {
-    var pos = off;
-    var level: u32 = 0;
-
-    while (pos < self.size and self.text[pos] == '#') {
-        level += 1;
-        pos += 1;
-    }
-
-    if (level == 0 or level > 6) return .{ .is_atx = false, .level = 0, .content_beg = 0 };
-
-    // Must be followed by space or end of line
-    if (pos < self.size and !helpers.isBlank(self.text[pos]) and !helpers.isNewline(self.text[pos])) {
-        if (!self.flags.permissive_atx_headers) return .{ .is_atx = false, .level = 0, .content_beg = 0 };
-    }
-
-    // Skip spaces after #
-    while (pos < self.size and helpers.isBlank(self.text[pos])) pos += 1;
-
-    return .{ .is_atx = true, .level = level, .content_beg = pos };
-}
-
-pub fn isOpeningCodeFence(self: *const Parser, off: OFF) struct { is_fence: bool, fence_data: u32 } {
-    if (off >= self.size) return .{ .is_fence = false, .fence_data = 0 };
-    const fence_char = self.text[off];
-    var pos = off;
-    var count: u32 = 0;
-
-    while (pos < self.size and self.text[pos] == fence_char) {
-        count += 1;
-        pos += 1;
-    }
-
-    if (count < 3) return .{ .is_fence = false, .fence_data = 0 };
-
-    // Backtick fences can't have backticks in info string
-    if (fence_char == '`') {
-        var check = pos;
-        while (check < self.size and !helpers.isNewline(self.text[check])) {
-            if (self.text[check] == '`') return .{ .is_fence = false, .fence_data = 0 };
-            check += 1;
-        }
-    }
-
-    // Encode: fence_char in low byte, count in next bytes
-    const data: u32 = @as(u32, fence_char) | (count << 8);
-    return .{ .is_fence = true, .fence_data = data };
-}
-
-pub fn isClosingCodeFence(self: *const Parser, off: OFF, fence_data: u32) bool {
-    const fence_char: u8 = @truncate(fence_data);
-    const fence_count = fence_data >> 8;
-
-    var pos = off;
-    var count: u32 = 0;
-    while (pos < self.size and self.text[pos] == fence_char) {
-        count += 1;
-        pos += 1;
-    }
-
-    if (count < fence_count) return false;
-
-    // Rest of line must be blank
-    while (pos < self.size and helpers.isBlank(self.text[pos])) pos += 1;
-
-    return pos >= self.size or helpers.isNewline(self.text[pos]);
-}
-
-pub fn isHtmlBlockStartCondition(self: *const Parser, off: OFF) u8 {
-    if (off + 1 >= self.size) return 0;
-
-    // Type 1: <script, <pre, <style, <textarea (case insensitive)
-    // Only opening tags start type 1 blocks. Closing tags like </pre> are
-    // only END conditions for type 1, not start conditions.
-    if (self.text[off + 1] != '/' and
-        (self.matchHtmlTag(off, "script") or self.matchHtmlTag(off, "pre") or
-            self.matchHtmlTag(off, "style") or self.matchHtmlTag(off, "textarea")))
-        return 1;
-
-    // Type 2: <!-- (comment)
-    if (off + 3 < self.size and self.text[off + 1] == '!' and self.text[off + 2] == '-' and self.text[off + 3] == '-')
-        return 2;
-
-    // Type 3: <? (processing instruction)
-    if (self.text[off + 1] == '?')
-        return 3;
-
-    // Type 4: <! followed by uppercase letter (declaration)
-    if (self.text[off + 1] == '!' and off + 2 < self.size and
-        self.text[off + 2] >= 'A' and self.text[off + 2] <= 'Z')
-        return 4;
-
-    // Type 5: <![CDATA[
-    if (off + 9 <= self.size and std.mem.eql(u8, self.text[off + 1 .. off + 9], "![CDATA["))
-        return 5;
-
-    // Type 6: block-level tags
-    if (self.isBlockLevelHtmlTag(off))
-        return 6;
-
-    // Type 7: any complete open or closing tag (not interrupting paragraph)
-    if (self.isCompleteHtmlTag(off))
-        return 7;
-
-    return 0;
-}
-
-pub fn isHtmlBlockEndCondition(self: *const Parser, off: OFF, block_type: u8) bool {
-    // Types 6 and 7: end condition is a blank line
-    if (block_type >= 6) {
-        return off >= self.size or helpers.isNewline(self.text[off]);
-    }
-
-    // Types 1-5: search from off to end of line for specific end patterns
-    var pos = off;
-    while (pos < self.size and !helpers.isNewline(self.text[pos])) {
-        switch (block_type) {
-            1 => {
-                // Type 1: </script>, </pre>, </style>, </textarea> (case insensitive)
-                if (self.text[pos] == '<' and pos + 1 < self.size and self.text[pos + 1] == '/') {
-                    if (self.matchHtmlTag(pos, "script") or self.matchHtmlTag(pos, "pre") or
-                        self.matchHtmlTag(pos, "style") or self.matchHtmlTag(pos, "textarea"))
-                        return true;
-                }
-            },
-            2 => {
-                // Type 2: -->
-                if (self.text[pos] == '-' and pos + 2 < self.size and
-                    self.text[pos + 1] == '-' and self.text[pos + 2] == '>')
-                    return true;
-            },
-            3 => {
-                // Type 3: ?>
-                if (self.text[pos] == '?' and pos + 1 < self.size and self.text[pos + 1] == '>')
-                    return true;
-            },
-            4 => {
-                // Type 4: >
-                if (self.text[pos] == '>')
-                    return true;
-            },
-            5 => {
-                // Type 5: ]]>
-                if (self.text[pos] == ']' and pos + 2 < self.size and
-                    self.text[pos + 1] == ']' and self.text[pos + 2] == '>')
-                    return true;
-            },
-            else => return false,
-        }
-        pos += 1;
-    }
-    return false;
-}
-
-pub fn matchHtmlTag(self: *const Parser, off: OFF, tag: []const u8) bool {
-    if (off + 1 + tag.len >= self.size) return false;
-    const start = off + 1;
-    // Allow optional / for closing tags
-    var pos = start;
-    if (pos < self.size and self.text[pos] == '/') pos += 1;
-    if (pos + tag.len > self.size) return false;
-    if (!helpers.asciiCaseEql(self.text[pos .. pos + tag.len], tag)) return false;
-    pos += @intCast(tag.len);
-    if (pos >= self.size) return true;
-    const after = self.text[pos];
-    return after == '>' or after == '/' or helpers.isBlank(after) or helpers.isNewline(after);
-}
-
-pub fn isBlockLevelHtmlTag(self: *const Parser, off: OFF) bool {
-    const block_tags = [_][]const u8{
-        "address", "article",  "aside",   "base",     "basefont", "blockquote", "body",
-        "caption", "center",   "col",     "colgroup", "dd",       "details",    "dialog",
-        "dir",     "div",      "dl",      "dt",       "fieldset", "figcaption", "figure",
-        "footer",  "form",     "frame",   "frameset", "h1",       "h2",         "h3",
-        "h4",      "h5",       "h6",      "head",     "header",   "hr",         "html",
-        "iframe",  "legend",   "li",      "link",     "main",     "menu",       "menuitem",
-        "nav",     "noframes", "ol",      "optgroup", "option",   "p",          "param",
-        "search",  "section",  "summary", "table",    "tbody",    "td",         "tfoot",
-        "th",      "thead",    "title",   "tr",       "track",    "ul",
-    };
-
-    for (block_tags) |tag| {
-        if (self.matchHtmlTag(off, tag)) return true;
-    }
-    return false;
-}
-
-pub fn isCompleteHtmlTag(self: *const Parser, off: OFF) bool {
-    if (off + 1 >= self.size) return false;
-    var pos = off + 1;
-
-    // Closing tag
-    if (pos < self.size and self.text[pos] == '/') {
-        pos += 1;
-        if (pos >= self.size or !helpers.isAlpha(self.text[pos])) return false;
-        while (pos < self.size and (helpers.isAlphaNum(self.text[pos]) or self.text[pos] == '-'))
-            pos += 1;
-        while (pos < self.size and helpers.isBlank(self.text[pos])) pos += 1;
-        if (pos >= self.size or self.text[pos] != '>') return false;
-        pos += 1;
-        // Rest of line must be whitespace only
-        while (pos < self.size and helpers.isBlank(self.text[pos])) pos += 1;
-        return pos >= self.size or helpers.isNewline(self.text[pos]);
-    }
-
-    // Opening tag: <tagname (attributes)* optional-/ >
-    if (!helpers.isAlpha(self.text[pos])) return false;
-    while (pos < self.size and (helpers.isAlphaNum(self.text[pos]) or self.text[pos] == '-'))
-        pos += 1;
-
-    // Parse attributes
-    while (true) {
-        const ws_start = pos;
-        while (pos < self.size and helpers.isBlank(self.text[pos])) pos += 1;
-        if (pos >= self.size or helpers.isNewline(self.text[pos])) return false;
-
-        // Check for end of tag
-        if (self.text[pos] == '>') {
-            pos += 1;
-            break;
-        }
-        if (self.text[pos] == '/' and pos + 1 < self.size and self.text[pos + 1] == '>') {
-            pos += 2;
-            break;
-        }
-
-        // Attributes must be preceded by whitespace
-        if (pos == ws_start) return false;
-
-        // Attribute name: [a-zA-Z_:][a-zA-Z0-9_.:-]*
-        if (!helpers.isAlpha(self.text[pos]) and self.text[pos] != '_' and self.text[pos] != ':')
-            return false;
-        pos += 1;
-        while (pos < self.size and (helpers.isAlphaNum(self.text[pos]) or
-            self.text[pos] == '_' or self.text[pos] == '.' or
-            self.text[pos] == ':' or self.text[pos] == '-'))
-            pos += 1;
-
-        // Optional attribute value
-        var ws_pos = pos;
-        while (ws_pos < self.size and helpers.isBlank(self.text[ws_pos])) ws_pos += 1;
-        if (ws_pos < self.size and self.text[ws_pos] == '=') {
-            pos = ws_pos + 1;
-            while (pos < self.size and helpers.isBlank(self.text[pos])) pos += 1;
-            if (pos >= self.size or helpers.isNewline(self.text[pos])) return false;
-
-            if (self.text[pos] == '"') {
-                pos += 1;
-                while (pos < self.size and self.text[pos] != '"' and !helpers.isNewline(self.text[pos]))
-                    pos += 1;
-                if (pos >= self.size or self.text[pos] != '"') return false;
-                pos += 1;
-            } else if (self.text[pos] == '\'') {
-                pos += 1;
-                while (pos < self.size and self.text[pos] != '\'' and !helpers.isNewline(self.text[pos]))
-                    pos += 1;
-                if (pos >= self.size or self.text[pos] != '\'') return false;
-                pos += 1;
-            } else {
-                // Unquoted value
-                while (pos < self.size and !helpers.isBlank(self.text[pos]) and
-                    !helpers.isNewline(self.text[pos]) and
-                    self.text[pos] != '"' and self.text[pos] != '\'' and
-                    self.text[pos] != '=' and self.text[pos] != '<' and
-                    self.text[pos] != '>' and self.text[pos] != '`')
-                    pos += 1;
-            }
-        }
-    }
-
-    // Rest of line must be whitespace only
-    while (pos < self.size and helpers.isBlank(self.text[pos])) pos += 1;
-    return pos >= self.size or helpers.isNewline(self.text[pos]);
-}
-
-pub fn isTableUnderline(self: *Parser, off: OFF) struct { is_underline: bool, col_count: u32 } {
-    var pos = off;
-    var col_count: u32 = 0;
-    var had_pipe = false;
-
-    // Skip leading pipe
-    if (pos < self.size and self.text[pos] == '|') {
-        had_pipe = true;
-        pos += 1;
-        while (pos < self.size and helpers.isBlank(self.text[pos])) pos += 1;
-    }
-
-    while (pos < self.size and !helpers.isNewline(self.text[pos])) {
-        // Expect optional ':' then dashes then optional ':'
-        const has_left_colon = pos < self.size and self.text[pos] == ':';
-        if (has_left_colon) pos += 1;
-
-        var dash_count: u32 = 0;
-        while (pos < self.size and self.text[pos] == '-') {
-            dash_count += 1;
-            pos += 1;
-        }
-
-        if (dash_count == 0) return .{ .is_underline = false, .col_count = 0 };
-
-        const has_right_colon = pos < self.size and self.text[pos] == ':';
-        if (has_right_colon) pos += 1;
-
-        // Determine alignment
-        if (col_count < types.TABLE_MAXCOLCOUNT) {
-            self.table_alignments[col_count] = if (has_left_colon and has_right_colon)
-                .center
-            else if (has_left_colon)
-                .left
-            else if (has_right_colon)
-                .right
-            else
-                .default;
-        }
-
-        col_count += 1;
-
-        // Skip whitespace
-        while (pos < self.size and helpers.isBlank(self.text[pos])) pos += 1;
-
-        // Pipe separator or end
-        if (pos < self.size and self.text[pos] == '|') {
-            had_pipe = true;
-            pos += 1;
-            while (pos < self.size and helpers.isBlank(self.text[pos])) pos += 1;
-            if (pos >= self.size or helpers.isNewline(self.text[pos])) break;
-        } else if (pos >= self.size or helpers.isNewline(self.text[pos])) {
-            break;
-        } else {
-            return .{ .is_underline = false, .col_count = 0 };
-        }
-    }
-
-    if (col_count == 0 or (!had_pipe and col_count < 2))
-        return .{ .is_underline = false, .col_count = 0 };
-
-    self.table_col_count = col_count;
-    return .{ .is_underline = true, .col_count = col_count };
-}
-
-/// Count the number of pipe-delimited columns in a table row.
-/// Used to validate that header and delimiter row column counts match (GFM requirement).
-pub fn countTableRowColumns(self: *const Parser, beg: OFF, end: OFF) u32 {
-    const row = self.text[beg..end];
-    var col_count: u32 = 0;
-    var pos: usize = 0;
-
-    // Skip leading whitespace
-    while (pos < row.len and helpers.isBlank(row[pos])) pos += 1;
-
-    // Skip leading pipe
-    if (pos < row.len and row[pos] == '|') {
-        pos += 1;
-    }
-
-    // Count cells between pipes
-    var in_cell = false;
-    while (pos < row.len) {
-        if (row[pos] == '|') {
-            col_count += 1;
-            in_cell = false;
-            pos += 1;
-        } else if (row[pos] == '\\' and pos + 1 < row.len) {
-            in_cell = true;
-            pos += 2;
-        } else if (helpers.isNewline(row[pos])) {
-            break;
-        } else {
-            in_cell = true;
-            pos += 1;
-        }
-    }
-    // If there's content after the last pipe (no trailing pipe), count it as a column
-    if (in_cell) col_count += 1;
-    return col_count;
-}
-
-pub fn isContainerMark(self: *const Parser, indent: u32, off: OFF) struct {
-    is_container: bool,
-    container: Container,
-    off: OFF,
-} {
-    if (off >= self.size) return .{ .is_container = false, .container = .{}, .off = off };
-
-    // md4c: indent >= code_indent_offset means this is indented code, not a container
-    if (indent >= self.code_indent_offset) return .{ .is_container = false, .container = .{}, .off = off };
-
-    const c = self.text[off];
-
-    // Blockquote
-    // Note: off points just past '>' — the optional space and remaining
-    // indent are handled by the caller via lineIndentation + the
-    // whitespace adjustment logic, matching md4c's behavior.
-    if (c == '>') {
-        return .{
-            .is_container = true,
-            .container = .{
-                .ch = '>',
-                .mark_indent = indent,
-                .contents_indent = indent + 1,
-            },
-            .off = off + 1,
-        };
-    }
-
-    // Unordered list: -, +, *
-    // off points just past the marker (before the mandatory space).
-    // The space is included in the lineIndentation computation by the caller.
-    if ((c == '-' or c == '+' or c == '*') and
-        off + 1 < self.size and helpers.isBlank(self.text[off + 1]))
-    {
-        return .{
-            .is_container = true,
-            .container = .{
-                .ch = c,
-                .mark_indent = indent,
-                .contents_indent = indent + 1,
-            },
-            .off = off + 1,
-        };
-    }
-    // Empty unordered list item: marker followed by newline or EOF
-    if ((c == '-' or c == '+' or c == '*') and
-        (off + 1 >= self.size or helpers.isNewline(self.text[off + 1])))
-    {
-        return .{
-            .is_container = true,
-            .container = .{
-                .ch = c,
-                .mark_indent = indent,
-                .contents_indent = indent + 1,
-            },
-            .off = off + 1,
-        };
-    }
-
-    // Ordered list: digits followed by . or )
-    if (helpers.isDigit(c)) {
-        var pos = off;
-        var num: u32 = 0;
-        while (pos < self.size and helpers.isDigit(self.text[pos]) and pos - off < 9) {
-            num = num * 10 + @as(u32, self.text[pos] - '0');
-            pos += 1;
-        }
-        if (pos < self.size and (self.text[pos] == '.' or self.text[pos] == ')')) {
-            const delim = self.text[pos];
-            pos += 1; // Past delimiter
-            if (pos < self.size and helpers.isBlank(self.text[pos])) {
-                // contents_indent = indent + marker_width (digits + delimiter)
-                const mark_width = pos - off;
-                return .{
-                    .is_container = true,
-                    .container = .{
-                        .ch = delim,
-                        .start = num,
-                        .mark_indent = indent,
-                        .contents_indent = indent + @as(u32, @intCast(mark_width)),
-                    },
-                    .off = pos,
-                };
-            }
-            // Empty list item
-            if (pos >= self.size or helpers.isNewline(self.text[pos])) {
-                const mark_width = pos - off;
-                return .{
-                    .is_container = true,
-                    .container = .{
-                        .ch = delim,
-                        .start = num,
-                        .mark_indent = indent,
-                        .contents_indent = indent + @as(u32, @intCast(mark_width)),
-                    },
-                    .off = pos,
-                };
-            }
-        }
-    }
-
-    return .{ .is_container = false, .container = .{}, .off = off };
-}
-
-const helpers = @import("./helpers.zig");
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const parser_mod = @import("./parser.zig");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const Parser = parser_mod.Parser;
-
-const types = @import("./types.zig");
 const Attribute = types.Attribute;
 const Container = types.Container;
-const OFF = types.OFF;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val << shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val << @as(ShiftType, @truncate(u_shift));
+    }
+    return val << shift;
+}
+fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val >> shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val >> @as(ShiftType, @truncate(u_shift));
+    }
+    return val >> shift;
+}
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const helpers = @import("./helpers.zig");
+pub const parser_mod = @import("./parser.zig");
+pub const types = @import("./types.zig");
+pub const SetextResult = struct {
+    is_setext: bool,
+    level: u32,
+};
+
+pub const AtxHeaderResult = struct {
+    is_atx: bool,
+    level: u32,
+    content_beg: u32,
+};
+
+pub const CodeFenceResult = struct {
+    is_fence: bool,
+    fence_data: u32,
+};
+
+pub const TableUnderlineResult = struct {
+    is_underline: bool,
+    col_count: u32,
+};
+
+pub const ContainerMarkResult = struct {
+    is_container: bool,
+    container: Container,
+    off: u32,
+};
+
+
+pub fn isSetextUnderline(p: *const Parser, off: u32) SetextResult {
+        const c = p.text[@as(usize, @intCast(off))];
+        if (((c != 61) and (c != 45))) {
+            return .{ .is_setext = false, .level = 0 };
+        }
+        var pos = off;
+        _ = &pos;
+        while (((pos < p.size) and (p.text[@as(usize, @intCast(pos))] == c))) {
+            pos = (pos + 1);
+        }
+        while (((pos < p.size) and helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) {
+            pos = (pos + 1);
+        }
+        if (((pos >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(pos))]))) {
+            const level: u32 = (if ((c == 61)) (if (comptime @typeInfo(@TypeOf(1)) == .@"enum") cp_cast_int(u32, @intFromEnum(1)) else cp_cast_int(u32, 1)) else (if (comptime @typeInfo(@TypeOf(2)) == .@"enum") cp_cast_int(u32, @intFromEnum(2)) else cp_cast_int(u32, 2)));
+            return .{ .is_setext = true, .level = level };
+        }
+        return .{ .is_setext = false, .level = 0 };
+}
+
+pub fn isHrLine(p: *const Parser, off: u32) bool {
+        const c = p.text[@as(usize, @intCast(off))];
+        if ((((c != 45) and (c != 95)) and (c != 42))) {
+            return false;
+        }
+        var pos = off;
+        _ = &pos;
+        var count: u32 = 0;
+        _ = &count;
+        while (((pos < p.size) and (!helpers.isNewline(p.text[@as(usize, @intCast(pos))])))) {
+            if ((p.text[@as(usize, @intCast(pos))] == c)) {
+                count = (count + 1);
+            } else {
+                if ((!helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) {
+                    return false;
+                }
+            }
+            pos = (pos + 1);
+        }
+        return (count >= 3);
+}
+
+pub fn isAtxHeaderLine(p: *const Parser, off: u32) AtxHeaderResult {
+        var pos = off;
+        _ = &pos;
+        var level: u32 = 0;
+        _ = &level;
+        while (((pos < p.size) and (p.text[@as(usize, @intCast(pos))] == 35))) {
+            level = (level + 1);
+            pos = (pos + 1);
+        }
+        if (((level == 0) or (level > 6))) {
+            return .{ .is_atx = false, .level = 0, .content_beg = 0 };
+        }
+        if ((((pos < p.size) and (!helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) and (!helpers.isNewline(p.text[@as(usize, @intCast(pos))])))) {
+            if ((!p.flags.permissive_atx_headers)) {
+                return .{ .is_atx = false, .level = 0, .content_beg = 0 };
+            }
+        }
+        while (((pos < p.size) and helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) {
+            pos = (pos + 1);
+        }
+        return .{ .is_atx = true, .level = level, .content_beg = pos };
+}
+
+pub fn isOpeningCodeFence(p: *const Parser, off: u32) CodeFenceResult {
+        if ((off >= p.size)) {
+            return .{ .is_fence = false, .fence_data = 0 };
+        }
+        const fence_char = p.text[@as(usize, @intCast(off))];
+        var pos = off;
+        _ = &pos;
+        var count: u32 = 0;
+        _ = &count;
+        while (((pos < p.size) and (p.text[@as(usize, @intCast(pos))] == fence_char))) {
+            count = (count + 1);
+            pos = (pos + 1);
+        }
+        if ((count < 3)) {
+            return .{ .is_fence = false, .fence_data = 0 };
+        }
+        if ((fence_char == 96)) {
+            var check = pos;
+            _ = &check;
+            while (((check < p.size) and (!helpers.isNewline(p.text[@as(usize, @intCast(check))])))) {
+                if ((p.text[@as(usize, @intCast(check))] == 96)) {
+                    return .{ .is_fence = false, .fence_data = 0 };
+                }
+                check = (check + 1);
+            }
+        }
+        const data: u32 = ((if (comptime @typeInfo(@TypeOf(fence_char)) == .@"enum") cp_cast_int(u32, @intFromEnum(fence_char)) else cp_cast_int(u32, fence_char)) | cp_shl(count, 8));
+        return .{ .is_fence = true, .fence_data = data };
+}
+
+pub fn isClosingCodeFence(p: *const Parser, off: u32, fence_data: u32) bool {
+        const fence_char: u8 = @truncate(fence_data);
+        const fence_count = cp_shr(fence_data, 8);
+        var pos = off;
+        _ = &pos;
+        var count: u32 = 0;
+        _ = &count;
+        while (((pos < p.size) and (p.text[@as(usize, @intCast(pos))] == fence_char))) {
+            count = (count + 1);
+            pos = (pos + 1);
+        }
+        if ((count < fence_count)) {
+            return false;
+        }
+        while (((pos < p.size) and helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) {
+            pos = (pos + 1);
+        }
+        return ((pos >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(pos))]));
+}
+
+pub fn isHtmlBlockStartCondition(p: *const Parser, off: u32) u8 {
+        if (((off + 1) >= p.size)) {
+            return 0;
+        }
+        if (((p.text[@as(usize, @intCast((off + 1)))] != 47) and (((p.matchHtmlTag(off, "script") or p.matchHtmlTag(off, "pre")) or p.matchHtmlTag(off, "style")) or p.matchHtmlTag(off, "textarea")))) {
+            return 1;
+        }
+        if ((((((off + 3) < p.size) and (p.text[@as(usize, @intCast((off + 1)))] == 33)) and (p.text[@as(usize, @intCast((off + 2)))] == 45)) and (p.text[@as(usize, @intCast((off + 3)))] == 45))) {
+            return 2;
+        }
+        if ((p.text[@as(usize, @intCast((off + 1)))] == 63)) {
+            return 3;
+        }
+        if (((((p.text[@as(usize, @intCast((off + 1)))] == 33) and ((off + 2) < p.size)) and (p.text[@as(usize, @intCast((off + 2)))] >= 65)) and (p.text[@as(usize, @intCast((off + 2)))] <= 90))) {
+            return 4;
+        }
+        if ((((off + 9) <= p.size) and std.mem.eql(u8, p.text[(off + 1)..(off + 9)], "![CDATA["))) {
+            return 5;
+        }
+        if (p.isBlockLevelHtmlTag(off)) {
+            return 6;
+        }
+        if (p.isCompleteHtmlTag(off)) {
+            return 7;
+        }
+        return 0;
+}
+
+pub fn isHtmlBlockEndCondition(p: *const Parser, off: u32, block_type: u8) bool {
+        if ((block_type >= 6)) {
+            return ((off >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(off))]));
+        }
+        var pos = off;
+        _ = &pos;
+        while (((pos < p.size) and (!helpers.isNewline(p.text[@as(usize, @intCast(pos))])))) {
+            switch (block_type) {
+1 => {
+if ((((p.text[@as(usize, @intCast(pos))] == 60) and ((pos + 1) < p.size)) and (p.text[@as(usize, @intCast((pos + 1)))] == 47))) {
+                if ((((p.matchHtmlTag(pos, "script") or p.matchHtmlTag(pos, "pre")) or p.matchHtmlTag(pos, "style")) or p.matchHtmlTag(pos, "textarea"))) {
+                    return true;
+                }
+            }
+},
+2 => {
+if (((((p.text[@as(usize, @intCast(pos))] == 45) and ((pos + 2) < p.size)) and (p.text[@as(usize, @intCast((pos + 1)))] == 45)) and (p.text[@as(usize, @intCast((pos + 2)))] == 62))) {
+                return true;
+            }
+},
+3 => {
+if ((((p.text[@as(usize, @intCast(pos))] == 63) and ((pos + 1) < p.size)) and (p.text[@as(usize, @intCast((pos + 1)))] == 62))) {
+                return true;
+            }
+},
+4 => {
+if ((p.text[@as(usize, @intCast(pos))] == 62)) {
+                return true;
+            }
+},
+5 => {
+if (((((p.text[@as(usize, @intCast(pos))] == 93) and ((pos + 2) < p.size)) and (p.text[@as(usize, @intCast((pos + 1)))] == 93)) and (p.text[@as(usize, @intCast((pos + 2)))] == 62))) {
+                return true;
+            }
+},
+else => {
+return false;
+},
+}
+            pos = (pos + 1);
+        }
+        return false;
+}
+
+pub fn matchHtmlTag(p: *const Parser, off: u32, tag: []const u8) bool {
+        if ((((off + 1) + tag.len) >= p.size)) {
+            return false;
+        }
+        const start = (off + 1);
+        var pos = start;
+        _ = &pos;
+        if (((pos < p.size) and (p.text[@as(usize, @intCast(pos))] == 47))) {
+            pos = (pos + 1);
+        }
+        if (((pos + tag.len) > p.size)) {
+            return false;
+        }
+        if ((!helpers.asciiCaseEql(p.text[pos..(pos + tag.len)], tag))) {
+            return false;
+        }
+        pos = (pos + @as(u32, @intCast(tag.len)));
+        if ((pos >= p.size)) {
+            return true;
+        }
+        const after = p.text[@as(usize, @intCast(pos))];
+        return ((((after == 62) or (after == 47)) or helpers.isBlank(after)) or helpers.isNewline(after));
+}
+
+pub fn isBlockLevelHtmlTag(p: *const Parser, off: u32) bool {
+        const block_tags: [][]const u8 = .{ "address", "article", "aside", "base", "basefont", "blockquote", "body", "caption", "center", "col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "iframe", "legend", "li", "link", "main", "menu", "menuitem", "nav", "noframes", "ol", "optgroup", "option", "p", "param", "search", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "title", "tr", "track", "ul" };
+        for (cp_iter_slice(block_tags)) |tag| {
+            _ = &tag;
+            if (p.matchHtmlTag(off, tag)) {
+                return true;
+            }
+        }
+        return false;
+}
+
+pub fn isCompleteHtmlTag(p: *const Parser, off: u32) bool {
+        if (((off + 1) >= p.size)) {
+            return false;
+        }
+        var pos = (off + 1);
+        _ = &pos;
+        if (((pos < p.size) and (p.text[@as(usize, @intCast(pos))] == 47))) {
+            pos = (pos + 1);
+            if (((pos >= p.size) or (!helpers.isAlpha(p.text[@as(usize, @intCast(pos))])))) {
+                return false;
+            }
+            while (((pos < p.size) and (helpers.isAlphaNum(p.text[@as(usize, @intCast(pos))]) or (p.text[@as(usize, @intCast(pos))] == 45)))) {
+                pos = (pos + 1);
+            }
+            while (((pos < p.size) and helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) {
+                pos = (pos + 1);
+            }
+            if (((pos >= p.size) or (p.text[@as(usize, @intCast(pos))] != 62))) {
+                return false;
+            }
+            pos = (pos + 1);
+            while (((pos < p.size) and helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) {
+                pos = (pos + 1);
+            }
+            return ((pos >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(pos))]));
+        }
+        if ((!helpers.isAlpha(p.text[@as(usize, @intCast(pos))]))) {
+            return false;
+        }
+        while (((pos < p.size) and (helpers.isAlphaNum(p.text[@as(usize, @intCast(pos))]) or (p.text[@as(usize, @intCast(pos))] == 45)))) {
+            pos = (pos + 1);
+        }
+        while (true) {
+            const ws_start = pos;
+            while (((pos < p.size) and helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) {
+                pos = (pos + 1);
+            }
+            if (((pos >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(pos))]))) {
+                return false;
+            }
+            if ((p.text[@as(usize, @intCast(pos))] == 62)) {
+                pos = (pos + 1);
+                break;
+            }
+            if ((((p.text[@as(usize, @intCast(pos))] == 47) and ((pos + 1) < p.size)) and (p.text[@as(usize, @intCast((pos + 1)))] == 62))) {
+                pos = (pos + 2);
+                break;
+            }
+            if ((pos == ws_start)) {
+                return false;
+            }
+            if ((((!helpers.isAlpha(p.text[@as(usize, @intCast(pos))])) and (p.text[@as(usize, @intCast(pos))] != 95)) and (p.text[@as(usize, @intCast(pos))] != 58))) {
+                return false;
+            }
+            pos = (pos + 1);
+            while (((pos < p.size) and ((((helpers.isAlphaNum(p.text[@as(usize, @intCast(pos))]) or (p.text[@as(usize, @intCast(pos))] == 95)) or (p.text[@as(usize, @intCast(pos))] == 46)) or (p.text[@as(usize, @intCast(pos))] == 58)) or (p.text[@as(usize, @intCast(pos))] == 45)))) {
+                pos = (pos + 1);
+            }
+            var ws_pos = pos;
+            _ = &ws_pos;
+            while (((ws_pos < p.size) and helpers.isBlank(p.text[@as(usize, @intCast(ws_pos))]))) {
+                ws_pos = (ws_pos + 1);
+            }
+            if (((ws_pos < p.size) and (p.text[@as(usize, @intCast(ws_pos))] == 61))) {
+                pos = (ws_pos + 1);
+                while (((pos < p.size) and helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) {
+                    pos = (pos + 1);
+                }
+                if (((pos >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(pos))]))) {
+                    return false;
+                }
+                if ((p.text[@as(usize, @intCast(pos))] == 34)) {
+                    pos = (pos + 1);
+                    while ((((pos < p.size) and (p.text[@as(usize, @intCast(pos))] != 34)) and (!helpers.isNewline(p.text[@as(usize, @intCast(pos))])))) {
+                        pos = (pos + 1);
+                    }
+                    if (((pos >= p.size) or (p.text[@as(usize, @intCast(pos))] != 34))) {
+                        return false;
+                    }
+                    pos = (pos + 1);
+                } else {
+                    if ((p.text[@as(usize, @intCast(pos))] == 39)) {
+                        pos = (pos + 1);
+                        while ((((pos < p.size) and (p.text[@as(usize, @intCast(pos))] != 39)) and (!helpers.isNewline(p.text[@as(usize, @intCast(pos))])))) {
+                            pos = (pos + 1);
+                        }
+                        if (((pos >= p.size) or (p.text[@as(usize, @intCast(pos))] != 39))) {
+                            return false;
+                        }
+                        pos = (pos + 1);
+                    } else {
+                        while ((((((((((pos < p.size) and (!helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) and (!helpers.isNewline(p.text[@as(usize, @intCast(pos))]))) and (p.text[@as(usize, @intCast(pos))] != 34)) and (p.text[@as(usize, @intCast(pos))] != 39)) and (p.text[@as(usize, @intCast(pos))] != 61)) and (p.text[@as(usize, @intCast(pos))] != 60)) and (p.text[@as(usize, @intCast(pos))] != 62)) and (p.text[@as(usize, @intCast(pos))] != 96))) {
+                            pos = (pos + 1);
+                        }
+                    }
+                }
+            }
+        }
+        while (((pos < p.size) and helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) {
+            pos = (pos + 1);
+        }
+        return ((pos >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(pos))]));
+}
+
+pub fn isTableUnderline(p: *Parser, off: u32) TableUnderlineResult {
+        var pos = off;
+        _ = &pos;
+        var col_count: u32 = 0;
+        _ = &col_count;
+        var had_pipe = false;
+        _ = &had_pipe;
+        if (((pos < p.size) and (p.text[@as(usize, @intCast(pos))] == 124))) {
+            had_pipe = true;
+            pos = (pos + 1);
+            while (((pos < p.size) and helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) {
+                pos = (pos + 1);
+            }
+        }
+        while (((pos < p.size) and (!helpers.isNewline(p.text[@as(usize, @intCast(pos))])))) {
+            const has_left_colon = ((pos < p.size) and (p.text[@as(usize, @intCast(pos))] == 58));
+            if (has_left_colon) {
+                pos = (pos + 1);
+            }
+            var dash_count: u32 = 0;
+            _ = &dash_count;
+            while (((pos < p.size) and (p.text[@as(usize, @intCast(pos))] == 45))) {
+                dash_count = (dash_count + 1);
+                pos = (pos + 1);
+            }
+            if ((dash_count == 0)) {
+                return .{ .is_underline = false, .col_count = 0 };
+            }
+            const has_right_colon = ((pos < p.size) and (p.text[@as(usize, @intCast(pos))] == 58));
+            if (has_right_colon) {
+                pos = (pos + 1);
+            }
+            if ((col_count < types.TABLE_MAXCOLCOUNT)) {
+                p.table_alignments[cp_cast_int(usize, col_count)] = (if ((has_left_colon and has_right_colon)) .center else (if (has_left_colon) .left else (if (has_right_colon) .right else .default)));
+            }
+            col_count = (col_count + 1);
+            while (((pos < p.size) and helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) {
+                pos = (pos + 1);
+            }
+            if (((pos < p.size) and (p.text[@as(usize, @intCast(pos))] == 124))) {
+                had_pipe = true;
+                pos = (pos + 1);
+                while (((pos < p.size) and helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) {
+                    pos = (pos + 1);
+                }
+                if (((pos >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(pos))]))) {
+                    break;
+                }
+            } else {
+                if (((pos >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(pos))]))) {
+                    break;
+                } else {
+                    return .{ .is_underline = false, .col_count = 0 };
+                }
+            }
+        }
+        if (((col_count == 0) or ((!had_pipe) and (col_count < 2)))) {
+            return .{ .is_underline = false, .col_count = 0 };
+        }
+        p.table_col_count = col_count;
+        return .{ .is_underline = true, .col_count = col_count };
+}
+
+pub fn countTableRowColumns(p: *const Parser, beg: u32, end: u32) u32 {
+        const row = p.text[beg..end];
+        var col_count: u32 = 0;
+        _ = &col_count;
+        var pos: usize = 0;
+        _ = &pos;
+        while (((pos < row.len) and helpers.isBlank(row[@as(usize, @intCast(pos))]))) {
+            pos = (pos + 1);
+        }
+        if (((pos < row.len) and (row[@as(usize, @intCast(pos))] == 124))) {
+            pos = (pos + 1);
+        }
+        var in_cell = false;
+        _ = &in_cell;
+        while ((pos < row.len)) {
+            if ((row[@as(usize, @intCast(pos))] == 124)) {
+                col_count = (col_count + 1);
+                in_cell = false;
+                pos = (pos + 1);
+            } else {
+                if (((row[@as(usize, @intCast(pos))] == 92) and ((pos + 1) < row.len))) {
+                    in_cell = true;
+                    pos = (pos + 2);
+                } else {
+                    if (helpers.isNewline(row[@as(usize, @intCast(pos))])) {
+                        break;
+                    } else {
+                        in_cell = true;
+                        pos = (pos + 1);
+                    }
+                }
+            }
+        }
+        if (in_cell) {
+            col_count = (col_count + 1);
+        }
+        return col_count;
+}
+
+pub fn isContainerMark(p: *const Parser, indent: u32, off: u32) ContainerMarkResult {
+        if ((off >= p.size)) {
+            return .{ .is_container = false, .container = .{}, .off = off };
+        }
+        if ((indent >= p.code_indent_offset)) {
+            return .{ .is_container = false, .container = .{}, .off = off };
+        }
+        const c = p.text[@as(usize, @intCast(off))];
+        if ((c == 62)) {
+            return .{ .is_container = true, .container = .{ .ch = 62, .mark_indent = indent, .contents_indent = (indent + 1) }, .off = (off + 1) };
+        }
+        if ((((((c == 45) or (c == 43)) or (c == 42)) and ((off + 1) < p.size)) and helpers.isBlank(p.text[@as(usize, @intCast((off + 1)))]))) {
+            return .{ .is_container = true, .container = .{ .ch = c, .mark_indent = indent, .contents_indent = (indent + 1) }, .off = (off + 1) };
+        }
+        if (((((c == 45) or (c == 43)) or (c == 42)) and (((off + 1) >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast((off + 1)))])))) {
+            return .{ .is_container = true, .container = .{ .ch = c, .mark_indent = indent, .contents_indent = (indent + 1) }, .off = (off + 1) };
+        }
+        if (helpers.isDigit(c)) {
+            var pos = off;
+            _ = &pos;
+            var num: u32 = 0;
+            _ = &num;
+            while ((((pos < p.size) and helpers.isDigit(p.text[@as(usize, @intCast(pos))])) and ((pos - off) < 9))) {
+                num = ((num * 10) + (if (comptime @typeInfo(@TypeOf((p.text[@as(usize, @intCast(pos))] - 48))) == .@"enum") cp_cast_int(u32, @intFromEnum((p.text[@as(usize, @intCast(pos))] - 48))) else cp_cast_int(u32, (p.text[@as(usize, @intCast(pos))] - 48))));
+                pos = (pos + 1);
+            }
+            if (((pos < p.size) and ((p.text[@as(usize, @intCast(pos))] == 46) or (p.text[@as(usize, @intCast(pos))] == 41)))) {
+                const delim = p.text[@as(usize, @intCast(pos))];
+                pos = (pos + 1);
+                if (((pos < p.size) and helpers.isBlank(p.text[@as(usize, @intCast(pos))]))) {
+                    const mark_width = (pos - off);
+                    return .{ .is_container = true, .container = .{ .ch = delim, .start = num, .mark_indent = indent, .contents_indent = (indent + @as(u32, @intCast(mark_width))) }, .off = pos };
+                }
+                if (((pos >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(pos))]))) {
+                    const mark_width = (pos - off);
+                    return .{ .is_container = true, .container = .{ .ch = delim, .start = num, .mark_indent = indent, .contents_indent = (indent + @as(u32, @intCast(mark_width))) }, .off = pos };
+                }
+            }
+        }
+        return .{ .is_container = false, .container = .{}, .off = off };
+}

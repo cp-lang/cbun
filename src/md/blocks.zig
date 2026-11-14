@@ -1,865 +1,732 @@
-pub fn processDoc(self: *Parser) Parser.Error!void {
-    const dummy_blank = Line{ .type = .blank };
-    var pivot_line = dummy_blank;
-    var line_buf: [2]Line = .{ .{}, .{} };
-    var line_idx: u1 = 0;
-    var off: OFF = 0;
-
-    try self.enterBlock(.doc, 0, 0);
-
-    while (off < self.size) {
-        const line = &line_buf[line_idx];
-
-        try self.analyzeLine(off, &off, &pivot_line, line);
-        try self.processLine(&pivot_line, line, &line_buf, &line_idx);
-    }
-
-    try self.endCurrentBlock();
-
-    // Build ref def hashtable
-    try self.buildRefDefHashtable();
-
-    // Process all blocks
-    try self.leaveChildContainers(0);
-    try self.processAllBlocks();
-
-    try self.leaveBlock(.doc, 0);
-}
-
-pub fn analyzeLine(self: *Parser, off_start: OFF, p_end: *OFF, pivot_line: *const Line, line: *Line) error{OutOfMemory}!void {
-    var off = off_start;
-    var total_indent: u32 = 0;
-    var n_parents: u32 = 0;
-    var n_brothers: u32 = 0;
-    var n_children: u32 = 0;
-    var container = Container{};
-    const prev_line_has_list_loosening_effect = self.last_line_has_list_loosening_effect;
-
-    line.* = .{};
-    line.enforce_new_block = false;
-
-    // Eat indentation and match containers
-    const indent_result = helpers.lineIndentation(self.text, total_indent, off);
-    line.indent = indent_result.indent;
-    total_indent += line.indent;
-    off = indent_result.off;
-    line.beg = off;
-
-    // Match existing containers
-    // remaining_indent tracks the indent left after subtracting each matched
-    // container's contents_indent. This ensures nested containers compare
-    // against the correct relative indentation rather than the absolute column.
-    var remaining_indent = total_indent;
-    while (n_parents < self.n_containers) {
-        const c = &self.containers.items[n_parents];
-        if (c.ch == '>') {
-            // Blockquote continuation
-            if (off < self.size and self.text[off] == '>' and line.indent < self.code_indent_offset) {
-                off += 1;
-                total_indent += 1;
-                const r = helpers.lineIndentation(self.text, total_indent, off);
-                line.indent = r.indent;
-                total_indent += line.indent;
-                off = r.off;
-                // The optional 1st space after '>' is part of the blockquote mark
-                if (line.indent > 0) line.indent -= 1;
-                // Use local indent (after optional-space adjustment) for subsequent
-                // list container matching, matching md4c's use of line->indent.
-                remaining_indent = line.indent;
-                line.beg = off;
-                n_parents += 1;
-                continue;
-            } else {
-                break;
-            }
-        } else {
-            // List continuation - check indentation against remaining indent
-            if (remaining_indent >= c.contents_indent) {
-                remaining_indent -= c.contents_indent;
-                line.indent = remaining_indent;
-                n_parents += 1;
-                continue;
-            } else {
-                break;
-            }
-        }
-    }
-
-    self.last_line_has_list_loosening_effect = false;
-
-    // Blank line lazy-matches list containers BEFORE the main detection loop
-    // (md4c does this outside while(TRUE) to ensure n_parents is correct for
-    // fenced code and HTML block container-boundary checks)
-    if (off >= self.size or helpers.isNewline(self.text[off])) {
-        if (n_brothers + n_children == 0) {
-            while (n_parents < self.n_containers and
-                self.containers.items[n_parents].ch != '>')
-            {
-                n_parents += 1;
-            }
-        }
-    }
-
-    // Track effective pivot type — brother/child containers reset this to .blank
-    var effective_pivot_type = pivot_line.type;
-
-    // Determine line type
-    while (true) {
-        // Check for fenced code continuation/closing (BEFORE blank line check, like md4c)
-        if (effective_pivot_type == .fencedcode) {
-            line.beg = off;
-
-            // Check for closing fence
-            if (line.indent < self.code_indent_offset) {
-                if (self.isClosingCodeFence(off, pivot_line.data)) {
-                    line.type = .blank; // ending fence treated as blank
-                    self.last_line_has_list_loosening_effect = false;
-                    break;
-                }
-            }
-
-            // Fenced code continuation only if all containers matched (md4c: n_parents == n_containers)
-            if (n_parents == self.n_containers) {
-                if (line.indent > self.fence_indent)
-                    line.indent -= self.fence_indent
-                else
-                    line.indent = 0;
-                line.type = .fencedcode;
-                break;
-            }
-            // If containers don't match, fenced code is implicitly ended.
-            // Fall through to other checks.
-        }
-
-        // Check for HTML block continuation (BEFORE blank line check, like md4c)
-        if (effective_pivot_type == .html and self.html_block_type > 0) {
-            if (n_parents < self.n_containers) {
-                // HTML block is implicitly ended when enclosing container closes
-                self.html_block_type = 0;
-            } else {
-                if (self.isHtmlBlockEndCondition(off, self.html_block_type)) {
-                    // Save type before clearing (md4c uses a local variable)
-                    const ended_type = self.html_block_type;
-                    self.html_block_type = 0;
-
-                    // Types 6 and 7 end conditions also serve as blank lines
-                    if (ended_type == 6 or ended_type == 7) {
-                        line.type = .blank;
-                        line.indent = 0;
-                        break;
-                    }
-                }
-                line.type = .html;
-                n_parents = self.n_containers;
-                break;
-            }
-        }
-
-        // Check for blank line
-        if (off >= self.size or helpers.isNewline(self.text[off])) {
-            // Indented code continuation through blank lines
-            if (effective_pivot_type == .indentedcode and n_parents == self.n_containers) {
-                line.type = .indentedcode;
-                if (line.indent > self.code_indent_offset)
-                    line.indent -= self.code_indent_offset
-                else
-                    line.indent = 0;
-                self.last_line_has_list_loosening_effect = false;
-            } else {
-                line.type = .blank;
-                self.last_line_has_list_loosening_effect = (n_parents > 0 and
-                    n_brothers + n_children == 0 and
-                    self.containers.items[n_parents - 1].ch != '>');
-
-                // HTML block types 6 and 7 end on a blank line
-                if (self.html_block_type >= 6) {
-                    self.html_block_type = 0;
-                }
-
-                // md4c issue #6: Track empty list items that start with 2+ blank lines.
-                // A list item can begin with at most one blank line.
-                if (n_parents > 0 and self.containers.items[n_parents - 1].ch != '>' and
-                    n_brothers + n_children == 0 and self.current_block == null and
-                    self.block_bytes.items.len > @sizeOf(BlockHeader))
-                {
-                    const align_mask_: usize = @alignOf(BlockHeader) - 1;
-                    const top_off = (self.block_bytes.items.len - @sizeOf(BlockHeader) + align_mask_) & ~align_mask_;
-                    if (top_off + @sizeOf(BlockHeader) <= self.block_bytes.items.len) {
-                        const top_hdr: *const BlockHeader = @ptrCast(@alignCast(self.block_bytes.items.ptr + (self.block_bytes.items.len - @sizeOf(BlockHeader))));
-                        if (top_hdr.block_type == .li) {
-                            self.last_list_item_starts_with_two_blank_lines = true;
-                        }
-                    }
-                }
-            }
-            break;
-        } else {
-            // Non-blank line: check if we need to force-close an empty list item
-            // (second half of md4c issue #6 hack)
-            if (self.last_list_item_starts_with_two_blank_lines) {
-                if (n_parents > 0 and n_parents == self.n_containers and
-                    self.containers.items[n_parents - 1].ch != '>' and
-                    n_brothers + n_children == 0 and self.current_block == null and
-                    self.block_bytes.items.len > @sizeOf(BlockHeader))
-                {
-                    const top_hdr: *const BlockHeader = @ptrCast(@alignCast(self.block_bytes.items.ptr + (self.block_bytes.items.len - @sizeOf(BlockHeader))));
-                    if (top_hdr.block_type == .li) {
-                        n_parents -= 1;
-                        line.indent = total_indent;
-                        if (n_parents > 0)
-                            line.indent -= @min(line.indent, self.containers.items[n_parents - 1].contents_indent);
-                    }
-                }
-                self.last_list_item_starts_with_two_blank_lines = false;
-            }
-            self.last_line_has_list_loosening_effect = false;
-        }
-
-        // Indented code continuation
-        if (effective_pivot_type == .indentedcode) {
-            if (line.indent >= self.code_indent_offset) {
-                line.type = .indentedcode;
-                line.indent -= self.code_indent_offset;
-                line.data = 0;
-                break;
-            }
-        }
-
-        // Check for Setext underline
-        if (line.indent < self.code_indent_offset and effective_pivot_type == .text and
-            off < self.size and (self.text[off] == '=' or self.text[off] == '-') and
-            n_parents == self.n_containers)
-        {
-            const setext_result = self.isSetextUnderline(off);
-            if (setext_result.is_setext) {
-                line.type = .setextunderline;
-                line.data = setext_result.level;
-                break;
-            }
-        }
-
-        // Check for thematic break
-        if (line.indent < self.code_indent_offset and off < self.size and
-            (self.text[off] == '-' or self.text[off] == '_' or self.text[off] == '*'))
-        {
-            if (self.isHrLine(off)) {
-                line.type = .hr;
-                break;
-            }
-        }
-
-        // Check for brother container (another list item in same list)
-        if (n_parents < self.n_containers and n_brothers + n_children == 0) {
-            const cont_result = self.isContainerMark(line.indent, off);
-            if (cont_result.is_container) {
-                if (self.isContainerCompatible(&self.containers.items[n_parents], &cont_result.container)) {
-                    effective_pivot_type = .blank;
-
-                    container = cont_result.container;
-                    off = cont_result.off;
-
-                    total_indent += container.contents_indent - container.mark_indent;
-                    const r = helpers.lineIndentation(self.text, total_indent, off);
-                    line.indent = r.indent;
-                    total_indent += line.indent;
-                    off = r.off;
-                    line.beg = off;
-
-                    // Adjust whitespace belonging to mark
-                    if (off >= self.size or helpers.isNewline(self.text[off])) {
-                        container.contents_indent += 1;
-                    } else if (line.indent <= self.code_indent_offset) {
-                        container.contents_indent += line.indent;
-                        line.indent = 0;
-                    } else {
-                        container.contents_indent += 1;
-                        line.indent -= 1;
-                    }
-
-                    self.containers.items[n_parents].mark_indent = container.mark_indent;
-                    self.containers.items[n_parents].contents_indent = container.contents_indent;
-
-                    // HTML block ends when a new sibling container starts
-                    self.html_block_type = 0;
-
-                    n_brothers += 1;
-                    continue;
-                }
-            }
-        }
-
-        // Check for indented code
-        if (line.indent >= self.code_indent_offset and effective_pivot_type != .text) {
-            line.type = .indentedcode;
-            line.indent -= self.code_indent_offset;
-            line.data = 0;
-            break;
-        }
-
-        // Check for new container block
-        if (line.indent < self.code_indent_offset) {
-            const cont_result = self.isContainerMark(line.indent, off);
-            if (cont_result.is_container) {
-                container = cont_result.container;
-
-                // List mark can't interrupt paragraph unless it's > or ordered starting at 1
-                if (effective_pivot_type == .text and n_parents == self.n_containers) {
-                    if ((cont_result.off >= self.size or helpers.isNewline(self.ch(cont_result.off))) and container.ch != '>') {
-                        // Blank after list mark can't interrupt paragraph
-                    } else if ((container.ch == '.' or container.ch == ')') and container.start != 1) {
-                        // Ordered list with start != 1 can't interrupt paragraph
-                    } else {
-                        off = cont_result.off;
-                        total_indent += container.contents_indent - container.mark_indent;
-                        const r = helpers.lineIndentation(self.text, total_indent, off);
-                        line.indent = r.indent;
-                        total_indent += line.indent;
-                        off = r.off;
-                        line.beg = off;
-                        line.data = container.ch;
-
-                        if (off >= self.size or helpers.isNewline(self.text[off])) {
-                            container.contents_indent += 1;
-                        } else if (line.indent <= self.code_indent_offset) {
-                            container.contents_indent += line.indent;
-                            line.indent = 0;
-                        } else {
-                            container.contents_indent += 1;
-                            line.indent -= 1;
-                        }
-
-                        if (n_brothers + n_children == 0) {
-                            effective_pivot_type = .blank;
-                        }
-
-                        if (n_children == 0) {
-                            try self.endCurrentBlock();
-                            try self.leaveChildContainers(n_parents + n_brothers);
-                        }
-
-                        n_children += 1;
-                        try self.pushContainer(&container);
-                        continue;
-                    }
-                } else {
-                    off = cont_result.off;
-                    total_indent += container.contents_indent - container.mark_indent;
-                    const r = helpers.lineIndentation(self.text, total_indent, off);
-                    line.indent = r.indent;
-                    total_indent += line.indent;
-                    off = r.off;
-                    line.beg = off;
-                    line.data = container.ch;
-
-                    if (off >= self.size or helpers.isNewline(self.text[off])) {
-                        container.contents_indent += 1;
-                    } else if (line.indent <= self.code_indent_offset) {
-                        container.contents_indent += line.indent;
-                        line.indent = 0;
-                    } else {
-                        container.contents_indent += 1;
-                        line.indent -= 1;
-                    }
-
-                    if (n_brothers + n_children == 0) {
-                        effective_pivot_type = .blank;
-                    }
-
-                    if (n_children == 0) {
-                        try self.endCurrentBlock();
-                        try self.leaveChildContainers(n_parents + n_brothers);
-                    }
-
-                    n_children += 1;
-                    try self.pushContainer(&container);
-                    continue;
-                }
-            }
-        }
-
-        // Check for table continuation
-        if (effective_pivot_type == .table and n_parents == self.n_containers) {
-            line.type = .table;
-            break;
-        }
-
-        // Check for ATX header
-        if (line.indent < self.code_indent_offset and off < self.size and self.text[off] == '#') {
-            const atx_result = self.isAtxHeaderLine(off);
-            if (atx_result.is_atx) {
-                line.type = .atxheader;
-                line.data = atx_result.level;
-                line.beg = atx_result.content_beg;
-
-                // Trim trailing whitespace
-                while (line.end > line.beg and (helpers.isBlank(self.text[line.end - 1]) or self.text[line.end - 1] == '\t'))
-                    line.end -= 1;
-                // Trim optional closing # sequence
-                if (line.end > line.beg and self.text[line.end - 1] == '#') {
-                    var tmp = line.end;
-                    while (tmp > line.beg and self.text[tmp - 1] == '#') tmp -= 1;
-                    // The closing # must be preceded by space (or be the entire content)
-                    if (tmp == line.beg or helpers.isBlank(self.text[tmp - 1])) {
-                        line.end = tmp;
-                        // Trim trailing whitespace again
-                        while (line.end > line.beg and helpers.isBlank(self.text[line.end - 1]))
-                            line.end -= 1;
-                    }
-                }
-
-                break;
-            }
-        }
-
-        // Check for opening code fence
-        if (line.indent < self.code_indent_offset and off < self.size and
-            (self.text[off] == '`' or self.text[off] == '~'))
-        {
-            const fence_result = self.isOpeningCodeFence(off);
-            if (fence_result.is_fence) {
-                line.type = .fencedcode;
-                line.data = fence_result.fence_data;
-                line.enforce_new_block = true;
-                break;
-            }
-        }
-
-        // Check for HTML block start
-        if (off < self.size and self.text[off] == '<' and !self.flags.no_html_blocks) {
-            self.html_block_type = self.isHtmlBlockStartCondition(off);
-
-            // Type 7 can't interrupt paragraph
-            if (self.html_block_type == 7 and effective_pivot_type == .text)
-                self.html_block_type = 0;
-
-            if (self.html_block_type > 0) {
-                if (self.isHtmlBlockEndCondition(off, self.html_block_type)) {
-                    self.html_block_type = 0;
-                }
-                line.enforce_new_block = true;
-                line.type = .html;
-                break;
-            }
-        }
-
-        // Check for table underline
-        if (self.flags.tables and effective_pivot_type == .text and
-            off < self.size and (self.text[off] == '|' or self.text[off] == '-' or self.text[off] == ':') and
-            n_parents == self.n_containers)
-        {
-            const tbl_result = self.isTableUnderline(off);
-            if (tbl_result.is_underline and self.current_block != null and
-                self.current_block_lines.items.len >= 1)
-            {
-                // GFM: validate that header row column count matches delimiter row column count.
-                const header_line = self.current_block_lines.items[self.current_block_lines.items.len - 1];
-                const header_cols = self.countTableRowColumns(header_line.beg, header_line.end);
-                if (header_cols == tbl_result.col_count) {
-                    line.data = tbl_result.col_count;
-                    line.type = .tableunderline;
-                    break;
-                }
-            }
-        }
-
-        // Default: normal text line
-        line.type = .text;
-        if (effective_pivot_type == .text and n_brothers + n_children == 0) {
-            // Lazy continuation
-            n_parents = self.n_containers;
-        }
-
-        // Check for task mark
-        if (self.flags.tasklists and n_brothers + n_children > 0 and
-            self.n_containers > 0 and
-            isListItemMark(self.containers.items[self.n_containers - 1].ch))
-        {
-            var tmp = off;
-            while (tmp < self.size and tmp < off + 3 and helpers.isBlank(self.text[tmp]))
-                tmp += 1;
-            if (tmp + 2 < self.size and self.text[tmp] == '[' and
-                (self.text[tmp + 1] == 'x' or self.text[tmp + 1] == 'X' or self.text[tmp + 1] == ' ') and
-                self.text[tmp + 2] == ']' and
-                (tmp + 3 == self.size or helpers.isBlank(self.text[tmp + 3]) or helpers.isNewline(self.text[tmp + 3])))
-            {
-                const task_container = if (n_children > 0) &self.containers.items[self.n_containers - 1] else &container;
-                task_container.is_task = true;
-                task_container.task_mark_off = @intCast(tmp + 1);
-                off = @intCast(tmp + 3);
-                while (off < self.size and helpers.isWhitespace(self.text[off]))
-                    off += 1;
-                line.beg = off;
-            }
-        }
-
-        break;
-    }
-
-    // Scan for end of line
-    while (off < self.size and !helpers.isNewline(self.text[off]))
-        off += 1;
-
-    line.end = off;
-
-    // Trim trailing closing marks for ATX header
-    if (line.type == .atxheader) {
-        var tmp = line.end;
-        while (tmp > line.beg and helpers.isBlank(self.text[tmp - 1]))
-            tmp -= 1;
-        while (tmp > line.beg and self.text[tmp - 1] == '#')
-            tmp -= 1;
-        if (tmp == line.beg or helpers.isBlank(self.text[tmp - 1]) or self.flags.permissive_atx_headers)
-            line.end = tmp;
-    }
-
-    // Trim trailing spaces (except for code/HTML/text)
-    // Text lines keep trailing spaces for hard line break detection
-    if (line.type != .indentedcode and line.type != .fencedcode and line.type != .html and line.type != .text) {
-        while (line.end > line.beg and helpers.isBlank(self.text[line.end - 1]))
-            line.end -= 1;
-    }
-
-    // Eat newline
-    if (off < self.size and self.text[off] == '\r') off += 1;
-    if (off < self.size and self.text[off] == '\n') off += 1;
-
-    p_end.* = off;
-
-    // Loose list detection
-    if (prev_line_has_list_loosening_effect and line.type != .blank and n_parents + n_brothers > 0) {
-        const ci = n_parents + n_brothers - 1;
-        if (ci < self.containers.items.len and self.containers.items[ci].ch != '>') {
-            self.containers.items[ci].is_loose = true;
-        }
-    }
-
-    // Flush current leaf block before any container transitions
-    // so that VerbatimLine data stays contiguous after its BlockHeader.
-    if ((n_children == 0 and n_parents + n_brothers < self.n_containers) or n_brothers > 0 or n_children > 0) {
-        try self.endCurrentBlock();
-    }
-
-    // Leave containers we're no longer part of
-    if (n_children == 0 and n_parents + n_brothers < self.n_containers) {
-        try self.leaveChildContainers(n_parents + n_brothers);
-    }
-
-    // Enter brother containers
-    if (n_brothers > 0) {
-        // Close old LI, open new LI
-        try self.pushContainerBytes(.li, if (self.containers.items[n_parents].is_task) @as(u32, self.text[self.containers.items[n_parents].task_mark_off]) else 0, types.BLOCK_CONTAINER_CLOSER);
-        try self.pushContainerBytes(.li, if (container.is_task) @as(u32, self.text[container.task_mark_off]) else 0, types.BLOCK_CONTAINER_OPENER);
-        self.containers.items[n_parents].is_task = container.is_task;
-        self.containers.items[n_parents].task_mark_off = container.task_mark_off;
-    }
-
-    if (n_children > 0) {
-        try self.enterChildContainers(n_children);
-    }
-}
-
-pub fn processLine(self: *Parser, pivot_line: *Line, line: *Line, line_buf: *[2]Line, line_idx: *u1) error{OutOfMemory}!void {
-    // Blank line ends current leaf block.
-    // Note: blank lines inside fenced code blocks are typed .fencedcode by analyzeLine,
-    // and blank lines inside HTML blocks type 1-5 are typed .html by analyzeLine.
-    // Only closing fences and actual block-ending blank lines reach here as .blank.
-    if (line.type == .blank) {
-        try self.endCurrentBlock();
-        pivot_line.* = .{ .type = .blank };
-        return;
-    }
-
-    // Opening code fence: start block but don't include fence line as content
-    if (line.type == .fencedcode and line.enforce_new_block) {
-        try self.endCurrentBlock();
-        try self.startNewBlock(line);
-        self.fence_indent = line.indent;
-
-        // Extract info string position and store in block data
-        if (self.current_block) |cb_off| {
-            const hdr = self.getBlockHeaderAt(cb_off);
-            const fence_count = line.data >> 8;
-            var info_beg: OFF = line.beg + fence_count;
-            // Skip whitespace before info string
-            while (info_beg < line.end and helpers.isBlank(self.text[info_beg])) info_beg += 1;
-            hdr.data = info_beg;
-            hdr.flags |= types.BLOCK_FENCED_CODE;
-        }
-        pivot_line.* = line.*;
-        return;
-    }
-
-    if (line.enforce_new_block)
-        try self.endCurrentBlock();
-
-    // Single-line blocks
-    if (line.type == .hr or line.type == .atxheader) {
-        try self.endCurrentBlock();
-        try self.startNewBlock(line);
-        try self.addLineToCurrentBlock(line);
-        try self.endCurrentBlock();
-        pivot_line.* = .{ .type = .blank };
-        return;
-    }
-
-    // Setext underline changes current block to header
-    if (line.type == .setextunderline) {
-        if (self.current_block) |cb_off| {
-            var blk = self.getBlockAt(cb_off);
-            blk.block_type = .h;
-            blk.data = line.data;
-            blk.flags |= types.BLOCK_SETEXT_HEADER;
-        }
-        // Add the underline line (md4c stores it for ref def interaction)
-        try self.addLineToCurrentBlock(line);
-        try self.endCurrentBlock();
-        if (self.current_block == null) {
-            // Block was closed normally
-            pivot_line.* = .{ .type = .blank };
-        } else {
-            // Block stayed open: all body was consumed as link ref defs,
-            // underline downgraded to start of a new paragraph (md4c behavior)
-            line.type = .text;
-            pivot_line.* = line.*;
-        }
-        return;
-    }
-
-    // Table underline
-    if (line.type == .tableunderline) {
-        if (self.current_block) |cb_off| {
-            if (self.current_block_lines.items.len > 1) {
-                // GFM: table interrupts paragraph. Split: lines 0..N-2 stay as paragraph,
-                // last line becomes table header.
-                const last_line = self.current_block_lines.items[self.current_block_lines.items.len - 1];
-                // Remove the last line from current paragraph block
-                _ = self.current_block_lines.pop();
-                var hdr = self.getBlockHeaderAt(cb_off);
-                hdr.n_lines -= 1;
-                // End the paragraph
-                try self.endCurrentBlock();
-                // Start a new table block with the saved header line
-                var header_as_line = Line{
-                    .type = .table,
-                    .beg = last_line.beg,
-                    .end = last_line.end,
-                    .indent = last_line.indent,
-                    .data = line.data,
-                };
-                try self.startNewBlock(&header_as_line);
-                try self.addLineToCurrentBlock(&header_as_line);
-            } else {
-                // Single line paragraph: convert directly to table
-                var blk = self.getBlockAt(cb_off);
-                blk.block_type = .table;
-                blk.data = line.data;
-            }
-        }
-        // Change pivot to table
-        pivot_line.type = .table;
-        try self.addLineToCurrentBlock(line);
-        return;
-    }
-
-    // Different line type ends current block
-    if (line.type != pivot_line.type) {
-        try self.endCurrentBlock();
-    }
-
-    // Start new block if needed
-    if (self.current_block == null) {
-        try self.startNewBlock(line);
-        pivot_line.* = line.*;
-    }
-
-    // Add line to current block
-    try self.addLineToCurrentBlock(line);
-
-    // Ensure we alternate line buffers to avoid aliasing
-    _ = line_buf;
-    line_idx.* ^= 1;
-}
-
-pub fn startNewBlock(self: *Parser, line: *const Line) error{OutOfMemory}!void {
-    const block_type: BlockType = switch (line.type) {
-        .hr => .hr,
-        .atxheader => .h,
-        .fencedcode, .indentedcode => .code,
-        .html => .html,
-        .table, .tableunderline => .table,
-        else => .p,
-    };
-
-    // Align block_bytes for Block alignment
-    const align_mask: usize = @alignOf(BlockHeader) - 1;
-    const cur_len = self.block_bytes.items.len;
-    const aligned = (cur_len + align_mask) & ~align_mask;
-    const needed = aligned + @sizeOf(BlockHeader);
-    try self.block_bytes.ensureTotalCapacity(self.allocator, needed);
-    // Zero-pad
-    while (self.block_bytes.items.len < aligned) {
-        try self.block_bytes.append(self.allocator, 0);
-    }
-    self.block_bytes.items.len = needed;
-
-    const hdr = self.getBlockHeaderAt(aligned);
-    hdr.* = .{
-        .block_type = block_type,
-        .flags = 0,
-        .data = line.data,
-        .n_lines = 0,
-    };
-
-    self.current_block = aligned;
-    self.current_block_lines.clearRetainingCapacity();
-}
-
-pub fn addLineToCurrentBlock(self: *Parser, line: *const Line) error{OutOfMemory}!void {
-    if (self.current_block) |cb_off| {
-        const hdr = self.getBlockHeaderAt(cb_off);
-        hdr.n_lines += 1;
-        try self.current_block_lines.append(self.allocator, .{
-            .beg = line.beg,
-            .end = line.end,
-            .indent = line.indent,
-        });
-    }
-}
-
-pub fn endCurrentBlock(self: *Parser) error{OutOfMemory}!void {
-    if (self.current_block) |cb_off| {
-        var hdr = self.getBlockHeaderAt(cb_off);
-
-        // Consume link ref defs from setext headings (md4c: md_end_current_block).
-        // For regular paragraphs, ref defs are consumed in buildRefDefHashtable.
-        const is_setext = hdr.block_type == .h and (hdr.flags & types.BLOCK_SETEXT_HEADER) != 0;
-        if (is_setext and hdr.n_lines > 0 and
-            self.current_block_lines.items.len > 0 and
-            self.current_block_lines.items[0].beg < self.size and
-            self.text[self.current_block_lines.items[0].beg] == '[')
-        {
-            self.consumeRefDefsFromCurrentBlock();
-            hdr = self.getBlockHeaderAt(cb_off);
-        }
-
-        // Handle setext heading after ref def consumption
-        if (hdr.block_type == .h and (hdr.flags & types.BLOCK_SETEXT_HEADER) != 0) {
-            if (hdr.n_lines > 1) {
-                // Remove the underline (last line)
-                hdr.n_lines -= 1;
-                _ = self.current_block_lines.pop();
-            } else if (hdr.n_lines == 1) {
-                // Only underline left after eating ref defs → convert to paragraph,
-                // keep block open so subsequent lines join this paragraph (md4c behavior)
-                hdr.block_type = .p;
-                hdr.flags &= ~@as(u32, types.BLOCK_SETEXT_HEADER);
-                return; // Don't close the block!
-            } else {
-                // All lines consumed (shouldn't normally happen)
-                hdr.flags |= types.BLOCK_REF_DEF_ONLY;
-            }
-        }
-
-        // Write accumulated lines to block_bytes
-        const line_bytes = std.mem.sliceAsBytes(self.current_block_lines.items);
-        try self.block_bytes.appendSlice(self.allocator, line_bytes);
-        self.current_block = null;
-    }
-}
-
-pub fn consumeRefDefsFromCurrentBlock(self: *Parser) void {
-    const items = self.current_block_lines.items;
-    if (items.len == 0) return;
-
-    // Merge lines into buffer for ref def parsing
-    self.buffer.clearRetainingCapacity();
-    for (items) |vline| {
-        if (vline.beg > vline.end or vline.end > self.size) continue;
-        if (self.buffer.items.len > 0) {
-            self.buffer.append(self.allocator, '\n') catch {};
-        }
-        self.buffer.appendSlice(self.allocator, self.text[vline.beg..vline.end]) catch {};
-    }
-
-    const merged = self.buffer.items;
-    var pos: usize = 0;
-    var lines_consumed: u32 = 0;
-
-    while (pos < merged.len) {
-        const result = self.parseRefDef(merged, pos) orelse break;
-
-        const norm_label = self.normalizeLabel(result.label);
-        if (norm_label.len == 0) break;
-
-        // First definition wins
-        var already_exists = false;
-        for (self.ref_defs.items) |existing| {
-            if (std.mem.eql(u8, existing.label, norm_label)) {
-                already_exists = true;
-                break;
-            }
-        }
-        if (!already_exists) {
-            const dest_dupe = self.allocator.dupe(u8, result.dest) catch return;
-            const title_dupe = self.allocator.dupe(u8, result.title) catch return;
-            self.ref_defs.append(self.allocator, .{
-                .label = norm_label,
-                .dest = dest_dupe,
-                .title = title_dupe,
-            }) catch return;
-        }
-
-        var newlines: u32 = 0;
-        for (merged[pos..result.end_pos]) |mc| {
-            if (mc == '\n') newlines += 1;
-        }
-        if (result.end_pos >= merged.len and (result.end_pos == pos or merged[result.end_pos - 1] != '\n')) {
-            newlines += 1;
-        }
-        lines_consumed += newlines;
-        pos = result.end_pos;
-    }
-
-    if (lines_consumed > 0) {
-        if (self.current_block) |cb_off| {
-            var hdr = self.getBlockHeaderAt(cb_off);
-            if (lines_consumed >= hdr.n_lines) {
-                // All lines consumed
-                self.current_block_lines.clearRetainingCapacity();
-                hdr.n_lines = 0;
-            } else {
-                // Remove first lines_consumed lines
-                const remaining = items.len - lines_consumed;
-                std.mem.copyForwards(VerbatimLine, items[0..remaining], items[lines_consumed..]);
-                self.current_block_lines.shrinkRetainingCapacity(remaining);
-                hdr.n_lines -= lines_consumed;
-            }
-        }
-    }
-}
-
-pub fn getBlockHeaderAt(self: *Parser, off: usize) *BlockHeader {
-    return @ptrCast(@alignCast(self.block_bytes.items.ptr + off));
-}
-
-pub fn getBlockAt(self: *Parser, off: usize) *BlockHeader {
-    return self.getBlockHeaderAt(off);
-}
-
-const helpers = @import("./helpers.zig");
-const parser_mod = @import("./parser.zig");
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const autolinks_mod = @import("./autolinks.zig");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const isListItemMark = autolinks_mod.isListItemMark;
-
 const Parser = parser_mod.Parser;
 const BlockHeader = Parser.BlockHeader;
-
-const types = @import("./types.zig");
 const Align = types.Align;
 const BlockType = types.BlockType;
 const Container = types.Container;
 const Line = types.Line;
-const OFF = types.OFF;
 const VerbatimLine = types.VerbatimLine;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_array_lit(comptime Elem: type, init_slice: []const Elem) []const Elem { const buf = std.heap.page_allocator.alloc(Elem, init_slice.len) catch unreachable; if (init_slice.len > 0) @memcpy(buf, init_slice); return buf; }
+fn CpArrayElemType(comptime PtrT: type) type { const S0 = @typeInfo(PtrT).pointer.child; const S1 = if (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one) @typeInfo(S0).pointer.child else S0; return @typeInfo(S1).pointer.child; }
+fn cp_array_push(arr_ptr: anytype, item: anytype) void { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const SliceT = @TypeOf(target_ptr.*); const Elem = @typeInfo(SliceT).pointer.child; const old_slice = target_ptr.*; const new_slice = std.heap.page_allocator.alloc(Elem, old_slice.len + 1) catch unreachable; if (old_slice.len > 0) @memcpy(new_slice[0..old_slice.len], old_slice); new_slice[old_slice.len] = @as(Elem, cp_val(item)); target_ptr.* = new_slice; }
+fn cp_array_pop(arr_ptr: anytype) ?CpArrayElemType(@TypeOf(arr_ptr)) { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const s = target_ptr.*; if (s.len == 0) return null; const last = s[s.len - 1]; target_ptr.* = s[0 .. s.len - 1]; return last; }
+fn cp_container_clear(ptr: anytype) void { const S0 = @TypeOf(ptr.*); if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one and @typeInfo(@typeInfo(S0).pointer.child) == .@"struct" and @hasDecl(@typeInfo(S0).pointer.child, "clear"))) { ptr.*.clear(); } else { const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) ptr.* else ptr; target_ptr.* = target_ptr.*[0..0]; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val << shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val << @as(ShiftType, @truncate(u_shift));
+    }
+    return val << shift;
+}
+fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val >> shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val >> @as(ShiftType, @truncate(u_shift));
+    }
+    return val >> shift;
+}
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const helpers = @import("./helpers.zig");
+pub const parser_mod = @import("./parser.zig");
+pub const autolinks_mod = @import("./autolinks.zig");
+pub const types = @import("./types.zig");
+
+pub fn processDoc(p: *Parser) Parser.Error!void {
+        const dummy_blank = Line{ .type = .blank };
+        var pivot_line = dummy_blank;
+        _ = &pivot_line;
+        var line_buf: [2]Line = .{ .{}, .{} };
+        _ = &line_buf;
+        var line_idx: u1 = 0;
+        _ = &line_idx;
+        var off: u32 = 0;
+        _ = &off;
+        _ = try p.enterBlock(.doc, 0, 0);
+        while ((off < p.size)) {
+            const line = (&line_buf[@as(usize, @intCast(line_idx))]);
+            _ = try p.analyzeLine(off, (&off), (&pivot_line), line);
+            _ = try p.processLine((&pivot_line), line, (&line_buf), (&line_idx));
+        }
+        _ = try p.endCurrentBlock();
+        _ = try p.buildRefDefHashtable();
+        _ = try p.leaveChildContainers(0);
+        _ = try p.processAllBlocks();
+        _ = try p.leaveBlock(.doc, 0);
+}
+
+pub fn analyzeLine(p: *Parser, off_start: u32, p_end: *u32, pivot_line: *const Line, line: *Line) std.mem.Allocator.Error!void {
+        var off = off_start;
+        _ = &off;
+        var total_indent: u32 = 0;
+        _ = &total_indent;
+        var n_parents: u32 = 0;
+        _ = &n_parents;
+        var n_brothers: u32 = 0;
+        _ = &n_brothers;
+        var n_children: u32 = 0;
+        _ = &n_children;
+        var container = Container{  };
+        _ = &container;
+        const prev_line_has_list_loosening_effect = p.last_line_has_list_loosening_effect;
+        line.* = .{};
+        line.enforce_new_block = false;
+        const indent_result = helpers.lineIndentation(p.text, total_indent, off);
+        line.indent = indent_result.indent;
+        total_indent = (total_indent + line.indent);
+        off = indent_result.off;
+        line.beg = off;
+        var remaining_indent = total_indent;
+        _ = &remaining_indent;
+        while ((n_parents < p.n_containers)) {
+            const c = (&p.containers.items[@as(usize, @intCast(n_parents))]);
+            if ((c.ch == 62)) {
+                if ((((off < p.size) and (p.text[@as(usize, @intCast(off))] == 62)) and (line.indent < p.code_indent_offset))) {
+                    off = (off + 1);
+                    total_indent = (total_indent + 1);
+                    const r = helpers.lineIndentation(p.text, total_indent, off);
+                    line.indent = r.indent;
+                    total_indent = (total_indent + line.indent);
+                    off = r.off;
+                    if ((line.indent > 0)) {
+                        line.indent = (line.indent - 1);
+                    }
+                    remaining_indent = line.indent;
+                    line.beg = off;
+                    n_parents = (n_parents + 1);
+                    continue;
+                } else {
+                    break;
+                }
+            } else {
+                if ((remaining_indent >= c.contents_indent)) {
+                    remaining_indent = (remaining_indent - c.contents_indent);
+                    line.indent = remaining_indent;
+                    n_parents = (n_parents + 1);
+                    continue;
+                } else {
+                    break;
+                }
+            }
+        }
+        p.last_line_has_list_loosening_effect = false;
+        if (((off >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(off))]))) {
+            if (((n_brothers + n_children) == 0)) {
+                while (((n_parents < p.n_containers) and (p.containers.items[@as(usize, @intCast(n_parents))].ch != 62))) {
+                    n_parents = (n_parents + 1);
+                }
+            }
+        }
+        var effective_pivot_type = pivot_line.type;
+        _ = &effective_pivot_type;
+        while (true) {
+            if ((effective_pivot_type == .fencedcode)) {
+                line.beg = off;
+                if ((line.indent < p.code_indent_offset)) {
+                    if (p.isClosingCodeFence(off, pivot_line.data)) {
+                        line.type = .blank;
+                        p.last_line_has_list_loosening_effect = false;
+                        break;
+                    }
+                }
+                if ((n_parents == p.n_containers)) {
+                    if ((line.indent > p.fence_indent)) {
+                        line.indent = (line.indent - p.fence_indent);
+                    } else {
+                        line.indent = 0;
+                    }
+                    line.type = .fencedcode;
+                    break;
+                }
+            }
+            if (((effective_pivot_type == .html) and (p.html_block_type > 0))) {
+                if ((n_parents < p.n_containers)) {
+                    p.html_block_type = 0;
+                } else {
+                    if (p.isHtmlBlockEndCondition(off, p.html_block_type)) {
+                        const ended_type = p.html_block_type;
+                        p.html_block_type = 0;
+                        if (((ended_type == 6) or (ended_type == 7))) {
+                            line.type = .blank;
+                            line.indent = 0;
+                            break;
+                        }
+                    }
+                    line.type = .html;
+                    n_parents = p.n_containers;
+                    break;
+                }
+            }
+            if (((off >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(off))]))) {
+                if (((effective_pivot_type == .indentedcode) and (n_parents == p.n_containers))) {
+                    line.type = .indentedcode;
+                    if ((line.indent > p.code_indent_offset)) {
+                        line.indent = (line.indent - p.code_indent_offset);
+                    } else {
+                        line.indent = 0;
+                    }
+                    p.last_line_has_list_loosening_effect = false;
+                } else {
+                    line.type = .blank;
+                    p.last_line_has_list_loosening_effect = (((n_parents > 0) and ((n_brothers + n_children) == 0)) and (p.containers.items[@as(usize, @intCast((n_parents - 1)))].ch != 62));
+                    if ((p.html_block_type >= 6)) {
+                        p.html_block_type = 0;
+                    }
+                    if ((((((n_parents > 0) and (p.containers.items[@as(usize, @intCast((n_parents - 1)))].ch != 62)) and ((n_brothers + n_children) == 0)) and (p.current_block == null)) and (p.block_bytes.items.len > @sizeOf(BlockHeader)))) {
+                        const align_mask_: usize = (@alignOf(BlockHeader) - 1);
+                        const top_off = (((p.block_bytes.items.len - @sizeOf(BlockHeader)) + align_mask_) & (~align_mask_));
+                        if (((top_off + @sizeOf(BlockHeader)) <= p.block_bytes.items.len)) {
+                            const top_hdr: *const BlockHeader = @ptrCast(@alignCast((p.block_bytes.items.ptr + (p.block_bytes.items.len - @sizeOf(BlockHeader)))));
+                            if ((top_hdr.block_type == .li)) {
+                                p.last_list_item_starts_with_two_blank_lines = true;
+                            }
+                        }
+                    }
+                }
+                break;
+            } else {
+                if (p.last_list_item_starts_with_two_blank_lines) {
+                    if (((((((n_parents > 0) and (n_parents == p.n_containers)) and (p.containers.items[@as(usize, @intCast((n_parents - 1)))].ch != 62)) and ((n_brothers + n_children) == 0)) and (p.current_block == null)) and (p.block_bytes.items.len > @sizeOf(BlockHeader)))) {
+                        const top_hdr: *const BlockHeader = @ptrCast(@alignCast((p.block_bytes.items.ptr + (p.block_bytes.items.len - @sizeOf(BlockHeader)))));
+                        if ((top_hdr.block_type == .li)) {
+                            n_parents = (n_parents - 1);
+                            line.indent = total_indent;
+                            if ((n_parents > 0)) {
+                                line.indent = (line.indent - @min(line.indent, p.containers.items[@as(usize, @intCast((n_parents - 1)))].contents_indent));
+                            }
+                        }
+                    }
+                    p.last_list_item_starts_with_two_blank_lines = false;
+                }
+                p.last_line_has_list_loosening_effect = false;
+            }
+            if ((effective_pivot_type == .indentedcode)) {
+                if ((line.indent >= p.code_indent_offset)) {
+                    line.type = .indentedcode;
+                    line.indent = (line.indent - p.code_indent_offset);
+                    line.data = 0;
+                    break;
+                }
+            }
+            if ((((((line.indent < p.code_indent_offset) and (effective_pivot_type == .text)) and (off < p.size)) and ((p.text[@as(usize, @intCast(off))] == 61) or (p.text[@as(usize, @intCast(off))] == 45))) and (n_parents == p.n_containers))) {
+                const setext_result = p.isSetextUnderline(off);
+                if (setext_result.is_setext) {
+                    line.type = .setextunderline;
+                    line.data = setext_result.level;
+                    break;
+                }
+            }
+            if ((((line.indent < p.code_indent_offset) and (off < p.size)) and (((p.text[@as(usize, @intCast(off))] == 45) or (p.text[@as(usize, @intCast(off))] == 95)) or (p.text[@as(usize, @intCast(off))] == 42)))) {
+                if (p.isHrLine(off)) {
+                    line.type = .hr;
+                    break;
+                }
+            }
+            if (((n_parents < p.n_containers) and ((n_brothers + n_children) == 0))) {
+                const cont_result = p.isContainerMark(line.indent, off);
+                if (cont_result.is_container) {
+                    if (p.isContainerCompatible((&p.containers.items[@as(usize, @intCast(n_parents))]), (&cont_result.container))) {
+                        effective_pivot_type = .blank;
+                        container = cont_result.container;
+                        off = cont_result.off;
+                        total_indent = (total_indent + (container.contents_indent - container.mark_indent));
+                        const r = helpers.lineIndentation(p.text, total_indent, off);
+                        line.indent = r.indent;
+                        total_indent = (total_indent + line.indent);
+                        off = r.off;
+                        line.beg = off;
+                        if (((off >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(off))]))) {
+                            container.contents_indent = (container.contents_indent + 1);
+                        } else {
+                            if ((line.indent <= p.code_indent_offset)) {
+                                container.contents_indent = (container.contents_indent + line.indent);
+                                line.indent = 0;
+                            } else {
+                                container.contents_indent = (container.contents_indent + 1);
+                                line.indent = (line.indent - 1);
+                            }
+                        }
+                        p.containers.items[@as(usize, @intCast(n_parents))].mark_indent = container.mark_indent;
+                        p.containers.items[@as(usize, @intCast(n_parents))].contents_indent = container.contents_indent;
+                        p.html_block_type = 0;
+                        n_brothers = (n_brothers + 1);
+                        continue;
+                    }
+                }
+            }
+            if (((line.indent >= p.code_indent_offset) and (effective_pivot_type != .text))) {
+                line.type = .indentedcode;
+                line.indent = (line.indent - p.code_indent_offset);
+                line.data = 0;
+                break;
+            }
+            if ((line.indent < p.code_indent_offset)) {
+                const cont_result = p.isContainerMark(line.indent, off);
+                if (cont_result.is_container) {
+                    container = cont_result.container;
+                    if (((effective_pivot_type == .text) and (n_parents == p.n_containers))) {
+                        if ((((cont_result.off >= p.size) or helpers.isNewline(p.ch(cont_result.off))) and (container.ch != 62))) {
+                        } else {
+                            if ((((container.ch == 46) or (container.ch == 41)) and (container.start != 1))) {
+                            } else {
+                                off = cont_result.off;
+                                total_indent = (total_indent + (container.contents_indent - container.mark_indent));
+                                const r = helpers.lineIndentation(p.text, total_indent, off);
+                                line.indent = r.indent;
+                                total_indent = (total_indent + line.indent);
+                                off = r.off;
+                                line.beg = off;
+                                line.data = container.ch;
+                                if (((off >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(off))]))) {
+                                    container.contents_indent = (container.contents_indent + 1);
+                                } else {
+                                    if ((line.indent <= p.code_indent_offset)) {
+                                        container.contents_indent = (container.contents_indent + line.indent);
+                                        line.indent = 0;
+                                    } else {
+                                        container.contents_indent = (container.contents_indent + 1);
+                                        line.indent = (line.indent - 1);
+                                    }
+                                }
+                                if (((n_brothers + n_children) == 0)) {
+                                    effective_pivot_type = .blank;
+                                }
+                                if ((n_children == 0)) {
+                                    _ = try p.endCurrentBlock();
+                                    _ = try p.leaveChildContainers((n_parents + n_brothers));
+                                }
+                                n_children = (n_children + 1);
+                                _ = try p.pushContainer((&container));
+                                continue;
+                            }
+                        }
+                    } else {
+                        off = cont_result.off;
+                        total_indent = (total_indent + (container.contents_indent - container.mark_indent));
+                        const r = helpers.lineIndentation(p.text, total_indent, off);
+                        line.indent = r.indent;
+                        total_indent = (total_indent + line.indent);
+                        off = r.off;
+                        line.beg = off;
+                        line.data = container.ch;
+                        if (((off >= p.size) or helpers.isNewline(p.text[@as(usize, @intCast(off))]))) {
+                            container.contents_indent = (container.contents_indent + 1);
+                        } else {
+                            if ((line.indent <= p.code_indent_offset)) {
+                                container.contents_indent = (container.contents_indent + line.indent);
+                                line.indent = 0;
+                            } else {
+                                container.contents_indent = (container.contents_indent + 1);
+                                line.indent = (line.indent - 1);
+                            }
+                        }
+                        if (((n_brothers + n_children) == 0)) {
+                            effective_pivot_type = .blank;
+                        }
+                        if ((n_children == 0)) {
+                            _ = try p.endCurrentBlock();
+                            _ = try p.leaveChildContainers((n_parents + n_brothers));
+                        }
+                        n_children = (n_children + 1);
+                        _ = try p.pushContainer((&container));
+                        continue;
+                    }
+                }
+            }
+            if (((effective_pivot_type == .table) and (n_parents == p.n_containers))) {
+                line.type = .table;
+                break;
+            }
+            if ((((line.indent < p.code_indent_offset) and (off < p.size)) and (p.text[@as(usize, @intCast(off))] == 35))) {
+                const atx_result = p.isAtxHeaderLine(off);
+                if (atx_result.is_atx) {
+                    line.type = .atxheader;
+                    line.data = atx_result.level;
+                    line.beg = atx_result.content_beg;
+                    while (((line.end > line.beg) and (helpers.isBlank(p.text[@as(usize, @intCast((line.end - 1)))]) or (p.text[@as(usize, @intCast((line.end - 1)))] == 9)))) {
+                        line.end = (line.end - 1);
+                    }
+                    if (((line.end > line.beg) and (p.text[@as(usize, @intCast((line.end - 1)))] == 35))) {
+                        var tmp = line.end;
+                        _ = &tmp;
+                        while (((tmp > line.beg) and (p.text[@as(usize, @intCast((tmp - 1)))] == 35))) {
+                            tmp = (tmp - 1);
+                        }
+                        if (((tmp == line.beg) or helpers.isBlank(p.text[@as(usize, @intCast((tmp - 1)))]))) {
+                            line.end = tmp;
+                            while (((line.end > line.beg) and helpers.isBlank(p.text[@as(usize, @intCast((line.end - 1)))]))) {
+                                line.end = (line.end - 1);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+            if ((((line.indent < p.code_indent_offset) and (off < p.size)) and ((p.text[@as(usize, @intCast(off))] == 96) or (p.text[@as(usize, @intCast(off))] == 126)))) {
+                const fence_result = p.isOpeningCodeFence(off);
+                if (fence_result.is_fence) {
+                    line.type = .fencedcode;
+                    line.data = fence_result.fence_data;
+                    line.enforce_new_block = true;
+                    break;
+                }
+            }
+            if ((((off < p.size) and (p.text[@as(usize, @intCast(off))] == 60)) and (!p.flags.no_html_blocks))) {
+                p.html_block_type = p.isHtmlBlockStartCondition(off);
+                if (((p.html_block_type == 7) and (effective_pivot_type == .text))) {
+                    p.html_block_type = 0;
+                }
+                if ((p.html_block_type > 0)) {
+                    if (p.isHtmlBlockEndCondition(off, p.html_block_type)) {
+                        p.html_block_type = 0;
+                    }
+                    line.enforce_new_block = true;
+                    line.type = .html;
+                    break;
+                }
+            }
+            if (((((p.flags.tables and (effective_pivot_type == .text)) and (off < p.size)) and (((p.text[@as(usize, @intCast(off))] == 124) or (p.text[@as(usize, @intCast(off))] == 45)) or (p.text[@as(usize, @intCast(off))] == 58))) and (n_parents == p.n_containers))) {
+                const tbl_result = p.isTableUnderline(off);
+                if (((tbl_result.is_underline and (p.current_block != null)) and (p.current_block_lines.items.len >= 1))) {
+                    const header_line = p.current_block_lines.items[@as(usize, @intCast((p.current_block_lines.items.len - 1)))];
+                    const header_cols = p.countTableRowColumns(header_line.beg, header_line.end);
+                    if ((header_cols == tbl_result.col_count)) {
+                        line.data = tbl_result.col_count;
+                        line.type = .tableunderline;
+                        break;
+                    }
+                }
+            }
+            line.type = .text;
+            if (((effective_pivot_type == .text) and ((n_brothers + n_children) == 0))) {
+                n_parents = p.n_containers;
+            }
+            if ((((p.flags.tasklists and ((n_brothers + n_children) > 0)) and (p.n_containers > 0)) and isListItemMark(p.containers.items[@as(usize, @intCast((p.n_containers - 1)))].ch))) {
+                var tmp = off;
+                _ = &tmp;
+                while ((((tmp < p.size) and (tmp < (off + 3))) and helpers.isBlank(p.text[@as(usize, @intCast(tmp))]))) {
+                    tmp = (tmp + 1);
+                }
+                if (((((((tmp + 2) < p.size) and (p.text[@as(usize, @intCast(tmp))] == 91)) and (((p.text[@as(usize, @intCast((tmp + 1)))] == 120) or (p.text[@as(usize, @intCast((tmp + 1)))] == 88)) or (p.text[@as(usize, @intCast((tmp + 1)))] == 32))) and (p.text[@as(usize, @intCast((tmp + 2)))] == 93)) and ((((tmp + 3) == p.size) or helpers.isBlank(p.text[@as(usize, @intCast((tmp + 3)))])) or helpers.isNewline(p.text[@as(usize, @intCast((tmp + 3)))])))) {
+                    var task_container = (if ((n_children > 0)) (&p.containers.items[@as(usize, @intCast((p.n_containers - 1)))]) else (&container));
+                    _ = &task_container;
+                    task_container.is_task = true;
+                    task_container.task_mark_off = @intCast((tmp + 1));
+                    off = @intCast((tmp + 3));
+                    while (((off < p.size) and helpers.isWhitespace(p.text[@as(usize, @intCast(off))]))) {
+                        off = (off + 1);
+                    }
+                    line.beg = off;
+                }
+            }
+            break;
+        }
+        while (((off < p.size) and (!helpers.isNewline(p.text[@as(usize, @intCast(off))])))) {
+            off = (off + 1);
+        }
+        line.end = off;
+        if ((line.type == .atxheader)) {
+            var tmp = line.end;
+            _ = &tmp;
+            while (((tmp > line.beg) and helpers.isBlank(p.text[@as(usize, @intCast((tmp - 1)))]))) {
+                tmp = (tmp - 1);
+            }
+            while (((tmp > line.beg) and (p.text[@as(usize, @intCast((tmp - 1)))] == 35))) {
+                tmp = (tmp - 1);
+            }
+            if ((((tmp == line.beg) or helpers.isBlank(p.text[@as(usize, @intCast((tmp - 1)))])) or p.flags.permissive_atx_headers)) {
+                line.end = tmp;
+            }
+        }
+        if (((((line.type != .indentedcode) and (line.type != .fencedcode)) and (line.type != .html)) and (line.type != .text))) {
+            while (((line.end > line.beg) and helpers.isBlank(p.text[@as(usize, @intCast((line.end - 1)))]))) {
+                line.end = (line.end - 1);
+            }
+        }
+        if (((off < p.size) and (p.text[@as(usize, @intCast(off))] == 13))) {
+            off = (off + 1);
+        }
+        if (((off < p.size) and (p.text[@as(usize, @intCast(off))] == 10))) {
+            off = (off + 1);
+        }
+        p_end.* = off;
+        if (((prev_line_has_list_loosening_effect and (line.type != .blank)) and ((n_parents + n_brothers) > 0))) {
+            const ci = ((n_parents + n_brothers) - 1);
+            if (((ci < p.containers.items.len) and (p.containers.items[@as(usize, @intCast(ci))].ch != 62))) {
+                p.containers.items[@as(usize, @intCast(ci))].is_loose = true;
+            }
+        }
+        if (((((n_children == 0) and ((n_parents + n_brothers) < p.n_containers)) or (n_brothers > 0)) or (n_children > 0))) {
+            _ = try p.endCurrentBlock();
+        }
+        if (((n_children == 0) and ((n_parents + n_brothers) < p.n_containers))) {
+            _ = try p.leaveChildContainers((n_parents + n_brothers));
+        }
+        if ((n_brothers > 0)) {
+            _ = try p.pushContainerBytes(.li, (if (p.containers.items[@as(usize, @intCast(n_parents))].is_task) (if (comptime @typeInfo(@TypeOf(p.text[@as(usize, @intCast(p.containers.items[@as(usize, @intCast(n_parents))].task_mark_off))])) == .@"enum") cp_cast_int(u32, @intFromEnum(p.text[@as(usize, @intCast(p.containers.items[@as(usize, @intCast(n_parents))].task_mark_off))])) else cp_cast_int(u32, p.text[@as(usize, @intCast(p.containers.items[@as(usize, @intCast(n_parents))].task_mark_off))])) else 0), types.BLOCK_CONTAINER_CLOSER);
+            _ = try p.pushContainerBytes(.li, (if (container.is_task) (if (comptime @typeInfo(@TypeOf(p.text[@as(usize, @intCast(container.task_mark_off))])) == .@"enum") cp_cast_int(u32, @intFromEnum(p.text[@as(usize, @intCast(container.task_mark_off))])) else cp_cast_int(u32, p.text[@as(usize, @intCast(container.task_mark_off))])) else 0), types.BLOCK_CONTAINER_OPENER);
+            p.containers.items[@as(usize, @intCast(n_parents))].is_task = container.is_task;
+            p.containers.items[@as(usize, @intCast(n_parents))].task_mark_off = container.task_mark_off;
+        }
+        if ((n_children > 0)) {
+            _ = try p.enterChildContainers(n_children);
+        }
+}
+
+pub fn processLine(p: *Parser, pivot_line: *Line, line: *Line, line_buf: *[2]Line, line_idx: *u1) std.mem.Allocator.Error!void {
+        if ((line.type == .blank)) {
+            _ = try p.endCurrentBlock();
+            pivot_line.* = .{ .type = .blank };
+            return;
+        }
+        if (((line.type == .fencedcode) and line.enforce_new_block)) {
+            _ = try p.endCurrentBlock();
+            _ = try p.startNewBlock(line);
+            p.fence_indent = line.indent;
+            if (p.current_block) |cb_off| {
+                _ = &cb_off;
+                var hdr = p.getBlockHeaderAt(cb_off);
+                _ = &hdr;
+                const fence_count = cp_shr(line.data, 8);
+                var info_beg: u32 = (line.beg + fence_count);
+                _ = &info_beg;
+                while (((info_beg < line.end) and helpers.isBlank(p.text[@as(usize, @intCast(info_beg))]))) {
+                    info_beg = (info_beg + 1);
+                }
+                hdr.data = info_beg;
+                hdr.flags = (hdr.flags | types.BLOCK_FENCED_CODE);
+            }
+            pivot_line.* = line.*;
+            return;
+        }
+        if (line.enforce_new_block) {
+            _ = try p.endCurrentBlock();
+        }
+        if (((line.type == .hr) or (line.type == .atxheader))) {
+            _ = try p.endCurrentBlock();
+            _ = try p.startNewBlock(line);
+            _ = try p.addLineToCurrentBlock(line);
+            _ = try p.endCurrentBlock();
+            pivot_line.* = .{ .type = .blank };
+            return;
+        }
+        if ((line.type == .setextunderline)) {
+            if (p.current_block) |cb_off| {
+                _ = &cb_off;
+                var blk = p.getBlockAt(cb_off);
+                _ = &blk;
+                blk.block_type = .h;
+                blk.data = line.data;
+                blk.flags = (blk.flags | types.BLOCK_SETEXT_HEADER);
+            }
+            _ = try p.addLineToCurrentBlock(line);
+            _ = try p.endCurrentBlock();
+            if ((p.current_block == null)) {
+                pivot_line.* = .{ .type = .blank };
+            } else {
+                line.type = .text;
+                pivot_line.* = line.*;
+            }
+            return;
+        }
+        if ((line.type == .tableunderline)) {
+            if (p.current_block) |cb_off| {
+                _ = &cb_off;
+                if ((p.current_block_lines.items.len > 1)) {
+                    const last_line = p.current_block_lines.items[@as(usize, @intCast((p.current_block_lines.items.len - 1)))];
+                    _ = p.current_block_lines.pop();
+                    var hdr = p.getBlockHeaderAt(cb_off);
+                    _ = &hdr;
+                    hdr.n_lines = (hdr.n_lines - 1);
+                    _ = try p.endCurrentBlock();
+                    var header_as_line = Line{ .type = .table, .beg = last_line.beg, .end = last_line.end, .indent = last_line.indent, .data = line.data };
+                    _ = &header_as_line;
+                    _ = try p.startNewBlock((&header_as_line));
+                    _ = try p.addLineToCurrentBlock((&header_as_line));
+                } else {
+                    var blk = p.getBlockAt(cb_off);
+                    _ = &blk;
+                    blk.block_type = .table;
+                    blk.data = line.data;
+                }
+            }
+            pivot_line.type = .table;
+            _ = try p.addLineToCurrentBlock(line);
+            return;
+        }
+        if ((line.type != pivot_line.type)) {
+            _ = try p.endCurrentBlock();
+        }
+        if ((p.current_block == null)) {
+            _ = try p.startNewBlock(line);
+            pivot_line.* = line.*;
+        }
+        _ = try p.addLineToCurrentBlock(line);
+        var _u = line_buf;
+        _ = &_u;
+        line_idx.* = (line_idx.* ^ 1);
+}
+
+pub fn startNewBlock(p: *Parser, line: *const Line) std.mem.Allocator.Error!void {
+        const block_type: BlockType = (switch (line.type) {
+.hr => .hr,
+.atxheader => .h,
+.fencedcode, .indentedcode => .code,
+.html => .html,
+.table, .tableunderline => .table,
+else => .p,
+});
+        const align_mask: usize = (@alignOf(BlockHeader) - 1);
+        const cur_len = p.block_bytes.items.len;
+        const aligned = ((cur_len + align_mask) & (~align_mask));
+        const needed = (aligned + @sizeOf(BlockHeader));
+        _ = try p.block_bytes.ensureTotalCapacity(p.allocator, needed);
+        while ((p.block_bytes.items.len < aligned)) {
+            _ = try p.block_bytes.append(p.allocator, 0);
+        }
+        p.block_bytes.items.len = needed;
+        var hdr = p.getBlockHeaderAt(aligned);
+        _ = &hdr;
+        hdr.* = .{ .block_type = block_type, .flags = 0, .data = line.data, .n_lines = 0 };
+        p.current_block = aligned;
+        _ = p.current_block_lines.clearRetainingCapacity();
+}
+
+pub fn addLineToCurrentBlock(p: *Parser, line: *const Line) std.mem.Allocator.Error!void {
+        if (p.current_block) |cb_off| {
+            _ = &cb_off;
+            var hdr = p.getBlockHeaderAt(cb_off);
+            _ = &hdr;
+            hdr.n_lines = (hdr.n_lines + 1);
+            _ = try p.current_block_lines.append(p.allocator, .{ .beg = line.beg, .end = line.end, .indent = line.indent });
+        }
+}
+
+pub fn endCurrentBlock(p: *Parser) std.mem.Allocator.Error!void {
+        if (p.current_block) |cb_off| {
+            _ = &cb_off;
+            var hdr = p.getBlockHeaderAt(cb_off);
+            _ = &hdr;
+            const is_setext = ((hdr.block_type == .h) and ((hdr.flags & types.BLOCK_SETEXT_HEADER) != 0));
+            if (((((is_setext and (hdr.n_lines > 0)) and (p.current_block_lines.items.len > 0)) and (p.current_block_lines.items[0].beg < p.size)) and (p.text[@as(usize, @intCast(p.current_block_lines.items[0].beg))] == 91))) {
+                _ = p.consumeRefDefsFromCurrentBlock();
+                hdr = p.getBlockHeaderAt(cb_off);
+            }
+            if (((hdr.block_type == .h) and ((hdr.flags & types.BLOCK_SETEXT_HEADER) != 0))) {
+                if ((hdr.n_lines > 1)) {
+                    hdr.n_lines = (hdr.n_lines - 1);
+                    _ = p.current_block_lines.pop();
+                } else {
+                    if ((hdr.n_lines == 1)) {
+                        hdr.block_type = .p;
+                        hdr.flags = (hdr.flags & (~(if (comptime @typeInfo(@TypeOf(types.BLOCK_SETEXT_HEADER)) == .@"enum") cp_cast_int(u32, @intFromEnum(types.BLOCK_SETEXT_HEADER)) else cp_cast_int(u32, types.BLOCK_SETEXT_HEADER))));
+                        return;
+                    } else {
+                        hdr.flags = (hdr.flags | types.BLOCK_REF_DEF_ONLY);
+                    }
+                }
+            }
+            const line_bytes = std.mem.sliceAsBytes(p.current_block_lines.items);
+            _ = try p.block_bytes.appendSlice(p.allocator, line_bytes);
+            p.current_block = null;
+        }
+}
+
+pub fn consumeRefDefsFromCurrentBlock(p: *Parser) void {
+        const items = p.current_block_lines.items;
+        if ((items.len == 0)) {
+            return;
+        }
+        _ = p.buffer.clearRetainingCapacity();
+        for (cp_iter_slice(items)) |vline| {
+            _ = &vline;
+            if (((vline.beg > vline.end) or (vline.end > p.size))) {
+                continue;
+            }
+            if ((p.buffer.items.len > 0)) {
+                _ = (blk_catch_0: { break :blk_catch_0 ((p.buffer.append(p.allocator, 10)) catch |__ce_0| { _ = &__ce_0;  }); });
+            }
+            _ = (blk_catch_1: { break :blk_catch_1 ((p.buffer.appendSlice(p.allocator, p.text[vline.beg..vline.end])) catch |__ce_1| { _ = &__ce_1;  }); });
+        }
+        const merged = p.buffer.items;
+        var pos: usize = 0;
+        _ = &pos;
+        var lines_consumed: u32 = 0;
+        _ = &lines_consumed;
+        while ((pos < merged.len)) {
+            const result = ((p.parseRefDef(merged, pos)) orelse break);
+            const norm_label = p.normalizeLabel(result.label);
+            if ((norm_label.len == 0)) {
+                break;
+            }
+            var already_exists = false;
+            _ = &already_exists;
+            for (p.ref_defs.items) |existing| {
+                _ = &existing;
+                if (std.mem.eql(u8, existing.label, norm_label)) {
+                    already_exists = true;
+                    break;
+                }
+            }
+            if ((!already_exists)) {
+                const dest_dupe = (blk_catch_2: { break :blk_catch_2 ((p.allocator.dupe(u8, result.dest)) catch |__ce_2| { _ = &__ce_2; return; }); });
+                const title_dupe = (blk_catch_3: { break :blk_catch_3 ((p.allocator.dupe(u8, result.title)) catch |__ce_3| { _ = &__ce_3; return; }); });
+                _ = (blk_catch_4: { break :blk_catch_4 ((p.ref_defs.append(p.allocator, .{ .label = norm_label, .dest = dest_dupe, .title = title_dupe })) catch |__ce_4| { _ = &__ce_4; return; }); });
+            }
+            var newlines: u32 = 0;
+            _ = &newlines;
+            for (cp_iter_slice(merged[pos..result.end_pos])) |mc| {
+                _ = &mc;
+                if ((mc == 10)) {
+                    newlines = (newlines + 1);
+                }
+            }
+            if (((result.end_pos >= merged.len) and ((result.end_pos == pos) or (merged[@as(usize, @intCast((result.end_pos - 1)))] != 10)))) {
+                newlines = (newlines + 1);
+            }
+            lines_consumed = (lines_consumed + newlines);
+            pos = result.end_pos;
+        }
+        if ((lines_consumed > 0)) {
+            if (p.current_block) |cb_off| {
+                _ = &cb_off;
+                var hdr = p.getBlockHeaderAt(cb_off);
+                _ = &hdr;
+                if ((lines_consumed >= hdr.n_lines)) {
+                    _ = p.current_block_lines.clearRetainingCapacity();
+                    hdr.n_lines = 0;
+                } else {
+                    const remaining = (items.len - lines_consumed);
+                    _ = std.mem.copyForwards(VerbatimLine, items[0..remaining], items[lines_consumed..]);
+                    _ = p.current_block_lines.shrinkRetainingCapacity(remaining);
+                    hdr.n_lines = (hdr.n_lines - lines_consumed);
+                }
+            }
+        }
+}
+
+pub fn getBlockHeaderAt(p: *Parser, off: usize) *BlockHeader {
+        return @ptrCast(@alignCast((p.block_bytes.items.ptr + off)));
+}
+
+pub fn getBlockAt(p: *Parser, off: usize) *BlockHeader {
+        return p.getBlockHeaderAt(off);
+}

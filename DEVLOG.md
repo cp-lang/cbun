@@ -234,3 +234,10 @@
   - `src/unicode/` 全树 18/18 100% 闭合、`src/string/immutable/` 首批 5 个模块。
 - **省 Token 批处理模式实测成效**：
   - 结合 `GEMINI.md` 瘦身（13.3 KB）、`AGENTS_H.md` 归档与 `scripts/zig2cp_prep.py` 机械语法预转换，子智能体 `11dfb5e3` 仅用 ~30 步即完成 13 个 `unicode` 模块迁移，子智能体 `aa37a18c` 仅用 ~44 步即完成 5 个大型 `uucode_lib` 模块（4,526 行），单模块 Token 消耗下降约 **85%**。
+
+
+## 2026-11-14: Milestone 7 Phase 12 闭环（`src/sql/` 全树 87/87 与 `src/md/` 16/16 100% 闭合）
+- **新增 18 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - `src/sql/postgres/PostgresTypes.cp`、`src/sql/postgres/types/Tag.cp`、`src/md/` (16/16)。
+- **关键工程经验**：
+  - `src/md/entity.cp` (2,165 行) 与 `src/md/ansi_renderer.cp` (2,260 行) 通过 `scripts/zig2cp_prep.py` 预转换后仅用少量 `edit_file` 即一次性通过 `cpc --lib` 与 `zig ast-check`，代码行数变化控制在 `+0.5%` 以内。

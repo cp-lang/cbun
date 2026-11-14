@@ -1,749 +1,755 @@
-/// Emphasis delimiter entry for CommonMark emphasis algorithm.
-pub const MAX_EMPH_MATCHES = 6;
-
-pub const EmphDelim = struct {
-    pos: usize, // start position in content
-    count: usize, // original run length
-    emph_char: u8, // * or _
-    can_open: bool,
-    can_close: bool,
-    remaining: usize, // chars not yet consumed
-    open_count: usize = 0, // total chars consumed as opener
-    close_count: usize = 0, // total chars consumed as closer
-    // Individual match sizes in order (each is 1 for em, 2 for strong)
-    open_sizes: [MAX_EMPH_MATCHES]u2 = [_]u2{0} ** MAX_EMPH_MATCHES,
-    open_num: u4 = 0, // number of open matches
-    close_sizes: [MAX_EMPH_MATCHES]u2 = [_]u2{0} ** MAX_EMPH_MATCHES,
-    close_num: u4 = 0, // number of close matches
-    active: bool = true, // false if deactivated between matched pairs
-};
-
-/// Merge all lines into buffer with \n between them (unmodified),
-/// then process inlines on the merged text. Hard/soft breaks are detected
-/// during inline processing when \n is encountered.
-pub fn processLeafBlock(self: *Parser, block_lines: []const VerbatimLine, trim_trailing: bool) Parser.Error!void {
-    if (block_lines.len == 0) return;
-
-    self.buffer.clearRetainingCapacity();
-
-    for (block_lines) |vline| {
-        if (vline.beg > vline.end or vline.end > self.size) continue;
-
-        if (self.buffer.items.len > 0) {
-            self.buffer.append(self.allocator, '\n') catch {};
-        }
-        self.buffer.appendSlice(self.allocator, self.text[vline.beg..vline.end]) catch {};
-    }
-
-    var merged = self.buffer.items;
-    // For headings, trim trailing whitespace
-    if (trim_trailing) {
-        while (merged.len > 0 and (merged[merged.len - 1] == ' ' or
-            merged[merged.len - 1] == '\t'))
-            merged = merged[0 .. merged.len - 1];
-    }
-    try self.processInlineContent(merged, block_lines[0].beg);
-}
-
-pub fn processInlineContent(self: *Parser, content: []const u8, base_off: OFF) Parser.Error!void {
-    if (!self.stack_check.isSafeToRecurse()) {
-        return bun.throwStackOverflow();
-    }
-
-    // Phase 1: Collect and resolve emphasis delimiters
-    self.collectEmphasisDelimiters(content);
-    self.resolveEmphasisDelimiters();
-
-    // Copy resolved delimiters locally (recursive calls may modify emph_delims)
-    const resolved = self.allocator.dupe(EmphDelim, self.emph_delims.items) catch {
-        // Fallback: emit content as plain text
-        try self.emitText(.normal, content);
-        return;
-    };
-    defer self.allocator.free(resolved);
-
-    // Phase 2: Emit content using resolved emphasis info
-    var i: usize = 0;
-    var text_start: usize = 0;
-    var delim_cursor: usize = 0;
-
-    while (i < content.len) {
-        const c = content[i];
-
-        // Fast path: character has no special meaning, skip it
-        if (!self.mark_char_map.isSet(c)) {
-            i += 1;
-            continue;
-        }
-
-        // Newline from merged lines — check for hard break
-        if (c == '\n') {
-            var emit_end = i;
-            var is_hard = false;
-            if (emit_end > text_start and content[emit_end - 1] == '\\') {
-                emit_end -= 1;
-                is_hard = true;
-            } else {
-                var sp = emit_end;
-                while (sp > text_start and content[sp - 1] == ' ') sp -= 1;
-                if (emit_end - sp >= 2) {
-                    // Also strip any trailing tabs/spaces before the space run
-                    while (sp > text_start and (content[sp - 1] == ' ' or content[sp - 1] == '\t')) sp -= 1;
-                    emit_end = sp;
-                    is_hard = true;
-                }
-            }
-            if (emit_end > text_start) try self.emitText(.normal, content[text_start..emit_end]);
-            if (is_hard) try self.emitText(.br, "") else try self.emitText(.softbr, "");
-            i += 1;
-            text_start = i;
-            continue;
-        }
-
-        // Check for backslash escape
-        if (c == '\\' and i + 1 < content.len and helpers.isAsciiPunctuation(content[i + 1])) {
-            if (i > text_start) try self.emitText(.normal, content[text_start..i]);
-            i += 1;
-            try self.emitText(.normal, content[i .. i + 1]);
-            i += 1;
-            text_start = i;
-            continue;
-        }
-
-        // Code span
-        if (c == '`') {
-            if (i > text_start) try self.emitText(.normal, content[text_start..i]);
-            const count = countBackticks(content, i);
-            if (self.findCodeSpanEnd(content, i + count, count)) |end_pos| {
-                try self.enterSpan(.code);
-                const code_content = self.normalizeCodeSpanContent(content[i + count .. end_pos]);
-                try self.emitText(.code, code_content);
-                try self.leaveSpan(.code);
-                i = end_pos + count;
-            } else {
-                // No matching closer found — emit the entire backtick run as literal text
-                try self.emitText(.normal, content[i .. i + count]);
-                i += count;
-            }
-            text_start = i;
-            continue;
-        }
-
-        // Emphasis/strikethrough with * or _ or ~ — use resolved delimiters
-        if (c == '*' or c == '_' or (c == '~' and self.flags.strikethrough)) {
-            // Find the corresponding resolved delimiter
-            while (delim_cursor < resolved.len and resolved[delim_cursor].pos < i) delim_cursor += 1;
-
-            if (delim_cursor < resolved.len and resolved[delim_cursor].pos == i) {
-                if (i > text_start) try self.emitText(.normal, content[text_start..i]);
-
-                const d = &resolved[delim_cursor];
-                const run_end = d.pos + d.count;
-
-                // Emit closing tags first (innermost to outermost)
-                if (d.emph_char == '~') {
-                    if (d.close_count > 0) try self.leaveSpan(.del);
-                } else {
-                    try self.emitEmphCloseTags(d.close_sizes[0..d.close_num]);
-                }
-
-                // Emit remaining delimiter chars as text
-                const text_chars = d.count -| (d.open_count + d.close_count);
-                if (text_chars > 0) {
-                    try self.emitText(.normal, content[i .. i + text_chars]);
-                }
-
-                // Emit opening tags (outermost to innermost)
-                if (d.emph_char == '~') {
-                    if (d.open_count > 0) try self.enterSpan(.del);
-                } else {
-                    try self.emitEmphOpenTags(d.open_sizes[0..d.open_num]);
-                }
-
-                delim_cursor += 1;
-                i = run_end;
-                text_start = i;
-                continue;
-            }
-            // No resolved delimiter found, just advance
-            i += 1;
-            continue;
-        }
-
-        // HTML entity
-        if (c == '&') {
-            if (self.findEntity(content, i)) |end_pos| {
-                if (i > text_start) try self.emitText(.normal, content[text_start..i]);
-                try self.emitText(.entity, content[i..end_pos]);
-                i = end_pos;
-                text_start = i;
-                continue;
-            }
-        }
-
-        // HTML tag
-        if (c == '<' and !self.flags.no_html_spans) {
-            if (self.findHtmlTag(content, i)) |tag_end| {
-                if (i > text_start) try self.emitText(.normal, content[text_start..i]);
-                try self.emitText(.html, content[i..tag_end]);
-                i = tag_end;
-                text_start = i;
-                continue;
-            }
-            if (self.findAutolink(content, i)) |autolink| {
-                if (i > text_start) try self.emitText(.normal, content[text_start..i]);
-                try self.renderAutolink(content[i + 1 .. autolink.end_pos - 1], autolink.is_email);
-                i = autolink.end_pos;
-                text_start = i;
-                continue;
-            }
-        }
-
-        // Wiki links: [[destination]] or [[destination|label]]
-        if (c == '[' and self.flags.wiki_links and i + 1 < content.len and content[i + 1] == '[') {
-            if (i > text_start) try self.emitText(.normal, content[text_start..i]);
-            if (try self.processWikiLink(content, i)) |end_pos| {
-                i = end_pos;
-                text_start = i;
-                continue;
-            }
-            // No wikilink matched: restore text_start so preceding text
-            // isn't double-emitted by the next span branch.
-            text_start = i;
-        }
-
-        // Links: [text](url) or [text][ref]
-        if (c == '[') {
-            if (i > text_start) try self.emitText(.normal, content[text_start..i]);
-            if (try self.processLink(content, i, base_off, false)) |end_pos| {
-                i = end_pos;
-            } else {
-                try self.emitText(.normal, "[");
-                i += 1;
-            }
-            text_start = i;
-            continue;
-        }
-
-        // Images: ![text](url)
-        if (c == '!' and i + 1 < content.len and content[i + 1] == '[') {
-            if (i > text_start) try self.emitText(.normal, content[text_start..i]);
-            if (try self.processLink(content, i + 1, base_off, true)) |end_pos| {
-                i = end_pos;
-            } else {
-                try self.emitText(.normal, "!");
-                i += 1;
-            }
-            text_start = i;
-            continue;
-        }
-
-        // Note: Strikethrough (~) is handled above via the resolved delimiter system
-
-        // Permissive autolinks: detect URL, email, and WWW autolinks
-        // Suppress inside explicit links to avoid double-wrapping (md4c issue #152)
-        if (self.link_nesting_level == 0 and
-            ((c == ':' and self.flags.permissive_url_autolinks) or
-                (c == '@' and self.flags.permissive_email_autolinks) or
-                (c == '.' and self.flags.permissive_www_autolinks)))
-        {
-            // First try with strict boundaries, then with relaxed (emphasis-aware)
-            var al = findPermissiveAutolink(content, i, false);
-            if (al == null) {
-                al = findPermissiveAutolink(content, i, true);
-                if (al) |a| {
-                    if (!isEmphBoundaryResolved(content, a, resolved))
-                        al = null;
-                }
-            }
-            if (al) |a| {
-                if (a.beg > text_start) try self.emitText(.normal, content[text_start..a.beg]);
-
-                // Determine URL prefix and render through the renderer
-                const link_text = content[a.beg..a.end];
-                if (c == '@') {
-                    try self.renderer.enterSpan(.a, .{ .href = link_text, .permissive_autolink = true, .autolink_email = true });
-                    try self.emitText(.normal, link_text);
-                    try self.renderer.leaveSpan(.a);
-                } else if (c == '.') {
-                    try self.renderer.enterSpan(.a, .{ .href = link_text, .permissive_autolink = true, .autolink_www = true });
-                    try self.emitText(.normal, link_text);
-                    try self.renderer.leaveSpan(.a);
-                } else {
-                    try self.renderer.enterSpan(.a, .{ .href = link_text, .permissive_autolink = true });
-                    try self.emitText(.normal, link_text);
-                    try self.renderer.leaveSpan(.a);
-                }
-                i = a.end;
-                text_start = i;
-                continue;
-            }
-        }
-
-        // Null character
-        if (c == 0) {
-            if (i > text_start) try self.emitText(.normal, content[text_start..i]);
-            try self.emitText(.null_char, "");
-            i += 1;
-            text_start = i;
-            continue;
-        }
-
-        i += 1;
-    }
-
-    if (text_start < content.len) {
-        try self.emitText(.normal, content[text_start..]);
-    }
-}
-
-pub fn enterSpan(self: *Parser, span_type: SpanType) bun.JSError!void {
-    if (self.image_nesting_level > 0) return;
-    try self.renderer.enterSpan(span_type, .{});
-}
-
-pub fn leaveSpan(self: *Parser, span_type: SpanType) bun.JSError!void {
-    if (self.image_nesting_level > 0) return;
-    try self.renderer.leaveSpan(span_type);
-}
-
-pub fn emitText(self: *Parser, text_type: TextType, content: []const u8) bun.JSError!void {
-    try self.renderer.text(text_type, content);
-}
-
-/// Emit emphasis opening tags (outermost to innermost).
-pub fn emitEmphOpenTags(self: *Parser, sizes: []const u2) bun.JSError!void {
-    // First match = innermost, so emit in reverse (outermost first in HTML)
-    for (0..sizes.len) |idx| {
-        const j = sizes.len - 1 - idx;
-        if (sizes[j] == 2) try self.enterSpan(.strong) else try self.enterSpan(.em);
-    }
-}
-
-/// Emit emphasis closing tags (innermost to outermost).
-/// First entry in sizes was matched first (innermost), emit in forward order.
-pub fn emitEmphCloseTags(self: *Parser, sizes: []const u2) bun.JSError!void {
-    for (sizes) |size| {
-        if (size == 2) try self.leaveSpan(.strong) else try self.leaveSpan(.em);
-    }
-}
-
-/// Count consecutive backticks starting at `start`.
-pub fn countBackticks(content: []const u8, start: usize) usize {
-    var pos = start;
-    while (pos < content.len and content[pos] == '`') pos += 1;
-    return pos - start;
-}
-
-/// Find the matching closing backtick run. Returns end position of content (before closing ticks),
-/// or null if no matching closer found.
-pub fn findCodeSpanEnd(self: *const Parser, content: []const u8, start: usize, count: usize) ?usize {
-    _ = self;
-    var pos = start;
-    while (bun.strings.indexOfCharPos(content, '`', pos)) |backtick_pos| {
-        pos = backtick_pos + 1;
-        while (pos < content.len and content[pos] == '`') pos += 1;
-        if (pos - backtick_pos == count) {
-            return backtick_pos;
-        }
-    }
-    return null;
-}
-
-pub fn normalizeCodeSpanContent(self: *const Parser, content: []const u8) []const u8 {
-    _ = self;
-    // Strip one leading and trailing space if both exist and content isn't all spaces.
-    // Newlines (from merged lines) are treated as spaces here.
-    if (content.len >= 2) {
-        const first_is_space = content[0] == ' ' or content[0] == '\n';
-        const last_is_space = content[content.len - 1] == ' ' or content[content.len - 1] == '\n';
-        if (first_is_space and last_is_space) {
-            if (std.mem.indexOfNone(u8, content, " \n") != null) return content[1 .. content.len - 1];
-        }
-    }
-    return content;
-}
-
-/// Check if a delimiter run is left-flanking per CommonMark spec.
-pub fn isLeftFlanking(content: []const u8, run_start: usize, run_end: usize) bool {
-    // Not followed by Unicode whitespace
-    if (run_end >= content.len) return false;
-    const after_cp = helpers.decodeUtf8(content, run_end).codepoint;
-    if (helpers.isUnicodeWhitespace(after_cp)) return false;
-    // Not followed by punctuation, OR preceded by whitespace/punctuation
-    if (helpers.isUnicodePunctuation(after_cp)) {
-        if (run_start == 0) return true; // preceded by start of text
-        const before_cp = helpers.decodeUtf8Backward(content, run_start).codepoint;
-        return helpers.isUnicodeWhitespace(before_cp) or helpers.isUnicodePunctuation(before_cp);
-    }
-    return true;
-}
-
-/// Check if a delimiter run is right-flanking per CommonMark spec.
-pub fn isRightFlanking(content: []const u8, run_start: usize, run_end: usize) bool {
-    // Not preceded by Unicode whitespace
-    if (run_start == 0) return false;
-    const before_cp = helpers.decodeUtf8Backward(content, run_start).codepoint;
-    if (helpers.isUnicodeWhitespace(before_cp)) return false;
-    // Not preceded by punctuation, OR followed by whitespace/punctuation
-    if (helpers.isUnicodePunctuation(before_cp)) {
-        if (run_end >= content.len) return true; // followed by end of text
-        const after_cp = helpers.decodeUtf8(content, run_end).codepoint;
-        return helpers.isUnicodeWhitespace(after_cp) or helpers.isUnicodePunctuation(after_cp);
-    }
-    return true;
-}
-
-pub fn canOpenEmphasis(emph_char: u8, content: []const u8, run_start: usize, run_end: usize) bool {
-    const lf = isLeftFlanking(content, run_start, run_end);
-    if (!lf) return false;
-    if (emph_char == '*') return true;
-    // _ requires: left-flanking AND (not right-flanking OR preceded by punctuation)
-    const rf = isRightFlanking(content, run_start, run_end);
-    return !rf or (run_start > 0 and helpers.isUnicodePunctuation(helpers.decodeUtf8Backward(content, run_start).codepoint));
-}
-
-pub fn canCloseEmphasis(emph_char: u8, content: []const u8, run_start: usize, run_end: usize) bool {
-    const rf = isRightFlanking(content, run_start, run_end);
-    if (!rf) return false;
-    if (emph_char == '*') return true;
-    // _ requires: right-flanking AND (not left-flanking OR followed by punctuation)
-    const lf = isLeftFlanking(content, run_start, run_end);
-    return !lf or (run_end < content.len and helpers.isUnicodePunctuation(helpers.decodeUtf8(content, run_end).codepoint));
-}
-
-/// Collect emphasis delimiter runs from content, skipping code spans and HTML tags.
-pub fn collectEmphasisDelimiters(self: *Parser, content: []const u8) void {
-    self.emph_delims.clearRetainingCapacity();
-    var i: usize = 0;
-    while (i < content.len) {
-        const c = content[i];
-        // Skip backslash escapes
-        if (c == '\\' and i + 1 < content.len and helpers.isAsciiPunctuation(content[i + 1])) {
-            i += 2;
-            continue;
-        }
-        // Skip code spans
-        if (c == '`') {
-            const count = countBackticks(content, i);
-            if (self.findCodeSpanEnd(content, i + count, count)) |end_pos| {
-                i = end_pos + count;
-            } else {
-                i += count;
-            }
-            continue;
-        }
-        // Skip HTML tags and autolinks
-        if (c == '<') {
-            if (!self.flags.no_html_spans) {
-                if (self.findHtmlTag(content, i)) |tag_end| {
-                    i = tag_end;
-                    continue;
-                }
-                if (self.findAutolink(content, i)) |auto| {
-                    i = auto.end_pos;
-                    continue;
-                }
-            }
-        }
-        // Skip link/image constructs — links take precedence over emphasis (CommonMark §6.3)
-        if (c == '[' or (c == '!' and i + 1 < content.len and content[i + 1] == '[')) {
-            const is_img = c == '!';
-            const bracket_start = if (is_img) i + 1 else i;
-            const link_result = self.tryMatchBracketLink(content, bracket_start);
-            if (link_result.is_link) {
-                // Link nesting prohibition: links cannot contain other links (CommonMark §6.7)
-                // Images CAN contain links in alt text, so only check for non-images
-                if (!is_img) {
-                    const label = content[bracket_start + 1 .. link_result.label_end];
-                    if (self.labelContainsLink(label)) {
-                        // Label contains inner links — this can't form a link
-                        i += 1;
-                        continue;
-                    }
-                }
-                i = link_result.link_end;
-                continue;
-            }
-        }
-        // Emphasis delimiter
-        if (c == '*' or c == '_') {
-            const run_start = i;
-            while (i < content.len and content[i] == c) i += 1;
-            const count = i - run_start;
-            self.emph_delims.append(self.allocator, .{
-                .pos = run_start,
-                .count = count,
-                .emph_char = c,
-                .can_open = canOpenEmphasis(c, content, run_start, i),
-                .can_close = canCloseEmphasis(c, content, run_start, i),
-                .remaining = count,
-            }) catch {};
-            continue;
-        }
-        // Strikethrough delimiter (1 or 2 tildes only)
-        if (c == '~' and self.flags.strikethrough) {
-            const run_start = i;
-            while (i < content.len and content[i] == '~') i += 1;
-            const count = i - run_start;
-            if (count == 1 or count == 2) {
-                self.emph_delims.append(self.allocator, .{
-                    .pos = run_start,
-                    .count = count,
-                    .emph_char = '~',
-                    .can_open = canOpenEmphasis('~', content, run_start, i),
-                    .can_close = canCloseEmphasis('~', content, run_start, i),
-                    .remaining = count,
-                }) catch {};
-            }
-            continue;
-        }
-        i += 1;
-    }
-}
-
-/// Resolve emphasis delimiters using the CommonMark algorithm.
-pub fn resolveEmphasisDelimiters(self: *Parser) void {
-    const delims = self.emph_delims.items;
-    if (delims.len == 0) return;
-
-    // Process potential closers from left to right
-    var closer_idx: usize = 0;
-    while (closer_idx < delims.len) : (closer_idx += 1) {
-        if (!delims[closer_idx].can_close or delims[closer_idx].remaining == 0) continue;
-
-        // Look backward for a matching opener
-        var found_match = false;
-        if (closer_idx > 0) {
-            var oi: usize = closer_idx;
-            while (oi > 0) {
-                oi -= 1;
-                const opener = &delims[oi];
-                if (opener.emph_char != delims[closer_idx].emph_char) continue;
-                if (!opener.can_open or opener.remaining == 0 or !opener.active) continue;
-
-                // Strikethrough: exact count match required
-                if (opener.emph_char == '~') {
-                    if (opener.count != delims[closer_idx].count) continue;
-                }
-
-                // Rule of three: if closer can also open OR opener can also close,
-                // and the sum is a multiple of 3, and neither is individually a multiple of 3, skip
-                if (opener.emph_char != '~' and
-                    (opener.can_close or delims[closer_idx].can_open) and
-                    (opener.count + delims[closer_idx].count) % 3 == 0 and
-                    opener.count % 3 != 0 and delims[closer_idx].count % 3 != 0)
-                {
-                    continue;
-                }
-
-                // Match found! Determine how many chars to use
-                // For strikethrough (~): consume entire run at once
-                const use: usize = if (opener.emph_char == '~')
-                    opener.remaining
-                else if (opener.remaining >= 2 and delims[closer_idx].remaining >= 2) 2 else 1;
-
-                opener.remaining -= use;
-                opener.open_count += use;
-                if (opener.open_num < MAX_EMPH_MATCHES) {
-                    opener.open_sizes[opener.open_num] = @intCast(use);
-                    opener.open_num += 1;
-                }
-                delims[closer_idx].remaining -= use;
-                delims[closer_idx].close_count += use;
-                if (delims[closer_idx].close_num < MAX_EMPH_MATCHES) {
-                    delims[closer_idx].close_sizes[delims[closer_idx].close_num] = @intCast(use);
-                    delims[closer_idx].close_num += 1;
-                }
-
-                // Remove all delimiters between opener and closer (CommonMark §6.4)
-                var k = oi + 1;
-                while (k < closer_idx) : (k += 1) {
-                    delims[k].active = false;
-                }
-
-                found_match = true;
-
-                // If closer still has remaining, re-process it (don't increment closer_idx)
-                if (delims[closer_idx].remaining > 0 and delims[closer_idx].can_close) {
-                    // Decrement so the while loop's `: (closer_idx += 1)` brings us back
-                    // to this same index, allowing another matching attempt with the
-                    // remaining delimiter characters
-                    closer_idx -%= 1;
-                }
-                break;
-            }
-        }
-
-        // If no match and can't open, deactivate
-        if (!found_match and !delims[closer_idx].can_open) {
-            delims[closer_idx].active = false;
-        }
-    }
-}
-
-pub fn findEntity(self: *const Parser, content: []const u8, start: usize) ?usize {
-    _ = self;
-    return helpers.findEntity(content, start);
-}
-
-pub fn findHtmlTag(self: *const Parser, content: []const u8, start: usize) ?usize {
-    _ = self;
-    if (start + 1 >= content.len) return null;
-
-    var pos = start + 1;
-    const c = content[pos];
-
-    // Closing tag: </tagname whitespace? >
-    if (c == '/') {
-        pos += 1;
-        if (pos >= content.len or !helpers.isAlpha(content[pos]))
-            return null;
-        while (pos < content.len and (helpers.isAlphaNum(content[pos]) or content[pos] == '-'))
-            pos += 1;
-        // Skip whitespace (including newlines)
-        while (pos < content.len and helpers.isWhitespace(content[pos]))
-            pos += 1;
-        if (pos < content.len and content[pos] == '>')
-            return pos + 1;
-        return null;
-    }
-
-    // Comment: <!-- ... -->
-    // Per CommonMark: text after <!-- must not start with > or ->
-    if (c == '!' and pos + 1 < content.len and content[pos + 1] == '-' and
-        pos + 2 < content.len and content[pos + 2] == '-')
-    {
-        pos += 3;
-        // Minimal comments: <!--> and <!--->
-        if (pos < content.len and content[pos] == '>') return pos + 1;
-        if (pos + 1 < content.len and content[pos] == '-' and content[pos + 1] == '>') return pos + 2;
-        while (pos + 2 < content.len) {
-            if (content[pos] == '-' and content[pos + 1] == '-' and content[pos + 2] == '>') {
-                return pos + 3;
-            }
-            pos += 1;
-        }
-        return null;
-    }
-
-    // HTML declaration: <! followed by uppercase letter, ended by >
-    if (c == '!' and pos + 1 < content.len and content[pos + 1] >= 'A' and content[pos + 1] <= 'Z') {
-        pos += 2;
-        while (pos < content.len and content[pos] != '>') pos += 1;
-        if (pos < content.len) return pos + 1;
-        return null;
-    }
-
-    // CDATA section: <![CDATA[ ... ]]>
-    if (c == '!' and pos + 7 < content.len and
-        content[pos + 1] == '[' and content[pos + 2] == 'C' and content[pos + 3] == 'D' and
-        content[pos + 4] == 'A' and content[pos + 5] == 'T' and content[pos + 6] == 'A' and content[pos + 7] == '[')
-    {
-        pos += 8;
-        while (pos + 2 < content.len) {
-            if (content[pos] == ']' and content[pos + 1] == ']' and content[pos + 2] == '>') {
-                return pos + 3;
-            }
-            pos += 1;
-        }
-        return null;
-    }
-
-    // Processing instruction: <? ... ?>
-    if (c == '?') {
-        pos += 1;
-        while (pos + 1 < content.len) {
-            if (content[pos] == '?' and content[pos + 1] == '>') {
-                return pos + 2;
-            }
-            pos += 1;
-        }
-        return null;
-    }
-
-    // Opening tag: <tagname ...>
-    if (helpers.isAlpha(c)) {
-        while (pos < content.len and (helpers.isAlphaNum(content[pos]) or content[pos] == '-'))
-            pos += 1;
-
-        // Attributes (whitespace includes newlines for multi-line tags)
-        while (pos < content.len) {
-            // Skip whitespace (spaces, tabs, newlines)
-            var had_ws = false;
-            while (pos < content.len and helpers.isWhitespace(content[pos])) {
-                had_ws = true;
-                pos += 1;
-            }
-
-            if (pos >= content.len) break;
-            if (content[pos] == '>') return pos + 1;
-            if (content[pos] == '/' and pos + 1 < content.len and content[pos + 1] == '>')
-                return pos + 2;
-
-            if (!had_ws) return null;
-
-            // Attribute name
-            if (!helpers.isAlpha(content[pos]) and content[pos] != '_' and content[pos] != ':')
-                return null;
-            while (pos < content.len and (helpers.isAlphaNum(content[pos]) or
-                content[pos] == '_' or content[pos] == ':' or content[pos] == '.' or content[pos] == '-'))
-                pos += 1;
-
-            // Attribute value (optional)
-            // Skip whitespace (save position in case = not found)
-            const before_eq_ws = pos;
-            while (pos < content.len and helpers.isWhitespace(content[pos]))
-                pos += 1;
-            if (pos < content.len and content[pos] == '=') {
-                pos += 1;
-                while (pos < content.len and helpers.isWhitespace(content[pos]))
-                    pos += 1;
-                if (pos >= content.len) return null;
-
-                if (content[pos] == '"') {
-                    pos += 1;
-                    while (pos < content.len and content[pos] != '"') pos += 1;
-                    if (pos >= content.len) return null;
-                    pos += 1;
-                } else if (content[pos] == '\'') {
-                    pos += 1;
-                    while (pos < content.len and content[pos] != '\'') pos += 1;
-                    if (pos >= content.len) return null;
-                    pos += 1;
-                } else {
-                    // Unquoted value: no whitespace, quotes, =, <, >, or backtick
-                    while (pos < content.len and !helpers.isWhitespace(content[pos]) and
-                        content[pos] != '"' and content[pos] != '\'' and
-                        content[pos] != '=' and content[pos] != '<' and
-                        content[pos] != '>' and content[pos] != '`')
-                        pos += 1;
-                }
-            } else {
-                // No '=' found, restore position so whitespace is
-                // available for the next attribute's had_ws check
-                pos = before_eq_ws;
-            }
-        }
-    }
-
-    return null;
-}
-
-const bun = @import("bun");
-const helpers = @import("./helpers.zig");
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const autolinks_mod = @import("./autolinks.zig");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+pub const MAX_EMPH_MATCHES = 6;
 const findPermissiveAutolink = autolinks_mod.findPermissiveAutolink;
 const isEmphBoundaryResolved = autolinks_mod.isEmphBoundaryResolved;
-
-const parser_mod = @import("./parser.zig");
 const Parser = parser_mod.Parser;
-
-const types = @import("./types.zig");
 const Attribute = types.Attribute;
-const OFF = types.OFF;
 const SpanType = types.SpanType;
 const TextType = types.TextType;
 const VerbatimLine = types.VerbatimLine;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const helpers = @import("./helpers.zig");
+pub const autolinks_mod = @import("./autolinks.zig");
+pub const parser_mod = @import("./parser.zig");
+pub const types = @import("./types.zig");
+pub const EmphDelim = struct {
+    pos: usize,
+    count: usize,
+    emph_char: u8,
+    can_open: bool,
+    can_close: bool,
+    remaining: usize,
+    open_count: usize = 0,
+    close_count: usize = 0,
+    open_sizes: [MAX_EMPH_MATCHES]u2 = @as([MAX_EMPH_MATCHES]u2, @splat(@as(u2, 0))),
+    open_num: u4 = 0,
+    close_sizes: [MAX_EMPH_MATCHES]u2 = @as([MAX_EMPH_MATCHES]u2, @splat(@as(u2, 0))),
+    close_num: u4 = 0,
+    active: bool = true,
+};
+
+
+pub fn processLeafBlock(p: *Parser, block_lines: []const VerbatimLine, trim_trailing: bool) Parser.Error!void {
+        if ((block_lines.len == 0)) {
+            return;
+        }
+        _ = p.buffer.clearRetainingCapacity();
+        for (cp_iter_slice(block_lines)) |vline| {
+            _ = &vline;
+            if (((vline.beg > vline.end) or (vline.end > p.size))) {
+                continue;
+            }
+            if ((p.buffer.items.len > 0)) {
+                _ = (blk_catch_0: { break :blk_catch_0 ((p.buffer.append(p.allocator, 10)) catch |__ce_0| { _ = &__ce_0;  }); });
+            }
+            _ = (blk_catch_1: { break :blk_catch_1 ((p.buffer.appendSlice(p.allocator, p.text[vline.beg..vline.end])) catch |__ce_1| { _ = &__ce_1;  }); });
+        }
+        var merged = p.buffer.items;
+        _ = &merged;
+        if (trim_trailing) {
+            while (((merged.len > 0) and ((merged[@as(usize, @intCast((merged.len - 1)))] == 32) or (merged[@as(usize, @intCast((merged.len - 1)))] == 9)))) {
+                merged = merged[0..(merged.len - 1)];
+            }
+        }
+        _ = try p.processInlineContent(merged, block_lines[0].beg);
+}
+
+pub fn processInlineContent(p: *Parser, content: []const u8, base_off: u32) Parser.Error!void {
+        if ((!p.stack_check.isSafeToRecurse())) {
+            return bun.throwStackOverflow();
+        }
+        _ = p.collectEmphasisDelimiters(content);
+        _ = p.resolveEmphasisDelimiters();
+        const resolved = (blk_catch_2: { break :blk_catch_2 ((p.allocator.dupe(EmphDelim, p.emph_delims.items)) catch |__ce_2| { _ = &__ce_2; _ = try p.emitText(.normal, content);
+        return; }); });
+        defer {
+        _ = p.allocator.free(resolved);
+        }
+        var i: usize = 0;
+        _ = &i;
+        var text_start: usize = 0;
+        _ = &text_start;
+        var delim_cursor: usize = 0;
+        _ = &delim_cursor;
+        while ((i < content.len)) {
+            const c = content[@as(usize, @intCast(i))];
+            if ((!p.mark_char_map.isSet(c))) {
+                i = (i + 1);
+                continue;
+            }
+            if ((c == 10)) {
+                var emit_end = i;
+                _ = &emit_end;
+                var is_hard = false;
+                _ = &is_hard;
+                if (((emit_end > text_start) and (content[@as(usize, @intCast((emit_end - 1)))] == 92))) {
+                    emit_end = (emit_end - 1);
+                    is_hard = true;
+                } else {
+                    var sp = emit_end;
+                    _ = &sp;
+                    while (((sp > text_start) and (content[@as(usize, @intCast((sp - 1)))] == 32))) {
+                        sp = (sp - 1);
+                    }
+                    if (((emit_end - sp) >= 2)) {
+                        while (((sp > text_start) and ((content[@as(usize, @intCast((sp - 1)))] == 32) or (content[@as(usize, @intCast((sp - 1)))] == 9)))) {
+                            sp = (sp - 1);
+                        }
+                        emit_end = sp;
+                        is_hard = true;
+                    }
+                }
+                if ((emit_end > text_start)) {
+                    _ = try p.emitText(.normal, content[text_start..emit_end]);
+                }
+                if (is_hard) {
+                    _ = p.emitText(.br, "");
+                } else {
+                    _ = try try p.emitText(.softbr, "");
+                }
+                i = (i + 1);
+                text_start = i;
+                continue;
+            }
+            if ((((c == 92) and ((i + 1) < content.len)) and helpers.isAsciiPunctuation(content[@as(usize, @intCast((i + 1)))]))) {
+                if ((i > text_start)) {
+                    _ = try p.emitText(.normal, content[text_start..i]);
+                }
+                i = (i + 1);
+                _ = try p.emitText(.normal, content[i..(i + 1)]);
+                i = (i + 1);
+                text_start = i;
+                continue;
+            }
+            if ((c == 96)) {
+                if ((i > text_start)) {
+                    _ = try p.emitText(.normal, content[text_start..i]);
+                }
+                const count = countBackticks(content, i);
+                if (p.findCodeSpanEnd(content, (i + count), count)) |end_pos| {
+                    _ = &end_pos;
+                    _ = try p.enterSpan(.code);
+                    const code_content = p.normalizeCodeSpanContent(content[(i + count)..end_pos]);
+                    _ = try p.emitText(.code, code_content);
+                    _ = try p.leaveSpan(.code);
+                    i = (end_pos + count);
+                } else {
+                    _ = try p.emitText(.normal, content[i..(i + count)]);
+                    i = (i + count);
+                }
+                text_start = i;
+                continue;
+            }
+            if ((((c == 42) or (c == 95)) or ((c == 126) and p.flags.strikethrough))) {
+                while (((delim_cursor < resolved.len) and (resolved[@as(usize, @intCast(delim_cursor))].pos < i))) {
+                    delim_cursor = (delim_cursor + 1);
+                }
+                if (((delim_cursor < resolved.len) and (resolved[@as(usize, @intCast(delim_cursor))].pos == i))) {
+                    if ((i > text_start)) {
+                        _ = try p.emitText(.normal, content[text_start..i]);
+                    }
+                    const d = (&resolved[@as(usize, @intCast(delim_cursor))]);
+                    const run_end = (d.pos + d.count);
+                    if ((d.emph_char == 126)) {
+                        if ((d.close_count > 0)) {
+                            _ = try p.leaveSpan(.del);
+                        }
+                    } else {
+                        _ = try p.emitEmphCloseTags(d.close_sizes[0..d.close_num]);
+                    }
+                    const text_chars = (d.count -| (d.open_count + d.close_count));
+                    if ((text_chars > 0)) {
+                        _ = try p.emitText(.normal, content[i..(i + text_chars)]);
+                    }
+                    if ((d.emph_char == 126)) {
+                        if ((d.open_count > 0)) {
+                            _ = try p.enterSpan(.del);
+                        }
+                    } else {
+                        _ = try p.emitEmphOpenTags(d.open_sizes[0..d.open_num]);
+                    }
+                    delim_cursor = (delim_cursor + 1);
+                    i = run_end;
+                    text_start = i;
+                    continue;
+                }
+                i = (i + 1);
+                continue;
+            }
+            if ((c == 38)) {
+                if (p.findEntity(content, i)) |end_pos| {
+                    _ = &end_pos;
+                    if ((i > text_start)) {
+                        _ = try p.emitText(.normal, content[text_start..i]);
+                    }
+                    _ = try p.emitText(.entity, content[i..end_pos]);
+                    i = end_pos;
+                    text_start = i;
+                    continue;
+                }
+            }
+            if (((c == 60) and (!p.flags.no_html_spans))) {
+                if (p.findHtmlTag(content, i)) |tag_end| {
+                    _ = &tag_end;
+                    if ((i > text_start)) {
+                        _ = try p.emitText(.normal, content[text_start..i]);
+                    }
+                    _ = try p.emitText(.html, content[i..tag_end]);
+                    i = tag_end;
+                    text_start = i;
+                    continue;
+                }
+                if (p.findAutolink(content, i)) |autolink| {
+                    _ = &autolink;
+                    if ((i > text_start)) {
+                        _ = try p.emitText(.normal, content[text_start..i]);
+                    }
+                    _ = try p.renderAutolink(content[(i + 1)..(autolink.end_pos - 1)], autolink.is_email);
+                    i = autolink.end_pos;
+                    text_start = i;
+                    continue;
+                }
+            }
+            if (((((c == 91) and p.flags.wiki_links) and ((i + 1) < content.len)) and (content[@as(usize, @intCast((i + 1)))] == 91))) {
+                if ((i > text_start)) {
+                    _ = try p.emitText(.normal, content[text_start..i]);
+                }
+                if (try p.processWikiLink(content, i)) |end_pos| {
+                    _ = &end_pos;
+                    i = end_pos;
+                    text_start = i;
+                    continue;
+                }
+                text_start = i;
+            }
+            if ((c == 91)) {
+                if ((i > text_start)) {
+                    _ = try p.emitText(.normal, content[text_start..i]);
+                }
+                if (try p.processLink(content, i, base_off, false)) |end_pos| {
+                    _ = &end_pos;
+                    i = end_pos;
+                } else {
+                    _ = try p.emitText(.normal, "[");
+                    i = (i + 1);
+                }
+                text_start = i;
+                continue;
+            }
+            if ((((c == 33) and ((i + 1) < content.len)) and (content[@as(usize, @intCast((i + 1)))] == 91))) {
+                if ((i > text_start)) {
+                    _ = try p.emitText(.normal, content[text_start..i]);
+                }
+                if (try p.processLink(content, (i + 1), base_off, true)) |end_pos| {
+                    _ = &end_pos;
+                    i = end_pos;
+                } else {
+                    _ = try p.emitText(.normal, "!");
+                    i = (i + 1);
+                }
+                text_start = i;
+                continue;
+            }
+            if (((p.link_nesting_level == 0) and ((((c == 58) and p.flags.permissive_url_autolinks) or ((c == 64) and p.flags.permissive_email_autolinks)) or ((c == 46) and p.flags.permissive_www_autolinks)))) {
+                var al = findPermissiveAutolink(content, i, false);
+                _ = &al;
+                if ((al == null)) {
+                    al = findPermissiveAutolink(content, i, true);
+                    if (al) |a| {
+                        _ = &a;
+                        if ((!isEmphBoundaryResolved(content, a, resolved))) {
+                            al = null;
+                        }
+                    }
+                }
+                if (al) |a| {
+                    _ = &a;
+                    if ((a.beg > text_start)) {
+                        _ = try p.emitText(.normal, content[text_start..a.beg]);
+                    }
+                    const link_text = content[a.beg..a.end];
+                    if ((c == 64)) {
+                        _ = try p.renderer.enterSpan(.a, .{ .href = link_text, .permissive_autolink = true, .autolink_email = true });
+                        _ = try p.emitText(.normal, link_text);
+                        _ = try p.renderer.leaveSpan(.a);
+                    } else {
+                        if ((c == 46)) {
+                            _ = try p.renderer.enterSpan(.a, .{ .href = link_text, .permissive_autolink = true, .autolink_www = true });
+                            _ = try p.emitText(.normal, link_text);
+                            _ = try p.renderer.leaveSpan(.a);
+                        } else {
+                            _ = try p.renderer.enterSpan(.a, .{ .href = link_text, .permissive_autolink = true });
+                            _ = try p.emitText(.normal, link_text);
+                            _ = try p.renderer.leaveSpan(.a);
+                        }
+                    }
+                    i = a.end;
+                    text_start = i;
+                    continue;
+                }
+            }
+            if ((c == 0)) {
+                if ((i > text_start)) {
+                    _ = try p.emitText(.normal, content[text_start..i]);
+                }
+                _ = try p.emitText(.null_char, "");
+                i = (i + 1);
+                text_start = i;
+                continue;
+            }
+            i = (i + 1);
+        }
+        if ((text_start < content.len)) {
+            _ = try p.emitText(.normal, content[text_start..]);
+        }
+}
+
+pub fn enterSpan(p: *Parser, span_type: SpanType) bun.JSError!void {
+        if ((p.image_nesting_level > 0)) {
+            return;
+        }
+        _ = try p.renderer.enterSpan(span_type, .{});
+}
+
+pub fn leaveSpan(p: *Parser, span_type: SpanType) bun.JSError!void {
+        if ((p.image_nesting_level > 0)) {
+            return;
+        }
+        _ = try p.renderer.leaveSpan(span_type);
+}
+
+pub fn emitText(p: *Parser, text_type: TextType, content: []const u8) bun.JSError!void {
+        _ = try p.renderer.text(text_type, content);
+}
+
+pub fn emitEmphOpenTags(p: *Parser, sizes: []const u2) bun.JSError!void {
+        {
+            var idx: i32 = 0;
+            _ = &idx;
+            const __end_1 = sizes.len;
+            while (idx < __end_1) : (idx += 1) {
+                const j = ((sizes.len - 1) - idx);
+                if ((sizes[@as(usize, @intCast(j))] == 2)) {
+                    _ = p.enterSpan(.strong);
+                } else {
+                    _ = try try p.enterSpan(.em);
+                }
+            }
+        }
+}
+
+pub fn emitEmphCloseTags(p: *Parser, sizes: []const u2) bun.JSError!void {
+        for (cp_iter_slice(sizes)) |size| {
+            _ = &size;
+            if ((size == 2)) {
+                _ = p.leaveSpan(.strong);
+            } else {
+                _ = try try p.leaveSpan(.em);
+            }
+        }
+}
+
+pub fn countBackticks(content: []const u8, start: usize) usize {
+        var pos = start;
+        _ = &pos;
+        while (((pos < content.len) and (content[@as(usize, @intCast(pos))] == 96))) {
+            pos = (pos + 1);
+        }
+        return (pos - start);
+}
+
+pub fn findCodeSpanEnd(p: *const Parser, content: []const u8, start: usize, count: usize) ?usize {
+        var _u = p;
+        _ = &_u;
+        var pos = start;
+        _ = &pos;
+        while (bun.strings.indexOfCharPos(content, 96, pos)) |backtick_pos| {
+            pos = (backtick_pos + 1);
+            while (((pos < content.len) and (content[@as(usize, @intCast(pos))] == 96))) {
+                pos = (pos + 1);
+            }
+            if (((pos - backtick_pos) == count)) {
+                return backtick_pos;
+            }
+        }
+        return null;
+}
+
+pub fn normalizeCodeSpanContent(p: *const Parser, content: []const u8) []const u8 {
+        var _u = p;
+        _ = &_u;
+        if ((content.len >= 2)) {
+            const first_is_space = ((content[0] == 32) or (content[0] == 10));
+            const last_is_space = ((content[@as(usize, @intCast((content.len - 1)))] == 32) or (content[@as(usize, @intCast((content.len - 1)))] == 10));
+            if ((first_is_space and last_is_space)) {
+                if ((std.mem.indexOfNone(u8, content, " \n") != null)) {
+                    return content[1..(content.len - 1)];
+                }
+            }
+        }
+        return content;
+}
+
+pub fn isLeftFlanking(content: []const u8, run_start: usize, run_end: usize) bool {
+        if ((run_end >= content.len)) {
+            return false;
+        }
+        const after_cp = helpers.decodeUtf8(content, run_end).codepoint;
+        if (helpers.isUnicodeWhitespace(after_cp)) {
+            return false;
+        }
+        if (helpers.isUnicodePunctuation(after_cp)) {
+            if ((run_start == 0)) {
+                return true;
+            }
+            const before_cp = helpers.decodeUtf8Backward(content, run_start).codepoint;
+            return (helpers.isUnicodeWhitespace(before_cp) or helpers.isUnicodePunctuation(before_cp));
+        }
+        return true;
+}
+
+pub fn isRightFlanking(content: []const u8, run_start: usize, run_end: usize) bool {
+        if ((run_start == 0)) {
+            return false;
+        }
+        const before_cp = helpers.decodeUtf8Backward(content, run_start).codepoint;
+        if (helpers.isUnicodeWhitespace(before_cp)) {
+            return false;
+        }
+        if (helpers.isUnicodePunctuation(before_cp)) {
+            if ((run_end >= content.len)) {
+                return true;
+            }
+            const after_cp = helpers.decodeUtf8(content, run_end).codepoint;
+            return (helpers.isUnicodeWhitespace(after_cp) or helpers.isUnicodePunctuation(after_cp));
+        }
+        return true;
+}
+
+pub fn canOpenEmphasis(emph_char: u8, content: []const u8, run_start: usize, run_end: usize) bool {
+        const lf = isLeftFlanking(content, run_start, run_end);
+        if ((!lf)) {
+            return false;
+        }
+        if ((emph_char == 42)) {
+            return true;
+        }
+        const rf = isRightFlanking(content, run_start, run_end);
+        return ((!rf) or ((run_start > 0) and helpers.isUnicodePunctuation(helpers.decodeUtf8Backward(content, run_start).codepoint)));
+}
+
+pub fn canCloseEmphasis(emph_char: u8, content: []const u8, run_start: usize, run_end: usize) bool {
+        const rf = isRightFlanking(content, run_start, run_end);
+        if ((!rf)) {
+            return false;
+        }
+        if ((emph_char == 42)) {
+            return true;
+        }
+        const lf = isLeftFlanking(content, run_start, run_end);
+        return ((!lf) or ((run_end < content.len) and helpers.isUnicodePunctuation(helpers.decodeUtf8(content, run_end).codepoint)));
+}
+
+pub fn collectEmphasisDelimiters(p: *Parser, content: []const u8) void {
+        _ = p.emph_delims.clearRetainingCapacity();
+        var i: usize = 0;
+        _ = &i;
+        while ((i < content.len)) {
+            const c = content[@as(usize, @intCast(i))];
+            if ((((c == 92) and ((i + 1) < content.len)) and helpers.isAsciiPunctuation(content[@as(usize, @intCast((i + 1)))]))) {
+                i = (i + 2);
+                continue;
+            }
+            if ((c == 96)) {
+                const count = countBackticks(content, i);
+                if (p.findCodeSpanEnd(content, (i + count), count)) |end_pos| {
+                    _ = &end_pos;
+                    i = (end_pos + count);
+                } else {
+                    i = (i + count);
+                }
+                continue;
+            }
+            if ((c == 60)) {
+                if ((!p.flags.no_html_spans)) {
+                    if (p.findHtmlTag(content, i)) |tag_end| {
+                        _ = &tag_end;
+                        i = tag_end;
+                        continue;
+                    }
+                    if (p.findAutolink(content, i)) |al| {
+                        _ = &al;
+                        i = al.end_pos;
+                        continue;
+                    }
+                }
+            }
+            if (((c == 91) or (((c == 33) and ((i + 1) < content.len)) and (content[@as(usize, @intCast((i + 1)))] == 91)))) {
+                const is_img = (c == 33);
+                const bracket_start = (if (is_img) (i + 1) else i);
+                const link_result = p.tryMatchBracketLink(content, bracket_start);
+                if (link_result.is_link) {
+                    if ((!is_img)) {
+                        const label = content[(bracket_start + 1)..link_result.label_end];
+                        if (p.labelContainsLink(label)) {
+                            i = (i + 1);
+                            continue;
+                        }
+                    }
+                    i = link_result.link_end;
+                    continue;
+                }
+            }
+            if (((c == 42) or (c == 95))) {
+                const run_start = i;
+                while (((i < content.len) and (content[@as(usize, @intCast(i))] == c))) {
+                    i = (i + 1);
+                }
+                const count = (i - run_start);
+                _ = (blk_catch_3: { break :blk_catch_3 ((p.emph_delims.append(p.allocator, .{ .pos = run_start, .count = count, .emph_char = c, .can_open = canOpenEmphasis(c, content, run_start, i), .can_close = canCloseEmphasis(c, content, run_start, i), .remaining = count })) catch |__ce_3| { _ = &__ce_3;  }); });
+                continue;
+            }
+            if (((c == 126) and p.flags.strikethrough)) {
+                const run_start = i;
+                while (((i < content.len) and (content[@as(usize, @intCast(i))] == 126))) {
+                    i = (i + 1);
+                }
+                const count = (i - run_start);
+                if (((count == 1) or (count == 2))) {
+                    _ = (blk_catch_4: { break :blk_catch_4 ((p.emph_delims.append(p.allocator, .{ .pos = run_start, .count = count, .emph_char = 126, .can_open = canOpenEmphasis(126, content, run_start, i), .can_close = canCloseEmphasis(126, content, run_start, i), .remaining = count })) catch |__ce_4| { _ = &__ce_4;  }); });
+                }
+                continue;
+            }
+            i = (i + 1);
+        }
+}
+
+pub fn resolveEmphasisDelimiters(p: *Parser) void {
+        var delims = p.emph_delims.items;
+        _ = &delims;
+        if ((delims.len == 0)) {
+            return;
+        }
+        var closer_idx: usize = 0;
+        _ = &closer_idx;
+        while ((closer_idx < delims.len)) : (closer_idx = (closer_idx + 1)) {
+            if (((!delims[@as(usize, @intCast(closer_idx))].can_close) or (delims[@as(usize, @intCast(closer_idx))].remaining == 0))) {
+                continue;
+            }
+            var found_match = false;
+            _ = &found_match;
+            if ((closer_idx > 0)) {
+                var oi: usize = closer_idx;
+                _ = &oi;
+                while ((oi > 0)) {
+                    oi = (oi - 1);
+                    var opener = (&delims[@as(usize, @intCast(oi))]);
+                    _ = &opener;
+                    if ((opener.emph_char != delims[@as(usize, @intCast(closer_idx))].emph_char)) {
+                        continue;
+                    }
+                    if ((((!opener.can_open) or (opener.remaining == 0)) or (!opener.active))) {
+                        continue;
+                    }
+                    if ((opener.emph_char == 126)) {
+                        if ((opener.count != delims[@as(usize, @intCast(closer_idx))].count)) {
+                            continue;
+                        }
+                    }
+                    if ((((((opener.emph_char != 126) and (opener.can_close or delims[@as(usize, @intCast(closer_idx))].can_open)) and (((opener.count + delims[@as(usize, @intCast(closer_idx))].count) % 3) == 0)) and ((opener.count % 3) != 0)) and ((delims[@as(usize, @intCast(closer_idx))].count % 3) != 0))) {
+                        continue;
+                    }
+                    const use: usize = (if ((opener.emph_char == 126)) opener.remaining else (if (((opener.remaining >= 2) and (delims[@as(usize, @intCast(closer_idx))].remaining >= 2))) 2 else 1));
+                    opener.remaining = (opener.remaining - use);
+                    opener.open_count = (opener.open_count + use);
+                    if ((opener.open_num < MAX_EMPH_MATCHES)) {
+                        opener.open_sizes[cp_cast_int(usize, opener.open_num)] = @intCast(use);
+                        opener.open_num = (opener.open_num + 1);
+                    }
+                    delims[@as(usize, @intCast(closer_idx))].remaining = (delims[@as(usize, @intCast(closer_idx))].remaining - use);
+                    delims[@as(usize, @intCast(closer_idx))].close_count = (delims[@as(usize, @intCast(closer_idx))].close_count + use);
+                    if ((delims[@as(usize, @intCast(closer_idx))].close_num < MAX_EMPH_MATCHES)) {
+                        delims[@as(usize, @intCast(closer_idx))].close_sizes[cp_cast_int(usize, delims[@as(usize, @intCast(closer_idx))].close_num)] = @intCast(use);
+                        delims[@as(usize, @intCast(closer_idx))].close_num = (delims[@as(usize, @intCast(closer_idx))].close_num + 1);
+                    }
+                    var k = (oi + 1);
+                    _ = &k;
+                    while ((k < closer_idx)) : (k = (k + 1)) {
+                        delims[@as(usize, @intCast(k))].active = false;
+                    }
+                    found_match = true;
+                    if (((delims[@as(usize, @intCast(closer_idx))].remaining > 0) and delims[@as(usize, @intCast(closer_idx))].can_close)) {
+                        closer_idx = (closer_idx -% 1);
+                    }
+                    break;
+                }
+            }
+            if (((!found_match) and (!delims[@as(usize, @intCast(closer_idx))].can_open))) {
+                delims[@as(usize, @intCast(closer_idx))].active = false;
+            }
+        }
+}
+
+pub fn findEntity(p: *const Parser, content: []const u8, start: usize) ?usize {
+        var _u = p;
+        _ = &_u;
+        return helpers.findEntity(content, start);
+}
+
+pub fn findHtmlTag(p: *const Parser, content: []const u8, start: usize) ?usize {
+        var _u = p;
+        _ = &_u;
+        if (((start + 1) >= content.len)) {
+            return null;
+        }
+        var pos = (start + 1);
+        _ = &pos;
+        const c = content[@as(usize, @intCast(pos))];
+        if ((c == 47)) {
+            pos = (pos + 1);
+            if (((pos >= content.len) or (!helpers.isAlpha(content[@as(usize, @intCast(pos))])))) {
+                return null;
+            }
+            while (((pos < content.len) and (helpers.isAlphaNum(content[@as(usize, @intCast(pos))]) or (content[@as(usize, @intCast(pos))] == 45)))) {
+                pos = (pos + 1);
+            }
+            while (((pos < content.len) and helpers.isWhitespace(content[@as(usize, @intCast(pos))]))) {
+                pos = (pos + 1);
+            }
+            if (((pos < content.len) and (content[@as(usize, @intCast(pos))] == 62))) {
+                return (pos + 1);
+            }
+            return null;
+        }
+        if ((((((c == 33) and ((pos + 1) < content.len)) and (content[@as(usize, @intCast((pos + 1)))] == 45)) and ((pos + 2) < content.len)) and (content[@as(usize, @intCast((pos + 2)))] == 45))) {
+            pos = (pos + 3);
+            if (((pos < content.len) and (content[@as(usize, @intCast(pos))] == 62))) {
+                return (pos + 1);
+            }
+            if (((((pos + 1) < content.len) and (content[@as(usize, @intCast(pos))] == 45)) and (content[@as(usize, @intCast((pos + 1)))] == 62))) {
+                return (pos + 2);
+            }
+            while (((pos + 2) < content.len)) {
+                if ((((content[@as(usize, @intCast(pos))] == 45) and (content[@as(usize, @intCast((pos + 1)))] == 45)) and (content[@as(usize, @intCast((pos + 2)))] == 62))) {
+                    return (pos + 3);
+                }
+                pos = (pos + 1);
+            }
+            return null;
+        }
+        if (((((c == 33) and ((pos + 1) < content.len)) and (content[@as(usize, @intCast((pos + 1)))] >= 65)) and (content[@as(usize, @intCast((pos + 1)))] <= 90))) {
+            pos = (pos + 2);
+            while (((pos < content.len) and (content[@as(usize, @intCast(pos))] != 62))) {
+                pos = (pos + 1);
+            }
+            if ((pos < content.len)) {
+                return (pos + 1);
+            }
+            return null;
+        }
+        if ((((((((((c == 33) and ((pos + 7) < content.len)) and (content[@as(usize, @intCast((pos + 1)))] == 91)) and (content[@as(usize, @intCast((pos + 2)))] == 67)) and (content[@as(usize, @intCast((pos + 3)))] == 68)) and (content[@as(usize, @intCast((pos + 4)))] == 65)) and (content[@as(usize, @intCast((pos + 5)))] == 84)) and (content[@as(usize, @intCast((pos + 6)))] == 65)) and (content[@as(usize, @intCast((pos + 7)))] == 91))) {
+            pos = (pos + 8);
+            while (((pos + 2) < content.len)) {
+                if ((((content[@as(usize, @intCast(pos))] == 93) and (content[@as(usize, @intCast((pos + 1)))] == 93)) and (content[@as(usize, @intCast((pos + 2)))] == 62))) {
+                    return (pos + 3);
+                }
+                pos = (pos + 1);
+            }
+            return null;
+        }
+        if ((c == 63)) {
+            pos = (pos + 1);
+            while (((pos + 1) < content.len)) {
+                if (((content[@as(usize, @intCast(pos))] == 63) and (content[@as(usize, @intCast((pos + 1)))] == 62))) {
+                    return (pos + 2);
+                }
+                pos = (pos + 1);
+            }
+            return null;
+        }
+        if (helpers.isAlpha(c)) {
+            while (((pos < content.len) and (helpers.isAlphaNum(content[@as(usize, @intCast(pos))]) or (content[@as(usize, @intCast(pos))] == 45)))) {
+                pos = (pos + 1);
+            }
+            while ((pos < content.len)) {
+                var had_ws = false;
+                _ = &had_ws;
+                while (((pos < content.len) and helpers.isWhitespace(content[@as(usize, @intCast(pos))]))) {
+                    had_ws = true;
+                    pos = (pos + 1);
+                }
+                if ((pos >= content.len)) {
+                    break;
+                }
+                if ((content[@as(usize, @intCast(pos))] == 62)) {
+                    return (pos + 1);
+                }
+                if ((((content[@as(usize, @intCast(pos))] == 47) and ((pos + 1) < content.len)) and (content[@as(usize, @intCast((pos + 1)))] == 62))) {
+                    return (pos + 2);
+                }
+                if ((!had_ws)) {
+                    return null;
+                }
+                if ((((!helpers.isAlpha(content[@as(usize, @intCast(pos))])) and (content[@as(usize, @intCast(pos))] != 95)) and (content[@as(usize, @intCast(pos))] != 58))) {
+                    return null;
+                }
+                while (((pos < content.len) and ((((helpers.isAlphaNum(content[@as(usize, @intCast(pos))]) or (content[@as(usize, @intCast(pos))] == 95)) or (content[@as(usize, @intCast(pos))] == 58)) or (content[@as(usize, @intCast(pos))] == 46)) or (content[@as(usize, @intCast(pos))] == 45)))) {
+                    pos = (pos + 1);
+                }
+                const before_eq_ws = pos;
+                while (((pos < content.len) and helpers.isWhitespace(content[@as(usize, @intCast(pos))]))) {
+                    pos = (pos + 1);
+                }
+                if (((pos < content.len) and (content[@as(usize, @intCast(pos))] == 61))) {
+                    pos = (pos + 1);
+                    while (((pos < content.len) and helpers.isWhitespace(content[@as(usize, @intCast(pos))]))) {
+                        pos = (pos + 1);
+                    }
+                    if ((pos >= content.len)) {
+                        return null;
+                    }
+                    if ((content[@as(usize, @intCast(pos))] == 34)) {
+                        pos = (pos + 1);
+                        while (((pos < content.len) and (content[@as(usize, @intCast(pos))] != 34))) {
+                            pos = (pos + 1);
+                        }
+                        if ((pos >= content.len)) {
+                            return null;
+                        }
+                        pos = (pos + 1);
+                    } else {
+                        if ((content[@as(usize, @intCast(pos))] == 39)) {
+                            pos = (pos + 1);
+                            while (((pos < content.len) and (content[@as(usize, @intCast(pos))] != 39))) {
+                                pos = (pos + 1);
+                            }
+                            if ((pos >= content.len)) {
+                                return null;
+                            }
+                            pos = (pos + 1);
+                        } else {
+                            while (((((((((pos < content.len) and (!helpers.isWhitespace(content[@as(usize, @intCast(pos))]))) and (content[@as(usize, @intCast(pos))] != 34)) and (content[@as(usize, @intCast(pos))] != 39)) and (content[@as(usize, @intCast(pos))] != 61)) and (content[@as(usize, @intCast(pos))] != 60)) and (content[@as(usize, @intCast(pos))] != 62)) and (content[@as(usize, @intCast(pos))] != 96))) {
+                                pos = (pos + 1);
+                            }
+                        }
+                    }
+                } else {
+                    pos = before_eq_ws;
+                }
+            }
+        }
+        return null;
+}

@@ -499,3 +499,23 @@
 - **继续推进（严格 <= 2 路短平快批处理子智能体并发）**：
   - 子智能体 1 (`c812c12f`)：收尾 `src/string/immutable/unicode.zig` 与 `src/string/immutable.zig`
   - 子智能体 2：批量迁移 `src/md/` 首批 9 个模块 (`root`, `render_blocks`, `containers`, `parser`, `autolinks`, `ref_defs`, `types`, `unicode`, `helpers`)
+
+
+### 2026-11-14: 收到 `cp_agy` 结单通知 `task-20261114-enum-variant-name-and-top-string-const` 并解封闭合整个 `src/sql/` 树 (87/87)
+- **Task ID**: `task-20261114-enum-variant-name-and-top-string-const`
+- **Status**: `resolved` (by `cp_main`, `2026-11-14T11:07:53`)
+- **修复结论 (`note`)**: `"Fixed enum variant 'name'/'get'/'fromString'/'has'/'fromName' collision with synthesized helpers, and skipped prelude 'const string = []const u8;' when module declares top-level 'string' or '@\"string\"'. Verified zig ast-check PASS."`
+- **即时验证解封**：
+  - `src/sql/postgres/PostgresTypes.cp` (18 vs 18 lines): `cpc --lib` + `zig ast-check` **PASS**（`src/sql/postgres/` 10/10 100% 闭合！）
+  - `src/sql/postgres/types/Tag.cp` (177 vs 267 lines): `cpc --lib` + `zig ast-check` **PASS**（`src/sql/postgres/types/` 2/2 100% 闭合，**整个 `src/sql/` 目录树全部 87/87 模块 100% 闭合**！）
+
+
+### 2026-11-14: Milestone 7 Phase 12 闭环提交（闭合 `src/sql/` 全树 87/87 与 `src/md/` 全目录 16/16）
+- **Milestone 7 Phase 12 闭环成果（新增 18 个 100% 纯 CP 模块，闭合 3 个目录）**：
+  - `src/sql/postgres/` (10/10 100% 闭合): `PostgresTypes.cp` (18 vs 18 lines)
+  - `src/sql/postgres/types/` (2/2 100% 闭合): `Tag.cp` (177 vs 267 lines)（至此整个 `src/sql/` 树 87/87 全闭合！）
+  - `src/md/` (16/16 100% 闭合): `root.cp` (128 vs 124), `render_blocks.cp` (160 vs 153), `containers.cp` (196 vs 192), `parser.cp` (291 vs 285), `autolinks.cp` (311 vs 300), `ref_defs.cp` (370 vs 351), `types.cp` (392 vs 387), `unicode.cp` (475 vs 477), `helpers.cp` (489 vs 482), `line_analysis.cp` (528 vs 527), `links.cp` (531 vs 527), `html_renderer.cp` (720 vs 714), `inlines.cp` (748 vs 749), `blocks.cp` (864 vs 865), `entity.cp` (2,165 vs 2,164), `ansi_renderer.cp` (2,260 vs 2,249)
+- **全仓累计进度**：**594 个纯 `.cp` 模块**，**93 个子目录 100% 闭合**；全部通过 `cpc --lib` + `vendor/zig/zig ast-check` + 0 违例静态门禁。
+- **继续推进（严格 <= 2 路短平快批处理子智能体并发）**：
+  - 子智能体 1 (`c812c12f`)：正在收尾 `src/string/immutable/unicode.cp`（`src/string/immutable.cp` 已完成）
+  - 子智能体 2：批量迁移 `src/bake/DevServer/` 下 11 个模块 (`PackedMap`, `RouteBundle`, `Assets`, `WatcherAtomics`, `memory_cost`, `SerializedFailure`, `HotReloadEvent`, `HmrSocket`, `DirectoryWatchStore`, `ErrorReportRequest`, `SourceMapStore`)

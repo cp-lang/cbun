@@ -1,153 +1,176 @@
-pub fn enterBlock(self: *Parser, block_type: BlockType, data: u32, flags: u32) bun.JSError!void {
-    if (self.image_nesting_level > 0) return;
-    try self.renderer.enterBlock(block_type, data, flags);
-}
-
-pub fn leaveBlock(self: *Parser, block_type: BlockType, data: u32) bun.JSError!void {
-    if (self.image_nesting_level > 0) return;
-    try self.renderer.leaveBlock(block_type, data);
-}
-
-pub fn processCodeBlock(self: *Parser, block_lines: []const VerbatimLine, data: u32, flags: u32) bun.JSError!void {
-    _ = data;
-
-    var count = block_lines.len;
-
-    // Trim trailing blank lines from indented code blocks (not fenced)
-    if (flags & types.BLOCK_FENCED_CODE == 0) {
-        while (count > 0 and block_lines[count - 1].beg >= block_lines[count - 1].end) {
-            count -= 1;
-        }
-    }
-
-    for (block_lines[0..count]) |vline| {
-        // Output indented content
-        for (0..vline.indent) |_| {
-            try self.emitText(.normal, " ");
-        }
-        const content = self.text[vline.beg..vline.end];
-        try self.emitText(.normal, content);
-        try self.emitText(.normal, "\n");
-    }
-}
-
-pub fn processHtmlBlock(self: *Parser, block_lines: []const VerbatimLine) bun.JSError!void {
-    for (block_lines, 0..) |vline, i| {
-        if (i > 0) try self.emitText(.html, "\n");
-        for (0..vline.indent) |_| {
-            try self.emitText(.html, " ");
-        }
-        try self.emitText(.html, self.text[vline.beg..vline.end]);
-    }
-    try self.emitText(.html, "\n");
-}
-
-pub fn processTableBlock(self: *Parser, block_lines: []const VerbatimLine, col_count: u32) Parser.Error!void {
-    if (block_lines.len < 2) return;
-
-    // First line is header, second is underline, rest are body
-    try self.enterBlock(.thead, 0, 0);
-    try self.enterBlock(.tr, 0, 0);
-    try self.processTableRow(block_lines[0], true, col_count);
-    try self.leaveBlock(.tr, 0);
-    try self.leaveBlock(.thead, 0);
-
-    if (block_lines.len > 2) {
-        try self.enterBlock(.tbody, 0, 0);
-        for (block_lines[2..]) |vline| {
-            try self.enterBlock(.tr, 0, 0);
-            try self.processTableRow(vline, false, col_count);
-            try self.leaveBlock(.tr, 0);
-        }
-        try self.leaveBlock(.tbody, 0);
-    }
-}
-
-pub fn processTableRow(self: *Parser, vline: VerbatimLine, is_header: bool, col_count: u32) Parser.Error!void {
-    const row_text = self.text[vline.beg..vline.end];
-    var start: usize = 0;
-    var cell_index: u32 = 0;
-
-    // Skip leading pipe
-    if (start < row_text.len and row_text[start] == '|') start += 1;
-
-    while (start < row_text.len and cell_index < col_count) {
-        // Find cell end, skipping escaped chars and code spans
-        var end = start;
-        while (end < row_text.len and row_text[end] != '|') {
-            if (row_text[end] == '\\' and end + 1 < row_text.len) {
-                end += 2;
-            } else {
-                end += 1;
-            }
-        }
-
-        // Skip trailing pipe cell
-        if (end == row_text.len and start == end) break;
-
-        // Trim cell content
-        var cell_beg = start;
-        var cell_end = end;
-        while (cell_beg < cell_end and helpers.isBlank(row_text[cell_beg])) cell_beg += 1;
-        while (cell_end > cell_beg and helpers.isBlank(row_text[cell_end - 1])) cell_end -= 1;
-
-        const cell_type: BlockType = if (is_header) .th else .td;
-        const align_data: u32 = if (cell_index < types.TABLE_MAXCOLCOUNT) @intFromEnum(self.table_alignments[cell_index]) else 0;
-        try self.enterBlock(cell_type, align_data, 0);
-        if (cell_beg < cell_end) {
-            const cell_content = row_text[cell_beg..cell_end];
-            // GFM: \| in table cells should be consumed at the table level,
-            // replacing \| with | before inline processing. This matters for
-            // code spans where backslash escapes don't apply.
-            if (std.mem.indexOf(u8, cell_content, "\\|") != null) {
-                var buf: std.ArrayListUnmanaged(u8) = .{};
-                defer buf.deinit(self.allocator);
-                const unescaped = if (buf.ensureTotalCapacity(self.allocator, cell_content.len)) |_| blk: {
-                    var ci: usize = 0;
-                    while (ci < cell_content.len) {
-                        if (cell_content[ci] == '\\' and ci + 1 < cell_content.len and cell_content[ci + 1] == '|') {
-                            buf.appendAssumeCapacity('|');
-                            ci += 2;
-                        } else {
-                            buf.appendAssumeCapacity(cell_content[ci]);
-                            ci += 1;
-                        }
-                    }
-                    break :blk buf.items;
-                } else |_| cell_content;
-                try self.processInlineContent(unescaped, vline.beg + @as(OFF, @intCast(cell_beg)));
-            } else {
-                try self.processInlineContent(cell_content, vline.beg + @as(OFF, @intCast(cell_beg)));
-            }
-        }
-        try self.leaveBlock(cell_type, 0);
-        cell_index += 1;
-
-        if (end < row_text.len) {
-            start = end + 1; // skip |
-        } else {
-            break;
-        }
-    }
-
-    // Pad short rows with empty cells
-    const cell_type: BlockType = if (is_header) .th else .td;
-    while (cell_index < col_count) {
-        const align_data: u32 = if (cell_index < types.TABLE_MAXCOLCOUNT) @intFromEnum(self.table_alignments[cell_index]) else 0;
-        try self.enterBlock(cell_type, align_data, 0);
-        try self.leaveBlock(cell_type, 0);
-        cell_index += 1;
-    }
-}
-
-const bun = @import("bun");
-const helpers = @import("./helpers.zig");
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const parser_mod = @import("./parser.zig");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const Parser = parser_mod.Parser;
-
-const types = @import("./types.zig");
 const BlockType = types.BlockType;
 const OFF = types.OFF;
 const VerbatimLine = types.VerbatimLine;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const helpers = @import("./helpers.zig");
+pub const parser_mod = @import("./parser.zig");
+pub const types = @import("./types.zig");
+
+pub fn enterBlock(self: *Parser, block_type: BlockType, data: u32, flags: u32) bun.JSError!void {
+        if ((self.image_nesting_level > 0)) {
+            return;
+        }
+        _ = try self.renderer.enterBlock(block_type, data, flags);
+}
+
+pub fn leaveBlock(self: *Parser, block_type: BlockType, data: u32) bun.JSError!void {
+        if ((self.image_nesting_level > 0)) {
+            return;
+        }
+        _ = try self.renderer.leaveBlock(block_type, data);
+}
+
+pub fn processCodeBlock(self: *Parser, block_lines: []const VerbatimLine, data: u32, flags: u32) bun.JSError!void {
+        _ = data;
+        var count = block_lines.len;
+        _ = &count;
+        if (((flags & types.BLOCK_FENCED_CODE) == 0)) {
+            while (((count > 0) and (block_lines[@as(usize, @intCast((count - 1)))].beg >= block_lines[@as(usize, @intCast((count - 1)))].end))) {
+                count = (count - 1);
+            }
+        }
+        for (block_lines[0..count]) |vline| {
+            for (0..vline.indent) |_| {
+                _ = try self.emitText(.normal, " ");
+            }
+            const content = self.text[vline.beg..vline.end];
+            _ = try self.emitText(.normal, content);
+            _ = try self.emitText(.normal, "\n");
+        }
+}
+
+pub fn processHtmlBlock(self: *Parser, block_lines: []const VerbatimLine) bun.JSError!void {
+        var i: usize = 0;
+        _ = &i;
+        for (block_lines) |vline| {
+            if ((i > 0)) {
+                _ = try self.emitText(.html, "\n");
+            }
+            for (0..vline.indent) |_| {
+                _ = try self.emitText(.html, " ");
+            }
+            _ = try self.emitText(.html, self.text[vline.beg..vline.end]);
+            i = (i + 1);
+        }
+        _ = try self.emitText(.html, "\n");
+}
+
+pub fn processTableBlock(self: *Parser, block_lines: []const VerbatimLine, col_count: u32) Parser.Error!void {
+        if ((block_lines.len < 2)) {
+            return;
+        }
+        _ = try self.enterBlock(.thead, 0, 0);
+        _ = try self.enterBlock(.tr, 0, 0);
+        _ = try self.processTableRow(block_lines[0], true, col_count);
+        _ = try self.leaveBlock(.tr, 0);
+        _ = try self.leaveBlock(.thead, 0);
+        if ((block_lines.len > 2)) {
+            _ = try self.enterBlock(.tbody, 0, 0);
+            for (block_lines[2..]) |vline| {
+                _ = try self.enterBlock(.tr, 0, 0);
+                _ = try self.processTableRow(vline, false, col_count);
+                _ = try self.leaveBlock(.tr, 0);
+            }
+            _ = try self.leaveBlock(.tbody, 0);
+        }
+}
+
+pub fn processTableRow(self: *Parser, vline: VerbatimLine, is_header: bool, col_count: u32) Parser.Error!void {
+        const row_text = self.text[vline.beg..vline.end];
+        var start: usize = 0;
+        _ = &start;
+        var cell_index: u32 = 0;
+        _ = &cell_index;
+        if (((start < row_text.len) and (row_text[@as(usize, @intCast(start))] == 124))) {
+            start = (start + 1);
+        }
+        while (((start < row_text.len) and (cell_index < col_count))) {
+            var end = start;
+            _ = &end;
+            while (((end < row_text.len) and (row_text[@as(usize, @intCast(end))] != 124))) {
+                if (((row_text[@as(usize, @intCast(end))] == 92) and ((end + 1) < row_text.len))) {
+                    end = (end + 2);
+                } else {
+                    end = (end + 1);
+                }
+            }
+            if (((end == row_text.len) and (start == end))) {
+                break;
+            }
+            var cell_beg = start;
+            _ = &cell_beg;
+            var cell_end = end;
+            _ = &cell_end;
+            while (((cell_beg < cell_end) and helpers.isBlank(row_text[@as(usize, @intCast(cell_beg))]))) {
+                cell_beg = (cell_beg + 1);
+            }
+            while (((cell_end > cell_beg) and helpers.isBlank(row_text[@as(usize, @intCast((cell_end - 1)))]))) {
+                cell_end = (cell_end - 1);
+            }
+            const cell_type: BlockType = (if (is_header) .th else .td);
+            const align_data: u32 = (if ((cell_index < types.TABLE_MAXCOLCOUNT)) @intFromEnum(self.table_alignments[@as(usize, @intCast(cell_index))]) else 0);
+            _ = try self.enterBlock(cell_type, align_data, 0);
+            if ((cell_beg < cell_end)) {
+                const cell_content = row_text[cell_beg..cell_end];
+                if ((std.mem.indexOf(u8, cell_content, "\\|") != null)) {
+                    var buf: std.ArrayListUnmanaged(u8) = .{};
+                    _ = &buf;
+                    defer {
+                    _ = buf.deinit(self.allocator);
+                    }
+                    var unescaped = cell_content;
+                    _ = &unescaped;
+                    var cap_ok = true;
+                    _ = &cap_ok;
+                    _ = (blk_catch_0: { break :blk_catch_0 ((buf.ensureTotalCapacity(self.allocator, cell_content.len)) catch |__ce_0| { _ = &__ce_0; cap_ok = false;
+                    break :blk_catch_0 {}; }); });
+                    if (cap_ok) {
+                        var ci: usize = 0;
+                        _ = &ci;
+                        while ((ci < cell_content.len)) {
+                            if ((((cell_content[@as(usize, @intCast(ci))] == 92) and ((ci + 1) < cell_content.len)) and (cell_content[@as(usize, @intCast((ci + 1)))] == 124))) {
+                                _ = buf.appendAssumeCapacity(124);
+                                ci = (ci + 2);
+                            } else {
+                                _ = buf.appendAssumeCapacity(cell_content[@as(usize, @intCast(ci))]);
+                                ci = (ci + 1);
+                            }
+                        }
+                        unescaped = buf.items;
+                    }
+                    _ = try self.processInlineContent(unescaped, (vline.beg + @as(OFF, @intCast(cell_beg))));
+                } else {
+                    _ = try self.processInlineContent(cell_content, (vline.beg + @as(OFF, @intCast(cell_beg))));
+                }
+            }
+            _ = try self.leaveBlock(cell_type, 0);
+            cell_index = (cell_index + 1);
+            if ((end < row_text.len)) {
+                start = (end + 1);
+            } else {
+                break;
+            }
+        }
+        const cell_type: BlockType = (if (is_header) .th else .td);
+        while ((cell_index < col_count)) {
+            const align_data: u32 = (if ((cell_index < types.TABLE_MAXCOLCOUNT)) @intFromEnum(self.table_alignments[@as(usize, @intCast(cell_index))]) else 0);
+            _ = try self.enterBlock(cell_type, align_data, 0);
+            _ = try self.leaveBlock(cell_type, 0);
+            cell_index = (cell_index + 1);
+        }
+}

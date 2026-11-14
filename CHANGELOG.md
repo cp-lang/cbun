@@ -294,3 +294,10 @@
   - `src/unicode/uucode_lib/src/x/config_x/{grapheme_break,wcwidth}.cp` (2/2 100% 闭合)
   - `src/unicode/uucode_lib/src/x/types_x/grapheme.cp` (1/1 100% 闭合)
   - `src/string/immutable/{exact_size_matcher,grapheme,paths,escapeHTML,visible}.cp` (5/7)
+
+
+## 2026-11-14 (Milestone 7 Phase 12: 闭合 src/sql/ 全树 87/87 与 src/md/ 全目录 16/16)
+- **新增 18 个 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/sql/postgres/PostgresTypes.cp` (10/10 100% 闭合)
+  - `src/sql/postgres/types/Tag.cp` (2/2 100% 闭合)
+  - `src/md/{ansi_renderer,autolinks,blocks,containers,entity,helpers,html_renderer,inlines,line_analysis,links,parser,ref_defs,render_blocks,root,types,unicode}.cp` (16/16 100% 闭合)

@@ -131,7 +131,9 @@
    - **重要 lowering 规则**：`struct` 或 `enum` 内部嵌套的二级子结构体（如 `pub const Sub = struct { ... };`）或包含 CP 语法的复杂 `pub const` 初始化器，会被 `cpc` 原样输出而不经过 CP 表达式 lowering。**必须将二级子结构体或复杂常量提升到模块顶层声明（`pub struct Sub { ... }`），再在父结构体内写 `pub const Sub = TopLevelSub;`**。
    - 若联合体含名为 `name` 的字段（如 `name: Data`），使用 `pub union(enum) Foo` 声明，避免与 `pub enum` 自动生成的 `pub fn name()` 方法冲突。
 5. **函数与方法接收者**：
-   - 实例方法接收者：可变写 `*this`，只读写 `this`；关联静态函数写 `pub static fn`（或无 `this` 参数的 `pub fn`）。
+   - 接收者规范：在 `enum`（及最新规范下的类型方法）中，只读实例方法省略接收者形参、在函数体内通过 `_`（或 `_.field`）访问当前实例；可变实例方法首参写 `*_`；静态方法必须显式标注 `static fn`（`enum` 内部成员默认 `pub`，禁止在 `enum` 内写冗余 `pub`）。对于兼容 `*this` / `this` 的 `struct`，若遇 `E0121`，一律切换为省略只读接收者 + `_` / `*_`。
+   - 无返回值函数：直接省略 `: void`（若可能返回错误写 `fn foo()!`）。
+   - 具名可变参数：形参需在函数体内修改或作为可变借用时，写为 `param: *T`（或在函数首行 `let p = param;`）。
    - 编译期参数修饰：写 `comptime T: type`（**不要写 `@comptime`**）。
    - 线程局部变量：写 `@tls pub let x: T = ...;`（**`@tls` 必须放在 `pub` 之前**）。
    - 值传递可变参数：函数体内需修改按值传入的参数时，声明为 `mut param: T` 或在函数首行 `let p = param;`。
