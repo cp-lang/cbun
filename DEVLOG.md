@@ -339,3 +339,14 @@
   - **`@root struct` 拓扑组织模型解耦**：当原 Zig 文件兼具根结构体字段与庞大的辅助类型族（如 `Route`, `Type`, `EncodedPattern`, `TinyLog`, `Style`）时，嵌套在 `@root struct` 内部会导致二级结构体逃逸 CP 编译器 lowering，甚至造成字段解析截断。最佳实践是将辅助数据结构全部提升至模块顶层进行纯正 CP 类型声明与静态方法定义，`@root struct` 仅严格包裹根类型自身的字段与实例方法（`initEmpty`, `deinit`, `scan`, `insert` 等）。在此拓扑下，`cpc` 完整输出全模块并在生成的 Zig 文件根级注入 `pub const FrameworkRouter = @This();`，各类型自动合流成为容器成员，100% 消除语义与语法鸿沟。
   - **右侧语句在 `??` 中的重构**：Zig 中的 `orelse return ...` 或 `orelse break` 属于语句级跳转，直接机翻为 `?? return` 会破坏 CP 表达式解析栈。必须规范拆分为语句级判定 `if (opt == null) return ...;` 或海象解包 `if (v := opt)`。
   - **嵌套错误分支变量遮蔽防范**：在 `catch |e| switch (e)` 分支中避免将分支捕获名也声明为 `|e|`（如 `error.OutOfMemory => |oom| return oom,`），杜绝 Zig 编译器报告 `capture shadows capture from outer scope`。
+
+## 2026-11-15: Milestone 7 Phase 23 攻坚总结（`DevServer.cp`，攻克 4,800 行全库最大单体巨石，100% 闭环 `src/bake/` 目录）
+- **新增 1 个超大型纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 4 门禁）**：
+  - `src/bake/DevServer.cp` (4,884 行源码，原始 4,783 行，膨胀率仅 1.021x)
+- **关键工程经验与 Lowering 深度沉淀**：
+  - **4,800 行超大单体文件的模块拓扑重构**：针对包含庞大内部状态、辅助类型族（如 `Options`, `DumpDir`, `CurrentBundle`, `NextBundle`, `TestingBatch`, `HTMLRouter`, `GraphTraceState`, `EntryPointList`, `HmrTopic` 等）的根结构体文件，严格采用模块顶层类型外提 + `@root struct DevServer` 极简包裹内部状态字段 + 顶层 C-ABI / 方法级解耦架构。生成的 Zig 文件无缝注入 `pub const DevServer = @This();`，彻底解决 `self` / `this` 接收者冲突。
+  - **容器方法接收者（`*_` 与 `_`）严密对齐**：对 `EntryPointList`、`HTMLRouter`、`GraphTraceState`、`IncrementalResult`、`TestingBatch` 等结构体方法，只读方法省略首参在函数体内使用 `_.field`，修改自身状态的方法显式标注首参为 `*_`，彻底根除作为 `static fn` 时接收者传参错位报 `Cannot pass read-only parameter 'alloc' to mutable parameter 'entry_points'` 的问题。
+  - **避免 `const` 变量发生解引用与字段赋值**：在 CP 严格的所有权与可变性规则下，任何后续执行 `.field = ...`、`.* = ...` 或以 `&mut` 可变引用的变量，声明时一律使用 `let`（如 `let dev = bun.new(...)`, `let deferred = ...`, `let router_type = ...`），杜绝 `E0200` 不可变赋值报错。
+  - **二级嵌套复杂常量的顶层提权**：针对 `IncrementalResult.empty`、`EntryPointList.empty`、`HTMLRouter.empty`、`TestingBatch.empty` 等内部复杂常量，提升为模块顶层 `pub const Type_empty: Type = .{ ... };`，父类型内写 `pub const empty: Type = Type_empty;`，规避 `cpc` 对嵌套常量表达式跳过 CP Lowering 的局限。
+  - **位域结构体直接 `@packed(u6)` 表达**：将原始 Zig 复杂的 `@Type(.{ .@"struct" = ... })` 运行时类型构造，直接纯化为 CP 原生的 `@packed(u6) pub struct HmrTopicBits { ... }`，代码更简洁安全且 100% 位兼容。
+
