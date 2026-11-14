@@ -665,3 +665,10 @@
 
 
 
+
+
+### 2026-11-14: 用户指令：按 cp agy 新 10 条规则更新 zig2cp_prep.py，并固化降 Token 规则到 GEMINI.md
+- 重写 `scripts/zig2cp_prep.py`（v2：接收者/返回类型/`|capture|`/`?T`/`try`/`_ =`/struct、err 声明/关键字转义/根结构体；自动探测 cpc 是否支持 `if (let v = e)`）；抽样 4 文件错误数 76→27、75→65（余为语义类）。
+- 新增 `scripts/cpc_brief.py`（cpc + ast-check + 4 门禁，错误按码聚合）、`CP_PITFALLS.md`（踩坑速查）；`GEMINI.md` 增第七节（新语法）与第八节（降耗铁律）。
+- 发现：已安装 cpc（18:18 构建）尚不认 `if (let v = e)`（E0100），其余新规则探测均通过；待 cp agy 重建后自动生效。
+- 429 配额耗尽：`production.cp`/`FrameworkRouter.cp` 子智能体中断，已注册定时唤醒后重派。

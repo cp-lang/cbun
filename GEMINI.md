@@ -113,7 +113,7 @@
 
 ---
 
-## 六、 CP 纯化语法与 `cpc` 代码生成实战速查表（权威内联版）
+## 六、 CP 纯化语法与 `cpc` 代码生成实战速查表（旧版；与第七节冲突处以第七节为准）
 
 1. **模块导入**：
    - `import std from "std";`、`import bun from "bun";`、`import Foo from "./foo.zig";`（严禁 `@import(...)`）。
@@ -145,3 +145,32 @@
    - `switch` 语法：枚举/联合体分支写 `.tag => |payload| ...` 或 `.tag payload => ...`；注意当 `switch` 赋给 `u8`/`u32` 等无符号整数变量时，字面量分支写 `@as(u32, 0)` 避免默认推导为 `i32` 触发 `E0207`。
    - 结构体字面量：`Foo{ a: 1, b: 2 }` 或匿名 `{ a: 1, b: 2 }`（字段名不加前导点 `.a = 1`）。
    - 标识符转义：遇到 CP 关键字作为字段/方法/枚举名（如 `in`, `as`, `let`, `import`, `arena`, `from`, `impl`, `meta`, `macro`, `err`, `type`），必须转义为 `@"in"`, `@"arena"`, `@"macro"` 等。
+
+
+---
+
+## 七、 新版 `cpc` 语法规则（cp agy 2026-11-14 下发；与第六节冲突时**以本节为准**）
+
+完整速查与踩坑清单见仓库根目录 **`CP_PITFALLS.md`**（约 3KB，子智能体启动时只读它，不读 `cp_agent_ref.md`）。要点：
+1. **接收者**：禁 `self`/`this`；体内用 `_`；只读省略首参（写 `(_)` 报 E0123）；修改字段/`init` 写 `*_`；转移所有权 `move _`。
+2. **形参**：只读 `v: T`；可变 `v: *T`；`move v: T` / `own v: T`；禁 `*v: T` / `mut v: T` / `let v: T`。
+3. **局部变量**：仅 `const`/`let`；忽略返回值写 `* = expr;`（禁 `_ = expr;`）。
+4. **返回类型**：有返回值必须 `): T`；void 全场景省略 `: void`（`*void` 保留）。
+5. **类型修饰**：可选后缀 `T?`（禁 `?T`）；错误联合 `T!` / `T!E`；禁 `any`，泛型推导用 `auto`。
+6. **条件/循环**：禁 `|capture|`；`if (let v = opt)`、`while (let v = it.next())`、`for (const v of arr)`；`while (..) : (i += 1)` 合法。若当前 `cpc` 尚不认 `let v = e`（E0100 unexpected 'Let'）则回退 `if (v := e)`（`zig2cp_prep.py` 自动探测）。
+7. **C-FFI**：`@c { fn foo(a: i32): i32; struct bar {..} enum baz: c_int {..} }`，导出 `pub @c {..}`，块内不写 `pub`/`extern`。
+8. **可见性**：struct 字段/方法、enum 方法默认 `pub`（删多余 `pub`），静态方法 `static fn`；空切片 `= []`（禁 `&.{}`）。
+9. **std**：删除 `const std = @import("std");`，直接用 `std.*`；严禁为调 std 用 `zig {}`。
+10. **编译宏**：`@is_nest` 替代 `@is_beam`。
+
+## 八、 Token 节省固化铁律（2026-11-14 追加，主/子智能体必须遵守）
+
+1. **工具链**：
+   - `python3 scripts/zig2cp_prep.py <a.zig> ...`：备份 + 按第七节规则机械转换（接收者、返回类型、`|capture|`、`?T`、`try`、struct/err 声明等）。
+   - `python3 scripts/cpc_brief.py -n 8 <a.cp> ...`：一条命令完成 `cpc` + `ast-check` + 4 门禁，输出**按错误码聚合的摘要**。**严禁**直接查看 `cpc` 原始报错（单次 40~70KB）。
+2. **踩坑表驱动**：子智能体 Prompt 只写「读 `CP_PITFALLS.md`、按其 C 节工作流执行」+ 目标文件与门禁，不再内联长篇语法说明。发现新坑由主智能体追加一行到 `CP_PITFALLS.md`（子智能体可在汇报中提交）。
+3. **步数熔断**：子智能体单文件 ≤ 50 步仍未过门禁 → 汇报 `BLOCKED` 并停止；>2,500 行大文件按函数段拆给多个全新子智能体；同类错误一次修完整个文件再重编，禁止逐条编译。
+4. **主智能体禁止轮询**：不得为“看进度”解析子智能体 transcript / 重复 `manage_subagents list`；只等 `send_message` 唤醒。收到汇报后由主智能体自己用 `cpc_brief.py` 一条命令验收。
+5. **汇报精简**：阶段汇报只给 3~5 行数字（模块数、闭合目录数、膨胀率区间）；`SESSION/CHANGELOG/DEVLOG` 用单行条目追加，不重复叙述；每 3~5 个模块（或闭合一个目录）提交一次。
+6. **配额耗尽（429）**：计算重置秒数 + 120 秒，`schedule` 单次唤醒后立即结束轮次，唤醒后重派全新子智能体（不复用旧的）。
+7. **存量净化**：已迁移 `.cp` 若含旧写法（`this`/`_ = `/`: void`/`?T`/`|capture|`/`zig {}` 取 std 等），在新 `cpc` 全量生效后分批用 `cpc_brief.py` 批量发现并净化，优先于新增迁移前先抽样 3 个目录验证。

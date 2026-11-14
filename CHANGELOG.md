@@ -377,3 +377,6 @@
 
 
 
+
+## 2026-11-14 (工具链: zig2cp_prep v2, cpc_brief.py, CP_PITFALLS.md, GEMINI.md 第七/八节)
+- 新增/修改：`scripts/zig2cp_prep.py`、`scripts/cpc_brief.py`、`CP_PITFALLS.md`、`GEMINI.md`
