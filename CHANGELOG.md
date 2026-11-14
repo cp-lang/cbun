@@ -354,4 +354,12 @@
   - `src/test_runner/diff/{diff_match_patch,printDiff}.cp` (2/2 100% 闭合)
 
 
+## 2026-11-14 (Milestone 7 Phase 19: 闭合 install/isolated_install 全目录及 css/selectors, js_printer)
+- **新增 9 个 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/install/isolated_install/{FileCloner,Symlinker,FileCopier,Hardlinker,Store,Installer}.cp` (6/6 100% 闭合)
+  - `src/css/selectors/{builder,selector}.cp` (2/3)
+  - `src/js_printer/renamer.cp` (1/2)
+
+
+
 

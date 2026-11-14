@@ -607,5 +607,18 @@
 - **全仓累计进度**：**658 个纯 `.cp` 模块**，**118 个子目录 100% 闭合**。
 
 
+### 2026-11-14: Milestone 7 Phase 19 闭环提交（闭合 install/isolated_install 全目录及 css/selectors, js_printer）
+- **Milestone 7 Phase 19 闭环成果（新增 9 个 100% 纯 CP 模块，5,949 行源码，闭合 1 个子目录）**：
+  - `src/install/isolated_install/` (6/6 100% 闭合): `FileCloner.cp` (47 vs 47 lines), `Symlinker.cp` (146 vs 143 lines), `FileCopier.cp` (182 vs 180 lines), `Hardlinker.cp` (204 vs 210 lines), `Store.cp` (580 vs 590 lines), `Installer.cp` (2,018 vs 2,045 lines)
+  - `src/css/selectors/` (2/3): `builder.cp` (207 vs 203 lines), `selector.cp` (1,650 vs 1,613 lines)
+  - `src/js_printer/` (1/2): `renamer.cp` (968 vs 956 lines)
+- **4 项硬门禁验收全部通过**：
+  - 全部 9 个模块通过 `cpc --lib` 与 `vendor/zig/zig ast-check`（0 报错）；
+  - 静态零违例门禁通过（0 `zig {}`、0 `var`、0 元组字段访问、0 `anyopaque`）；
+  - 代码膨胀率均处于 `[-2.9%, +2.3%]` 区间，完全满足 `<= 1.20x` 红线。
+- **全仓累计进度**：**667 个纯 `.cp` 模块**，**119 个子目录 100% 闭合**。
+
+
+
 
 

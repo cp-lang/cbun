@@ -1,143 +1,170 @@
-pub const Symlinker = struct {
-    dest: bun.Path(.{ .sep = .auto }),
-    target: bun.RelPath(.{ .sep = .auto }),
-    fallback_junction_target: bun.AbsPath(.{ .sep = .auto }),
-
-    pub fn symlink(this: *const @This()) sys.Maybe(void) {
-        if (comptime Environment.isWindows) {
-            return sys.symlinkOrJunction(this.dest.sliceZ(), this.target.sliceZ(), this.fallback_junction_target.sliceZ());
-        }
-        return sys.symlink(this.target.sliceZ(), this.dest.sliceZ());
-    }
-
-    pub const Strategy = enum {
-        expect_existing,
-        expect_missing,
-        ignore_failure,
-    };
-
-    pub fn ensureSymlink(
-        this: *const @This(),
-        strategy: Strategy,
-    ) sys.Maybe(void) {
-        return switch (strategy) {
-            .ignore_failure => {
-                return switch (this.symlink()) {
-                    .result => .success,
-                    .err => |symlink_err| switch (symlink_err.getErrno()) {
-                        .NOENT => {
-                            const dest_parent = this.dest.dirname() orelse {
-                                return .success;
-                            };
-
-                            FD.cwd().makePath(u8, dest_parent) catch {};
-                            _ = this.symlink();
-                            return .success;
-                        },
-                        else => .success,
-                    },
-                };
-            },
-            .expect_missing => {
-                return switch (this.symlink()) {
-                    .result => .success,
-                    .err => |symlink_err1| switch (symlink_err1.getErrno()) {
-                        .NOENT => {
-                            const dest_parent = this.dest.dirname() orelse {
-                                return .initErr(symlink_err1);
-                            };
-
-                            FD.cwd().makePath(u8, dest_parent) catch {};
-                            return this.symlink();
-                        },
-                        .EXIST => {
-                            FD.cwd().deleteTree(this.dest.sliceZ()) catch {};
-                            return this.symlink();
-                        },
-                        else => .initErr(symlink_err1),
-                    },
-                };
-            },
-            .expect_existing => {
-                const current_link_buf = bun.path_buffer_pool.get();
-                defer bun.path_buffer_pool.put(current_link_buf);
-                var current_link: []const u8 = switch (sys.readlink(this.dest.sliceZ(), current_link_buf)) {
-                    .result => |res| res,
-                    .err => |readlink_err| return switch (readlink_err.getErrno()) {
-                        .NOENT => switch (this.symlink()) {
-                            .result => .success,
-                            .err => |symlink_err| switch (symlink_err.getErrno()) {
-                                .NOENT => {
-                                    const dest_parent = this.dest.dirname() orelse {
-                                        return .initErr(symlink_err);
-                                    };
-
-                                    FD.cwd().makePath(u8, dest_parent) catch {};
-                                    return this.symlink();
-                                },
-                                else => .initErr(symlink_err),
-                            },
-                        },
-                        // readlink failed for a reason other than NOENT —
-                        // dest exists but isn't a symlink. If it's a real
-                        // directory, leave it: this is the `bun patch <pkg>`
-                        // workspace (a detached copy the user is editing
-                        // before `--commit`), and `deleteTree` here would
-                        // silently destroy their in-progress edits. If it's
-                        // a regular file, replace it.
-                        else => {
-                            const is_dir = if (comptime Environment.isWindows)
-                                if (sys.getFileAttributes(this.dest.sliceZ())) |a| a.is_directory and !a.is_reparse_point else false
-                            else if (sys.lstat(this.dest.sliceZ()).asValue()) |st|
-                                std.posix.S.ISDIR(@intCast(st.mode))
-                            else
-                                false;
-                            if (is_dir) return .success;
-                            _ = sys.unlink(this.dest.sliceZ());
-                            return this.symlink();
-                        },
-                    },
-                };
-
-                // libuv adds a trailing slash to junctions.
-                current_link = strings.withoutTrailingSlash(current_link);
-
-                if (strings.eqlLong(current_link, this.target.sliceZ(), true)) {
-                    return .success;
-                }
-
-                if (comptime Environment.isWindows) {
-                    if (strings.eqlLong(current_link, this.fallback_junction_target.slice(), true)) {
-                        return .success;
-                    }
-
-                    // this existing link is pointing to the wrong package.
-                    // on windows rmdir must be used for symlinks created to point
-                    // at directories, even if the target no longer exists
-                    switch (sys.rmdir(this.dest.sliceZ())) {
-                        .result => {},
-                        .err => |err| switch (err.getErrno()) {
-                            .PERM => {
-                                _ = sys.unlink(this.dest.sliceZ());
-                            },
-                            else => {},
-                        },
-                    }
-                } else {
-                    // this existing link is pointing to the wrong package
-                    _ = sys.unlink(this.dest.sliceZ());
-                }
-
-                return this.symlink();
-            },
-        };
-    }
-};
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const Environment = bun.Environment;
 const FD = bun.FD;
 const strings = bun.strings;
 const sys = bun.sys;
+pub const LinkStrategy = enum {
+    expect_existing,
+    expect_missing,
+    ignore_failure,
+};
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime __T: type, comptime idx: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") return ti.@"struct".field_types[idx]; return @FieldType(__T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime __T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .array)) { return v[idx]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") return @field(v, ti.@"struct".field_names[idx]); return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime __T: type, comptime offset_from_end: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return ti.@"struct".field_types[n - offset_from_end]; } return @FieldType(__T, std.fmt.comptimePrint("{d}", .{1})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime __T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .array)) { return v[v.len - offset_from_end]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return @field(v, ti.@"struct".field_names[n - offset_from_end]); } return @field(v, std.fmt.comptimePrint("{d}", .{0})); } }
+pub fn CpUnpackSliceType(comptime __T: type, comptime start_idx: usize) type { if (__T == ?Message or __T == Message) return []const Message; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return __T; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return []const @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return []const @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const types = ti.@"struct".field_types; if (types.len == 0) return []const i32; const Elem = if (start_idx < types.len) types[start_idx] else types[0]; return []const CpValType(Elem); } return []const i32; }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime __T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const names = ti.@"struct".field_names; const types = ti.@"struct".field_types; const end = names.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < types.len) CpValType(types[start_idx]) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, names[f_idx])); } return buf; } return &[_]i32{}; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const Symlinker = struct {
+    dest: bun.Path(.{.sep=.auto}),
+    target: bun.RelPath(.{.sep=.auto}),
+    fallback_junction_target: bun.AbsPath(.{.sep=.auto}),
+
+pub fn symlink(self: Symlinker) sys.Maybe(void) {
+            if (comptime Environment.isWindows) {
+                return sys.symlinkOrJunction(self.dest.sliceZ(), self.target.sliceZ(), self.fallback_junction_target.sliceZ());
+            }
+            return sys.symlink(self.target.sliceZ(), self.dest.sliceZ());
+    }
+
+pub fn ensureSymlink(self: Symlinker, strategy: LinkStrategy) sys.Maybe(void) {
+            return (switch (strategy) {
+.ignore_failure => {
+return (switch (self.symlink()) {
+.result => .success,
+.err => |symlink_err| (switch (symlink_err.getErrno()) {
+.NOENT => {
+{
+                const dest_parent = ((self.dest.dirname()) orelse (({
+                return .success;
+})));
+                _ = (blk_catch_0: { break :blk_catch_0 ((FD.cwd().makePath(u8, dest_parent)) catch |__ce_0| { _ = &__ce_0;  }); });
+                _ = self.symlink();
+                return .success;
+            }
+},
+else => .success,
+}),
+});
+},
+.expect_missing => {
+return (switch (self.symlink()) {
+.result => .success,
+.err => |symlink_err1| (switch (symlink_err1.getErrno()) {
+.NOENT => {
+{
+                const dest_parent = ((self.dest.dirname()) orelse (({
+                return .initErr(symlink_err1);
+})));
+                _ = (blk_catch_1: { break :blk_catch_1 ((FD.cwd().makePath(u8, dest_parent)) catch |__ce_1| { _ = &__ce_1;  }); });
+                return self.symlink();
+            }
+},
+.EXIST => {
+{
+                _ = (blk_catch_2: { break :blk_catch_2 ((FD.cwd().deleteTree(self.dest.sliceZ())) catch |__ce_2| { _ = &__ce_2;  }); });
+                return self.symlink();
+            }
+},
+else => .initErr(symlink_err1),
+}),
+});
+},
+.expect_existing => {
+{
+                const current_link_buf = bun.path_buffer_pool.get();
+                defer {
+                _ = bun.path_buffer_pool.put(current_link_buf);
+                }
+                var current_link: []const u8 = (switch (sys.readlink(self.dest.sliceZ(), current_link_buf)) {
+.result => |res| res,
+.err => |readlink_err| {
+return (switch (readlink_err.getErrno()) {
+.NOENT => (switch (self.symlink()) {
+.result => .success,
+.err => |symlink_err| (switch (symlink_err.getErrno()) {
+.NOENT => {
+{
+                    const dest_parent = ((self.dest.dirname()) orelse (({
+                    return .initErr(symlink_err);
+})));
+                    _ = (blk_catch_3: { break :blk_catch_3 ((FD.cwd().makePath(u8, dest_parent)) catch |__ce_3| { _ = &__ce_3;  }); });
+                    return self.symlink();
+                }
+},
+else => .initErr(symlink_err),
+}),
+}),
+else => {
+{
+                    var is_dir = false;
+                    _ = &is_dir;
+                    if (comptime Environment.isWindows) {
+                        if (sys.getFileAttributes(self.dest.sliceZ())) |a| {
+                            _ = &a;
+                            is_dir = (a.is_directory and (!a.is_reparse_point));
+                        }
+                    } else {
+                        if (sys.lstat(self.dest.sliceZ()).asValue()) |st| {
+                            _ = &st;
+                            is_dir = std.posix.S.ISDIR(@as(u32, @intCast(st.mode)));
+                        }
+                    }
+                    if (is_dir) {
+                        return .success;
+                    }
+                    _ = sys.unlink(self.dest.sliceZ());
+                    return self.symlink();
+                }
+},
+});
+},
+});
+                _ = &current_link;
+                current_link = strings.withoutTrailingSlash(current_link);
+                if (strings.eqlLong(current_link, self.target.sliceZ(), true)) {
+                    return .success;
+                }
+                if (comptime Environment.isWindows) {
+                    if (strings.eqlLong(current_link, self.fallback_junction_target.slice(), true)) {
+                        return .success;
+                    }
+                    switch (sys.rmdir(self.dest.sliceZ())) {
+.result => {
+
+},
+.err => |e| {
+switch (e.getErrno()) {
+.PERM => {
+_ = sys.unlink(self.dest.sliceZ());
+},
+else => {
+
+},
+}
+},
+}
+                } else {
+                    _ = sys.unlink(self.dest.sliceZ());
+                }
+                return self.symlink();
+            }
+},
+});
+    }
+    pub const Strategy = LinkStrategy;
+};
+

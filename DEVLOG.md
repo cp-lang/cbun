@@ -295,4 +295,14 @@
   - **大型差异对比算法 (`diff_match_patch.cp`, 2,995 行) 纯化**：将泛型工厂函数签名规范化为 `pub fn DMP(comptime Unit: type): type`，内部逻辑表达式严格适配 Zig 语义，在保持 1.000x 零膨胀率的同时实现 100% 纯 CP 重构。
 
 
+## 2026-11-14: Milestone 7 Phase 19 闭环（闭合 install/isolated_install 全目录及 css/selectors, js_printer，纯 CP 模块达 667 个）
+- **新增 9 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - 覆盖 `src/install/isolated_install/` (6/6 100% 闭合)、`src/css/selectors/` (2/3)、`src/js_printer/` (1/2)，源码共计 5,949 行。
+- **关键工程经验与 Lowering 深度沉淀**：
+  - **独立安装器 (`Installer.cp`, 2,018 行) 复杂结构体嵌套字面量与 `err` 关键字防冲突**：修复嵌套结构体字面量 `.{ .download = .{ ... } }` 解析时导致 `cpc` 提前中断闭合结构体的隐蔽问题，明确类型声明 `Task.Error{ .download = ... }`；将涉及错误处理的形参/局部变量统一避让为 `e` / `download_err`，联合体字段转义为 `@"err"`。
+  - **Switch 分支语句语义**：在 CP 语言中，`return` 是语句而非表达式。在 void 返回值函数的 switch 分支直接写 `.default_namespace => return,` 会破坏 CP 解析器的嵌套大括号栈，导致后续函数被截断抛弃；规范改写为 `.default_namespace => {},` 完全解决。
+  - **表达式解包语句级重构**：针对 `const css_module = if (dest.css_module) |m| ...` 这类在表达式位置尝试解包的结构，重构为 CP 规范的语句级 `let css_module = dest.css_module; if (css_module != null) { ... }`，消除借用检查误判。
+
+
+
 
