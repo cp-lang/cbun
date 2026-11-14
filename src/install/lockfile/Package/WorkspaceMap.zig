@@ -1,412 +1,7 @@
-const WorkspaceMap = @This();
-
-map: Map,
-
-const Map = bun.StringArrayHashMap(Entry);
-pub const Entry = struct {
-    name: string,
-    version: ?string,
-    name_loc: logger.Loc,
-};
-
-pub fn init(allocator: std.mem.Allocator) WorkspaceMap {
-    return .{
-        .map = Map.init(allocator),
-    };
-}
-
-pub fn keys(self: WorkspaceMap) []const string {
-    return self.map.keys();
-}
-
-pub fn values(self: WorkspaceMap) []const Entry {
-    return self.map.values();
-}
-
-pub fn count(self: WorkspaceMap) usize {
-    return self.map.count();
-}
-
-pub fn insert(self: *WorkspaceMap, key: string, value: Entry) !void {
-    if (comptime Environment.isDebug) {
-        if (!bun.sys.exists(key)) {
-            Output.debugWarn("WorkspaceMap.insert: key {s} does not exist", .{key});
-        }
-    }
-
-    const entry = try self.map.getOrPut(key);
-    if (!entry.found_existing) {
-        entry.key_ptr.* = try self.map.allocator.dupe(u8, key);
-    } else {
-        self.map.allocator.free(entry.value_ptr.name);
-    }
-
-    entry.value_ptr.* = .{
-        .name = value.name,
-        .version = value.version,
-        .name_loc = value.name_loc,
-    };
-}
-
-pub fn sort(self: *WorkspaceMap, sort_ctx: anytype) void {
-    self.map.sort(sort_ctx);
-}
-
-pub fn deinit(self: *WorkspaceMap) void {
-    for (self.map.values()) |value| {
-        self.map.allocator.free(value.name);
-    }
-
-    for (self.map.keys()) |key| {
-        self.map.allocator.free(key);
-    }
-
-    self.map.deinit();
-}
-
-fn processWorkspaceName(
-    allocator: std.mem.Allocator,
-    json_cache: *PackageManager.WorkspacePackageJSONCache,
-    abs_package_json_path: [:0]const u8,
-    log: *logger.Log,
-) !Entry {
-    const workspace_json = try json_cache.getWithPath(allocator, log, abs_package_json_path, .{
-        .init_reset_store = false,
-        .guess_indentation = true,
-    }).unwrap();
-
-    const name_expr = workspace_json.root.get("name") orelse return error.MissingPackageName;
-    const name = try name_expr.asStringCloned(allocator) orelse return error.MissingPackageName;
-
-    const entry = Entry{
-        .name = name,
-        .name_loc = name_expr.loc,
-        .version = brk: {
-            if (workspace_json.root.get("version")) |version_expr| {
-                if (try version_expr.asStringCloned(allocator)) |version| {
-                    break :brk version;
-                }
-            }
-
-            break :brk null;
-        },
-    };
-    debug("processWorkspaceName({s}) = {s}", .{ abs_package_json_path, entry.name });
-
-    return entry;
-}
-
-pub fn processNamesArray(
-    workspace_names: *WorkspaceMap,
-    allocator: Allocator,
-    json_cache: *PackageManager.WorkspacePackageJSONCache,
-    log: *logger.Log,
-    arr: *JSAst.E.Array,
-    source: *const logger.Source,
-    loc: logger.Loc,
-    string_builder: ?*StringBuilder,
-) !u32 {
-    if (arr.items.len == 0) return 0;
-
-    const orig_msgs_len = log.msgs.items.len;
-
-    var workspace_globs = std.array_list.Managed(string).init(allocator);
-    defer workspace_globs.deinit();
-    const filepath_bufOS = allocator.create(bun.PathBuffer) catch unreachable;
-    const filepath_buf = std.mem.asBytes(filepath_bufOS);
-    defer allocator.destroy(filepath_bufOS);
-
-    for (arr.slice()) |item| {
-        // TODO: when does this get deallocated?
-        const input_path = try item.asStringZ(allocator) orelse {
-            log.addErrorFmt(source, item.loc, allocator,
-                \\Workspaces expects an array of strings, like:
-                \\  <r><green>"workspaces"<r>: [
-                \\    <green>"path/to/package"<r>
-                \\  ]
-            , .{}) catch {};
-            return error.InvalidPackageJSON;
-        };
-
-        if (input_path.len == 0 or input_path.len == 1 and input_path[0] == '.' or strings.eqlComptime(input_path, "./") or strings.eqlComptime(input_path, ".\\")) continue;
-
-        if (glob.detectGlobSyntax(input_path)) {
-            bun.handleOom(workspace_globs.append(input_path));
-            continue;
-        }
-
-        const abs_package_json_path: stringZ = Path.joinAbsStringBufZ(
-            source.path.name.dir,
-            filepath_buf,
-            &.{ input_path, "package.json" },
-            .auto,
-        );
-
-        // skip root package.json
-        if (strings.eqlLong(bun.path.dirname(abs_package_json_path, .auto), source.path.name.dir, true)) continue;
-
-        const workspace_entry = processWorkspaceName(
-            allocator,
-            json_cache,
-            abs_package_json_path,
-            log,
-        ) catch |err| {
-            bun.handleErrorReturnTrace(err, @errorReturnTrace());
-            switch (err) {
-                error.EISNOTDIR, error.EISDIR, error.EACCESS, error.EPERM, error.ENOENT, error.FileNotFound => {
-                    log.addErrorFmt(
-                        source,
-                        item.loc,
-                        allocator,
-                        "Workspace not found \"{s}\"",
-                        .{input_path},
-                    ) catch {};
-                },
-                error.MissingPackageName => {
-                    log.addErrorFmt(
-                        source,
-                        loc,
-                        allocator,
-                        "Missing \"name\" from package.json in {s}",
-                        .{input_path},
-                    ) catch {};
-                },
-                else => {
-                    log.addErrorFmt(
-                        source,
-                        item.loc,
-                        allocator,
-                        "{s} reading package.json for workspace package \"{s}\" from \"{s}\"",
-                        .{ @errorName(err), input_path, bun.getcwd(allocator.alloc(u8, bun.MAX_PATH_BYTES) catch unreachable) catch unreachable },
-                    ) catch {};
-                },
-            }
-            continue;
-        };
-
-        if (workspace_entry.name.len == 0) continue;
-
-        const rel_input_path = Path.relativePlatform(
-            source.path.name.dir,
-            strings.withoutSuffixComptime(abs_package_json_path, std.fs.path.sep_str ++ "package.json"),
-            .auto,
-            true,
-        );
-        if (comptime Environment.isWindows) {
-            Path.dangerouslyConvertPathToPosixInPlace(u8, @constCast(rel_input_path));
-        }
-
-        if (string_builder) |builder| {
-            builder.count(workspace_entry.name);
-            builder.count(rel_input_path);
-            builder.cap += bun.MAX_PATH_BYTES;
-            if (workspace_entry.version) |version_string| {
-                builder.count(version_string);
-            }
-        }
-
-        try workspace_names.insert(rel_input_path, .{
-            .name = workspace_entry.name,
-            .name_loc = workspace_entry.name_loc,
-            .version = workspace_entry.version,
-        });
-    }
-
-    if (workspace_globs.items.len > 0) {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-        for (workspace_globs.items, 0..) |user_pattern, i| {
-            defer _ = arena.reset(.retain_capacity);
-
-            const glob_pattern = if (user_pattern.len == 0) "package.json" else brk: {
-                const parts = [_][]const u8{ user_pattern, "package.json" };
-                break :brk bun.handleOom(arena.allocator().dupe(u8, bun.path.join(parts, .auto)));
-            };
-
-            var walker: GlobWalker = .{};
-            var cwd = bun.path.dirname(source.path.text, .auto);
-            cwd = if (bun.strings.eql(cwd, "")) bun.fs.FileSystem.instance.top_level_dir else cwd;
-            if ((try walker.initWithCwd(&arena, glob_pattern, cwd, false, false, false, false, true)).asErr()) |e| {
-                log.addErrorFmt(
-                    source,
-                    loc,
-                    allocator,
-                    "Failed to run workspace pattern <b>{s}<r> due to error <b>{s}<r>",
-                    .{ user_pattern, @tagName(e.getErrno()) },
-                ) catch {};
-                return error.GlobError;
-            }
-            defer walker.deinit(false);
-
-            var iter: GlobWalker.Iterator = .{
-                .walker = &walker,
-            };
-            defer iter.deinit();
-            if ((try iter.init()).asErr()) |e| {
-                log.addErrorFmt(
-                    source,
-                    loc,
-                    allocator,
-                    "Failed to run workspace pattern <b>{s}<r> due to error <b>{s}<r>",
-                    .{ user_pattern, @tagName(e.getErrno()) },
-                ) catch {};
-                return error.GlobError;
-            }
-
-            next_match: while (switch (try iter.next()) {
-                .result => |r| r,
-                .err => |e| {
-                    log.addErrorFmt(
-                        source,
-                        loc,
-                        allocator,
-                        "Failed to run workspace pattern <b>{s}<r> due to error <b>{s}<r>",
-                        .{ user_pattern, @tagName(e.getErrno()) },
-                    ) catch {};
-                    return error.GlobError;
-                },
-            }) |matched_path| {
-                const entry_dir: []const u8 = Path.dirname(matched_path, .auto);
-
-                // skip root package.json
-                if (strings.eqlComptime(matched_path, "package.json")) continue;
-
-                {
-                    const matched_path_without_package_json = strings.withoutTrailingSlash(strings.withoutSuffixComptime(matched_path, "package.json"));
-
-                    // check if it's negated by any remaining patterns
-                    for (workspace_globs.items[i + 1 ..]) |next_pattern| {
-                        switch (bun.glob.match(next_pattern, matched_path_without_package_json)) {
-                            .no_match,
-                            .match,
-                            .negate_match,
-                            => {},
-
-                            .negate_no_match => {
-                                debug("skipping negated path: {s}, {s}\n", .{
-                                    matched_path_without_package_json,
-                                    next_pattern,
-                                });
-                                continue :next_match;
-                            },
-                        }
-                    }
-                }
-
-                debug("matched path: {s}, dirname: {s}\n", .{ matched_path, entry_dir });
-
-                const abs_package_json_path = Path.joinAbsStringBufZ(
-                    cwd,
-                    filepath_buf,
-                    &.{ entry_dir, "package.json" },
-                    .auto,
-                );
-                const abs_workspace_dir_path: string = strings.withoutSuffixComptime(abs_package_json_path, "package.json");
-
-                const workspace_entry = processWorkspaceName(
-                    allocator,
-                    json_cache,
-                    abs_package_json_path,
-                    log,
-                ) catch |err| {
-                    bun.handleErrorReturnTrace(err, @errorReturnTrace());
-
-                    const entry_base: []const u8 = Path.basename(matched_path);
-                    switch (err) {
-                        error.FileNotFound, error.PermissionDenied => continue,
-                        error.MissingPackageName => {
-                            log.addErrorFmt(
-                                source,
-                                logger.Loc.Empty,
-                                allocator,
-                                "Missing \"name\" from package.json in {s}" ++ std.fs.path.sep_str ++ "{s}",
-                                .{ entry_dir, entry_base },
-                            ) catch {};
-                        },
-                        else => {
-                            log.addErrorFmt(
-                                source,
-                                logger.Loc.Empty,
-                                allocator,
-                                "{s} reading package.json for workspace package \"{s}\" from \"{s}\"",
-                                .{ @errorName(err), entry_dir, entry_base },
-                            ) catch {};
-                        },
-                    }
-
-                    continue;
-                };
-
-                if (workspace_entry.name.len == 0) continue;
-
-                const workspace_path: string = Path.relativePlatform(
-                    source.path.name.dir,
-                    abs_workspace_dir_path,
-                    .auto,
-                    true,
-                );
-                if (comptime Environment.isWindows) {
-                    Path.dangerouslyConvertPathToPosixInPlace(u8, @constCast(workspace_path));
-                }
-
-                if (string_builder) |builder| {
-                    builder.count(workspace_entry.name);
-                    builder.count(workspace_path);
-                    builder.cap += bun.MAX_PATH_BYTES;
-                    if (workspace_entry.version) |version| {
-                        builder.count(version);
-                    }
-                }
-
-                try workspace_names.insert(workspace_path, .{
-                    .name = workspace_entry.name,
-                    .version = workspace_entry.version,
-                    .name_loc = workspace_entry.name_loc,
-                });
-            }
-        }
-    }
-
-    if (orig_msgs_len != log.msgs.items.len) return error.InstallFailed;
-
-    // Sort the names for determinism
-    workspace_names.sort(struct {
-        values: []const WorkspaceMap.Entry,
-        pub fn lessThan(
-            self: @This(),
-            a: usize,
-            b: usize,
-        ) bool {
-            return strings.order(self.values[a].name, self.values[b].name) == .lt;
-        }
-    }{
-        .values = workspace_names.values(),
-    });
-
-    return @truncate(workspace_names.count());
-}
-
-const IGNORED_PATHS: []const []const u8 = &.{
-    "node_modules",
-    ".git",
-    "CMakeFiles",
-};
-fn ignoredWorkspacePaths(path: []const u8) bool {
-    inline for (IGNORED_PATHS) |ignored| {
-        if (bun.strings.eqlComptime(path, ignored)) return true;
-    }
-    return false;
-}
-const GlobWalker = glob.GlobWalker(ignoredWorkspacePaths, glob.walk.SyscallAccessor, false);
-
-const string = []const u8;
-const debug = Output.scoped(.Lockfile, .hidden);
-const stringZ = [:0]const u8;
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 
-const bun = @import("bun");
+const Allocator = std.mem.Allocator;
 const Environment = bun.Environment;
 const JSAst = bun.ast;
 const Output = bun.Output;
@@ -414,9 +9,282 @@ const Path = bun.path;
 const glob = bun.glob;
 const logger = bun.logger;
 const strings = bun.strings;
-
 const install = bun.install;
 const PackageManager = bun.install.PackageManager;
-
 const Lockfile = install.Lockfile;
 const StringBuilder = Lockfile.StringBuilder;
+const debug = Output.scoped(.Lockfile, .hidden);
+const Map = bun.StringArrayHashMap(Entry);
+const IGNORED_PATHS: []const []const u8 = (&.{ "node_modules", ".git", "CMakeFiles" });
+const GlobWalker = glob.GlobWalker(ignoredWorkspacePaths, glob.walk.SyscallAccessor, false);
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const Entry = struct {
+    name: []const u8,
+    version: ?[]const u8,
+    name_loc: logger.Loc,
+};
+
+pub const WorkspaceSortContext = struct {
+    values: []const Entry,
+
+pub fn lessThan(self: WorkspaceSortContext, a: usize, b: usize) bool {
+            return (strings.order(self.values[@as(usize, @intCast(a))].name, self.values[@as(usize, @intCast(b))].name) == .lt);
+    }
+};
+
+pub const WorkspaceMap = @This();
+
+map: Map,
+
+pub fn init(allocator: std.mem.Allocator) WorkspaceMap {
+        return WorkspaceMap{ .map = Map.init(allocator) };
+}
+
+pub fn keys(self: WorkspaceMap) []const []const u8 {
+        return self.map.keys();
+}
+
+pub fn values(self: WorkspaceMap) []const Entry {
+        return self.map.values();
+}
+
+pub fn count(self: WorkspaceMap) usize {
+        return self.map.count();
+}
+
+pub fn insert(self: *WorkspaceMap, key: []const u8, value: Entry) !void {
+        if (comptime Environment.isDebug) {
+            if ((!bun.sys.exists(key))) {
+                _ = Output.debugWarn("WorkspaceMap.insert: key {s} does not exist", .{ key });
+            }
+        }
+        const entry = try self.map.getOrPut(key);
+        if ((!entry.found_existing)) {
+            entry.key_ptr.* = try self.map.allocator.dupe(u8, key);
+        } else {
+            _ = self.map.allocator.free((if (@typeInfo(@TypeOf(entry.value_ptr)) == .@"enum" or @typeInfo(@TypeOf(entry.value_ptr)) == .@"union") @tagName(entry.value_ptr) else entry.value_ptr.name));
+        }
+        entry.value_ptr.* = Entry{ .name = value.name, .version = value.version, .name_loc = value.name_loc };
+}
+
+pub fn sort(self: *WorkspaceMap, sort_ctx: anytype) void {
+        _ = self.map.sort(sort_ctx);
+}
+
+pub fn deinit(self: *WorkspaceMap) void {
+        for (self.map.values()) |value| {
+            _ = &value;
+            _ = self.map.allocator.free((if (@typeInfo(@TypeOf(value)) == .@"enum" or @typeInfo(@TypeOf(value)) == .@"union") @tagName(value) else value.name));
+        }
+        for (cp_iter_slice(self.map.keys())) |key| {
+            _ = &key;
+            _ = self.map.allocator.free(key);
+        }
+        _ = self.map.deinit();
+}
+const string = []const u8;
+const stringZ = [:0]const u8;
+
+pub fn ignoredWorkspacePaths(path: []const u8) bool {
+        inline for (IGNORED_PATHS) |ignored| {
+            if (bun.strings.eqlComptime(path, ignored)) {
+                return true;
+            }
+        }
+        return false;
+}
+
+pub fn processWorkspaceName(allocator: std.mem.Allocator, json_cache: *PackageManager.WorkspacePackageJSONCache, abs_package_json_path: [:0]const u8, log: *logger.Log) !Entry {
+        const workspace_json = try json_cache.getWithPath(allocator, log, abs_package_json_path, .{ .init_reset_store = false, .guess_indentation = true }).unwrap();
+        const name_expr = ((workspace_json.root.get("name")) orelse { return error.MissingPackageName; });
+        const name = ((try name_expr.asStringCloned(allocator)) orelse { return error.MissingPackageName; });
+        const entry = Entry{ .name = name, .name_loc = name_expr.loc, .version = brk: {
+        if (workspace_json.root.get("version")) |version_expr| {
+            _ = &version_expr;
+            if (try version_expr.asStringCloned(allocator)) |version| {
+                _ = &version;
+                break :brk version;
+            }
+        }
+        break :brk null;
+} };
+        _ = debug("processWorkspaceName({s}) = {s}", .{ abs_package_json_path, entry.name });
+        return entry;
+}
+
+pub fn processNamesArray(workspace_names: *WorkspaceMap, allocator: Allocator, json_cache: *PackageManager.WorkspacePackageJSONCache, log: *logger.Log, arr: *JSAst.E.Array, source: *const logger.Source, loc: logger.Loc, string_builder: ?*StringBuilder) !u32 {
+        if ((arr.items.len == 0)) {
+            return 0;
+        }
+        const orig_msgs_len = log.msgs.items.len;
+        var workspace_globs = std.array_list.Managed(string).init(allocator);
+        _ = &workspace_globs;
+        defer {
+        _ = workspace_globs.deinit();
+        }
+        const filepath_bufOS = ((allocator.create(bun.PathBuffer)) catch unreachable);
+        const filepath_buf = std.mem.asBytes(filepath_bufOS);
+        defer {
+        _ = allocator.destroy(filepath_bufOS);
+        }
+        for (cp_iter_slice(arr.slice())) |item| {
+            _ = &item;
+            const input_path_opt = try item.asStringZ(allocator);
+            if ((input_path_opt == null)) {
+                _ = (blk_catch_1: { break :blk_catch_1 ((log.addError(source, item.loc, allocator, "Workspaces expects an array of strings")) catch |__ce_1| { _ = &__ce_1;  }); });
+                return error.InvalidPackageJSON;
+            }
+            const input_path = input_path_opt.?;
+            if (((((input_path.len == 0) or ((input_path.len == 1) and (input_path[0] == 46))) or strings.eqlComptime(input_path, "./")) or strings.eqlComptime(input_path, ".\\\\"))) {
+                continue;
+            }
+            if (glob.detectGlobSyntax(input_path)) {
+                _ = bun.handleOom(workspace_globs.append(input_path));
+                continue;
+            }
+            const abs_package_json_path: stringZ = Path.joinAbsStringBufZ((if (@typeInfo(@TypeOf(source.path)) == .@"enum" or @typeInfo(@TypeOf(source.path)) == .@"union") @tagName(source.path) else source.path.name).dir, filepath_buf, (&.{ input_path, "package.json" }), .auto);
+            if (strings.eqlLong(bun.path.dirname(abs_package_json_path, .auto), (if (@typeInfo(@TypeOf(source.path)) == .@"enum" or @typeInfo(@TypeOf(source.path)) == .@"union") @tagName(source.path) else source.path.name).dir, true)) {
+                continue;
+            }
+            const workspace_entry = (blk_catch_2: { break :blk_catch_2 ((processWorkspaceName(allocator, json_cache, abs_package_json_path, log)) catch |e| { _ = &e; _ = bun.handleErrorReturnTrace(e, @errorReturnTrace());
+            switch (e) {
+error.EISNOTDIR, error.EISDIR, error.EACCESS, error.EPERM, error.ENOENT, error.FileNotFound => {
+_ = (blk_catch_3: { break :blk_catch_3 ((log.addErrorFmt(source, item.loc, allocator, "Workspace not found \"{s}\"", .{ input_path })) catch |__ce_3| { _ = &__ce_3;  }); });
+},
+error.MissingPackageName => {
+_ = (blk_catch_4: { break :blk_catch_4 ((log.addErrorFmt(source, loc, allocator, "Missing \"name\" from package.json in {s}", .{ input_path })) catch |__ce_4| { _ = &__ce_4;  }); });
+},
+else => {
+_ = (blk_catch_5: { break :blk_catch_5 ((log.addErrorFmt(source, loc, allocator, "{s} reading package.json for workspace package \"{s}\"", .{ @errorName(e), input_path })) catch |__ce_5| { _ = &__ce_5;  }); });
+},
+}
+            continue; }); });
+            if ((workspace_entry.name.len == 0)) {
+                continue;
+            }
+            const abs_workspace_dir_path: []const u8 = bun.path.dirname(abs_package_json_path, .auto);
+            const workspace_path: []const u8 = Path.relativePlatform((if (@typeInfo(@TypeOf(source.path)) == .@"enum" or @typeInfo(@TypeOf(source.path)) == .@"union") @tagName(source.path) else source.path.name).dir, abs_workspace_dir_path, .auto, true);
+            if (comptime Environment.isWindows) {
+                _ = Path.dangerouslyConvertPathToPosixInPlace(u8, @constCast(workspace_path));
+            }
+            if (string_builder) |builder| {
+                _ = &builder;
+                _ = builder.count(workspace_entry.name);
+                _ = builder.count(workspace_path);
+                builder.cap = (builder.cap + bun.MAX_PATH_BYTES);
+                if (workspace_entry.version) |version| {
+                    _ = &version;
+                    _ = builder.count(version);
+                }
+            }
+            _ = try workspace_names.insert(workspace_path, Entry{ .name = workspace_entry.name, .version = workspace_entry.version, .name_loc = workspace_entry.name_loc });
+        }
+        if ((workspace_globs.items.len > 0)) {
+            const cwd = bun.toFD((blk_catch_6: { break :blk_catch_6 ((bun.openDirAt(bun.FD.cwd(), (if (@typeInfo(@TypeOf(source.path)) == .@"enum" or @typeInfo(@TypeOf(source.path)) == .@"union") @tagName(source.path) else source.path.name).dir)) catch |e| { _ = &e; _ = (blk_catch_7: { break :blk_catch_7 ((log.addErrorFmt(source, loc, allocator, "Failed to open directory {s} for workspace pattern: {s}", .{ (if (@typeInfo(@TypeOf(source.path)) == .@"enum" or @typeInfo(@TypeOf(source.path)) == .@"union") @tagName(source.path) else source.path.name).dir, @errorName(e) })) catch |__ce_7| { _ = &__ce_7;  }); });
+            return error.GlobError; }); }));
+            defer {
+            _ = bun.sys.close(cwd);
+            }
+            for (workspace_globs.items) |user_pattern| {
+                _ = &user_pattern;
+                var glob_pattern: []const u8 = user_pattern;
+                _ = &glob_pattern;
+                if (strings.hasPrefix(glob_pattern, "./")) {
+                    glob_pattern = glob_pattern[2..];
+                } else {
+                    if (strings.hasPrefix(glob_pattern, ".\\\\")) {
+                        glob_pattern = glob_pattern[2..];
+                    }
+                }
+                var walker: GlobWalker = .{};
+                _ = &walker;
+                defer {
+                _ = walker.deinit();
+                }
+                var arena_alloc = std.heap.ArenaAllocator.init(allocator);
+                _ = &arena_alloc;
+                defer {
+                _ = arena_alloc.deinit();
+                }
+                var iter = GlobWalker.Iterator{ .walker = (&walker) };
+                _ = &iter;
+                defer {
+                _ = iter.deinit();
+                }
+                if (try iter.init().asErr()) |err_opt| {
+                    _ = &err_opt;
+                    const e = err_opt;
+                    _ = (blk_catch_8: { break :blk_catch_8 ((log.addErrorFmt(source, loc, allocator, "Failed to run workspace pattern <b>{s}<r> due to error <b>{s}<r>", .{ user_pattern, @tagName(e.getErrno()) })) catch |__ce_8| { _ = &__ce_8;  }); });
+                    return error.GlobError;
+                }
+                next_match: while (true) {
+                    const match_result = try iter.next();
+                    var matched_path: []const u8 = "";
+                    _ = &matched_path;
+                    switch (match_result) {
+.result => |r| {
+if (r) |path_slice| {
+                        _ = &path_slice;
+                        matched_path = path_slice;
+                    } else {
+                        break :next_match;
+                    }
+},
+.err => |e| {
+_ = (blk_catch_9: { break :blk_catch_9 ((log.addErrorFmt(source, loc, allocator, "Failed to run workspace pattern <b>{s}<r> due to error <b>{s}<r>", .{ user_pattern, @tagName(e.getErrno()) })) catch |__ce_9| { _ = &__ce_9;  }); });
+                    return error.GlobError;
+},
+}
+                    const entry_dir: []const u8 = Path.dirname(matched_path, .auto);
+                    const abs_package_json_path: stringZ = Path.joinAbsStringBufZ((if (@typeInfo(@TypeOf(source.path)) == .@"enum" or @typeInfo(@TypeOf(source.path)) == .@"union") @tagName(source.path) else source.path.name).dir, filepath_buf, (&.{ entry_dir, "package.json" }), .auto);
+                    const abs_workspace_dir_path: []const u8 = strings.withoutSuffixComptime(abs_package_json_path, "package.json");
+                    const workspace_entry = (blk_catch_10: { break :blk_catch_10 ((processWorkspaceName(allocator, json_cache, abs_package_json_path, log)) catch |e| { _ = &e; _ = bun.handleErrorReturnTrace(e, @errorReturnTrace());
+                    const entry_base: []const u8 = Path.basename(matched_path);
+                    switch (e) {
+error.FileNotFound, error.PermissionDenied => {
+_ = continue;
+},
+error.MissingPackageName => {
+_ = (blk_catch_11: { break :blk_catch_11 ((log.addErrorFmt(source, logger.Loc.Empty, allocator, "Missing \"name\" from package.json in {s}/{s}", .{ entry_dir, entry_base })) catch |__ce_11| { _ = &__ce_11;  }); });
+},
+else => {
+_ = (blk_catch_12: { break :blk_catch_12 ((log.addErrorFmt(source, logger.Loc.Empty, allocator, "{s} reading package.json for workspace package \"{s}\" from \"{s}\"", .{ @errorName(e), entry_dir, entry_base })) catch |__ce_12| { _ = &__ce_12;  }); });
+},
+}
+                    continue; }); });
+                    if ((workspace_entry.name.len == 0)) {
+                        continue;
+                    }
+                    const workspace_path: []const u8 = Path.relativePlatform((if (@typeInfo(@TypeOf(source.path)) == .@"enum" or @typeInfo(@TypeOf(source.path)) == .@"union") @tagName(source.path) else source.path.name).dir, abs_workspace_dir_path, .auto, true);
+                    if (comptime Environment.isWindows) {
+                        _ = Path.dangerouslyConvertPathToPosixInPlace(u8, @constCast(workspace_path));
+                    }
+                    if (string_builder) |builder| {
+                        _ = &builder;
+                        _ = builder.count(workspace_entry.name);
+                        _ = builder.count(workspace_path);
+                        builder.cap = (builder.cap + bun.MAX_PATH_BYTES);
+                        if (workspace_entry.version) |version| {
+                            _ = &version;
+                            _ = builder.count(version);
+                        }
+                    }
+                    _ = try workspace_names.insert(workspace_path, Entry{ .name = workspace_entry.name, .version = workspace_entry.version, .name_loc = workspace_entry.name_loc });
+                }
+            }
+        }
+        if ((orig_msgs_len != log.msgs.items.len)) {
+            return error.InstallFailed;
+        }
+        _ = workspace_names.sort(WorkspaceSortContext{ .values = workspace_names.values() });
+        return @truncate(workspace_names.count());
+}

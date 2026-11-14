@@ -1,352 +1,331 @@
-pub const FolderResolution = union(Tag) {
-    package_id: PackageID,
-    err: anyerror,
-    new_package_id: PackageID,
-
-    pub const Tag = enum { package_id, err, new_package_id };
-
-    pub const PackageWorkspaceSearchPathFormatter = struct {
-        manager: *PackageManager,
-        version: Dependency.Version,
-        quoted: bool = true,
-
-        pub fn format(this: PackageWorkspaceSearchPathFormatter, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            var joined: [bun.MAX_PATH_BYTES + 2]u8 = undefined;
-            const str_to_use = this.manager.lockfile.workspace_paths.getPtr(
-                @truncate(String.Builder.stringHash(this.manager.lockfile.str(&this.version.value.workspace))),
-            ) orelse &this.version.value.workspace;
-            var paths = normalizePackageJSONPath(.{ .relative = .workspace }, joined[2..], this.manager.lockfile.str(str_to_use));
-
-            if (!strings.startsWithChar(paths.rel, '.') and !strings.startsWithChar(paths.rel, std.fs.path.sep)) {
-                joined[0..2].* = ("." ++ std.fs.path.sep_str).*;
-                paths.rel = joined[0 .. paths.rel.len + 2];
-            }
-
-            if (this.quoted) {
-                const quoted = bun.fmt.QuotedFormatter{
-                    .text = paths.rel,
-                };
-                try quoted.format(writer);
-            } else {
-                try writer.writeAll(paths.rel);
-            }
-        }
-    };
-
-    pub const Map = std.HashMapUnmanaged(u64, FolderResolution, IdentityContext(u64), 80);
-
-    pub fn normalize(path: string) string {
-        return FileSystem.instance.normalize(path);
-    }
-
-    pub fn hash(normalized_path: string) u64 {
-        return bun.hash(normalized_path);
-    }
-
-    fn NewResolver(comptime tag: Resolution.Tag) type {
-        return struct {
-            folder_path: string,
-
-            pub fn resolve(this: @This(), comptime Builder: type, builder: Builder, _: JSAst.Expr) !Resolution {
-                return Resolution{
-                    .tag = tag,
-                    .value = @unionInit(Resolution.Value, @tagName(tag), builder.append(String, this.folder_path)),
-                };
-            }
-
-            pub fn count(this: @This(), comptime Builder: type, builder: Builder, _: JSAst.Expr) void {
-                builder.count(this.folder_path);
-            }
-
-            pub fn checkBundledDependencies() bool {
-                return tag == .folder or tag == .symlink;
-            }
-        };
-    }
-
-    const Resolver = NewResolver(Resolution.Tag.folder);
-    const SymlinkResolver = NewResolver(Resolution.Tag.symlink);
-    const WorkspaceResolver = NewResolver(Resolution.Tag.workspace);
-    const CacheFolderResolver = struct {
-        version: Semver.Version,
-
-        pub fn resolve(this: @This(), comptime Builder: type, _: Builder, _: JSAst.Expr) !Resolution {
-            return Resolution{
-                .tag = Resolution.Tag.npm,
-                .value = .{
-                    .npm = .{
-                        .version = this.version,
-                        .url = String.from(""),
-                    },
-                },
-            };
-        }
-
-        pub fn count(_: @This(), comptime Builder: type, _: Builder, _: JSAst.Expr) void {}
-
-        pub fn checkBundledDependencies() bool {
-            return true;
-        }
-    };
-
-    const Paths = struct {
-        abs: stringZ,
-        rel: string,
-    };
-    fn normalizePackageJSONPath(global_or_relative: GlobalOrRelative, joined: *bun.PathBuffer, non_normalized_path: string) Paths {
-        var abs: string = "";
-        var rel: string = "";
-        // We consider it valid if there is a package.json in the folder
-        const normalized = if (non_normalized_path.len == 1 and non_normalized_path[0] == '.')
-            non_normalized_path
-        else if (std.fs.path.isAbsolute(non_normalized_path))
-            std.mem.trimRight(u8, non_normalized_path, std.fs.path.sep_str)
-        else
-            std.mem.trimRight(u8, normalize(non_normalized_path), std.fs.path.sep_str);
-
-        if (strings.startsWithChar(normalized, '.')) {
-            var tempcat: bun.PathBuffer = undefined;
-
-            bun.copy(u8, &tempcat, normalized);
-            tempcat[normalized.len..][0.."/package.json".len].* = (std.fs.path.sep_str ++ "package.json").*;
-            var parts = [_]string{ FileSystem.instance.top_level_dir, tempcat[0 .. normalized.len + "/package.json".len] };
-            abs = FileSystem.instance.absBuf(&parts, joined);
-            rel = FileSystem.instance.relative(FileSystem.instance.top_level_dir, abs[0 .. abs.len - "/package.json".len]);
-        } else {
-            var remain: []u8 = joined[0..];
-            switch (global_or_relative) {
-                .global, .cache_folder => {
-                    const path = if (global_or_relative == .global) global_or_relative.global else global_or_relative.cache_folder;
-                    if (path.len > 0) {
-                        const offset = path.len -| @as(usize, @intFromBool(path[path.len -| 1] == std.fs.path.sep));
-                        if (offset > 0)
-                            @memcpy(remain[0..offset], path[0..offset]);
-                        remain = remain[offset..];
-                        if (normalized.len > 0) {
-                            if ((path[path.len - 1] != std.fs.path.sep) and (normalized[0] != std.fs.path.sep)) {
-                                remain[0] = std.fs.path.sep;
-                                remain = remain[1..];
-                            }
-                        }
-                    }
-                },
-                .relative => {},
-            }
-            bun.copy(u8, remain, normalized);
-            remain[normalized.len..][0.."/package.json".len].* = (std.fs.path.sep_str ++ "package.json").*;
-            remain = remain[normalized.len + "/package.json".len ..];
-            abs = joined[0 .. joined.len - remain.len];
-            // We store the folder name without package.json
-            rel = FileSystem.instance.relative(FileSystem.instance.top_level_dir, abs[0 .. abs.len - "/package.json".len]);
-        }
-        joined[abs.len] = 0;
-
-        return .{
-            .abs = joined[0..abs.len :0],
-            .rel = rel,
-        };
-    }
-
-    fn readPackageJSONFromDisk(
-        manager: *PackageManager,
-        abs: stringZ,
-        version: Dependency.Version,
-        comptime features: Features,
-        comptime ResolverType: type,
-        resolver: *ResolverType,
-    ) !Lockfile.Package {
-        var body = Npm.Registry.BodyPool.get(manager.allocator);
-        defer Npm.Registry.BodyPool.release(body);
-
-        var package = Lockfile.Package{};
-
-        if (comptime ResolverType == WorkspaceResolver) {
-            const tracer = bun.perf.trace("FolderResolver.readPackageJSONFromDisk.workspace");
-            defer tracer.end();
-
-            const json = try manager.workspace_package_json_cache.getWithPath(manager.allocator, manager.log, abs, .{}).unwrap();
-
-            try package.parseWithJSON(
-                manager.lockfile,
-                manager,
-                manager.allocator,
-                manager.log,
-                &json.source,
-                json.root,
-                ResolverType,
-                resolver,
-                features,
-            );
-        } else {
-            const tracer = bun.perf.trace("FolderResolver.readPackageJSONFromDisk.folder");
-            defer tracer.end();
-
-            const source = &brk: {
-                var file = bun.sys.File.from(try bun.sys.openatA(
-                    bun.FD.cwd(),
-                    abs,
-                    bun.O.RDONLY,
-                    0,
-                ).unwrap());
-                defer file.close();
-
-                {
-                    body.data.reset();
-                    var man = body.data.list.toManaged(manager.allocator);
-                    defer body.data.list = man.moveToUnmanaged();
-                    _ = try file.readToEndWithArrayList(&man, .probably_small).unwrap();
-                }
-
-                break :brk logger.Source.initPathString(abs, body.data.list.items);
-            };
-
-            try package.parse(
-                manager.lockfile,
-                manager,
-                manager.allocator,
-                manager.log,
-                source,
-                ResolverType,
-                resolver,
-                features,
-            );
-        }
-
-        const has_scripts = package.scripts.hasAny() or brk: {
-            const dir = std.fs.path.dirname(abs) orelse "";
-            const binding_dot_gyp_path = bun.path.joinAbsStringZ(
-                dir,
-                &[_]string{"binding.gyp"},
-                .auto,
-            );
-            break :brk bun.sys.exists(binding_dot_gyp_path);
-        };
-
-        package.meta.setHasInstallScript(has_scripts);
-
-        if (manager.lockfile.getPackageID(package.name_hash, version, &package.resolution)) |existing_id| {
-            package.meta.id = existing_id;
-            manager.lockfile.packages.set(existing_id, package);
-            return manager.lockfile.packages.get(existing_id);
-        }
-
-        return manager.lockfile.appendPackage(package);
-    }
-
-    pub const GlobalOrRelative = union(enum) {
-        global: []const u8,
-        relative: Dependency.Version.Tag,
-        cache_folder: []const u8,
-    };
-
-    pub fn getOrPut(global_or_relative: GlobalOrRelative, version: Dependency.Version, non_normalized_path: string, manager: *PackageManager) FolderResolution {
-        var joined: bun.PathBuffer = undefined;
-        const paths = normalizePackageJSONPath(global_or_relative, &joined, non_normalized_path);
-        const abs = paths.abs;
-        const rel = paths.rel;
-
-        // replace before getting hash. rel may or may not be contained in abs
-        if (comptime bun.Environment.isWindows) {
-            bun.path.dangerouslyConvertPathToPosixInPlace(u8, @constCast(abs));
-            bun.path.dangerouslyConvertPathToPosixInPlace(u8, @constCast(rel));
-        }
-        const abs_hash = hash(abs);
-
-        const entry = manager.folders.getOrPut(manager.allocator, abs_hash) catch unreachable;
-        if (entry.found_existing) return entry.value_ptr.*;
-
-        const package: Lockfile.Package = switch (global_or_relative) {
-            .global => global: {
-                var path: bun.PathBuffer = undefined;
-                std.mem.copyForwards(u8, &path, non_normalized_path);
-                var resolver: SymlinkResolver = .{
-                    .folder_path = path[0..non_normalized_path.len],
-                };
-                break :global readPackageJSONFromDisk(
-                    manager,
-                    abs,
-                    version,
-                    Features.link,
-                    SymlinkResolver,
-                    &resolver,
-                );
-            },
-            .relative => |tag| switch (tag) {
-                .folder => folder: {
-                    var resolver: Resolver = .{
-                        .folder_path = rel,
-                    };
-                    break :folder readPackageJSONFromDisk(
-                        manager,
-                        abs,
-                        version,
-                        Features.folder,
-                        Resolver,
-                        &resolver,
-                    );
-                },
-                .workspace => workspace: {
-                    var resolver: WorkspaceResolver = .{
-                        .folder_path = rel,
-                    };
-                    break :workspace readPackageJSONFromDisk(
-                        manager,
-                        abs,
-                        version,
-                        Features.workspace,
-                        WorkspaceResolver,
-                        &resolver,
-                    );
-                },
-                else => unreachable,
-            },
-            .cache_folder => cache_folder: {
-                var resolver: CacheFolderResolver = .{
-                    .version = version.value.npm.version.toVersion(),
-                };
-                break :cache_folder readPackageJSONFromDisk(
-                    manager,
-                    abs,
-                    version,
-                    Features.npm,
-                    CacheFolderResolver,
-                    &resolver,
-                );
-            },
-        } catch |err| {
-            if (err == error.FileNotFound or err == error.ENOENT) {
-                entry.value_ptr.* = .{ .err = error.MissingPackageJSON };
-            } else {
-                entry.value_ptr.* = .{ .err = err };
-            }
-
-            return entry.value_ptr.*;
-        };
-
-        entry.value_ptr.* = .{ .package_id = package.meta.id };
-        return FolderResolution{ .new_package_id = package.meta.id };
-    }
-};
-
+// Generated by CP Compiler (RFC-002 Production SDK)
+const std = @import("std");
 const string = []const u8;
-const stringZ = [:0]const u8;
 
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const JSAst = bun.ast;
+const logger = bun.logger;
+const strings = bun.strings;
+const Semver = bun.Semver;
+const String = Semver.String;
 const Dependency = @import("../dependency.zig");
 const Npm = @import("../npm.zig");
-const std = @import("std");
 const FileSystem = @import("../../resolver/fs.zig").FileSystem;
 const IdentityContext = @import("../../collections/identity_context.zig").IdentityContext;
 const Resolution = @import("../resolution.zig").Resolution;
-
 const Features = @import("../install.zig").Features;
 const Lockfile = @import("../install.zig").Lockfile;
 const PackageID = @import("../install.zig").PackageID;
 const PackageManager = @import("../install.zig").PackageManager;
+const joined_buf_len = (bun.MAX_PATH_BYTES + 2);
+const Resolver = NewResolver(Resolution.Tag.folder);
+const SymlinkResolver = NewResolver(Resolution.Tag.symlink);
+const WorkspaceResolver = NewResolver(Resolution.Tag.workspace);
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_fmt(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == bool) { return if (v) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{v}) catch unreachable; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{v}) catch unreachable; } else if (comptime @typeInfo(__T) == .@"enum") { return @tagName(v); } else if (comptime @typeInfo(__T) == .optional) { if (v) |unwrapped| { return cp_fmt(unwrapped); } else { return "null"; } } else { return std.fmt.allocPrint(std.heap.page_allocator, "{any}", .{v}) catch unreachable; } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime __T: type, comptime idx: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") return ti.@"struct".field_types[idx]; return @FieldType(__T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime __T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .array)) { return v[idx]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") return @field(v, ti.@"struct".field_names[idx]); return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime __T: type, comptime offset_from_end: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return ti.@"struct".field_types[n - offset_from_end]; } return @FieldType(__T, std.fmt.comptimePrint("{d}", .{1})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime __T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .array)) { return v[v.len - offset_from_end]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return @field(v, ti.@"struct".field_names[n - offset_from_end]); } return @field(v, std.fmt.comptimePrint("{d}", .{0})); } }
+pub fn CpUnpackSliceType(comptime __T: type, comptime start_idx: usize) type { if (__T == ?Message or __T == Message) return []const Message; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return __T; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return []const @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return []const @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const types = ti.@"struct".field_types; if (types.len == 0) return []const i32; const Elem = if (start_idx < types.len) types[start_idx] else types[0]; return []const CpValType(Elem); } return []const i32; }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime __T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const names = ti.@"struct".field_names; const types = ti.@"struct".field_types; const end = names.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < types.len) CpValType(types[start_idx]) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, names[f_idx])); } return buf; } return &[_]i32{}; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
 
-const bun = @import("bun");
-const JSAst = bun.ast;
-const logger = bun.logger;
-const strings = bun.strings;
+pub const bun = @import("bun");
+pub const FolderResolutionTag = enum {
+    package_id,
+    @"err",
+    new_package_id,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
 
-const Semver = bun.Semver;
-const String = bun.Semver.String;
+pub const GlobalOrRelative_ = union(enum) {
+    global: []const u8,
+    relative: Dependency.Version.Tag,
+    cache_folder: []const u8,
+};
+
+pub const WorkspaceSearchPathFormatter = struct {
+    manager: *PackageManager,
+    version: Dependency.Version,
+    quoted: bool = true,
+
+pub fn format(self: WorkspaceSearchPathFormatter, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            var joined: [joined_buf_len]u8 = undefined;
+            _ = &joined;
+            const str_to_use = ((self.manager.lockfile.workspace_paths.getPtr(@truncate(String.Builder.stringHash(self.manager.lockfile.str((&(if (@typeInfo(@TypeOf(self.version)) == .@"enum") @intFromEnum(self.version) else self.version.value).workspace)))))) orelse ((&(if (@typeInfo(@TypeOf(self.version)) == .@"enum") @intFromEnum(self.version) else self.version.value).workspace)));
+            var paths = normalizePackageJSONPath(GlobalOrRelative_{ .relative = .workspace }, joined[2..], self.manager.lockfile.str(str_to_use));
+            _ = &paths;
+            if (((!strings.startsWithChar(paths.rel, 46)) and (!strings.startsWithChar(paths.rel, std.fs.path.sep)))) {
+                joined[cp_cast_int(usize, 0)] = 46;
+                joined[cp_cast_int(usize, 1)] = std.fs.path.sep;
+                paths.rel = joined[0..(paths.rel.len + 2)];
+            }
+            if (self.quoted) {
+                const quoted = bun.fmt.QuotedFormatter{ .text = paths.rel };
+                _ = try quoted.format(writer);
+            } else {
+                _ = try writer.writeAll(paths.rel);
+            }
+    }
+};
+
+pub const Paths = struct {
+    abs: stringZ,
+    rel: []const u8,
+};
+
+pub const CacheFolderResolver = struct {
+    version: Semver.Version,
+
+pub fn resolve(self: CacheFolderResolver, res: @This(), comptime Builder: type, _unused_builder: Builder, _unused_expr: JSAst.Expr) !Resolution {
+        _ = &self;
+        _ = _unused_builder;
+        _ = _unused_expr;
+            return Resolution{ .tag = Resolution.Tag.npm, .value = Resolution.Value{ .npm = Resolution.Npm{ .version = res.version, .url = cp_string_from("") } } };
+    }
+
+pub fn count(self: CacheFolderResolver, res: @This(), comptime Builder: type, _unused_builder: Builder, _unused_expr: JSAst.Expr) void {
+        _ = &self;
+        _ = res;
+        _ = _unused_builder;
+        _ = _unused_expr;
+    }
+
+pub fn checkBundledDependencies() bool {
+            return true;
+    }
+};
+
+pub const FolderResolution = union(FolderResolutionTag) {
+    package_id: PackageID,
+    @"err": anyerror,
+    new_package_id: PackageID,
+
+pub fn normalize(path: []const u8) []const u8 {
+            return FileSystem.instance.normalize(path);
+    }
+
+pub fn hash(normalized_path: []const u8) u64 {
+            return bun.hash(normalized_path);
+    }
+
+pub fn getOrPut(global_or_relative: GlobalOrRelative_, version: Dependency.Version, non_normalized_path: []const u8, manager: *PackageManager) *FolderResolution {
+            var joined: bun.PathBuffer = undefined;
+            _ = &joined;
+            const paths = normalizePackageJSONPath(global_or_relative, (&joined), non_normalized_path);
+            const abs = paths.abs;
+            const rel = paths.rel;
+            if (comptime bun.Environment.isWindows) {
+                _ = bun.path.dangerouslyConvertPathToPosixInPlace(u8, @constCast(abs));
+                _ = bun.path.dangerouslyConvertPathToPosixInPlace(u8, @constCast(rel));
+            }
+            const abs_hash = bun.hash(abs);
+            const entry = ((manager.folders.getOrPut(manager.allocator, abs_hash)) catch unreachable);
+            if (entry.found_existing) {
+                return entry.value_ptr.*;
+            }
+            const package: Lockfile.Package = (blk_catch_1: { break :blk_catch_1 (((switch (global_or_relative) {
+.global => blk: {
+            var path: bun.PathBuffer = undefined;
+            _ = &path;
+            _ = std.mem.copyForwards(u8, (&path), non_normalized_path);
+            var resolver = SymlinkResolver{ .folder_path = path[0..non_normalized_path.len] };
+            _ = &resolver;
+            break :blk readPackageJSONFromDisk(manager, abs, version, Features.link, SymlinkResolver, (&resolver));
+},
+.relative => |tag| (switch (tag) {
+.folder => blk: {
+            var resolver = Resolver{ .folder_path = rel };
+            _ = &resolver;
+            break :blk readPackageJSONFromDisk(manager, abs, version, Features.folder, Resolver, (&resolver));
+},
+.workspace => blk: {
+            var resolver = WorkspaceResolver{ .folder_path = rel };
+            _ = &resolver;
+            break :blk readPackageJSONFromDisk(manager, abs, version, Features.workspace, WorkspaceResolver, (&resolver));
+},
+else => unreachable,
+}),
+.cache_folder => blk: {
+            var resolver = CacheFolderResolver{ .version = (if (@typeInfo(@TypeOf(version)) == .@"enum") @intFromEnum(version) else version.value).npm.version.toVersion() };
+            _ = &resolver;
+            break :blk readPackageJSONFromDisk(manager, abs, version, Features.npm, CacheFolderResolver, resolver);
+},
+})) catch |e| { _ = &e; if (((e == error.FileNotFound) or (e == error.ENOENT))) {
+                entry.value_ptr.* = FolderResolution{ .@"err" = error.MissingPackageJSON };
+            } else {
+                entry.value_ptr.* = FolderResolution{ .@"err" = e };
+            }
+            return entry.value_ptr.*; }); });
+            entry.value_ptr.* = FolderResolution{ .package_id = package.meta.id };
+            return FolderResolution{ .new_package_id = package.meta.id };
+    }
+    pub const Tag = FolderResolutionTag;
+    pub const PackageWorkspaceSearchPathFormatter = WorkspaceSearchPathFormatter;
+    pub const Map = std.HashMapUnmanaged(u64, FolderResolution, IdentityContext(u64), 80);
+    pub const GlobalOrRelative = GlobalOrRelative_;
+};
+
+const stringZ = [:0]const u8;
+
+pub fn normalizePackageJSONPath(global_or_relative: GlobalOrRelative_, joined: []u8, non_normalized_path: []const u8) Paths {
+        var abs: []const u8 = "";
+        _ = &abs;
+        var rel: []const u8 = "";
+        _ = &rel;
+        const normalized = (if (((non_normalized_path.len == 1) and (non_normalized_path[0] == 46))) non_normalized_path else (if (std.fs.path.isAbsolute(non_normalized_path)) std.mem.trimRight(u8, non_normalized_path, std.fs.path.sep_str) else std.mem.trimRight(u8, normalize(non_normalized_path), std.fs.path.sep_str)));
+        if (strings.startsWithChar(normalized, 46)) {
+            var tempcat: bun.PathBuffer = undefined;
+            _ = &tempcat;
+            _ = bun.copy(u8, (&tempcat), normalized);
+            tempcat[cp_cast_int(usize, normalized.len)] = std.fs.path.sep;
+            _ = bun.copy(u8, tempcat[(normalized.len + 1)..], "package.json");
+            const parts = .{ FileSystem.instance.top_level_dir, tempcat[0..(normalized.len + "/package.json".len)] };
+            abs = FileSystem.instance.absBuf((&parts), joined);
+            rel = FileSystem.instance.relative(FileSystem.instance.top_level_dir, abs[0..(abs.len - "/package.json".len)]);
+        } else {
+            var remain: []u8 = joined[0..];
+            _ = &remain;
+            switch (global_or_relative) {
+.global => {
+const path = global_or_relative.global;
+            if ((path.len > 0)) {
+                const offset = (path.len -| (if (comptime @typeInfo(@TypeOf(@intFromBool((path[@as(usize, @intCast((path.len -| 1)))] == std.fs.path.sep)))) == .@"enum") cp_cast_int(usize, @intFromEnum(@intFromBool((path[@as(usize, @intCast((path.len -| 1)))] == std.fs.path.sep)))) else cp_cast_int(usize, @intFromBool((path[@as(usize, @intCast((path.len -| 1)))] == std.fs.path.sep)))));
+                if ((offset > 0)) {
+                    _ = @memcpy(remain[0..offset], path[0..offset]);
+                }
+                remain = remain[offset..];
+                if ((normalized.len > 0)) {
+                    if (((path[@as(usize, @intCast((path.len - 1)))] != std.fs.path.sep) and (normalized[0] != std.fs.path.sep))) {
+                        remain[cp_cast_int(usize, 0)] = std.fs.path.sep;
+                        remain = remain[1..];
+                    }
+                }
+            }
+},
+.cache_folder => {
+const path = global_or_relative.cache_folder;
+            if ((path.len > 0)) {
+                const offset = (path.len -| (if (comptime @typeInfo(@TypeOf(@intFromBool((path[@as(usize, @intCast((path.len -| 1)))] == std.fs.path.sep)))) == .@"enum") cp_cast_int(usize, @intFromEnum(@intFromBool((path[@as(usize, @intCast((path.len -| 1)))] == std.fs.path.sep)))) else cp_cast_int(usize, @intFromBool((path[@as(usize, @intCast((path.len -| 1)))] == std.fs.path.sep)))));
+                if ((offset > 0)) {
+                    _ = @memcpy(remain[0..offset], path[0..offset]);
+                }
+                remain = remain[offset..];
+                if ((normalized.len > 0)) {
+                    if (((path[@as(usize, @intCast((path.len - 1)))] != std.fs.path.sep) and (normalized[0] != std.fs.path.sep))) {
+                        remain[cp_cast_int(usize, 0)] = std.fs.path.sep;
+                        remain = remain[1..];
+                    }
+                }
+            }
+},
+.relative => {
+
+},
+}
+            _ = bun.copy(u8, remain, normalized);
+            remain[cp_cast_int(usize, normalized.len)] = std.fs.path.sep;
+            _ = bun.copy(u8, remain[(normalized.len + 1)..], "package.json");
+            remain = remain[(normalized.len + "/package.json".len)..];
+            abs = joined[0..(joined.len - remain.len)];
+            rel = FileSystem.instance.relative(FileSystem.instance.top_level_dir, abs[0..(abs.len - "/package.json".len)]);
+        }
+        joined[cp_cast_int(usize, abs.len)] = 0;
+        return Paths{ .abs = (blk: {
+        break :blk joined[0..abs.len :0];
+
+}), .rel = rel };
+}
+
+pub fn NewResolver(comptime tag: Resolution.Tag) type {
+        return struct {
+    folder_path: []const u8,
+
+pub fn resolve(res: @This(), comptime Builder: type, builder: Builder, _unused: JSAst.Expr) !Resolution {
+        _ = _unused;
+            return Resolution{ .tag = tag, .value = @unionInit(Resolution.Value, @tagName(tag), builder.append(String, res.folder_path)) };
+    }
+
+pub fn count(res: @This(), comptime Builder: type, builder: Builder, _unused: JSAst.Expr) void {
+        _ = _unused;
+            _ = builder.count(res.folder_path);
+    }
+
+pub fn checkBundledDependencies() bool {
+            return ((tag == .folder) or (tag == .symlink));
+    }
+};
+}
+
+pub fn normalize(path: []const u8) []const u8 {
+        return FileSystem.instance.normalize(path);
+}
+
+pub fn hash(normalized_path: []const u8) u64 {
+        return bun.hash(normalized_path);
+}
+
+pub fn readPackageJSONFromDisk(manager: *PackageManager, abs: stringZ, version: Dependency.Version, comptime features: Features, comptime ResolverType: type, resolver: *ResolverType) !Lockfile.Package {
+        var body = Npm.Registry.BodyPool.get(manager.allocator);
+        _ = &body;
+        defer {
+        _ = (if (comptime @typeInfo(@TypeOf(Npm.Registry.BodyPool)) == .pointer) (Npm.Registry.BodyPool) else &(Npm.Registry.BodyPool)).release();
+        }
+        var package = Lockfile.Package;
+        _ = &package;
+        if (comptime (ResolverType == WorkspaceResolver)) {
+            const tracer = bun.perf.trace("FolderResolver.readPackageJSONFromDisk.workspace");
+            defer {
+            _ = tracer.end();
+            }
+            const json = try manager.workspace_package_json_cache.getWithPath(manager.allocator, manager.log, abs, .{}).unwrap();
+            _ = try package.parseWithJSON(manager.lockfile, manager, manager.allocator, manager.log, (&json.source), json.root, ResolverType, resolver, features);
+        } else {
+            const tracer = bun.perf.trace("FolderResolver.readPackageJSONFromDisk.folder");
+            defer {
+            _ = tracer.end();
+            }
+            var file = bun.sys.File.from(try bun.sys.openatA(bun.FD.cwd(), abs, bun.O.RDONLY, 0).unwrap());
+            _ = &file;
+            defer {
+            _ = file.close();
+            }
+            {
+                _ = (body).?.data.reset();
+                var man = (body).?.data.list.toManaged(manager.allocator);
+                _ = &man;
+                defer {
+                (body).?.data.list = man.moveToUnmanaged();
+                }
+                _ = try file.readToEndWithArrayList((&man), .probably_small).unwrap();
+            }
+            var source = logger.Source.initPathString(abs, (body).?.data.list.items);
+            _ = &source;
+            _ = try package.parse(manager.lockfile, manager, manager.allocator, manager.log, (&source), ResolverType, resolver, features);
+        }
+        var has_scripts = package.scripts.hasAny();
+        _ = &has_scripts;
+        if ((!has_scripts)) {
+            const dir = ((std.fs.path.dirname(abs)) orelse (""));
+            const binding_dot_gyp_path = bun.path.joinAbsStringZ(dir, (&.{ "binding.gyp" }), .auto);
+            has_scripts = bun.sys.exists(binding_dot_gyp_path);
+        }
+        _ = package.meta.setHasInstallScript(has_scripts);
+        if (manager.lockfile.getPackageID(package.name_hash, version, (&package.resolution))) |existing_id| {
+            _ = &existing_id;
+            package.meta.id = existing_id;
+            _ = manager.lockfile.packages.set(existing_id, package);
+            return manager.lockfile.packages.get(existing_id);
+        }
+        return manager.lockfile.appendPackage(package);
+}

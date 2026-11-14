@@ -249,3 +249,11 @@
 - **关键工程经验**：
   - `HotReloadEvent.cp` 与 `DirectoryWatchStore.cp` 中消除 `_ = expr;` 模式（CP 中 `_` 专用于接收者实例），采用 `* = expr;` 或直接表达式求值。
   - `SourceMapStore.cp` 与 `RouteBundle.cp` 中修复空指针和可选类型映射，严格使用 `(Type)?` 与 `type?` 语法。
+
+
+## 2026-11-14: Milestone 7 Phase 14 闭环（闭合 8 个目录，全仓突破 100 个 100% 纯 CP 闭合子目录！）
+- **新增 12 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - 覆盖 `codegen/`, `js_parser/lexer/`, `runtime/node/net/`, `runtime/node/os/`, `runtime/webview/`, `install/resolvers/`, `install/lockfile/printer/`, `install/lockfile/Package/` 8 个子目录，全部 100% 闭合。
+- **关键工程经验**：
+  - `WorkspaceMap.cp` 中消除命名为 `arena` 的标识符（与 CP 内置关键字冲突），改用 `arena_alloc`；使用 `WorkspaceSortContext` 作为排序上下文并以 `_` 省略只读接收者。
+  - `ChromeProcess.cp` 中将 `spawn` 转义为 `@"spawn"` 消除与内置并发原语冲突，使用 `unsafe` 精准包裹指针切片。

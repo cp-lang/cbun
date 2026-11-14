@@ -306,3 +306,15 @@
 ## 2026-11-14 (Milestone 7 Phase 13: 迁移 src/bake/DevServer/ 11 个模块至纯 CP)
 - **新增 11 个 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
   - `src/bake/DevServer/{Assets,DirectoryWatchStore,ErrorReportRequest,HmrSocket,HotReloadEvent,PackedMap,RouteBundle,SerializedFailure,SourceMapStore,WatcherAtomics,memory_cost}.cp` (11 模块)
+
+
+## 2026-11-14 (Milestone 7 Phase 14: 闭合 codegen, js_parser/lexer, runtime/node/net, runtime/node/os, runtime/webview, install/resolvers, install/lockfile/printer, install/lockfile/Package 共 8 个目录)
+- **新增 12 个 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/codegen/process_windows_translate_c.cp` (1/1 100% 闭合)
+  - `src/js_parser/lexer/identifier.cp` (1/1 100% 闭合)
+  - `src/runtime/node/net/BlockList.cp` (1/1 100% 闭合)
+  - `src/runtime/node/os/constants.cp` (1/1 100% 闭合)
+  - `src/runtime/webview/{HostProcess,ChromeProcess}.cp` (2/2 100% 闭合)
+  - `src/install/resolvers/folder_resolver.cp` (1/1 100% 闭合)
+  - `src/install/lockfile/printer/{Yarn,tree_printer}.cp` (2/2 100% 闭合)
+  - `src/install/lockfile/Package/{Meta,Scripts,WorkspaceMap}.cp` (3/3 100% 闭合)

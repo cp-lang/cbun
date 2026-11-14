@@ -1,477 +1,15 @@
-fn printInstalledWorkspaceSection(
-    this: *const Printer,
-    manager: *PackageManager,
-    comptime Writer: type,
-    writer: Writer,
-    comptime enable_ansi_colors: bool,
-    workspace_package_id: PackageID,
-    installed: *const Bitset,
-    comptime print_section_header: enum(u1) { print_section_header, dont_print_section_header },
-    printed_new_install: *bool,
-    id_map: ?[]DependencyID,
-) !void {
-    const lockfile = this.lockfile;
-    const string_buf = lockfile.buffers.string_bytes.items;
-    const packages_slice = lockfile.packages.slice();
-    const resolutions = lockfile.buffers.resolutions.items;
-    const dependencies = lockfile.buffers.dependencies.items;
-    const workspace_res = packages_slice.items(.resolution)[workspace_package_id];
-    const names = packages_slice.items(.name);
-    const pkg_metas = packages_slice.items(.meta);
-    bun.assert(workspace_res.tag == .workspace or workspace_res.tag == .root);
-    const resolutions_list = packages_slice.items(.resolutions);
-    var printed_section_header = false;
-    var printed_update = false;
-
-    // It's possible to have duplicate dependencies with the same version and resolution.
-    // While both are technically installed, only one was chosen and should be printed.
-    var dep_dedupe: std.AutoHashMap(install.PackageNameHash, void) = .init(manager.allocator);
-    defer dep_dedupe.deinit();
-
-    // find the updated packages
-    for (resolutions_list[workspace_package_id].begin()..resolutions_list[workspace_package_id].end()) |_dep_id| {
-        const dep_id: DependencyID = @intCast(_dep_id);
-
-        switch (shouldPrintPackageInstall(this, manager, @intCast(dep_id), installed, id_map, pkg_metas)) {
-            .yes, .no, .@"return" => {},
-            .update => |update_info| {
-                printed_new_install.* = true;
-                printed_update = true;
-
-                if (comptime print_section_header == .print_section_header) {
-                    if (!printed_section_header) {
-                        printed_section_header = true;
-                        const workspace_name = names[workspace_package_id].slice(string_buf);
-                        try writer.print(comptime Output.prettyFmt("<r>\n<cyan>{s}<r><d>:<r>\n", enable_ansi_colors), .{
-                            workspace_name,
-                        });
-                    }
-                }
-
-                try printUpdatedPackage(this, update_info, enable_ansi_colors, Writer, writer);
-            },
-        }
-    }
-
-    for (resolutions_list[workspace_package_id].begin()..resolutions_list[workspace_package_id].end()) |_dep_id| {
-        const dep_id: DependencyID = @intCast(_dep_id);
-
-        switch (shouldPrintPackageInstall(this, manager, @intCast(dep_id), installed, id_map, pkg_metas)) {
-            .@"return" => return,
-            .yes => {},
-            .no, .update => continue,
-        }
-
-        const dep = dependencies[dep_id];
-        const package_id = resolutions[dep_id];
-
-        if ((try dep_dedupe.getOrPut(dep.name_hash)).found_existing) {
-            continue;
-        }
-
-        printed_new_install.* = true;
-
-        if (comptime print_section_header == .print_section_header) {
-            if (!printed_section_header) {
-                printed_section_header = true;
-                const workspace_name = names[workspace_package_id].slice(string_buf);
-                try writer.print(comptime Output.prettyFmt("<r>\n<cyan>{s}<r><d>:<r>\n", enable_ansi_colors), .{
-                    workspace_name,
-                });
-            }
-        }
-
-        if (printed_update) {
-            printed_update = false;
-            try writer.writeAll("\n");
-        }
-        try printInstalledPackage(this, manager, &dep, package_id, enable_ansi_colors, Writer, writer);
-    }
-}
-
-const PackageUpdatePrintInfo = struct {
-    version: Semver.Version,
-    version_buf: string,
-    resolution: Resolution,
-    dependency_id: DependencyID,
-};
-
-const ShouldPrintPackageInstallResult = union(enum) {
-    yes,
-    no,
-    @"return",
-    update: PackageUpdatePrintInfo,
-};
-
-fn shouldPrintPackageInstall(
-    this: *const Printer,
-    manager: *PackageManager,
-    dep_id: DependencyID,
-    installed: *const Bitset,
-    id_map: ?[]DependencyID,
-    pkg_metas: []const Package.Meta,
-) ShouldPrintPackageInstallResult {
-    const dependencies = this.lockfile.buffers.dependencies.items;
-    const resolutions = this.lockfile.buffers.resolutions.items;
-    const dependency = dependencies[dep_id];
-    const package_id = resolutions[dep_id];
-
-    if (dependency.behavior.isWorkspace() or package_id >= this.lockfile.packages.len) return .no;
-
-    if (id_map) |map| {
-        for (this.updates, map) |update, *update_dependency_id| {
-            if (update.failed) return .@"return";
-            if (update.matches(dependency, this.lockfile.buffers.string_bytes.items)) {
-                if (update_dependency_id.* == invalid_package_id) {
-                    update_dependency_id.* = dep_id;
-                }
-
-                return .no;
-            }
-        }
-    }
-
-    if (!installed.isSet(package_id)) return .no;
-
-    // It's possible this package was installed but the dependency is disabled.
-    // Have "zod@1.0.0" in dependencies and `zod2@npm:zod@1.0.0` in devDependencies
-    // and install with --omit=dev.
-    if (this.lockfile.isResolvedDependencyDisabled(
-        dep_id,
-        this.options.local_package_features,
-        &pkg_metas[package_id],
-        this.options.cpu,
-        this.options.os,
-    )) {
-        return .no;
-    }
-
-    const resolution = this.lockfile.packages.items(.resolution)[package_id];
-    if (resolution.tag == .npm) {
-        const name = dependency.name.slice(this.lockfile.buffers.string_bytes.items);
-        if (manager.updating_packages.get(name)) |entry| {
-            if (entry.original_version) |original_version| {
-                if (!original_version.eql(resolution.value.npm.version)) {
-                    return .{
-                        .update = .{
-                            .version = original_version,
-                            .version_buf = entry.original_version_string_buf,
-                            .resolution = resolution,
-                            .dependency_id = dep_id,
-                        },
-                    };
-                }
-            }
-        }
-    }
-
-    return .yes;
-}
-
-fn printUpdatedPackage(
-    this: *const Printer,
-    update_info: PackageUpdatePrintInfo,
-    comptime enable_ansi_colors: bool,
-    comptime Writer: type,
-    writer: Writer,
-) !void {
-    const string_buf = this.lockfile.buffers.string_bytes.items;
-    const dependency = this.lockfile.buffers.dependencies.items[update_info.dependency_id];
-
-    const fmt = comptime brk: {
-        if (enable_ansi_colors) {
-            break :brk Output.prettyFmt("<r><cyan>↑<r> <b>{s}<r><d> <b>{f} →<r> <b><cyan>{f}<r>\n", enable_ansi_colors);
-        }
-        break :brk Output.prettyFmt("<r>^ <b>{s}<r><d> <b>{f} -\\><r> <b>{f}<r>\n", enable_ansi_colors);
-    };
-
-    try writer.print(
-        fmt,
-        .{
-            dependency.name.slice(string_buf),
-            update_info.version.fmt(update_info.version_buf),
-            update_info.resolution.value.npm.version.fmt(string_buf),
-        },
-    );
-}
-
-fn printInstalledPackage(
-    this: *const Printer,
-    manager: *PackageManager,
-    dependency: *const Dependency,
-    package_id: PackageID,
-    comptime enable_ansi_colors: bool,
-    comptime Writer: type,
-    writer: Writer,
-) !void {
-    const string_buf = this.lockfile.buffers.string_bytes.items;
-    const packages_slice = this.lockfile.packages.slice();
-    const resolution: Resolution = packages_slice.items(.resolution)[package_id];
-    const name = dependency.name.slice(string_buf);
-
-    const package_name = packages_slice.items(.name)[package_id].slice(string_buf);
-    if (manager.formatLaterVersionInCache(package_name, dependency.name_hash, resolution)) |later_version_fmt| {
-        const fmt = comptime brk: {
-            if (enable_ansi_colors) {
-                break :brk Output.prettyFmt("<r><green>+<r> <b>{s}<r><d>@{f}<r> <d>(<blue>v{f} available<r><d>)<r>\n", enable_ansi_colors);
-            } else {
-                break :brk Output.prettyFmt("<r>+ {s}<r><d>@{f}<r> <d>(v{f} available)<r>\n", enable_ansi_colors);
-            }
-        };
-        try writer.print(
-            fmt,
-            .{
-                name,
-                resolution.fmt(string_buf, .posix),
-                later_version_fmt,
-            },
-        );
-
-        return;
-    }
-
-    const fmt = comptime brk: {
-        if (enable_ansi_colors) {
-            break :brk Output.prettyFmt("<r><green>+<r> <b>{s}<r><d>@{f}<r>\n", enable_ansi_colors);
-        } else {
-            break :brk Output.prettyFmt("<r>+ {s}<r><d>@{f}<r>\n", enable_ansi_colors);
-        }
-    };
-
-    try writer.print(
-        fmt,
-        .{
-            name,
-            resolution.fmt(string_buf, .posix),
-        },
-    );
-}
-
-/// - Prints an empty newline with no diffs
-/// - Prints a leading and trailing blank newline with diffs
-pub fn print(
-    this: *const Printer,
-    manager: *PackageManager,
-    comptime Writer: type,
-    writer: Writer,
-    comptime enable_ansi_colors: bool,
-    log_level: PackageManager.Options.LogLevel,
-) !void {
-    try writer.writeAll("\n");
-    const allocator = this.lockfile.allocator;
-    var slice = this.lockfile.packages.slice();
-    const bins: []const Bin = slice.items(.bin);
-    const resolved: []const Resolution = slice.items(.resolution);
-    if (resolved.len == 0) return;
-    const string_buf = this.lockfile.buffers.string_bytes.items;
-    const resolutions_list = slice.items(.resolutions);
-    const pkg_metas = slice.items(.meta);
-    const resolutions_buffer: []const PackageID = this.lockfile.buffers.resolutions.items;
-    const dependencies_buffer: []const Dependency = this.lockfile.buffers.dependencies.items;
-    if (dependencies_buffer.len == 0) return;
-    const id_map = try default_allocator.alloc(DependencyID, this.updates.len);
-    @memset(id_map, invalid_package_id);
-    defer if (id_map.len > 0) default_allocator.free(id_map);
-
-    const end = @as(PackageID, @truncate(resolved.len));
-
-    var had_printed_new_install = false;
-    if (this.successfully_installed) |*installed| {
-        if (log_level.isVerbose()) {
-            var workspaces_to_print: std.ArrayListUnmanaged(DependencyID) = .{};
-            defer workspaces_to_print.deinit(allocator);
-
-            for (resolutions_list[0].begin()..resolutions_list[0].end()) |dep_id| {
-                const dep = dependencies_buffer[dep_id];
-                if (dep.behavior.isWorkspace()) {
-                    bun.handleOom(workspaces_to_print.append(allocator, @intCast(dep_id)));
-                }
-            }
-
-            var found_workspace_to_print = false;
-            for (workspaces_to_print.items) |workspace_dep_id| {
-                const workspace_package_id = resolutions_buffer[workspace_dep_id];
-                for (resolutions_list[workspace_package_id].begin()..resolutions_list[workspace_package_id].end()) |dep_id| {
-                    switch (shouldPrintPackageInstall(this, manager, @intCast(dep_id), installed, id_map, pkg_metas)) {
-                        .yes => found_workspace_to_print = true,
-                        else => {},
-                    }
-                }
-            }
-
-            try printInstalledWorkspaceSection(
-                this,
-                manager,
-                Writer,
-                writer,
-                enable_ansi_colors,
-                0,
-                installed,
-                .dont_print_section_header,
-                &had_printed_new_install,
-                null,
-            );
-
-            for (workspaces_to_print.items) |workspace_dep_id| {
-                try printInstalledWorkspaceSection(
-                    this,
-                    manager,
-                    Writer,
-                    writer,
-                    enable_ansi_colors,
-                    resolutions_buffer[workspace_dep_id],
-                    installed,
-                    .print_section_header,
-                    &had_printed_new_install,
-                    null,
-                );
-            }
-        } else {
-            // just print installed packages for the current workspace
-            var workspace_package_id: DependencyID = 0;
-            if (manager.workspace_name_hash) |workspace_name_hash| {
-                for (resolutions_list[0].begin()..resolutions_list[0].end()) |dep_id| {
-                    const dep = dependencies_buffer[dep_id];
-                    if (dep.behavior.isWorkspace() and dep.name_hash == workspace_name_hash) {
-                        workspace_package_id = resolutions_buffer[dep_id];
-                        break;
-                    }
-                }
-            }
-
-            try printInstalledWorkspaceSection(
-                this,
-                manager,
-                Writer,
-                writer,
-                enable_ansi_colors,
-                workspace_package_id,
-                installed,
-                .dont_print_section_header,
-                &had_printed_new_install,
-                id_map,
-            );
-        }
-    } else {
-        outer: for (dependencies_buffer, resolutions_buffer, 0..) |dependency, package_id, dep_id| {
-            if (package_id >= end) continue;
-            if (dependency.behavior.isPeer()) continue;
-            const package_name = dependency.name.slice(string_buf);
-
-            if (this.updates.len > 0) {
-                for (this.updates, id_map) |update, *dependency_id| {
-                    if (update.failed) return;
-                    if (update.matches(dependency, string_buf)) {
-                        if (dependency_id.* == invalid_package_id) {
-                            dependency_id.* = @as(DependencyID, @truncate(dep_id));
-                        }
-
-                        continue :outer;
-                    }
-                }
-            }
-
-            try writer.print(
-                comptime Output.prettyFmt(" <r><b>{s}<r><d>@<b>{f}<r>\n", enable_ansi_colors),
-                .{
-                    package_name,
-                    resolved[package_id].fmt(string_buf, .auto),
-                },
-            );
-        }
-    }
-
-    if (had_printed_new_install) {
-        try writer.writeAll("\n");
-    }
-
-    if (bun.Environment.allow_assert) had_printed_new_install = false;
-
-    var printed_installed_update_request = false;
-    for (id_map) |dependency_id| {
-        if (dependency_id == invalid_package_id) continue;
-        if (bun.Environment.allow_assert) had_printed_new_install = true;
-
-        const name = dependencies_buffer[dependency_id].name;
-        const package_id = resolutions_buffer[dependency_id];
-        const bin = bins[package_id];
-
-        const package_name = name.slice(string_buf);
-
-        switch (bin.tag) {
-            .none, .dir => {
-                printed_installed_update_request = true;
-
-                const fmt = comptime Output.prettyFmt("<r><green>installed<r> <b>{s}<r><d>@{f}<r>\n", enable_ansi_colors);
-
-                try writer.print(
-                    fmt,
-                    .{
-                        package_name,
-                        resolved[package_id].fmt(string_buf, .posix),
-                    },
-                );
-            },
-            .map, .file, .named_file => {
-                printed_installed_update_request = true;
-
-                var iterator = Bin.NamesIterator{
-                    .bin = bin,
-                    .package_name = name,
-                    .string_buffer = string_buf,
-                    .extern_string_buf = this.lockfile.buffers.extern_strings.items,
-                };
-
-                {
-                    const fmt = comptime Output.prettyFmt("<r><green>installed<r> {s}<r><d>@{f}<r> with binaries:\n", enable_ansi_colors);
-
-                    try writer.print(
-                        fmt,
-                        .{
-                            package_name,
-                            resolved[package_id].fmt(string_buf, .posix),
-                        },
-                    );
-                }
-
-                {
-                    const fmt = comptime Output.prettyFmt("<r> <d>- <r><b>{s}<r>\n", enable_ansi_colors);
-
-                    if (manager.track_installed_bin == .pending) {
-                        if (iterator.next() catch null) |bin_name| {
-                            manager.track_installed_bin = .{
-                                .basename = bun.handleOom(bun.default_allocator.dupe(u8, bin_name)),
-                            };
-
-                            try writer.print(fmt, .{bin_name});
-                        }
-                    }
-
-                    while (iterator.next() catch null) |bin_name| {
-                        try writer.print(fmt, .{bin_name});
-                    }
-                }
-            },
-        }
-    }
-
-    if (printed_installed_update_request) {
-        try writer.writeAll("\n");
-    }
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
+const std = @import("std");
 const string = []const u8;
 
-const std = @import("std");
-
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const Environment = bun.Environment;
 const Output = bun.Output;
 const Semver = bun.Semver;
 const assert = bun.assert;
 const default_allocator = bun.default_allocator;
 const Bitset = bun.bit_set.DynamicBitSetUnmanaged;
-
+const sliceFn = Semver.String.slice;
 const install = bun.install;
 const Bin = bun.install.Bin;
 const Dependency = install.Dependency;
@@ -480,7 +18,206 @@ const PackageID = install.PackageID;
 const PackageManager = bun.install.PackageManager;
 const Resolution = install.Resolution;
 const invalid_package_id = bun.install.invalid_package_id;
-
 const Lockfile = install.Lockfile;
 const Package = Lockfile.Package;
 const Printer = Lockfile.Printer;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+const Message = anyopaque;
+fn cp_msg_to_val(_: anytype) []const u8 { return ""; }
+pub fn CpUnpackElemType(comptime __T: type, comptime idx: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") return ti.@"struct".field_types[idx]; return @FieldType(__T, std.fmt.comptimePrint("{d}", .{idx})); }
+pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return ""; } else if (comptime __T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .array)) { return v[idx]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") return @field(v, ti.@"struct".field_names[idx]); return @field(v, std.fmt.comptimePrint("{d}", .{idx})); } }
+pub fn CpUnpackTailType(comptime __T: type, comptime offset_from_end: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return ti.@"struct".field_types[n - offset_from_end]; } return @FieldType(__T, std.fmt.comptimePrint("{d}", .{1})); }
+pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return ""; } else if (comptime __T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return ""; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .array)) { return v[v.len - offset_from_end]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const n = ti.@"struct".field_names.len; return @field(v, ti.@"struct".field_names[n - offset_from_end]); } return @field(v, std.fmt.comptimePrint("{d}", .{0})); } }
+pub fn CpUnpackSliceType(comptime __T: type, comptime start_idx: usize) type { if (__T == ?Message or __T == Message) return []const Message; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return __T; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return []const @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return []const @typeInfo(__T).array.child; const ti = @typeInfo(__T); if (ti == .@"struct") { const types = ti.@"struct".field_types; if (types.len == 0) return []const i32; const Elem = if (start_idx < types.len) types[start_idx] else types[0]; return []const CpValType(Elem); } return []const i32; }
+pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime __T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const ti = @typeInfo(__T); if (ti == .@"struct") { const names = ti.@"struct".field_names; const types = ti.@"struct".field_types; const end = names.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < types.len) CpValType(types[start_idx]) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, names[f_idx])); } return buf; } return &[_]i32{}; } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const PrintSectionHeader = enum(u1) {
+    print_section_header,
+    dont_print_section_header,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
+
+pub const PackageUpdatePrintInfo = struct {
+    version: Semver.Version,
+    version_buf: []const u8,
+    resolution: Resolution,
+    dependency_id: DependencyID,
+};
+
+pub const ShouldPrintPackageInstallResult = union(enum) {
+    yes: void,
+    no: void,
+    @"return": void,
+    update: PackageUpdatePrintInfo,
+};
+
+
+pub fn printInstalledWorkspaceSection(printer: *const Printer, manager: *PackageManager, comptime Writer: type, writer: Writer, comptime enable_ansi_colors: bool, workspace_package_id: PackageID, installed: *const Bitset, comptime print_section_header: PrintSectionHeader, printed_new_install: *bool, id_map: ?[]DependencyID) !void {
+        const lockfile = printer.lockfile;
+        const string_buf = lockfile.buffers.string_bytes.items;
+        const packages_slice = lockfile.packages.slice();
+        const resolutions = lockfile.buffers.resolutions.items;
+        const dependencies = lockfile.buffers.dependencies.items;
+        const workspace_res = packages_slice.items(.resolution)[@as(usize, @intCast(workspace_package_id))];
+        const names = packages_slice.items(.name);
+        const pkg_metas = packages_slice.items(.@"meta");
+        _ = bun.assert(((workspace_res.tag == .workspace) or (workspace_res.tag == .root)));
+        const resolutions_list = packages_slice.items(.resolutions);
+        var printed_section_header = false;
+        _ = &printed_section_header;
+        var printed_update = false;
+        _ = &printed_update;
+        var dep_dedupe = std.AutoHashMap(install.PackageNameHash, void).init(manager.allocator);
+        _ = &dep_dedupe;
+        defer {
+        _ = dep_dedupe.deinit();
+        }
+        {
+            var _dep_id: i32 = resolutions_list[@as(usize, @intCast(workspace_package_id))].begin();
+            _ = &_dep_id;
+            const __end_0 = resolutions_list[@as(usize, @intCast(workspace_package_id))].end();
+            while (_dep_id < __end_0) : (_dep_id += 1) {
+                const dep_id: DependencyID = @intCast(_dep_id);
+                switch (shouldPrintPackageInstall(printer, manager, @intCast(dep_id), installed, id_map, pkg_metas)) {
+.yes, .no, .@"return" => {
+
+},
+.update => |update_info| {
+printed_new_install.* = true;
+                printed_update = true;
+                if (comptime (print_section_header == .print_section_header)) {
+                    if ((!printed_section_header)) {
+                        printed_section_header = true;
+                        const workspace_name = sliceFn(names[@as(usize, @intCast(workspace_package_id))], string_buf);
+                        _ = try writer.print((comptime Output.prettyFmt("<r>\n<cyan>{s}<r><d>:<r>\n", enable_ansi_colors)), .{ workspace_name });
+                    }
+                }
+                _ = try printUpdatedPackage(printer, update_info, enable_ansi_colors, Writer, writer);
+},
+}
+            }
+        }
+        {
+            var _dep_id: i32 = resolutions_list[@as(usize, @intCast(workspace_package_id))].begin();
+            _ = &_dep_id;
+            const __end_1 = resolutions_list[@as(usize, @intCast(workspace_package_id))].end();
+            while (_dep_id < __end_1) : (_dep_id += 1) {
+                const dep_id: DependencyID = @intCast(_dep_id);
+                switch (shouldPrintPackageInstall(printer, manager, @intCast(dep_id), installed, id_map, pkg_metas)) {
+.@"return" => {
+return;
+},
+.yes => {
+
+},
+.no, .update => {
+continue;
+},
+}
+                const dep = dependencies[@as(usize, @intCast(dep_id))];
+                const package_id = resolutions[@as(usize, @intCast(dep_id))];
+                if (try dep_dedupe.getOrPut(dep.name_hash).found_existing) {
+                    continue;
+                }
+                printed_new_install.* = true;
+                if (comptime (print_section_header == .print_section_header)) {
+                    if ((!printed_section_header)) {
+                        printed_section_header = true;
+                        const workspace_name = sliceFn(names[@as(usize, @intCast(workspace_package_id))], string_buf);
+                        _ = try writer.print((comptime Output.prettyFmt("<r>\n<cyan>{s}<r><d>:<r>\n", enable_ansi_colors)), .{ workspace_name });
+                    }
+                }
+                if (printed_update) {
+                    printed_update = false;
+                    _ = try writer.writeAll("\n");
+                }
+                _ = try printInstalledPackage(printer, manager, dep, package_id, enable_ansi_colors, Writer, writer);
+            }
+        }
+}
+
+pub fn shouldPrintPackageInstall(printer: *const Printer, manager: *PackageManager, dep_id: DependencyID, installed: *const Bitset, id_map: ?[]DependencyID, pkg_metas: []const Package.Meta) *ShouldPrintPackageInstallResult {
+        const dependencies = printer.lockfile.buffers.dependencies.items;
+        const resolutions = printer.lockfile.buffers.resolutions.items;
+        const dependency = dependencies[@as(usize, @intCast(dep_id))];
+        const package_id = resolutions[@as(usize, @intCast(dep_id))];
+        if ((dependency.behavior.isWorkspace() or (package_id >= printer.lockfile.packages.len))) {
+            return .no;
+        }
+        if (id_map) |map| {
+            _ = &map;
+            {
+                var i: i32 = 0;
+                _ = &i;
+                const __end_2 = printer.updates.len;
+                while (i < __end_2) : (i += 1) {
+                    const update = printer.updates[@as(usize, @intCast(i))];
+                    var update_dependency_id = (&map[@as(usize, @intCast(i))]);
+                    _ = &update_dependency_id;
+                    if (update.failed) {
+                        return .@"return";
+                    }
+                    if (update.matches(dependency, printer.lockfile.buffers.string_bytes.items)) {
+                        if ((update_dependency_id.* == invalid_package_id)) {
+                            update_dependency_id.* = dep_id;
+                        }
+                        return .no;
+                    }
+                }
+            }
+        }
+        if ((!installed.isSet(package_id))) {
+            return .no;
+        }
+        if (printer.lockfile.isResolvedDependencyDisabled(dep_id, printer.options.local_package_features, (&pkg_metas[@as(usize, @intCast(package_id))]), printer.options.cpu, printer.options.os)) {
+            return .no;
+        }
+        const resolution = printer.lockfile.packages.items(.resolution)[@as(usize, @intCast(package_id))];
+        if ((resolution.tag == .npm)) {
+            const name = sliceFn((if (@typeInfo(@TypeOf(dependency)) == .@"enum" or @typeInfo(@TypeOf(dependency)) == .@"union") @tagName(dependency) else dependency.name), printer.lockfile.buffers.string_bytes.items);
+            if (manager.updating_packages.get(name)) |entry| {
+                _ = &entry;
+                if (entry.original_version) |original_version| {
+                    _ = &original_version;
+                    if ((!original_version.eql((if (@typeInfo(@TypeOf(resolution)) == .@"enum") @intFromEnum(resolution) else resolution.value).npm.version))) {
+                        return ShouldPrintPackageInstallResult{ .update = PackageUpdatePrintInfo{ .version = original_version, .version_buf = entry.original_version_string_buf, .resolution = resolution, .dependency_id = dep_id } };
+                    }
+                }
+            }
+        }
+        return .yes;
+}
+
+pub fn printUpdatedPackage(printer: *const Printer, update_info: PackageUpdatePrintInfo, comptime enable_ansi_colors: bool, comptime Writer: type, writer: Writer) !void {
+        const string_buf = printer.lockfile.buffers.string_bytes.items;
+        const dependency = printer.lockfile.buffers.dependencies.items[@as(usize, @intCast(update_info.dependency_id))];
+        const fmt = (comptime (if (enable_ansi_colors) Output.prettyFmt("<r><cyan>↑<r> <b>{s}<r><d> <b>{f} →<r> <b><cyan>{f}<r>\n", enable_ansi_colors) else Output.prettyFmt("<r>^ <b>{s}<r><d> <b>{f} -\\><r> <b>{f}<r>\n", enable_ansi_colors)));
+        _ = try writer.print(fmt, .{ sliceFn((if (@typeInfo(@TypeOf(dependency)) == .@"enum" or @typeInfo(@TypeOf(dependency)) == .@"union") @tagName(dependency) else dependency.name), string_buf), update_info.version.fmt(update_info.version_buf), (if (@typeInfo(@TypeOf(update_info.resolution)) == .@"enum") @intFromEnum(update_info.resolution) else update_info.resolution.value).npm.version.fmt(string_buf) });
+}
+
+pub fn printInstalledPackage(printer: *const Printer, manager: *PackageManager, dependency: *const Dependency, package_id: PackageID, comptime enable_ansi_colors: bool, comptime Writer: type, writer: Writer) !void {
+        const string_buf = printer.lockfile.buffers.string_bytes.items;
+        const packages_slice = printer.lockfile.packages.slice();
+        const resolution: Resolution = packages_slice.items(.resolution)[@as(usize, @intCast(package_id))];
+        const name = sliceFn((if (@typeInfo(@TypeOf(dependency)) == .@"enum" or @typeInfo(@TypeOf(dependency)) == .@"union") @tagName(dependency) else dependency.name), string_buf);
+        const package_name = sliceFn(packages_slice.items(.name)[@as(usize, @intCast(package_id))], string_buf);
+        if (manager.formatLaterVersionInCache(package_name, dependency.name_hash, resolution)) |later_version_fmt| {
+            _ = &later_version_fmt;
+            const fmt = (comptime (if (enable_ansi_colors) Output.prettyFmt("<r><green>+<r> <b>{s}<r><d>@{f}<r> <d>(<blue>v{f} available<r><d>)<r>\n", enable_ansi_colors) else Output.prettyFmt("<r>+ {s}<r><d>@{f}<r> <d>(v{f} available)<r>\n", enable_ansi_colors)));
+            _ = try writer.print(fmt, .{ name, resolution.fmt(string_buf, .posix), later_version_fmt });
+            return;
+        }
+        const fmt = (comptime (if (enable_ansi_colors) Output.prettyFmt("<r><green>+<r> <b>{s}<r><d>@{f}<r>\n", enable_ansi_colors) else Output.prettyFmt("<r>+ {s}<r><d>@{f}<r>\n", enable_ansi_colors)));
+        _ = try writer.print(fmt, .{ name, resolution.fmt(string_buf, .posix) });
+}
