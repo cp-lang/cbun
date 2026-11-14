@@ -318,3 +318,15 @@
   - `src/install/resolvers/folder_resolver.cp` (1/1 100% 闭合)
   - `src/install/lockfile/printer/{Yarn,tree_printer}.cp` (2/2 100% 闭合)
   - `src/install/lockfile/Package/{Meta,Scripts,WorkspaceMap}.cp` (3/3 100% 闭合)
+
+
+## 2026-11-14 (Milestone 7 Phase 15: 闭合 runtime 根目录, runtime/node/assert, runtime/node/zlib, test_runner/timers, test_runner/harness, runtime/api/bun/spawn, jsc/bindings, cli/test 共 8 个目录)
+- **新增 16 个 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/runtime/{api,node,webcore}.cp` (3/3 100% 闭合)
+  - `src/runtime/node/assert/myers_diff.cp` (1/1 100% 闭合)
+  - `src/runtime/node/zlib/{NativeBrotli,NativeZlib,NativeZstd}.cp` (3/3 100% 闭合)
+  - `src/test_runner/timers/FakeTimers.cp` (1/1 100% 闭合)
+  - `src/test_runner/harness/{fixtures,recover}.cp` (2/2 100% 闭合)
+  - `src/runtime/api/bun/spawn/stdio.cp` (1/1 100% 闭合)
+  - `src/jsc/bindings/{GeneratedBindings,GeneratedJS2Native}.cp` (2/2 100% 闭合)
+  - `src/cli/test/{ChangedFilesFilter,ParallelRunner,Scanner}.cp` (3/3 100% 闭合)

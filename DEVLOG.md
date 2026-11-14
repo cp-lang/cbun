@@ -257,3 +257,11 @@
 - **关键工程经验**：
   - `WorkspaceMap.cp` 中消除命名为 `arena` 的标识符（与 CP 内置关键字冲突），改用 `arena_alloc`；使用 `WorkspaceSortContext` 作为排序上下文并以 `_` 省略只读接收者。
   - `ChromeProcess.cp` 中将 `spawn` 转义为 `@"spawn"` 消除与内置并发原语冲突，使用 `unsafe` 精准包裹指针切片。
+
+
+## 2026-11-14: Milestone 7 Phase 15 闭环（闭合 8 个关键子目录，纯 CP 模块达 633 个）
+- **新增 16 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - 覆盖 `runtime/`, `runtime/node/assert/`, `runtime/node/zlib/`, `test_runner/timers/`, `test_runner/harness/`, `runtime/api/bun/spawn/`, `jsc/bindings/`, `cli/test/` 8 个子目录，全部 100% 闭合。
+- **关键工程经验**：
+  - `FakeTimers.cp` 与 `ChangedFilesFilter.cp` 中统一切片访问 `[0..0]` 与类型转换。
+  - `NativeBrotli.cp`、`NativeZlib.cp`、`NativeZstd.cp` 中消除对底层 C 库解压模式转换的类型歧义，使用 `@mod(..., 1.0)` 和纯 CP 类型断言。
