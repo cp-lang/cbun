@@ -304,5 +304,15 @@
   - **表达式解包语句级重构**：针对 `const css_module = if (dest.css_module) |m| ...` 这类在表达式位置尝试解包的结构，重构为 CP 规范的语句级 `let css_module = dest.css_module; if (css_module != null) { ... }`，消除借用检查误判。
 
 
+## 2026-11-14: Milestone 7 Phase 20 闭环（闭合 css/selectors 全目录，实现 bake 核心与 valkey 协议栈纯 CP 重构，纯 CP 模块达 674 个）
+- **新增 7 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - 覆盖 `src/css/selectors/` (3/3 100% 闭合)、`src/bake/bake.cp`、`src/runtime/valkey_jsc/` (5/7 模块)，源码共计 6,344 行。
+- **关键工程经验与 Lowering 深度沉淀**：
+  - **超大型 CSS 选择器解析器 (`parser.cp`, 3,746 行) 嵌套结构体方法提升规范化**：`cpc` 编译器对右侧匿名 `union(enum)` / `packed struct` 内部方法直接原样 token 输出，未 lower 为 Zig 表达式。遵循第六节第 4 条规范，将复杂判断函数全面提升至模块顶层纯 CP 函数，并由父结构体以静态代理函数调用，保持 100% CP 借用检查安全性。
+  - **Valkey 协议栈 (`valkey.cp`, 1,228 行) 联合体与枚举类型匹配规范**：在处理 RESP 协议多分支解析时，将针对联合体和无符号整数的 switch 分支进行显式类型标注，避免默认推导为 `i32` 触发 `E0207`。
+  - **短生命周期「用完即弃」子智能体高效调度**：严格遵循单批次短生命周期原则，单智能体在 25 步内精准拿下 3,746 行超大模块重构，避免历史上下文恶性累积。
+
+
+
 
 

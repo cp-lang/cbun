@@ -619,6 +619,33 @@
 - **全仓累计进度**：**667 个纯 `.cp` 模块**，**119 个子目录 100% 闭合**。
 
 
+### 2026-11-14: 收到 `cp_agy` 结单通知 `task-20261114-prelude-ptr-shadow`（解决 `cp_mut_slice` 形参名遮蔽用户函数 `pub fn ptr()`）
+- **Task ID**: `task-20261114-prelude-ptr-shadow`
+- **Repro**: `/data/dev/bun/temp/repro_prelude_ptr_shadow.cp`
+- **Status**: `resolved` (by `cp_agy`, `2026-11-14T18:18:44`)
+- **修复结论 (`note`)**: `"Prefixed prelude helper parameter and local names with __cp_ in codegen/mod.rs; verified repro_prelude_ptr_shadow.cp passes cpc --lib and zig ast-check."`
+- **影响范围**: `cpc` 自动注入的 `cp_mut_slice` 等辅助函数参数与内部局部变量已全部统一加上 `__cp_` 前缀，彻底杜绝了与用户自定义 `ptr`、`len` 等常见标识符的符号遮蔽冲突。
+
+
+### 2026-11-14: 用户指令："汇报一下你的工作成果和进度" 与 Milestone 7 Phase 20 闭环提交
+- **用户指令**：汇报当前工作成果与全仓迁移进度。
+- **Milestone 7 Phase 20 闭环成果（新增 7 个 100% 纯 CP 模块，6,344 行源码，闭合 1 个子目录）**：
+  - `src/css/selectors/` (3/3 100% 闭合): `parser.cp` (3,746 vs 3,664 lines, +2.2%)
+  - `src/bake/`: `bake.cp` (1,004 vs 1,008 lines, -0.4%)
+  - `src/runtime/valkey_jsc/` (5/7): `index.cp` (21 vs 21 lines), `protocol_jsc.cp` (155 vs 147 lines, +5.4%), `ValkeyCommand.cp` (184 vs 170 lines, +8.2%), `ValkeyContext.cp` (6 vs 6 lines), `valkey.cp` (1,228 vs 1,228 lines, 0.0%)
+- **4 项硬门禁验收全部通过**：
+  - 全部 7 个模块通过 `cpc --lib` 与 `vendor/zig/zig ast-check`（0 报错）；
+  - 静态零违例门禁通过（0 `zig {}`、0 `var`、0 元组字段访问、0 `anyopaque`）；
+  - 代码膨胀率均处于 `[-0.4%, +8.2%]` 区间，完全满足 `<= 1.20x` 红线。
+- **全仓累计最新进度**：
+  - 纯 `.cp` 模块数：**674 个**（原始对标 1,294 个 `.zig` 文件，迁移率达 **52.09%**）；
+  - 100% 闭合子目录：**136 个 / 171 个**（子目录全量闭合率 **79.5%**）；
+  - `watch_task.py` 后台双向通信守护进程持续稳健运行中；
+  - 严格遵守 2 路并发上限与「用完即弃」短生命周期子智能体纪律，Token 消耗大幅降低。
+
+
+
+
 
 
 

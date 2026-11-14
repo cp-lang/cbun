@@ -361,5 +361,13 @@
   - `src/js_printer/renamer.cp` (1/2)
 
 
+## 2026-11-14 (Milestone 7 Phase 20: 闭合 css/selectors 全目录及 bake 核心、valkey_jsc 协议栈)
+- **新增 7 个 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/css/selectors/parser.cp` (3/3 100% 闭合)
+  - `src/bake/bake.cp` (核心服务端入口)
+  - `src/runtime/valkey_jsc/{index,protocol_jsc,ValkeyCommand,ValkeyContext,valkey}.cp` (5/7 模块闭环)
+
+
+
 
 
