@@ -241,3 +241,11 @@
   - `src/sql/postgres/PostgresTypes.cp`、`src/sql/postgres/types/Tag.cp`、`src/md/` (16/16)。
 - **关键工程经验**：
   - `src/md/entity.cp` (2,165 行) 与 `src/md/ansi_renderer.cp` (2,260 行) 通过 `scripts/zig2cp_prep.py` 预转换后仅用少量 `edit_file` 即一次性通过 `cpc --lib` 与 `zig ast-check`，代码行数变化控制在 `+0.5%` 以内。
+
+
+## 2026-11-14: Milestone 7 Phase 13 闭环（`src/bake/DevServer/` 11 个核心模块迁移完成，全仓突破 600 个纯 CP 模块）
+- **新增 11 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - `src/bake/DevServer/` 下 11 个模块全部通过编译与 AST 校验。
+- **关键工程经验**：
+  - `HotReloadEvent.cp` 与 `DirectoryWatchStore.cp` 中消除 `_ = expr;` 模式（CP 中 `_` 专用于接收者实例），采用 `* = expr;` 或直接表达式求值。
+  - `SourceMapStore.cp` 与 `RouteBundle.cp` 中修复空指针和可选类型映射，严格使用 `(Type)?` 与 `type?` 语法。

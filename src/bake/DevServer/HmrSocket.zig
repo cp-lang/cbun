@@ -1,288 +1,11 @@
-pub const HmrSocket = @This();
-
-dev: *DevServer,
-underlying: ?AnyWebSocket = null,
-subscriptions: HmrTopic.Bits,
-/// Allows actions which inspect or mutate sensitive DevServer state.
-is_from_localhost: bool,
-/// By telling DevServer the active route, this enables receiving detailed
-/// `hot_update` events for when the route is updated.
-active_route: RouteBundle.Index.Optional,
-referenced_source_maps: std.AutoHashMapUnmanaged(SourceMapStore.Key, void),
-inspector_connection_id: i32 = -1,
-
-pub fn new(dev: *DevServer, res: anytype) *HmrSocket {
-    return bun.create(dev.allocator(), HmrSocket, .{
-        .dev = dev,
-        .is_from_localhost = if (res.getRemoteSocketInfo()) |addr|
-            if (addr.is_ipv6)
-                bun.strings.eqlComptime(addr.ip, "::1")
-            else
-                bun.strings.eqlComptime(addr.ip, "127.0.0.1")
-        else
-            false,
-        .subscriptions = .{},
-        .active_route = .none,
-        .referenced_source_maps = .empty,
-    });
-}
-
-pub fn onOpen(s: *HmrSocket, ws: AnyWebSocket) void {
-    const send_status = ws.send(&(.{MessageId.version.char()} ++ s.dev.configuration_hash_key), .binary, false, true);
-    s.underlying = ws;
-
-    if (send_status != .dropped) {
-        // Notify inspector about client connection
-        if (s.dev.inspector()) |agent| {
-            s.inspector_connection_id = agent.nextConnectionID();
-            agent.notifyClientConnected(s.dev.inspector_server_id, s.inspector_connection_id);
-        }
-    }
-}
-
-pub fn onMessage(s: *HmrSocket, ws: AnyWebSocket, msg: []const u8, opcode: uws.Opcode) void {
-    _ = opcode;
-
-    if (msg.len == 0)
-        return ws.close();
-
-    switch (@as(IncomingMessageId, @enumFromInt(msg[0]))) {
-        .init => {
-            if (msg.len != 9) return ws.close();
-            var generation: u32 = undefined;
-            _ = std.fmt.hexToBytes(std.mem.asBytes(&generation), msg[1..]) catch
-                return ws.close();
-            const source_map_id = SourceMapStore.Key.init(@as(u64, generation) << 32);
-            if (s.dev.source_maps.removeOrUpgradeWeakRef(source_map_id, .upgrade)) {
-                s.referenced_source_maps.put(s.dev.allocator(), source_map_id, {}) catch
-                    bun.outOfMemory();
-            }
-        },
-        .subscribe => {
-            var new_bits: HmrTopic.Bits = .{};
-            const topics = msg[1..];
-            if (topics.len > HmrTopic.max_count) return;
-            outer: for (topics) |char| {
-                inline for (@typeInfo(HmrTopic).@"enum".fields) |field| {
-                    if (char == field.value) {
-                        @field(new_bits, field.name) = true;
-                        continue :outer;
-                    }
-                }
-            }
-            inline for (comptime std.enums.values(HmrTopic)) |field| {
-                if (@field(new_bits, @tagName(field)) and !@field(s.subscriptions, @tagName(field))) {
-                    _ = ws.subscribe(&.{@intFromEnum(field)});
-
-                    // on-subscribe hooks
-                    if (bun.FeatureFlags.bake_debugging_features) switch (field) {
-                        .incremental_visualizer => {
-                            s.dev.emit_incremental_visualizer_events += 1;
-                            s.dev.emitVisualizerMessageIfNeeded();
-                        },
-                        .memory_visualizer => {
-                            s.dev.emit_memory_visualizer_events += 1;
-                            s.dev.emitMemoryVisualizerMessage();
-                            if (s.dev.emit_memory_visualizer_events == 1) {
-                                bun.assert(s.dev.memory_visualizer_timer.state != .ACTIVE);
-                                s.dev.vm.timer.update(
-                                    &s.dev.memory_visualizer_timer,
-                                    &bun.timespec.msFromNow(.allow_mocked_time, 1000),
-                                );
-                            }
-                        },
-                        else => {},
-                    };
-                } else if (@field(new_bits, @tagName(field)) and !@field(s.subscriptions, @tagName(field))) {
-                    _ = ws.unsubscribe(&.{@intFromEnum(field)});
-                }
-            }
-            onUnsubscribe(s, bun.bits.@"and"(
-                HmrTopic.Bits,
-                bun.bits.invert(HmrTopic.Bits, new_bits),
-                s.subscriptions,
-            ));
-            s.subscriptions = new_bits;
-        },
-        .set_url => {
-            const pattern = msg[1..];
-            const maybe_rbi = s.dev.routeToBundleIndexSlow(pattern);
-            if (s.dev.inspector()) |agent| {
-                if (s.inspector_connection_id > -1) {
-                    var pattern_str = bun.String.init(pattern);
-                    defer pattern_str.deref();
-                    agent.notifyClientNavigated(
-                        s.dev.inspector_server_id,
-                        s.inspector_connection_id,
-                        &pattern_str,
-                        maybe_rbi,
-                    );
-                }
-            }
-            const rbi = maybe_rbi orelse return;
-            if (s.active_route.unwrap()) |old| {
-                if (old == rbi) return;
-                s.dev.routeBundlePtr(old).active_viewers -= 1;
-            }
-            s.dev.routeBundlePtr(rbi).active_viewers += 1;
-            s.active_route = rbi.toOptional();
-            var response: [5]u8 = .{MessageId.set_url_response.char()} ++ std.mem.toBytes(rbi.get());
-
-            _ = ws.send(&response, .binary, false, true);
-            s.notifyInspectorClientNavigation(pattern, rbi.toOptional());
-        },
-        .testing_batch_events => switch (s.dev.testing_batch_events) {
-            .disabled => {
-                if (s.dev.current_bundle != null) {
-                    s.dev.testing_batch_events = .enable_after_bundle;
-                } else {
-                    s.dev.testing_batch_events = .{ .enabled = .empty };
-                    s.dev.publish(.testing_watch_synchronization, &.{
-                        MessageId.testing_watch_synchronization.char(),
-                        0,
-                    }, .binary);
-                }
-            },
-            .enable_after_bundle => {
-                // do not expose a websocket event that panics a release build
-                bun.debugAssert(false);
-                ws.close();
-            },
-            .enabled => |event_const| {
-                var event = event_const;
-                s.dev.testing_batch_events = .disabled;
-
-                if (event.entry_points.set.count() == 0) {
-                    s.dev.publish(.testing_watch_synchronization, &.{
-                        MessageId.testing_watch_synchronization.char(),
-                        2,
-                    }, .binary);
-                    return;
-                }
-
-                s.dev.startAsyncBundle(
-                    event.entry_points,
-                    true,
-                    std.time.Timer.start() catch @panic("timers unsupported"),
-                ) catch |err| bun.handleOom(err);
-
-                event.entry_points.deinit(s.dev.allocator());
-            },
-        },
-        .console_log => {
-            if (msg.len < 2) {
-                ws.close();
-                return;
-            }
-
-            const kind: ConsoleLogKind = switch (msg[1]) {
-                'l' => .log,
-                'e' => .err,
-                else => {
-                    ws.close();
-                    return;
-                },
-            };
-
-            const data = msg[2..];
-
-            if (s.dev.inspector()) |agent| {
-                var log_str = bun.String.init(data);
-                defer log_str.deref();
-                agent.notifyConsoleLog(s.dev.inspector_server_id, kind, &log_str);
-            }
-
-            if (s.dev.broadcast_console_log_from_browser_to_server) {
-                switch (kind) {
-                    .log => {
-                        bun.Output.pretty("<r><d>[browser]<r> {s}<r>\n", .{data});
-                    },
-                    .err => {
-                        bun.Output.prettyError("<r><d>[browser]<r> {s}<r>\n", .{data});
-                    },
-                }
-                bun.Output.flush();
-            }
-        },
-        .unref_source_map => {
-            var fbs = std.io.fixedBufferStream(msg[1..]);
-            const r = fbs.reader();
-
-            const source_map_id = SourceMapStore.Key.init(r.readInt(u64, .little) catch
-                return ws.close());
-            const kv = s.referenced_source_maps.fetchRemove(source_map_id) orelse {
-                bun.Output.debugWarn("unref_source_map: no entry found: {x}\n", .{source_map_id.get()});
-                return; // no entry may happen.
-            };
-            s.dev.source_maps.unref(kv.key);
-        },
-        _ => ws.close(),
-    }
-}
-
-fn onUnsubscribe(s: *HmrSocket, field: HmrTopic.Bits) void {
-    if (bun.FeatureFlags.bake_debugging_features) {
-        if (field.incremental_visualizer) {
-            s.dev.emit_incremental_visualizer_events -= 1;
-        }
-        if (field.memory_visualizer) {
-            s.dev.emit_memory_visualizer_events -= 1;
-            if (s.dev.emit_incremental_visualizer_events == 0 and s.dev.memory_visualizer_timer.state == .ACTIVE) {
-                s.dev.vm.timer.remove(&s.dev.memory_visualizer_timer);
-            }
-        }
-    }
-}
-
-pub fn onClose(s: *HmrSocket, ws: AnyWebSocket, exit_code: i32, message: []const u8) void {
-    _ = ws;
-    _ = exit_code;
-    _ = message;
-
-    s.onUnsubscribe(s.subscriptions);
-
-    if (s.inspector_connection_id > -1) {
-        // Notify inspector about client disconnection
-        if (s.dev.inspector()) |agent| {
-            agent.notifyClientDisconnected(s.dev.inspector_server_id, s.inspector_connection_id);
-        }
-    }
-
-    if (s.active_route.unwrap()) |old| {
-        s.dev.routeBundlePtr(old).active_viewers -= 1;
-    }
-
-    var it = s.referenced_source_maps.keyIterator();
-    while (it.next()) |key| {
-        s.dev.source_maps.unref(key.*);
-    }
-    s.referenced_source_maps.deinit(s.dev.allocator());
-    bun.debugAssert(s.dev.active_websocket_connections.remove(s));
-    s.dev.allocator().destroy(s);
-}
-
-fn notifyInspectorClientNavigation(s: *const HmrSocket, pattern: []const u8, rbi: RouteBundle.Index.Optional) void {
-    if (s.inspector_connection_id > -1) {
-        if (s.dev.inspector()) |agent| {
-            var pattern_str = bun.String.init(pattern);
-            defer pattern_str.deref();
-            agent.notifyClientNavigated(
-                s.dev.inspector_server_id,
-                s.inspector_connection_id,
-                &pattern_str,
-                rbi.unwrap(),
-            );
-        }
-    }
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
 const Output = bun.Output;
 const assert = bun.assert;
 const bake = bun.bake;
-
 const DevServer = bake.DevServer;
 const ConsoleLogKind = DevServer.ConsoleLogKind;
 const HmrTopic = DevServer.HmrTopic;
@@ -290,6 +13,306 @@ const IncomingMessageId = DevServer.IncomingMessageId;
 const MessageId = DevServer.MessageId;
 const RouteBundle = DevServer.RouteBundle;
 const SourceMapStore = DevServer.SourceMapStore;
-
 const uws = bun.uws;
 const AnyWebSocket = uws.AnyWebSocket;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val << shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val << @as(ShiftType, @truncate(u_shift));
+    }
+    return val << shift;
+}
+fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val >> shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val >> @as(ShiftType, @truncate(u_shift));
+    }
+    return val >> shift;
+}
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const HmrSocket = @This();
+
+dev: *DevServer,
+underlying: ?AnyWebSocket = null,
+subscriptions: HmrTopic.Bits,
+is_from_localhost: bool,
+active_route: RouteBundle.Index.Optional,
+referenced_source_maps: std.AutoHashMapUnmanaged(SourceMapStore.Key,void),
+inspector_connection_id: i32 = -1,
+
+pub fn new(dev: *DevServer, res: anytype) *HmrSocket {
+        var is_from_localhost = false;
+        _ = &is_from_localhost;
+        if (res.getRemoteSocketInfo()) |addr| {
+            _ = &addr;
+            if (addr.is_ipv6) {
+                is_from_localhost = bun.strings.eqlComptime(addr.ip, "::1");
+            } else {
+                is_from_localhost = bun.strings.eqlComptime(addr.ip, "127.0.0.1");
+            }
+        }
+        return bun.create(dev.allocator(), HmrSocket, HmrSocket{ .dev = dev, .is_from_localhost = is_from_localhost, .subscriptions = .{}, .active_route = .none, .referenced_source_maps = .empty });
+}
+
+pub fn onOpen(s: *HmrSocket, ws: AnyWebSocket) void {
+        var version_buf: [17]u8 = undefined;
+        _ = &version_buf;
+        version_buf[cp_cast_int(usize, 0)] = MessageId.version.char();
+        _ = @memcpy(version_buf[1..], (&s.dev.configuration_hash_key));
+        const send_status = ws.send((&version_buf), .binary, false, true);
+        s.underlying = ws;
+        if ((send_status != .dropped)) {
+            if (s.dev.inspector()) |agent| {
+                _ = &agent;
+                s.inspector_connection_id = agent.nextConnectionID();
+                _ = agent.notifyClientConnected(s.dev.inspector_server_id, s.inspector_connection_id);
+            }
+        }
+}
+
+pub fn onMessage(s: *HmrSocket, ws: AnyWebSocket, msg: []const u8, _opcode: uws.Opcode) void {
+    _ = _opcode;
+        if ((msg.len == 0)) {
+            return ws.close();
+        }
+        switch (@as(IncomingMessageId, @enumFromInt(msg[0]))) {
+.init => {
+if ((msg.len != 9)) {
+            return ws.close();
+        }
+        var generation: u32 = undefined;
+        _ = &generation;
+        _ = (blk_catch_0: { break :blk_catch_0 ((std.fmt.hexToBytes(std.mem.asBytes((&generation)), msg[1..])) catch |__ce_0| { _ = &__ce_0; return ws.close(); }); });
+        const source_map_id = SourceMapStore.Key.init(cp_shl((if (comptime @typeInfo(@TypeOf(generation)) == .@"enum") cp_cast_int(u64, @intFromEnum(generation)) else cp_cast_int(u64, generation)), 32));
+        if (s.dev.source_maps.removeOrUpgradeWeakRef(source_map_id, .upgrade)) {
+            _ = (blk_catch_1: { break :blk_catch_1 ((s.referenced_source_maps.put(s.dev.allocator(), source_map_id, .{})) catch |__ce_1| { _ = &__ce_1; break :blk_catch_1 bun.outOfMemory(); }); });
+        }
+},
+.subscribe => {
+var new_bits: HmrTopic.Bits = .{};
+        _ = &new_bits;
+        const topics = msg[1..];
+        if ((topics.len > HmrTopic.max_count)) {
+            return;
+        }
+        for (cp_iter_slice(topics)) |char| {
+            _ = &char;
+            inline for (@typeInfo(HmrTopic).@"enum".fields) |field| {
+                if ((char == (if (@typeInfo(@TypeOf(field)) == .@"enum") @intFromEnum(field) else field.value))) {
+                    @field(new_bits, (if (@typeInfo(@TypeOf(field)) == .@"enum" or @typeInfo(@TypeOf(field)) == .@"union") @tagName(field) else field.name)) = true;
+                    break;
+                }
+            }
+        }
+        inline for ((comptime std.enums.values(HmrTopic))) |field| {
+            if ((@field(new_bits, @tagName(field)) and (!@field(s.subscriptions, @tagName(field))))) {
+                _ = ws.subscribe((&.{ @intFromEnum(field) }));
+                if (bun.FeatureFlags.bake_debugging_features) {
+                    switch (field) {
+.incremental_visualizer => {
+s.dev.emit_incremental_visualizer_events = (s.dev.emit_incremental_visualizer_events + 1);
+                    _ = s.dev.emitVisualizerMessageIfNeeded();
+},
+.memory_visualizer => {
+s.dev.emit_memory_visualizer_events = (s.dev.emit_memory_visualizer_events + 1);
+                    _ = s.dev.emitMemoryVisualizerMessage();
+                    if ((s.dev.emit_memory_visualizer_events == 1)) {
+                        _ = bun.assert((s.dev.memory_visualizer_timer.state != .ACTIVE));
+                        _ = s.dev.vm.timer.update((&s.dev.memory_visualizer_timer), (&bun.timespec.msFromNow(.allow_mocked_time, 1000)));
+                    }
+},
+else => {
+
+},
+}
+                }
+            } else {
+                if (((!@field(new_bits, @tagName(field))) and @field(s.subscriptions, @tagName(field)))) {
+                    _ = ws.unsubscribe((&.{ @intFromEnum(field) }));
+                }
+            }
+        }
+        _ = onUnsubscribe(s, bun.bits.@"and"(HmrTopic.Bits, bun.bits.invert(HmrTopic.Bits, new_bits), s.subscriptions));
+        s.subscriptions = new_bits;
+},
+.set_url => {
+const pattern = msg[1..];
+        const maybe_rbi = s.dev.routeToBundleIndexSlow(pattern);
+        if (s.dev.inspector()) |agent| {
+            _ = &agent;
+            if ((s.inspector_connection_id > -1)) {
+                var pattern_str = bun.String.init(pattern);
+                _ = &pattern_str;
+                defer {
+                _ = pattern_str.deref();
+                }
+                _ = agent.notifyClientNavigated(s.dev.inspector_server_id, s.inspector_connection_id, (&pattern_str), maybe_rbi);
+            }
+        }
+        const rbi = ((maybe_rbi) orelse { return; });
+        if (s.active_route.unwrap()) |old| {
+            _ = &old;
+            if ((old == rbi)) {
+                return;
+            }
+            s.dev.routeBundlePtr(old).active_viewers = (s.dev.routeBundlePtr(old).active_viewers - 1);
+        }
+        s.dev.routeBundlePtr(rbi).active_viewers = (s.dev.routeBundlePtr(rbi).active_viewers + 1);
+        s.active_route = rbi.toOptional();
+        var response: [5]u8 = undefined;
+        _ = &response;
+        response[cp_cast_int(usize, 0)] = MessageId.set_url_response.char();
+        _ = @memcpy(response[1..5], (&std.mem.toBytes(rbi.get())));
+        _ = ws.send((&response), .binary, false, true);
+        _ = notifyInspectorClientNavigation(s, pattern, rbi.toOptional());
+},
+.testing_batch_events => {
+switch (s.dev.testing_batch_events) {
+.disabled => {
+if ((s.dev.current_bundle != null)) {
+            s.dev.testing_batch_events = .enable_after_bundle;
+        } else {
+            s.dev.testing_batch_events = .{ .enabled = .empty };
+            _ = s.dev.publish(.testing_watch_synchronization, (&.{ MessageId.testing_watch_synchronization.char(), 0 }), .binary);
+        }
+},
+.enable_after_bundle => {
+_ = bun.debugAssert(false);
+        _ = ws.close();
+},
+.enabled => |event_const| {
+var event = event_const;
+        _ = &event;
+        s.dev.testing_batch_events = .disabled;
+        if ((event.entry_points.set.count() == 0)) {
+            _ = s.dev.publish(.testing_watch_synchronization, (&.{ MessageId.testing_watch_synchronization.char(), 2 }), .binary);
+            return;
+        }
+        _ = (blk_catch_3: { break :blk_catch_3 ((s.dev.startAsyncBundle(event.entry_points, true, (blk_catch_2: { break :blk_catch_2 ((std.time.Timer.start()) catch |__ce_2| { _ = &__ce_2; @panic("timers unsupported"); }); }))) catch |e| { _ = &e; break :blk_catch_3 bun.handleOom(e); }); });
+        _ = event.entry_points.deinit(s.dev.allocator());
+},
+}
+},
+.console_log => {
+if ((msg.len < 2)) {
+            _ = ws.close();
+            return;
+        }
+        const kind: ConsoleLogKind = (switch (msg[1]) {
+'l' => .log,
+'e' => .err,
+else => {
+{
+            _ = ws.close();
+            return;
+        }
+},
+});
+        const data = msg[2..];
+        if (s.dev.inspector()) |agent| {
+            _ = &agent;
+            var log_str = bun.String.init(data);
+            _ = &log_str;
+            defer {
+            _ = log_str.deref();
+            }
+            _ = agent.notifyConsoleLog(s.dev.inspector_server_id, kind, (&log_str));
+        }
+        if (s.dev.broadcast_console_log_from_browser_to_server) {
+            switch (kind) {
+.log => {
+_ = bun.Output.pretty("<r><d>[browser]<r> {s}<r>\n", .{ data });
+},
+.err => {
+_ = bun.Output.prettyError("<r><d>[browser]<r> {s}<r>\n", .{ data });
+},
+}
+            _ = bun.Output.flush();
+        }
+},
+.unref_source_map => {
+var fbs = std.io.fixedBufferStream(msg[1..]);
+        _ = &fbs;
+        const r = fbs.reader();
+        const source_map_id = SourceMapStore.Key.init((blk_catch_4: { break :blk_catch_4 ((r.readInt(u64, .little)) catch |__ce_4| { _ = &__ce_4; return ws.close(); }); }));
+        const kv_opt = s.referenced_source_maps.fetchRemove(source_map_id);
+        if ((kv_opt == null)) {
+            _ = bun.Output.debugWarn("unref_source_map: no entry found: {x}\n", .{ source_map_id.get() });
+            return;
+        }
+        const kv = kv_opt.?;
+        _ = s.dev.source_maps.unref(kv.key);
+},
+else => {
+_ = ws.close();
+},
+}
+}
+
+pub fn onUnsubscribe(s: *HmrSocket, field: HmrTopic.Bits) void {
+        if (bun.FeatureFlags.bake_debugging_features) {
+            if (field.incremental_visualizer) {
+                s.dev.emit_incremental_visualizer_events = (s.dev.emit_incremental_visualizer_events - 1);
+            }
+            if (field.memory_visualizer) {
+                s.dev.emit_memory_visualizer_events = (s.dev.emit_memory_visualizer_events - 1);
+                if (((s.dev.emit_incremental_visualizer_events == 0) and (s.dev.memory_visualizer_timer.state == .ACTIVE))) {
+                    _ = s.dev.vm.timer.remove((&s.dev.memory_visualizer_timer));
+                }
+            }
+        }
+}
+
+pub fn onClose(s: *HmrSocket, _ws: AnyWebSocket, _exit_code: i32, _message: []const u8) void {
+    _ = _ws;
+    _ = _exit_code;
+    _ = _message;
+        _ = onUnsubscribe(s, s.subscriptions);
+        if ((s.inspector_connection_id > -1)) {
+            if (s.dev.inspector()) |agent| {
+                _ = &agent;
+                _ = agent.notifyClientDisconnected(s.dev.inspector_server_id, s.inspector_connection_id);
+            }
+        }
+        if (s.active_route.unwrap()) |old| {
+            _ = &old;
+            s.dev.routeBundlePtr(old).active_viewers = (s.dev.routeBundlePtr(old).active_viewers - 1);
+        }
+        var it = s.referenced_source_maps.keyIterator();
+        _ = &it;
+        while (it.next()) |key| {
+            _ = s.dev.source_maps.unref(key.*);
+        }
+        _ = s.referenced_source_maps.deinit(s.dev.allocator());
+        _ = bun.debugAssert(s.dev.active_websocket_connections.remove(s));
+        _ = s.dev.allocator().destroy(s);
+}
+
+pub fn notifyInspectorClientNavigation(s: *const HmrSocket, pattern: []const u8, rbi: RouteBundle.Index.Optional) void {
+        if ((s.inspector_connection_id > -1)) {
+            if (s.dev.inspector()) |agent| {
+                _ = &agent;
+                var pattern_str = bun.String.init(pattern);
+                _ = &pattern_str;
+                defer {
+                _ = pattern_str.deref();
+                }
+                _ = agent.notifyClientNavigated(s.dev.inspector_server_id, s.inspector_connection_id, (&pattern_str), rbi.unwrap());
+            }
+        }
+}

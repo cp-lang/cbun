@@ -301,3 +301,8 @@
   - `src/sql/postgres/PostgresTypes.cp` (10/10 100% 闭合)
   - `src/sql/postgres/types/Tag.cp` (2/2 100% 闭合)
   - `src/md/{ansi_renderer,autolinks,blocks,containers,entity,helpers,html_renderer,inlines,line_analysis,links,parser,ref_defs,render_blocks,root,types,unicode}.cp` (16/16 100% 闭合)
+
+
+## 2026-11-14 (Milestone 7 Phase 13: 迁移 src/bake/DevServer/ 11 个模块至纯 CP)
+- **新增 11 个 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/bake/DevServer/{Assets,DirectoryWatchStore,ErrorReportRequest,HmrSocket,HotReloadEvent,PackedMap,RouteBundle,SerializedFailure,SourceMapStore,WatcherAtomics,memory_cost}.cp` (11 模块)

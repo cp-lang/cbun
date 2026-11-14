@@ -1,213 +1,197 @@
-//! All code working with atomics to communicate watcher <-> DevServer is here.
-//! It attempts to recycle as much memory as possible, since files are very
-//! frequently updated (the whole point of HMR)
-
-const Self = @This();
-
-/// Only one event can run at any given time. We need three events because:
-///
-/// * One event may be actively running on the dev server thread.
-/// * One event may be "pending", i.e., it was added by the watcher thread but not immediately
-///   started because an event was already running.
-/// * One event must be available for the watcher thread to initialize and submit. If an event
-///   is already pending, this new event will replace the pending one, and the pending one will
-///   become available.
-events: [3]HotReloadEvent,
-
-/// The next event to be run. If an event is already running, new events are stored in this
-/// field instead of scheduled directly, and will be run once the current event finishes.
-next_event: std.atomic.Value(NextEvent) align(std.atomic.cache_line) = .init(.done),
-
-// Only the watcher thread uses these two fields. They are both indices into the `events` array,
-// and indicate which elements are in-use and not available for modification. Only two such events
-// can ever be in use at once, so we can always find a free event in the array of length 3.
-current_event: ?u2 = null,
-pending_event: ?u2 = null,
-
-// Debug fields to ensure methods are being called in the right order.
-dbg_watcher_event: DbgEventPtr = if (Environment.allow_assert) null,
-dbg_server_event: DbgEventPtr = if (Environment.allow_assert) null,
-
-const NextEvent = enum(u8) {
-    /// An event is running, and no next event is pending.
-    waiting = std.math.maxInt(u8) - 1,
-    /// No event is running.
-    done = std.math.maxInt(u8),
-    /// Any other value represents an index into the `events` array.
-    _,
-};
-
-const DbgEventPtr = if (Environment.allow_assert) ?*HotReloadEvent else void;
-
-pub fn init(dev: *DevServer) Self {
-    var self = Self{ .events = undefined };
-    for (&self.events) |*event| {
-        event.* = .initEmpty(dev);
-    }
-    return self;
-}
-
-/// Atomically get a *HotReloadEvent that is not used by the DevServer thread
-/// Call `watcherRelease` when it is filled with files.
-///
-/// Called from watcher thread.
-pub fn watcherAcquireEvent(self: *Self) *HotReloadEvent {
-    var available = [_]bool{true} ** 3;
-    if (self.current_event) |i| available[i] = false;
-    if (self.pending_event) |i| available[i] = false;
-
-    const index = for (available, 0..) |is_available, i| {
-        if (is_available) break i;
-    } else unreachable;
-    const ev = &self.events[index];
-
-    if (comptime Environment.allow_assert) {
-        bun.assertf(
-            self.dbg_watcher_event == null,
-            "must call `watcherReleaseEvent` before calling `watcherAcquireEvent` again",
-            .{},
-        );
-        self.dbg_watcher_event = ev;
-    }
-
-    // Initialize the timer if it is empty.
-    if (ev.isEmpty())
-        ev.timer = std.time.Timer.start() catch unreachable;
-
-    ev.owner.bun_watcher.thread_lock.assertLocked();
-
-    if (comptime Environment.isDebug)
-        assert(ev.debug_mutex.tryLock());
-    return ev;
-}
-
-/// Release the pointer from `watcherAcquireHotReloadEvent`, submitting
-/// the event if it contains new files.
-///
-/// Called from watcher thread.
-pub fn watcherReleaseAndSubmitEvent(self: *Self, ev: *HotReloadEvent) void {
-    ev.owner.bun_watcher.thread_lock.assertLocked();
-
-    if (comptime Environment.allow_assert) {
-        const dbg_event = self.dbg_watcher_event orelse std.debug.panic(
-            "must call `watcherAcquireEvent` before `watcherReleaseAndSubmitEvent`",
-            .{},
-        );
-        bun.assertf(
-            dbg_event == ev,
-            "watcherReleaseAndSubmitEvent: event is not from last `watcherAcquireEvent` call" ++
-                " (expected {*}, got {*})",
-            .{ dbg_event, ev },
-        );
-        self.dbg_watcher_event = null;
-    }
-
-    if (comptime Environment.isDebug) {
-        for (std.mem.asBytes(&ev.timer)) |b| {
-            if (b != 0xAA) break;
-        } else @panic("timer is undefined memory in watcherReleaseAndSubmitEvent");
-        ev.debug_mutex.unlock();
-    }
-
-    if (ev.isEmpty()) return;
-    // There are files to be processed.
-
-    const ev_index: u2 = @intCast(ev - &self.events[0]);
-    const old_next = self.next_event.swap(@enumFromInt(ev_index), .acq_rel);
-    switch (old_next) {
-        .done => {
-            // Dev server is done running events. We need to schedule the event directly.
-            self.current_event = ev_index;
-            self.pending_event = null;
-            // .monotonic because the dev server is not running events right now.
-            // (could technically be made non-atomic)
-            self.next_event.store(.waiting, .monotonic);
-            if (comptime Environment.allow_assert) {
-                bun.assertf(
-                    self.dbg_server_event == null,
-                    "no event should be running right now",
-                    .{},
-                );
-                // Not atomic because the dev server is not running events right now.
-                self.dbg_server_event = ev;
-            }
-            ev.concurrent_task = .{
-                .task = jsc.Task.init(ev),
-            };
-            ev.owner.vm.event_loop.enqueueTaskConcurrent(&ev.concurrent_task);
-        },
-
-        .waiting => {
-            if (self.pending_event != null) {
-                // `pending_event` is running, which means we're done with `current_event`.
-                self.current_event = self.pending_event;
-            } // else, no pending event yet, but not done with `current_event`.
-            self.pending_event = ev_index;
-        },
-
-        else => {
-            // This is an index into the `events` array.
-            const old_index: u2 = @intCast(@intFromEnum(old_next));
-            bun.assertf(
-                self.pending_event == old_index,
-                "watcherReleaseAndSubmitEvent: expected `pending_event` to be {d}; got {?d}",
-                .{ old_index, self.pending_event },
-            );
-            // The old pending event hadn't been run yet, so we can replace it with `ev`.
-            self.pending_event = ev_index;
-        },
-    }
-}
-
-/// Called by DevServer after it receives a task callback. If this returns another event,
-/// that event should be passed again to this function, and so on, until this function
-/// returns null.
-///
-/// Runs on dev server thread.
-pub fn recycleEventFromDevServer(self: *Self, old_event: *HotReloadEvent) ?*HotReloadEvent {
-    old_event.reset();
-
-    if (comptime Environment.allow_assert) {
-        // Not atomic because watcher won't modify this value while an event is running.
-        const dbg_event = self.dbg_server_event;
-        self.dbg_server_event = null;
-        bun.assertf(
-            dbg_event == old_event,
-            "recycleEventFromDevServer: old_event: expected {*}, got {*}",
-            .{ dbg_event, old_event },
-        );
-    }
-
-    const event = while (true) {
-        const next = self.next_event.swap(.waiting, .acq_rel);
-        switch (next) {
-            .waiting => {
-                // Success order is not .acq_rel because the swap above performed an .acquire load.
-                // Failure order is .monotonic because we're going to perform an .acquire load
-                // in the next loop iteration.
-                if (self.next_event.cmpxchgWeak(.waiting, .done, .release, .monotonic) != null)
-                    continue; // another event may have been added
-                return null; // done running events
-            },
-            .done => unreachable,
-            else => break &self.events[@intFromEnum(next)],
-        }
-    };
-
-    if (comptime Environment.allow_assert) {
-        // Not atomic because watcher won't modify this value while an event is running.
-        self.dbg_server_event = event;
-    }
-    return event;
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
+const string = []const u8;
 
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const DbgEventPtr = GetDbgEventPtr(Environment.allow_assert);
+const cache_line = std.atomic.cache_line;
 const Environment = bun.Environment;
 const assert = bun.assert;
 const bake = bun.bake;
 const jsc = bun.jsc;
-
 const DevServer = bake.DevServer;
 const HotReloadEvent = DevServer.HotReloadEvent;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const NextEvent = enum(u8) {
+    waiting = (std.math.maxInt(u8) - 1),
+    done = std.math.maxInt(u8),
+    _,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
+
+pub const WatcherAtomics = @This();
+
+events: [3]HotReloadEvent,
+next_event: std.atomic.Value(NextEvent) = std.atomic.Value(NextEvent).init(.done),
+current_event: ?u2 = null,
+pending_event: ?u2 = null,
+dbg_watcher_event: DbgEventPtr = (if (Environment.allow_assert) null else ({
+})),
+dbg_server_event: DbgEventPtr = (if (Environment.allow_assert) null else ({
+})),
+
+pub fn init(self: *WatcherAtomics, dev: *DevServer) Self {
+    _ = &self;
+        var s = Self{ .events = undefined };
+        _ = &s;
+        {
+            var i: i32 = 0;
+            _ = &i;
+            const __end_0 = s.events.len;
+            while (i < __end_0) : (i += 1) {
+                s.events[cp_cast_int(usize, i)] = HotReloadEvent.initEmpty(dev);
+            }
+        }
+        return s;
+}
+
+pub fn watcherAcquireEvent(self: *WatcherAtomics) *HotReloadEvent {
+        var available: [3]bool = .{ true, true, true };
+        _ = &available;
+        if (self.current_event) |i| {
+            _ = &i;
+            available[cp_cast_int(usize, i)] = false;
+        }
+        if (self.pending_event) |i| {
+            _ = &i;
+            available[cp_cast_int(usize, i)] = false;
+        }
+        var index: usize = 0;
+        _ = &index;
+        var found = false;
+        _ = &found;
+        {
+            var i: i32 = 0;
+            _ = &i;
+            const __end_1 = available.len;
+            while (i < __end_1) : (i += 1) {
+                if (available[@as(usize, @intCast(i))]) {
+                    index = i;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if ((!found)) {
+            _ = unreachable;
+        }
+        if (comptime Environment.allow_assert) {
+            _ = bun.assertf((self.dbg_watcher_event == null), "must call `watcherReleaseEvent` before calling `watcherAcquireEvent` again", &.{});
+            self.dbg_watcher_event = (&self.events[@as(usize, @intCast(index))]);
+        }
+        const ev = (&self.events[@as(usize, @intCast(index))]);
+        if (ev.isEmpty()) {
+            ev.timer = ((std.time.Timer.start()) catch unreachable);
+        }
+        _ = ev.owner.bun_watcher.thread_lock.assertLocked();
+        if (comptime Environment.isDebug) {
+            _ = assert((if (comptime @typeInfo(@TypeOf(ev.debug_mutex)) == .pointer) (ev.debug_mutex) else &(ev.debug_mutex)).tryLock());
+        }
+        return ev;
+}
+
+pub fn watcherReleaseAndSubmitEvent(self: *WatcherAtomics, ev: *HotReloadEvent) void {
+        _ = ev.owner.bun_watcher.thread_lock.assertLocked();
+        if (comptime Environment.allow_assert) {
+            const dbg_event = ((self.dbg_watcher_event) orelse (std.debug.panic("must call `watcherAcquireEvent` before `watcherReleaseAndSubmitEvent`", &.{})));
+            _ = bun.assertf((dbg_event == ev), "watcherReleaseAndSubmitEvent: event is not from last `watcherAcquireEvent` call (expected {*}, got {*})", .{ dbg_event, ev });
+            self.dbg_watcher_event = null;
+        }
+        if (comptime Environment.isDebug) {
+            var is_valid = false;
+            _ = &is_valid;
+            for (cp_iter_slice(std.mem.asBytes((&ev.timer)))) |b| {
+                _ = &b;
+                if ((b != 170)) {
+                    is_valid = true;
+                    break;
+                }
+            }
+            if ((!is_valid)) {
+                _ = @panic("timer is undefined memory in watcherReleaseAndSubmitEvent");
+            }
+            _ = ev.debug_mutex.unlock();
+        }
+        if (ev.isEmpty()) {
+            return;
+        }
+        const ev_index: u2 = @intCast(((@intFromPtr(ev) - @intFromPtr((&self.events[0]))) / @sizeOf(HotReloadEvent)));
+        const old_next = self.next_event.swap(@enumFromInt(ev_index), .acq_rel);
+        switch (old_next) {
+.done => {
+self.current_event = ev_index;
+        self.pending_event = null;
+        _ = self.next_event.store(.waiting, .monotonic);
+        if (comptime Environment.allow_assert) {
+            _ = bun.assertf((self.dbg_server_event == null), "no event should be running right now", &.{});
+            self.dbg_server_event = ev;
+        }
+        ev.concurrent_task = jsc.ConcurrentTask{ .task = jsc.Task.init(ev) };
+        _ = ev.owner.vm.event_loop.enqueueTaskConcurrent((&ev.concurrent_task));
+},
+.waiting => {
+if ((self.pending_event != null)) {
+            self.current_event = self.pending_event;
+        }
+        self.pending_event = ev_index;
+},
+else => {
+const old_index: u2 = @intCast(@intFromEnum(old_next));
+        _ = bun.assertf((self.pending_event == old_index), "watcherReleaseAndSubmitEvent: expected `pending_event` to be {d}; got {?d}", .{ old_index, self.pending_event });
+        self.pending_event = ev_index;
+},
+}
+}
+
+pub fn recycleEventFromDevServer(self: *WatcherAtomics, old_event: *HotReloadEvent) ?*HotReloadEvent {
+        _ = old_event.reset();
+        if (comptime Environment.allow_assert) {
+            const dbg_event = self.dbg_server_event;
+            self.dbg_server_event = null;
+            _ = bun.assertf((dbg_event == old_event), "recycleEventFromDevServer: old_event: expected {*}, got {*}", .{ dbg_event, old_event });
+        }
+        var next_index: usize = 0;
+        _ = &next_index;
+        while (true) {
+            const next = self.next_event.swap(.waiting, .acq_rel);
+            switch (next) {
+.waiting => {
+if ((self.next_event.cmpxchgWeak(.waiting, .done, .release, .monotonic) != null)) {
+                continue;
+            }
+            return null;
+},
+.done => {
+_ = unreachable;
+},
+else => {
+next_index = @intFromEnum(next);
+            break;
+},
+}
+        }
+        if (comptime Environment.allow_assert) {
+            self.dbg_server_event = (&self.events[@as(usize, @intCast(next_index))]);
+        }
+        return (&self.events[@as(usize, @intCast(next_index))]);
+}
+const Self = @This();
+
+pub fn GetDbgEventPtr(comptime allow: bool) type {
+        if (allow) {
+            return ?*HotReloadEvent;
+        }
+        return void;
+}

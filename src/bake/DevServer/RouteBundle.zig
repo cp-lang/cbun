@@ -1,169 +1,173 @@
-pub const RouteBundle = @This();
-
-pub const Index = bun.GenericIndex(u30, RouteBundle);
-
-server_state: State,
-/// There are two distinct types of route bundles.
-data: union(enum) {
-    /// FrameworkRouter provided route
-    framework: Framework,
-    /// HTMLBundle provided route
-    html: HTML,
-},
-/// Generated lazily when the client JS is requested.
-/// Invalidated when a downstream client module updates.
-client_bundle: ?*StaticRoute,
-
-/// If the client tries to load a script with the wrong generation, it will
-/// receive a bundle that instantly reloads the page, implying a bundle
-/// change has occurred while fetching the script.
-client_script_generation: u32,
-
-/// Reference count of how many HmrSockets say they are on this route. This
-/// allows hot-reloading events to reduce the amount of times it traces the
-/// graph.
-active_viewers: u32,
-
-pub const Framework = struct {
-    route_index: Route.Index,
-
-    /// Cached to avoid re-creating the array every request.
-    /// TODO: Invalidated when a layout is added or removed from this route.
-    cached_module_list: jsc.Strong.Optional,
-    /// Cached to avoid re-creating the string every request.
-    /// TODO: Invalidated when any client file associated with the route is updated.
-    cached_client_bundle_url: jsc.Strong.Optional,
-    /// Cached to avoid re-creating the array every request.
-    /// Invalidated when the list of CSS files changes.
-    cached_css_file_array: jsc.Strong.Optional,
-
-    /// When state == .evaluation_failure, this is populated with the route
-    /// evaluation error mirrored in the dev server hash map
-    evaluate_failure: ?SerializedFailure,
-};
-
-pub const HTML = struct {
-    /// DevServer increments the ref count of this bundle
-    html_bundle: RefPtr(HTMLBundle.HTMLBundleRoute),
-    bundled_file: IncrementalGraph(.client).FileIndex,
-    /// Invalidated when the HTML file is modified, but not it's imports.
-    /// The style tag is injected here.
-    script_injection_offset: ByteOffset.Optional,
-    /// The HTML file bundled, from the bundler.
-    bundled_html_text: ?[]const u8,
-    /// Derived from `bundled_html_text` + `client_script_generation`
-    /// and css information. Invalidated when:
-    /// - The HTML file itself modified.
-    /// - The list of CSS files changes.
-    /// - Any downstream file is rebundled.
-    cached_response: ?*StaticRoute,
-
-    const ByteOffset = bun.GenericIndex(u32, u8);
-};
-
-/// A union is not used so that `bundler_failure_logs` can re-use memory, as
-/// this state frequently changes between `loaded` and the failure variants.
-pub const State = enum {
-    /// In development mode, routes are lazily built. This state implies a
-    /// build of this route has never been run. It is possible to bundle the
-    /// route entry point and still have an unqueued route if another route
-    /// imports this one. This state is implied if `FrameworkRouter.Route`
-    /// has no bundle index assigned.
-    unqueued,
-    /// A bundle associated with this route is happening
-    bundling,
-    /// A bundle associated with this route *will happen in the next bundle*
-    deferred_to_next_bundle,
-    /// This route was flagged for bundling failures. There are edge cases
-    /// where a route can be disconnected from its failures, so the route
-    /// imports has to be traced to discover if possible failures still
-    /// exist.
-    possible_bundling_failures,
-    /// Loading the module at runtime had a failure. The error can be
-    /// cleared by editing any file in the same hot-reloading boundary.
-    evaluation_failure,
-    /// Calling the request function may error, but that error will not be
-    /// at fault of bundling, nor would re-bundling change anything.
-    loaded,
-};
-
-pub const UnresolvedIndex = union(enum) {
-    /// FrameworkRouter provides a fullstack server-side route
-    framework: FrameworkRouter.Route.Index,
-    /// HTMLBundle provides a frontend-only route, SPA-style
-    html: *HTMLBundle.HTMLBundleRoute,
-};
-
-pub fn deinit(rb: *RouteBundle, allocator: Allocator) void {
-    if (rb.client_bundle) |blob| blob.deref();
-    switch (rb.data) {
-        .framework => |*fw| {
-            fw.cached_client_bundle_url.deinit();
-            fw.cached_css_file_array.deinit();
-            fw.cached_module_list.deinit();
-        },
-        .html => |*html| {
-            if (html.bundled_html_text) |text| {
-                allocator.free(text);
-            }
-            if (html.cached_response) |cached_response| {
-                cached_response.deref();
-            }
-            html.html_bundle.deref();
-        },
-    }
-}
-
-pub fn sourceMapId(rb: *RouteBundle) SourceMapStore.Key {
-    return .init(@as(u64, rb.client_script_generation) << 32);
-}
-
-pub fn invalidateClientBundle(rb: *RouteBundle, dev: *DevServer) void {
-    if (rb.client_bundle) |bundle| {
-        dev.source_maps.unref(rb.sourceMapId());
-        bundle.deref();
-        rb.client_bundle = null;
-    }
-    rb.client_script_generation = std.crypto.random.int(u32);
-    switch (rb.data) {
-        .framework => |*fw| fw.cached_client_bundle_url.clearWithoutDeallocation(),
-        .html => |*html| if (html.cached_response) |cached_response| {
-            cached_response.deref();
-            html.cached_response = null;
-        },
-    }
-}
-
-pub fn memoryCost(rb: *const RouteBundle) usize {
-    var cost: usize = @sizeOf(RouteBundle);
-    if (rb.client_bundle) |bundle| cost += bundle.memoryCost();
-    switch (rb.data) {
-        .framework => {
-            // the jsc.Strong.Optional children do not support memoryCost. likely not needed
-            // .evaluate_failure is not owned
-        },
-        .html => |*html| {
-            if (html.bundled_html_text) |text| cost += text.len;
-            if (html.cached_response) |cached_response| cost += cached_response.memoryCost();
-        },
-    }
-    return cost;
-}
-
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
-const Allocator = std.mem.Allocator;
+const string = []const u8;
 
-const bun = @import("bun");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const Allocator = std.mem.Allocator;
 const bake = bun.bake;
 const jsc = bun.jsc;
 const RefPtr = bun.ptr.RefPtr;
 const HTMLBundle = jsc.API.HTMLBundle;
 const StaticRoute = bun.api.server.StaticRoute;
-
 const DevServer = bake.DevServer;
 const IncrementalGraph = DevServer.IncrementalGraph;
 const SerializedFailure = DevServer.SerializedFailure;
 const SourceMapStore = DevServer.SourceMapStore;
-
 const FrameworkRouter = bake.FrameworkRouter;
 const Route = FrameworkRouter.Route;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val << shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val << @as(ShiftType, @truncate(u_shift));
+    }
+    return val << shift;
+}
+fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {
+    const __T = @TypeOf(val);
+    if (comptime @typeInfo(__T) == .comptime_int) return val >> shift;
+    if (comptime @typeInfo(__T) == .int) {
+        const ShiftType = std.math.Log2Int(__T);
+        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);
+        return val >> @as(ShiftType, @truncate(u_shift));
+    }
+    return val >> shift;
+}
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const bun = @import("bun");
+pub const RouteBundleState = enum {
+    unqueued,
+    bundling,
+    deferred_to_next_bundle,
+    possible_bundling_failures,
+    evaluation_failure,
+    loaded,
+    pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }
+    pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }
+    pub fn fromName(s: []const u8) ?@This() { return get(s); }
+    pub fn name(self: @This()) []const u8 { return @tagName(self); }
+};
+
+pub const RouteBundleData = union(enum) {
+    framework: RouteBundleFramework,
+    html: RouteBundleHTML,
+};
+
+pub const RouteBundleFramework = struct {
+    route_index: Route.Index,
+    cached_module_list: jsc.Strong.Optional,
+    cached_client_bundle_url: jsc.Strong.Optional,
+    cached_css_file_array: jsc.Strong.Optional,
+    evaluate_failure: ?SerializedFailure,
+};
+
+pub const RouteBundleHTML = struct {
+    html_bundle: RefPtr(HTMLBundle.HTMLBundleRoute),
+    bundled_file: IncrementalGraph(.client).FileIndex,
+    script_injection_offset: ByteOffset.Optional,
+    bundled_html_text: ?[]const u8,
+    cached_response: ?*StaticRoute,
+    const ByteOffset = bun.GenericIndex(u32, u8);
+};
+
+pub const RouteBundleUnresolvedIndex = union(enum) {
+    framework: FrameworkRouter.Route.Index,
+    html: *HTMLBundle.HTMLBundleRoute,
+};
+
+pub const RouteBundle = @This();
+
+server_state: State,
+data: *RouteBundleData,
+client_bundle: ?*StaticRoute,
+client_script_generation: u32,
+active_viewers: u32,
+
+pub fn deinit(self: *RouteBundle, allocator: Allocator) void {
+        if (self.client_bundle) |blob| {
+            _ = &blob;
+            _ = blob.deref();
+        }
+        switch (self.data) {
+.framework => |*fw| {
+_ = fw.cached_client_bundle_url.deinit();
+        _ = fw.cached_css_file_array.deinit();
+        _ = fw.cached_module_list.deinit();
+},
+.html => |*html| {
+if (html.bundled_html_text) |text| {
+            _ = &text;
+            _ = allocator.free(text);
+        }
+        if (html.cached_response) |cached_response| {
+            _ = &cached_response;
+            _ = cached_response.deref();
+        }
+        _ = html.html_bundle.deref();
+},
+}
+}
+
+pub fn sourceMapId(self: *RouteBundle) SourceMapStore.Key {
+        return SourceMapStore.Key.init(cp_shl((if (comptime @typeInfo(@TypeOf(self.client_script_generation)) == .@"enum") cp_cast_int(u64, @intFromEnum(self.client_script_generation)) else cp_cast_int(u64, self.client_script_generation)), 32));
+}
+
+pub fn invalidateClientBundle(self: *RouteBundle, dev: *DevServer) void {
+        if (self.client_bundle) |bundle| {
+            _ = &bundle;
+            _ = dev.source_maps.unref(self.sourceMapId());
+            _ = bundle.deref();
+            self.client_bundle = null;
+        }
+        self.client_script_generation = std.crypto.random.int(u32);
+        switch (self.data) {
+.framework => |*fw| {
+_ = fw.cached_client_bundle_url.clearWithoutDeallocation();
+},
+.html => |*html| {
+if (html.cached_response) |cached_response| {
+            _ = &cached_response;
+            _ = cached_response.deref();
+            html.cached_response = null;
+        }
+},
+}
+}
+
+pub fn memoryCost(self: RouteBundle) usize {
+        var cost: usize = @sizeOf(RouteBundle);
+        _ = &cost;
+        if (self.client_bundle) |bundle| {
+            _ = &bundle;
+            cost = (cost + bundle.memoryCost());
+        }
+        switch (self.data) {
+.framework => {
+
+},
+.html => |*html| {
+if (html.bundled_html_text) |text| {
+            _ = &text;
+            cost = (cost + text.len);
+        }
+        if (html.cached_response) |cached_response| {
+            _ = &cached_response;
+            cost = (cost + cached_response.memoryCost());
+        }
+},
+}
+        return cost;
+}
+pub const Index = bun.GenericIndex(u30, RouteBundle);
+pub const Framework = RouteBundleFramework;
+pub const HTML = RouteBundleHTML;
+pub const State = RouteBundleState;
+pub const UnresolvedIndex = RouteBundleUnresolvedIndex;
