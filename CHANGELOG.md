@@ -380,3 +380,10 @@
 
 ## 2026-11-14 (工具链: zig2cp_prep v2, cpc_brief.py, CP_PITFALLS.md, GEMINI.md 第七/八节)
 - 新增/修改：`scripts/zig2cp_prep.py`、`scripts/cpc_brief.py`、`CP_PITFALLS.md`、`GEMINI.md`
+
+
+## 2026-11-14 (Milestone 7 Phase 22: 攻克 bake/production 与 bake/FrameworkRouter 两大核心模块)
+- **新增 2 个大型 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/bake/production.cp` (1,095 行 vs 1,074 行，+2.0% 膨胀率)
+  - `src/bake/FrameworkRouter.cp` (1,491 行 vs 1,399 行，+6.6% 膨胀率)
+- **4 项硬门禁全部 100% PASS**（`cpc --lib` 0 报错、`vendor/zig/zig ast-check` 0 报错、0 `zig {}`、0 `var`、0 `.@"0"`、0 `*anyopaque`）。

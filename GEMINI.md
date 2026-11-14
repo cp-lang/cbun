@@ -168,10 +168,15 @@
 
 1. **工具链**：
    - `python3 scripts/zig2cp_prep.py <a.zig> ...`：备份 + 按第七节规则机械转换（接收者、返回类型、`|capture|`、`?T`、`try`、struct/err 声明等）。
-   - `python3 scripts/cpc_brief.py -n 8 <a.cp> ...`：一条命令完成 `cpc check --json` 结构化诊断提取 + `cpc --lib` 编译 + `ast-check` + 4 门禁，输出**按错误码聚合的摘要与根因建议**。**严禁**直接查看 `cpc` 原始报错（单次 40~70KB）。
+   - `/data/dev/cp/cap/bin/cpc fix <file.cp>`（或 `cpc check --fix`）：利用编译器内置修复能力自动完成 `E0101`..`E0104`, `E0115` (`?T`->`T?`), `E0116` (`:`), `E0118` (`|v|`), `E0119`, `E0120` (`* =`), `E0121` (`*_`), `E0122`, `E0123`, `E0126` 的多轮就地机械修复。
+   - `cpc check --brief <file.cp>` / `python3 scripts/cpc_brief.py -n 8 <a.cp> ...`：聚合去重诊断模式，折叠 `cascade_of` 连带错误；一条命令完成 `cpc check --json --brief` 提取 + `cpc --lib` 编译 + `ast-check` + 4 门禁。**严禁**直接查看 `cpc` 原始报错（单次 40~70KB）。
 2. **踩坑表驱动**：子智能体 Prompt 只写「读 `CP_PITFALLS.md`、按其 C 节工作流执行」+ 目标文件与门禁，不再内联长篇语法说明。发现新坑由主智能体追加一行到 `CP_PITFALLS.md`（子智能体可在汇报中提交）。
 3. **步数熔断**：子智能体单文件 ≤ 50 步仍未过门禁 → 汇报 `BLOCKED` 并停止；>2,500 行大文件按函数段拆给多个全新子智能体；同类错误一次修完整个文件再重编，禁止逐条编译。
 4. **主智能体禁止轮询**：不得为“看进度”解析子智能体 transcript / 重复 `manage_subagents list`；只等 `send_message` 唤醒。收到汇报后由主智能体自己用 `cpc_brief.py` 一条命令验收。
 5. **汇报精简**：阶段汇报只给 3~5 行数字（模块数、闭合目录数、膨胀率区间）；`SESSION/CHANGELOG/DEVLOG` 用单行条目追加，不重复叙述；每 3~5 个模块（或闭合一个目录）提交一次。
 6. **配额耗尽（429）**：计算重置秒数 + 120 秒，`schedule` 单次唤醒后立即结束轮次，唤醒后重派全新子智能体（不复用旧的）。
 7. **存量净化**：已迁移 `.cp` 若含旧写法（`this`/`_ = `/`: void`/`?T`/`|capture|`/`zig {}` 取 std 等），在新 `cpc` 全量生效后分批用 `cpc_brief.py` 批量发现并净化，优先于新增迁移前先抽样 3 个目录验证。
+8. **`@root struct` 与辅助结构体组织铁律**：
+   - 当原 Zig 文件表示根结构体时，文件级的辅助结构体/枚举（如 `Route`, `Type`, `EncodedPattern`, `TinyLog` 等）必须声明在模块顶层（位于 `@root struct Name { ... }` 外部），使 `cpc` 能进行完整的 CP 语法 lowering（`static fn` -> `pub fn`, `: ReturnType` -> `ReturnType` 等）；
+   - `@root struct Name { ... }` 仅包裹根结构体自身的字段与自身的方法（如 `initEmpty`, `deinit`, `scan`, `insert`），确保方法体内的 `_` 与 `*_` 能正确绑定到根结构体实例接收者；
+   - 严禁将二级子结构体嵌套在 `@root struct` 字段声明中间（会被 codegen 跳过或解析为 field 报错）。

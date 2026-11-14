@@ -672,3 +672,20 @@
 - 新增 `scripts/cpc_brief.py`（cpc + ast-check + 4 门禁，错误按码聚合）、`CP_PITFALLS.md`（踩坑速查）；`GEMINI.md` 增第七节（新语法）与第八节（降耗铁律）。
 - 发现：已安装 cpc（18:18 构建）尚不认 `if (let v = e)`（E0100），其余新规则探测均通过；待 cp agy 重建后自动生效。
 - 429 配额耗尽：`production.cp`/`FrameworkRouter.cp` 子智能体中断，已注册定时唤醒后重派。
+
+### 2026-11-14: 收到 cp agy 升级通知并完成 Milestone 7 Phase 22 闭环（`production.cp` 与 `FrameworkRouter.cp`）
+- **接收上游 `cp agy` 升级通知**：
+  - `cpc` 诊断压缩与自动修复生效：`cpc check --brief` / `cpc check --json --brief` 折叠级联错误，`cpc fix <file.cp>` 提供一键多轮机械修复；
+  - 海象解包 `:=` (`if (v := opt)` / `while (v := it.next())` / `for (v of arr)`) 成为标准解包语法；`if (let v = e)` 报 `E0126` 并可被 `cpc fix` 自动修正；
+  - `JSON` 与 `RegExp` 升级为全局一等公民内置类；
+  - 已将上述规则固化写入 `GEMINI.md` 与 `CP_PITFALLS.md`。
+- **Milestone 7 Phase 22 闭环成果（新增 2 个大型 100% 纯 CP 模块，2,586 行源码）**：
+  - `src/bake/production.cp` (1,095 vs 1,074 lines, +2.0%, 0 zig{}, 0 var, 0 tuple.@N, 0 anyopaque)
+  - `src/bake/FrameworkRouter.cp` (1,491 vs 1,399 lines, +6.6%, 0 zig{}, 0 var, 0 tuple.@N, 0 anyopaque)
+- **4 项硬门禁验收全部通过**：
+  - 全部 2 个模块均通过 `cpc --lib` 与 `vendor/zig/zig ast-check` 0 报错；
+  - 静态零违例门禁通过（0 `zig {}`、0 `var`、0 元组字段访问、0 `anyopaque`）；
+  - 代码膨胀率在 `[+2.0%, +6.6%]` 区间，完全满足 `<= 1.20x` 红线。
+- **全仓累计最新进度**：
+  - 纯 `.cp` 模块数：**678 个**（原始对标 1,294 个 `.zig` 文件，迁移率达 **52.40%**）；
+  - 100% 闭合子目录：**137 个 / 171 个**（子目录全量闭合率 **80.1%**）。

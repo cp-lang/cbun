@@ -329,3 +329,13 @@
 
 ## 2026-11-14: 降 Token 工具链
 - prep 脚本按「字符串/注释外」分段变换，避免误改字符串内 and/or；`cpc_brief` 将 40~70KB 报错压缩为按错误码摘要；新 cpc 的 `let v = e` 捕获语法用探测回退 `:=`。
+
+
+## 2026-11-14: Milestone 7 Phase 22 攻坚总结（`production.cp` 与 `FrameworkRouter.cp`，纯 CP 模块达 678 个）
+- **新增 2 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 4 门禁）**：
+  - `src/bake/production.cp` (1,095 行)
+  - `src/bake/FrameworkRouter.cp` (1,491 行)
+- **关键工程经验与 Lowering 深度沉淀**：
+  - **`@root struct` 拓扑组织模型解耦**：当原 Zig 文件兼具根结构体字段与庞大的辅助类型族（如 `Route`, `Type`, `EncodedPattern`, `TinyLog`, `Style`）时，嵌套在 `@root struct` 内部会导致二级结构体逃逸 CP 编译器 lowering，甚至造成字段解析截断。最佳实践是将辅助数据结构全部提升至模块顶层进行纯正 CP 类型声明与静态方法定义，`@root struct` 仅严格包裹根类型自身的字段与实例方法（`initEmpty`, `deinit`, `scan`, `insert` 等）。在此拓扑下，`cpc` 完整输出全模块并在生成的 Zig 文件根级注入 `pub const FrameworkRouter = @This();`，各类型自动合流成为容器成员，100% 消除语义与语法鸿沟。
+  - **右侧语句在 `??` 中的重构**：Zig 中的 `orelse return ...` 或 `orelse break` 属于语句级跳转，直接机翻为 `?? return` 会破坏 CP 表达式解析栈。必须规范拆分为语句级判定 `if (opt == null) return ...;` 或海象解包 `if (v := opt)`。
+  - **嵌套错误分支变量遮蔽防范**：在 `catch |e| switch (e)` 分支中避免将分支捕获名也声明为 `|e|`（如 `error.OutOfMemory => |oom| return oom,`），杜绝 Zig 编译器报告 `capture shadows capture from outer scope`。

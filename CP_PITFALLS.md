@@ -32,7 +32,12 @@
 - 文件尾部的 `extern fn` 声明，若调用点前未识别（E0206）→ 提到文件顶部。
 - 形参名与同文件顶层函数同名会遮蔽（如 `ptr`）→ 改名。
 
+- `?? return / ?? break` 语法非法：`??` 是表达式运算符，`return`/`break` 是语句，语法解析失败或引发连带级联。必须拆分为 `if (opt == null) return ...;` 或 `if (v := opt) { ... } else return ...;`。
+- `@root struct` 组织铁律：文件级辅助结构体/枚举必须置于顶层（位于 `@root struct Name { ... }` 外部），`@root struct` 仅包含根字段与方法，确保内部 `_`/`*_` 正常绑定且辅助类型被完整 CP lowering。
+- 自动化修复：`/data/dev/cp/cap/bin/cpc fix <file.cp>`（或 `cpc check --fix`）可自动就地修复 `E0101`..`E0104`, `E0115`..`E0123`, `E0126`（如 `if (let v = e)` 会自动修正为 `if (v := e)`）。
+
 ## C. 工作流（节省 Token）
 1. `python3 scripts/zig2cp_prep.py <a.zig> <b.zig>`（备份 + 机械转换）。
-2. `python3 scripts/cpc_brief.py -n 8 <a.cp> <b.cp>`（编译 + ast-check + 4 门禁，输出按错误码聚合，**不要**直接看 cpc 原始输出）。
-3. 按 `edit_file` 精修；同一类错误一次修完整个文件再重编；单文件 ≤ 50 步，超限汇报 BLOCKED。
+2. `/data/dev/cp/cap/bin/cpc fix <a.cp> <b.cp>`（一键就地多轮机械修复）。
+3. `python3 scripts/cpc_brief.py -n 8 <a.cp> <b.cp>`（编译 + ast-check + 4 门禁，输出按错误码聚合，**不要**直接看 cpc 原始输出）。
+4. 按 `edit_file` 精修；同一类错误一次修完整个文件再重编；单文件 ≤ 50 步，超限汇报 BLOCKED。
