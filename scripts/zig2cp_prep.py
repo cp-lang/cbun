@@ -10,7 +10,7 @@ Rules implemented (see CP_PITFALLS.md):
     (top-level fns keep a plain param, renamed `client`)
   - `fn f(..) T {` -> `fn f(..): T {`; `: void` omitted; bare `!void` -> `)!`
   - var->let, `_ = x;` -> `* = x;`, `?T` -> `T?`, `anytype` -> `auto`, `@is_beam` -> `@is_nest`
-  - `|capture|` -> `if (let v = e)` / `while (let v = e)` / `for (const v of a)`
+  - `|capture|` -> `if (v := e)` / `while (v := e)` / `for (v of a)` (`*v` for mutable)
   - `try e;` -> `e?;`, `and/or/orelse` -> `&& / || / ??`, `&.{}` -> `[]`
   - top-level `const X = struct {` -> `pub struct X {` (+ `static fn`, drop inner `pub fn`)
   - `const E = error{A,B};` -> `err E { A, B }`
@@ -25,22 +25,6 @@ from pathlib import Path
 
 ID_KW = ["arena", "in", "as", "from", "impl", "meta", "macro"]
 CP_KW_FIELDS = ["in", "as", "let", "import", "arena", "from", "impl", "meta", "macro", "type"]
-
-
-def _probe_let_capture():
-    """Use `if (let v = e)` only if the installed cpc accepts it, else `if (v := e)`."""
-    import subprocess, tempfile, os
-    d = tempfile.mkdtemp()
-    f = os.path.join(d, "p.cp")
-    open(f, "w").write("pub fn f(o: u32?) { if (let v = o) { * = v; } }\n")
-    try:
-        r = subprocess.run(["cpc", "--lib", f, "-o", f + ".zig"], capture_output=True, text=True, timeout=30)
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
-LET_CAPTURE = None
 
 
 # ---------- helpers: apply a transform only to code outside strings/comments ----------
@@ -166,20 +150,15 @@ def fix_capture(line):
         inner = inner[4:].strip() + "?"
     if kind in ("if", "while"):
         names = [c.strip() for c in cap.split(",")]
-        if len(names) != 1 or names[0].startswith("*"):
+        if len(names) != 1:
             return line
-        global LET_CAPTURE
-        if LET_CAPTURE is None:
-            LET_CAPTURE = _probe_let_capture()
-        if LET_CAPTURE:
-            return "%s%s (let %s = %s)%s" % (pre, kind, names[0], inner, tail)
         return "%s%s (%s := %s)%s" % (pre, kind, names[0], inner, tail)
     # for
     names = [c.strip() for c in cap.split(",")]
     srcs = [s.strip() for s in inner.split(",")]
     if len(names) == 1 and len(srcs) == 1:
         n = names[0]
-        return "%sfor (%s of %s)%s" % (pre, n if n.startswith("*") else "const " + n, srcs[0], tail)
+        return "%sfor (%s of %s)%s" % (pre, n, srcs[0], tail)
     return line  # indexed/multi-capture for: manual (use `for (i of 0..n)` + index)
 
 

@@ -8,12 +8,12 @@
 3. 局部只用 `const`/`let`，禁 `var`/`mut`。忽略返回值写 `* = expr;`，禁 `_ = expr;`（E0120）。
 4. 有返回值必须 `): T`（漏冒号 E0116）；void 一律省略 `: void`（E0122，`*void` 指针保留）。
 5. 可选后缀 `T?`（禁 `?T`，E0115）；错误联合 `T!` / `T!E`；禁 `any`（E0119），泛型推导用 `auto`。
-6. 禁 Zig `|capture|`（E0118）：`if (let v = opt)`、`while (let v = it.next())`、`for (const v of arr)`；`while (..) : (i += 1)` 合法。
-   - ⚠ 当前已安装的 cpc 若不认 `let v = e`（报 E0100 unexpected 'Let'），改用 `if (v := e)` / `while (v := e)`；`scripts/zig2cp_prep.py` 会自动探测。
+6. 禁 Zig `|capture|`（E0118）：只读 `if (v := opt)`、`while (v := it.next())`；可变就地 `if (*v := opt)`；循环 `for (v of arr)`（只读）、`for (*v of arr)`（可变借用）、`for (move v of arr)`（无需 const/let）；`while (..) : (i += 1)` 合法。**`if (let v = e)` 当前 cpc 不支持（E0100）**。
 7. C-FFI：`@c { fn foo(a: i32): i32; struct bar {..} enum baz: c_int {..} type X = ..; const K: c_int = 1; }`；导出 `pub @c {..}`；块内不写 `pub`/`extern`。
 8. struct 字段/方法、enum 方法默认 `pub`，删内部多余 `pub`；静态方法写 `static fn`；顶层导出用 `pub`。空切片 `buf: []T = [];`（禁 `&.{}`）。
 9. 删除 `const std = @import("std");`，直接用 `std.*`、`builtin`；**严禁**为调 std 使用 `zig {}`。
 10. 编译宏 `@is_nest` 替代 `@is_beam`。
+11. 内置类：`JSON` 与 `RegExp` 为全局一等公民内置类（无需 `import`，与 Bun 100% 同构）。直接使用 `JSON.stringify(val)`、`JSON.parse<T>(str)`、`JSON.parse(str)`、`/pattern/flags` 或 `new RegExp(pattern, flags)`。严禁使用遗留的 `@json_parse`。
 
 ## B. 已知 lowering / 语法坑
 - `pub const X = struct {..};` 内部不会被 lower → 改 `pub struct X {..}`；二级嵌套 struct/复杂常量提升到模块顶层。

@@ -157,17 +157,18 @@
 3. **局部变量**：仅 `const`/`let`；忽略返回值写 `* = expr;`（禁 `_ = expr;`）。
 4. **返回类型**：有返回值必须 `): T`；void 全场景省略 `: void`（`*void` 保留）。
 5. **类型修饰**：可选后缀 `T?`（禁 `?T`）；错误联合 `T!` / `T!E`；禁 `any`，泛型推导用 `auto`。
-6. **条件/循环**：禁 `|capture|`；`if (let v = opt)`、`while (let v = it.next())`、`for (const v of arr)`；`while (..) : (i += 1)` 合法。若当前 `cpc` 尚不认 `let v = e`（E0100 unexpected 'Let'）则回退 `if (v := e)`（`zig2cp_prep.py` 自动探测）。
+6. **条件/循环**：禁 `|capture|`；只读 `if (v := opt)`、`while (v := it.next())`；可变 `if (*v := opt)`；`for (v of arr)` / `for (*v of arr)` / `for (move v of arr)`（无需写 const/let）；`while (..) : (i += 1)` 合法。**`let v = e` 形式 cpc 不支持**。
 7. **C-FFI**：`@c { fn foo(a: i32): i32; struct bar {..} enum baz: c_int {..} }`，导出 `pub @c {..}`，块内不写 `pub`/`extern`。
 8. **可见性**：struct 字段/方法、enum 方法默认 `pub`（删多余 `pub`），静态方法 `static fn`；空切片 `= []`（禁 `&.{}`）。
 9. **std**：删除 `const std = @import("std");`，直接用 `std.*`；严禁为调 std 用 `zig {}`。
 10. **编译宏**：`@is_nest` 替代 `@is_beam`。
+11. **一等公民内置类**：`JSON` 与 `RegExp` 已作为全局一等公民内置类（无需 `import`，且与 Bun 100% 同构）。直接使用 `JSON.stringify(val)`、`JSON.parse<T>(str)`、`JSON.parse(str)` 以及 `/pattern/flags` 或 `new RegExp(pattern, flags)`。废除早期遗留的 `@json_parse`。
 
 ## 八、 Token 节省固化铁律（2026-11-14 追加，主/子智能体必须遵守）
 
 1. **工具链**：
    - `python3 scripts/zig2cp_prep.py <a.zig> ...`：备份 + 按第七节规则机械转换（接收者、返回类型、`|capture|`、`?T`、`try`、struct/err 声明等）。
-   - `python3 scripts/cpc_brief.py -n 8 <a.cp> ...`：一条命令完成 `cpc` + `ast-check` + 4 门禁，输出**按错误码聚合的摘要**。**严禁**直接查看 `cpc` 原始报错（单次 40~70KB）。
+   - `python3 scripts/cpc_brief.py -n 8 <a.cp> ...`：一条命令完成 `cpc check --json` 结构化诊断提取 + `cpc --lib` 编译 + `ast-check` + 4 门禁，输出**按错误码聚合的摘要与根因建议**。**严禁**直接查看 `cpc` 原始报错（单次 40~70KB）。
 2. **踩坑表驱动**：子智能体 Prompt 只写「读 `CP_PITFALLS.md`、按其 C 节工作流执行」+ 目标文件与门禁，不再内联长篇语法说明。发现新坑由主智能体追加一行到 `CP_PITFALLS.md`（子智能体可在汇报中提交）。
 3. **步数熔断**：子智能体单文件 ≤ 50 步仍未过门禁 → 汇报 `BLOCKED` 并停止；>2,500 行大文件按函数段拆给多个全新子智能体；同类错误一次修完整个文件再重编，禁止逐条编译。
 4. **主智能体禁止轮询**：不得为“看进度”解析子智能体 transcript / 重复 `manage_subagents list`；只等 `send_message` 唤醒。收到汇报后由主智能体自己用 `cpc_brief.py` 一条命令验收。
