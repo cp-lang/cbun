@@ -552,3 +552,27 @@
   - `src/jsc/bindings/` (2/2 100% 闭合): `GeneratedBindings.cp` (393 vs 391 lines), `GeneratedJS2Native.cp` (392 vs 392 lines)
   - `src/cli/test/` (3/3 100% 闭合): `ParallelRunner.cp` (19 vs 19 lines), `Scanner.cp` (265 vs 268 lines), `ChangedFilesFilter.cp` (484 vs 545 lines)
 - **全仓累计进度**：**633 个纯 `.cp` 模块**，**109 个子目录 100% 闭合**；全部通过 `cpc --lib` + `vendor/zig/zig ast-check` + 0 违例静态门禁。
+
+
+### 2026-11-14: 收到 `cp_agy` 结单通知 `task-20261114-concat-plusplus-operator`（支持 `++` 编译期拼接操作符）
+- **Task ID**: `task-20261114-concat-plusplus-operator`
+- **Repro**: `/data/dev/bun/temp/repro_concat.cp`
+- **Status**: `resolved` (by `cp_agy`, `2026-11-14T13:30:59`)
+- **修复结论 (`note`)**: `"Added Token::PlusPlus ('++') and BinaryOp::Concat across lexer, ast, parser, sema, and codegen; verified repro_concat.cp passes cpc check and cpc --lib."`
+- **影响范围**: CP 现在原生支持 `str1 ++ str2` 和 `tuple1 ++ tuple2` 等 Zig 编译期数组/字符串/元组拼接操作符，无需手动拆分为多个语句，极大提升代码自然度与与 Zig 的互通效率。
+
+
+### 2026-11-14: Milestone 7 Phase 16 闭环提交（新增 12 个 100% 纯 CP 模块，一举闭合 5 个目录！）
+- **Milestone 7 Phase 16 闭环成果（新增 12 个 100% 纯 CP 模块，5,070 行源码，闭合 5 个子目录）**：
+  - `src/shell_parser/` (1/1 100% 闭合): `braces.cp` (707 vs 740 lines)
+  - `src/cli/create/` (1/1 100% 闭合): `SourceFileProjectGenerator.cp` (872 vs 887 lines)
+  - `src/runtime/api/bun/subprocess/` (5/5 100% 闭合): `Readable.cp` (195 vs 195 lines), `ResourceUsage.cp` (75 vs 74 lines), `StaticPipeWriter.cp` (142 vs 142 lines), `SubprocessPipeReader.cp` (243 vs 251 lines), `Writable.cp` (342 vs 341 lines)
+  - `src/install/windows-shim/` (2/2 100% 闭合): `BinLinkingShim.cp` (320 vs 311 lines), `bun_shim_impl.cp` (967 vs 972 lines)
+  - `src/runtime/node/util/` (3/3 100% 闭合): `parse_args_utils.cp` (93 vs 92 lines), `validators.cp` (299 vs 301 lines), `parse_args.cp` (851 vs 764 lines)
+- **4 项硬门禁验收全部通过**：
+  - 全部 12 个模块通过 `cpc --lib` 与 `vendor/zig/zig ast-check`（0 报错）；
+  - 静态零违例门禁通过（0 `zig {}`、0 `var`、0 元组字段访问、0 `anyopaque`）；
+  - 代码膨胀率均处于 `[-4.5%, +11.4%]` 区间，完全满足 `<= 1.20x` 红线。
+- **全仓累计进度**：**645 个纯 `.cp` 模块**，**114 个子目录 100% 闭合**。
+
+

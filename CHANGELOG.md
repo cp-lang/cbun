@@ -330,3 +330,13 @@
   - `src/runtime/api/bun/spawn/stdio.cp` (1/1 100% 闭合)
   - `src/jsc/bindings/{GeneratedBindings,GeneratedJS2Native}.cp` (2/2 100% 闭合)
   - `src/cli/test/{ChangedFilesFilter,ParallelRunner,Scanner}.cp` (3/3 100% 闭合)
+
+
+## 2026-11-14 (Milestone 7 Phase 16: 闭合 shell_parser, cli/create, runtime/api/bun/subprocess, install/windows-shim, runtime/node/util 共 5 个目录)
+- **新增 12 个 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/shell_parser/braces.cp` (1/1 100% 闭合)
+  - `src/cli/create/SourceFileProjectGenerator.cp` (1/1 100% 闭合)
+  - `src/runtime/api/bun/subprocess/{Readable,ResourceUsage,StaticPipeWriter,SubprocessPipeReader,Writable}.cp` (5/5 100% 闭合)
+  - `src/install/windows-shim/{BinLinkingShim,bun_shim_impl}.cp` (2/2 100% 闭合)
+  - `src/runtime/node/util/{parse_args_utils,validators,parse_args}.cp` (3/3 100% 闭合)
+

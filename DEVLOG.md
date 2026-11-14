@@ -265,3 +265,14 @@
 - **关键工程经验**：
   - `FakeTimers.cp` 与 `ChangedFilesFilter.cp` 中统一切片访问 `[0..0]` 与类型转换。
   - `NativeBrotli.cp`、`NativeZlib.cp`、`NativeZstd.cp` 中消除对底层 C 库解压模式转换的类型歧义，使用 `@mod(..., 1.0)` 和纯 CP 类型断言。
+
+
+## 2026-11-14: Milestone 7 Phase 16 闭环（闭合 5 个子目录，纯 CP 模块达 645 个，闭合子目录达 114 个）
+- **新增 12 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - 覆盖 `src/shell_parser/` (1/1)、`src/cli/create/` (1/1)、`src/runtime/api/bun/subprocess/` (5/5)、`src/install/windows-shim/` (2/2)、`src/runtime/node/util/` (3/3) 5 个子目录，全部 100% 闭合。
+- **关键工程经验与编译器能力跃升**：
+  - **`cpc` 编译器拓展（`task-20261114-concat-plusplus-operator`）**：针对编译期字符串/元组/数组拼接需求，上游 `cp agy` 顺利在 `cpc` 编译器中新增 `Token::PlusPlus` (`++`) 与 `BinaryOp::Concat`，使 `bun_shim_impl.cp` 与后续模块可直接使用 Zig 风格的编译期拼接。
+  - **非对齐内存读写在 CP 借用检查下的安全性保障**：在 `bun_shim_impl.cp` 中，规避直接 `@as(*align(1) T, ptr).* = val` 导致的类型安全报警，写入采用 `std.mem.writeInt(T, slice[0..@sizeOf(T)], val, .little)`，读取使用强类型非对齐指针 `*align(1) const ShebangMetadataPacked`。
+  - **指针运算与下溢防护**：将原 Zig 中 `[*]u16` 反向自减运算重构为基于 `let idx: usize` 的下标安全偏移遍历，结合 `empty_u8[0..0]` 规范切片初始化，彻底根除指针算术下溢风险。
+  - **顶层结构体提升与无返回值函数签名规范**：将嵌套结构体统一提升至顶层定义；规范无返回值函数直接省略 `: void` 声明，杜绝 `E0122` 冗余 void 报警。
+

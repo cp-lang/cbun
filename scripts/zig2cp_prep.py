@@ -40,7 +40,7 @@ def pre_transpile(src: str) -> str:
     src = re.sub(r'\bcatch\s*\|\s*err\s*\|', 'catch |e|', src)
     # 8. Struct field initialization: .{ .field = val } -> { field: val } (simple single-line cases)
     src = re.sub(r'\.\{\s*\}', '{}', src)
-    src = re.sub(r'^(\s*)\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*', r'\1\2: ', src, flags=re.MULTILINE)
+    src = re.sub(r'^(\s*)\.([A-Za-z_][A-Za-z0-9_]*)\s*=(?!>)\s*', r'\1\2: ', src, flags=re.MULTILINE)
     return src
 
 def main():
