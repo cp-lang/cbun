@@ -286,3 +286,13 @@
   - **接收者与切片迭代解耦**：针对 `for (_.workers)` 内部接收者重名遮蔽问题，采用 `const workers = _.workers; for (workers) |*w|` 本地绑定，兼顾 CP 借用安全性与 `cpc` 干净 lowering。
 
 
+## 2026-11-14: Milestone 7 Phase 18 闭环（闭合 runtime/ffi 与 test_runner/diff 全目录，纯 CP 模块达 658 个）
+- **新增 4 个大型纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - 覆盖 `src/runtime/ffi/` (2/2 100% 闭合)、`src/test_runner/diff/` (2/2 100% 闭合)，源码共计 6,732 行。
+- **关键工程经验与避让模式**：
+  - **FFI 指针与同名导出函数避让**：在 `FFIObject.cp` 中，局部非对齐指针变量重命名为 `mem_ptr`，避免在同一编译单元内遮蔽顶层导出函数 `pub fn ptr()`；在字段元编程遍历中采用 `inline while` 替代常规 `for (x of arr)`，避免 `cpc` 注入的 `cp_mut_slice(ptr: anytype)` 辅助函数形参对用户同名函数的遮蔽（已同时提交 `task-20261114-prelude-ptr-shadow` 供上游优化）。
+  - **编译期 JIT 安全保护泛型签名**：在 `ffi.cp` 中，为 `dangerouslyRunWithoutJitProtections` 增加 `comptime R: type` 显式编译期类型标记，并在 `Offsets` 结构体中使用 `@extern(*Offsets, .{ .name = "Bun__FFI__offsets" })` 声明外部符号，严格满足 0 `var` 约束。
+  - **大型差异对比算法 (`diff_match_patch.cp`, 2,995 行) 纯化**：将泛型工厂函数签名规范化为 `pub fn DMP(comptime Unit: type): type`，内部逻辑表达式严格适配 Zig 语义，在保持 1.000x 零膨胀率的同时实现 100% 纯 CP 重构。
+
+
+

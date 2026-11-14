@@ -589,4 +589,23 @@
 - **全仓累计进度**：**654 个纯 `.cp` 模块**，**116 个子目录 100% 闭合**。
 
 
+### 2026-11-14: 提交 `cp_agy` 异步任务 `task-20261114-prelude-ptr-shadow`（`cp_mut_slice` 形参名遮蔽用户函数 `pub fn ptr()`）
+- **Task ID**: `task-20261114-prelude-ptr-shadow`
+- **Repro**: `/data/dev/bun/temp/repro_prelude_ptr_shadow.cp`
+- **Error 根因**: `cpc` 展开 `for (x of arr)` 时自动注入的辅助函数 `fn cp_mut_slice(ptr: anytype)` 其参数名 `ptr` 会遮蔽用户模块中声明的同名导出函数 `pub fn ptr()`，触发 Zig AST 校验中的 `parameter shadows declaration of 'ptr'` 报警。
+- **状态**: `pending`（模块内已通过 `inline while` 自主避让通过门禁，留作编译器健壮性项待解决）。
+
+
+### 2026-11-14: Milestone 7 Phase 18 闭环提交（闭合 runtime/ffi 与 test_runner/diff 全目录）
+- **Milestone 7 Phase 18 闭环成果（新增 4 个大型 100% 纯 CP 模块，6,732 行源码，闭合 2 个子目录）**：
+  - `src/runtime/ffi/` (2/2 100% 闭合): `FFIObject.cp` (677 vs 650 lines, +4.2%), `ffi.cp` (2,447 vs 2,465 lines, -0.7%)
+  - `src/test_runner/diff/` (2/2 100% 闭合): `diff_match_patch.cp` (2,995 vs 2,994 lines, +0.0%), `printDiff.cp` (613 vs 585 lines, +4.8%)
+- **4 项硬门禁验收全部通过**：
+  - 全部 4 个模块通过 `cpc --lib` 与 `vendor/zig/zig ast-check`（0 报错）；
+  - 静态零违例门禁通过（0 `zig {}`、0 `var`、0 元组字段访问、0 `anyopaque`）；
+  - 代码膨胀率均处于 `[-0.7%, +4.8%]` 区间，完全满足 `<= 1.20x` 红线。
+- **全仓累计进度**：**658 个纯 `.cp` 模块**，**118 个子目录 100% 闭合**。
+
+
+
 

@@ -348,3 +348,10 @@
   - `src/sys/windows/env.cp` (1/2)
 
 
+## 2026-11-14 (Milestone 7 Phase 18: 闭合 runtime/ffi 与 test_runner/diff 全目录)
+- **新增 4 个大型 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/runtime/ffi/{FFIObject,ffi}.cp` (2/2 100% 闭合)
+  - `src/test_runner/diff/{diff_match_patch,printDiff}.cp` (2/2 100% 闭合)
+
+
+
