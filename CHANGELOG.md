@@ -340,3 +340,11 @@
   - `src/install/windows-shim/{BinLinkingShim,bun_shim_impl}.cp` (2/2 100% 闭合)
   - `src/runtime/node/util/{parse_args_utils,validators,parse_args}.cp` (3/3 100% 闭合)
 
+
+## 2026-11-14 (Milestone 7 Phase 17: 闭合 cli/test/parallel 与 bake/DevServer 全目录)
+- **新增 9 个 100% 纯 CP 模块及对应转译 `.zig` / 备份 `_.zig`**：
+  - `src/cli/test/parallel/{aggregate,Channel,Coordinator,FileRange,Frame,runner,Worker}.cp` (7/7 100% 闭合)
+  - `src/bake/DevServer/IncrementalGraph.cp` (12/12 100% 闭合)
+  - `src/sys/windows/env.cp` (1/2)
+
+

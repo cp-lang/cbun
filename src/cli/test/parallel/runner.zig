@@ -1,457 +1,467 @@
-//! Coordinator and worker entry points: `runAsCoordinator` (sets up the
-//! `Coordinator`, sorts/partitions files, drives the loop, merges fragments)
-//! and `runAsWorker` (the `--test-worker` side that reads framed commands
-//! from stdin, runs each file under isolation, and streams results to fd 3).
-
-/// All workers are busy for at least this long before another is spawned.
-/// Overridable via BUN_TEST_PARALLEL_SCALE_MS for tests, where debug-build
-/// module load alone can exceed the production 5ms threshold.
-pub const default_scale_up_after_ms = 5;
-
-/// Returns true if files were actually run via the worker pool, false if it
-/// fell back to the sequential path (≤1 effective worker). The caller uses
-/// this to decide whether to run the serial coverage/JUnit reporters.
-pub fn runAsCoordinator(
-    reporter: *CommandLineReporter,
-    vm: *jsc.VirtualMachine,
-    files: []const PathString,
-    ctx: Command.Context,
-    coverage_opts: *TestCommand.CodeCoverageOptions,
-) !bool {
-    const allocator = ctx.allocator;
-    const N: u32 = @intCast(files.len);
-    const K: u32 = @min(ctx.test_options.parallel, N);
-    if (K <= 1) {
-        // Jest sets JEST_WORKER_ID=1 even with --maxWorkers=1; match that so
-        // tests can rely on the var whenever --parallel is passed.
-        bun.handleOom(vm.transpiler.env.map.put("JEST_WORKER_ID", "1"));
-        bun.handleOom(vm.transpiler.env.map.put("BUN_TEST_WORKER_ID", "1"));
-        TestCommand.runAllTests(reporter, vm, files, allocator);
-        return false;
-    }
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var worker_tmpdir: ?[:0]const u8 = null;
-    // Workers' stderr is a pipe; have them format with ANSI when we will be
-    // rendering to a color terminal so streamed lines match serial output.
-    if (Output.enable_ansi_colors_stderr) {
-        bun.handleOom(vm.transpiler.env.map.put("FORCE_COLOR", "1"));
-    }
-    defer if (worker_tmpdir) |d| bun.FD.cwd().deleteTree(d) catch {};
-    if (ctx.test_options.reporters.junit or coverage_opts.enabled) {
-        const dir = try std.fmt.allocPrintSentinel(arena.allocator(), "{s}/bun-test-worker-{d}", .{
-            bun.fs.FileSystem.RealFS.getDefaultTempDir(),
-            if (bun.Environment.isWindows) std.os.windows.GetCurrentProcessId() else std.c.getpid(),
-        }, 0);
-        bun.FD.cwd().makePath(u8, dir) catch |e| {
-            Output.err(e, "failed to create worker temp dir {s}", .{dir});
-            bun.Global.exit(1);
-        };
-        worker_tmpdir = dir;
-        bun.handleOom(vm.transpiler.env.map.put("BUN_TEST_WORKER_TMP", dir));
-        // Coordinator's own JunitReporter would otherwise produce an empty
-        // document and overwrite the merged one in writeJUnitReportIfNeeded.
-        if (reporter.reporters.junit) |jr| {
-            bun.handleOom(vm.transpiler.env.map.put("BUN_TEST_WORKER_JUNIT", "1"));
-            jr.deinit();
-            reporter.reporters.junit = null;
-        }
-    }
-    // Each worker gets a unique JEST_WORKER_ID / BUN_TEST_WORKER_ID (1-indexed,
-    // matching Jest) so tests can pick distinct ports/databases. Serialize the
-    // env map once per worker after .put() — appending after the fact would
-    // create duplicate entries when the parent already has the variable set,
-    // and POSIX getenv() returns the first match.
-    const envps = try arena.allocator().alloc([:null]?[*:0]const u8, K);
-    for (envps, 0..) |*envp, i| {
-        const id = try std.fmt.allocPrint(arena.allocator(), "{d}", .{i + 1});
-        bun.handleOom(vm.transpiler.env.map.put("JEST_WORKER_ID", id));
-        bun.handleOom(vm.transpiler.env.map.put("BUN_TEST_WORKER_ID", id));
-        envp.* = try vm.transpiler.env.map.createNullDelimitedEnvMap(arena.allocator());
-    }
-    const argv = try buildWorkerArgv(arena.allocator(), ctx);
-
-    // Sort lexicographically so adjacent indices share parent directories.
-    // Each worker owns a contiguous chunk; co-located files share imports, so
-    // this keeps each worker's isolation SourceProvider cache hot. --randomize
-    // explicitly opts out of locality (the caller already shuffled).
-    const sorted = try arena.allocator().dupe(PathString, files);
-    if (!ctx.test_options.randomize) {
-        std.sort.pdq(PathString, sorted, {}, struct {
-            fn lt(_: void, a: PathString, b: PathString) bool {
-                return bun.strings.order(a.slice(), b.slice()) == .lt;
-            }
-        }.lt);
-    }
-
-    const workers = try allocator.alloc(Worker, K);
-
-    var coord = Coordinator{
-        .vm = vm,
-        .reporter = reporter,
-        .files = sorted,
-        .cwd = bun.fs.FileSystem.instance.top_level_dir,
-        .argv = argv,
-        .envps = envps,
-        .workers = workers,
-        .worker_tmpdir = worker_tmpdir,
-        .parallel_limit = K,
-        .scale_up_after_ms = if (ctx.test_options.parallel_delay_ms) |d|
-            @intCast(d)
-        else if (vm.transpiler.env.get("BUN_TEST_PARALLEL_SCALE_MS")) |s|
-            @max(0, std.fmt.parseInt(i64, s, 10) catch default_scale_up_after_ms)
-        else
-            default_scale_up_after_ms,
-        .bail = ctx.test_options.bail,
-        .dots = ctx.test_options.reporters.dots,
-        .windows_job = if (Environment.isWindows) Coordinator.createWindowsKillOnCloseJob() else {},
-    };
-
-    Coordinator.AbortHandler.install();
-    defer Coordinator.AbortHandler.uninstall();
-
-    for (workers, 0..) |*w, i| {
-        const idx: u32 = @intCast(i);
-        w.* = .{
-            .coord = &coord,
-            .idx = idx,
-            .range = .{ .lo = idx * N / K, .hi = (idx + 1) * N / K },
-            .out = .{ .role = .stdout, .worker = w },
-            .err = .{ .role = .stderr, .worker = w },
-        };
-    }
-
-    vm.eventLoop().ensureWaker();
-    vm.runWithAPILock(Coordinator, &coord, Coordinator.drive);
-
-    if (ctx.test_options.reporters.junit) {
-        if (ctx.test_options.reporter_outfile) |outfile| {
-            aggregate.mergeJUnitFragments(&coord, outfile, reporter.summary());
-        }
-    }
-    if (coverage_opts.enabled) {
-        switch (Output.enable_ansi_colors_stderr) {
-            inline else => |colors| aggregate.mergeCoverageFragments(coord.coverage_fragments.items, coverage_opts, colors),
-        }
-    }
-    return true;
-}
-
-/// Build the argv used for every worker (re)spawn. Forwards every `bun test`
-/// flag that affects how tests *execute inside* a worker, plus `--dots` and
-/// `--only-failures` since the worker formats result lines and the coordinator
-/// prints them verbatim. Coordinator-only concerns — file discovery
-/// (`--path-ignore-patterns`, `--changed`), `--reporter`/`--reporter-outfile`,
-/// `--pass-with-no-tests`, `--parallel` itself — are intentionally not
-/// forwarded.
-fn buildWorkerArgv(arena: std.mem.Allocator, ctx: Command.Context) ![:null]?[*:0]const u8 {
-    var argv: std.ArrayListUnmanaged(?[*:0]const u8) = .empty;
-    const opts = &ctx.test_options;
-
-    const printZ = struct {
-        fn f(a: std.mem.Allocator, comptime fmt: []const u8, args: anytype) ![*:0]const u8 {
-            return (try std.fmt.allocPrintSentinel(a, fmt, args, 0)).ptr;
-        }
-    }.f;
-
-    try argv.append(arena, (bun.selfExePath() catch return error.SelfExePathFailed).ptr);
-    try argv.append(arena, "test");
-    try argv.append(arena, "--test-worker");
-    try argv.append(arena, "--isolate");
-
-    try argv.append(arena, try printZ(arena, "--timeout={d}", .{opts.default_timeout_ms}));
-    if (opts.run_todo) try argv.append(arena, "--todo");
-    if (opts.only) try argv.append(arena, "--only");
-    if (opts.reporters.dots) try argv.append(arena, "--dots");
-    if (opts.reporters.only_failures) try argv.append(arena, "--only-failures");
-    if (opts.update_snapshots) try argv.append(arena, "--update-snapshots");
-    if (opts.concurrent) try argv.append(arena, "--concurrent");
-    if (opts.randomize) try argv.append(arena, "--randomize");
-    if (opts.seed) |seed|
-        try argv.append(arena, try printZ(arena, "--seed={d}", .{seed}));
-    // --bail is intentionally NOT forwarded: workers Global.exit(1) on bail
-    // (test_command.zig handleTestCompleted), which the coordinator would
-    // misread as a crash. Cross-worker bail is handled at file granularity by
-    // the coordinator instead.
-    if (opts.repeat_count > 0)
-        try argv.append(arena, try printZ(arena, "--rerun-each={d}", .{opts.repeat_count}));
-    if (opts.retry > 0)
-        try argv.append(arena, try printZ(arena, "--retry={d}", .{opts.retry}));
-    try argv.append(arena, try printZ(arena, "--max-concurrency={d}", .{opts.max_concurrency}));
-    if (opts.test_filter_pattern) |pattern| {
-        try argv.append(arena, "-t");
-        try argv.append(arena, (try arena.dupeZ(u8, pattern)).ptr);
-    }
-    for (ctx.preloads) |preload| {
-        try argv.append(arena, "--preload");
-        try argv.append(arena, (try arena.dupeZ(u8, preload)).ptr);
-    }
-    if (ctx.args.define) |define| {
-        for (define.keys, define.values) |key, value| {
-            try argv.append(arena, "--define");
-            try argv.append(arena, try printZ(arena, "{s}={s}", .{ key, value }));
-        }
-    }
-    if (ctx.args.loaders) |loaders| {
-        for (loaders.extensions, loaders.loaders) |ext, loader| {
-            try argv.append(arena, "--loader");
-            try argv.append(arena, try printZ(arena, "{s}:{s}", .{ ext, @tagName(loader) }));
-        }
-    }
-    if (ctx.args.tsconfig_override) |tsconfig| {
-        try argv.append(arena, "--tsconfig-override");
-        try argv.append(arena, (try arena.dupeZ(u8, tsconfig)).ptr);
-    }
-    inline for (.{
-        .{ "--conditions", ctx.args.conditions },
-        .{ "--drop", ctx.args.drop },
-        .{ "--main-fields", ctx.args.main_fields },
-        .{ "--extension-order", ctx.args.extension_order },
-        .{ "--env-file", ctx.args.env_files },
-        .{ "--feature", ctx.args.feature_flags },
-    }) |pair| {
-        for (pair[1]) |value| {
-            try argv.append(arena, pair[0]);
-            try argv.append(arena, (try arena.dupeZ(u8, value)).ptr);
-        }
-    }
-    if (ctx.args.preserve_symlinks orelse false)
-        try argv.append(arena, "--preserve-symlinks");
-    if (ctx.runtime_options.smol)
-        try argv.append(arena, "--smol");
-    if (ctx.runtime_options.experimental_http2_fetch)
-        try argv.append(arena, "--experimental-http2-fetch");
-    if (ctx.runtime_options.experimental_http3_fetch)
-        try argv.append(arena, "--experimental-http3-fetch");
-    if (ctx.args.allow_addons == false)
-        try argv.append(arena, "--no-addons");
-    if (ctx.debug.macros == .disable)
-        try argv.append(arena, "--no-macros");
-    if (ctx.args.disable_default_env_files)
-        try argv.append(arena, "--no-env-file");
-    if (ctx.args.jsx) |jsx| {
-        if (jsx.factory.len > 0)
-            try argv.append(arena, try printZ(arena, "--jsx-factory={s}", .{jsx.factory}));
-        if (jsx.fragment.len > 0)
-            try argv.append(arena, try printZ(arena, "--jsx-fragment={s}", .{jsx.fragment}));
-        if (jsx.import_source.len > 0)
-            try argv.append(arena, try printZ(arena, "--jsx-import-source={s}", .{jsx.import_source}));
-        try argv.append(arena, try printZ(arena, "--jsx-runtime={s}", .{@tagName(jsx.runtime)}));
-        if (jsx.side_effects)
-            try argv.append(arena, "--jsx-side-effects");
-    }
-    if (opts.coverage.enabled) {
-        try argv.append(arena, "--coverage");
-    }
-
-    try argv.append(arena, null);
-    return argv.items[0 .. argv.items.len - 1 :null];
-}
-
-/// Event-loop-driven coordinator ↔ worker channel. The worker pumps
-/// `vm.eventLoop()` between files instead of sitting in a blocking read(), so
-/// any post-swap cleanup the loop owns (timers the generation guard let
-/// through, async dispose, etc.) gets to run, and on macOS — where there's no
-/// PDEATHSIG — coordinator death surfaces as channel close. Same `Channel`
-/// abstraction as the coordinator side: usockets over the socketpair on POSIX,
-/// `uv.Pipe` over the inherited duplex named-pipe on Windows.
-const WorkerCommands = struct {
-    vm: *jsc.VirtualMachine,
-    channel: Channel(WorkerCommands, "channel") = .{},
-    /// Coordinator dispatches one `.run` and waits for `.file_done` before
-    /// the next, so a single slot is sufficient. Owned path storage.
-    pending_idx: ?u32 = null,
-    pending_path: std.ArrayListUnmanaged(u8) = .empty,
-    /// EOF, error, `.shutdown`, or a corrupt frame.
-    done: bool = false,
-
-    pub fn send(this: *WorkerCommands, frame_bytes: []const u8) void {
-        this.channel.send(frame_bytes);
-    }
-
-    pub fn onChannelFrame(this: *WorkerCommands, kind: Frame.Kind, rd: *Frame.Reader) void {
-        switch (kind) {
-            .run => {
-                this.pending_idx = rd.u32_();
-                this.pending_path.clearRetainingCapacity();
-                bun.handleOom(this.pending_path.appendSlice(bun.default_allocator, rd.str()));
-            },
-            .shutdown => this.done = true,
-            else => {},
-        }
-    }
-    pub fn onChannelDone(this: *WorkerCommands) void {
-        this.done = true;
-    }
-};
-
-/// Worker side: read framed commands from the IPC channel via the event loop,
-/// run each file with isolation, stream per-test events back. Never returns.
-pub fn runAsWorker(
-    reporter: *CommandLineReporter,
-    vm: *jsc.VirtualMachine,
-    ctx: Command.Context,
-) !noreturn {
-    vm.test_isolation_enabled = true;
-    vm.auto_killer.enabled = true;
-
-    var arena = bun.MimallocArena.init();
-    vm.eventLoop().ensureWaker();
-    vm.arena = &arena;
-    vm.allocator = arena.allocator();
-
-    const worker_tmp = vm.transpiler.env.get("BUN_TEST_WORKER_TMP");
-    if (vm.transpiler.env.get("BUN_TEST_WORKER_JUNIT") != null and reporter.reporters.junit == null) {
-        reporter.reporters.junit = test_command.JunitReporter.init();
-    }
-
-    const WorkerLoop = struct {
-        reporter: *CommandLineReporter,
-        vm: *jsc.VirtualMachine,
-        cmds: WorkerCommands,
-
-        pub fn begin(self: *@This()) void {
-            if (!self.cmds.channel.adopt(self.vm, .fromUV(3))) {
-                Output.prettyErrorln("<red>error<r>: test worker failed to adopt IPC fd", .{});
-                bun.Global.exit(1);
-            }
-            worker_cmds = &self.cmds;
-
-            worker_frame.begin(.ready);
-            self.cmds.send(worker_frame.finish());
-
-            while (true) {
-                while (self.cmds.pending_idx == null and !self.cmds.done) {
-                    self.vm.eventLoop().tick();
-                    if (self.cmds.pending_idx != null or self.cmds.done) break;
-                    self.vm.eventLoop().autoTick();
-                }
-                const idx = self.cmds.pending_idx orelse break;
-                self.cmds.pending_idx = null;
-
-                self.reporter.worker_ipc_file_idx = idx;
-                worker_frame.begin(.file_start);
-                worker_frame.u32_(idx);
-                self.cmds.send(worker_frame.finish());
-
-                const before = self.reporter.summary().*;
-                const before_unhandled = self.reporter.jest.unhandled_errors_between_tests;
-
-                // Workers always run with --isolate; every file is its own
-                // complete run from the preload's perspective.
-                TestCommand.run(self.reporter, self.vm, self.cmds.pending_path.items, .{ .first = true, .last = true }) catch |err| test_command.handleTopLevelTestErrorBeforeJavaScriptStart(err);
-                self.vm.swapGlobalForTestIsolation();
-                self.reporter.jest.bun_test_root.resetHookScopeForTestIsolation();
-                self.reporter.jest.default_timeout_override = std.math.maxInt(u32);
-
-                const after = self.reporter.summary().*;
-                worker_frame.begin(.file_done);
-                inline for (.{
-                    idx,
-                    after.pass - before.pass,
-                    after.fail - before.fail,
-                    after.skip - before.skip,
-                    after.todo - before.todo,
-                    after.expectations - before.expectations,
-                    after.skipped_because_label - before.skipped_because_label,
-                    after.files - before.files,
-                    self.reporter.jest.unhandled_errors_between_tests - before_unhandled,
-                }) |v| worker_frame.u32_(v);
-                self.cmds.send(worker_frame.finish());
-            }
-        }
-    };
-
-    var loop = WorkerLoop{ .reporter = reporter, .vm = vm, .cmds = .{ .vm = vm } };
-    vm.runWithAPILock(WorkerLoop, &loop, WorkerLoop.begin);
-
-    workerFlushAggregates(reporter, vm, ctx, worker_tmp, &loop.cmds);
-    // Drain any backpressure-buffered frames before exit so the coordinator
-    // sees repeat_bufs/junit_file/coverage_file.
-    while (loop.cmds.channel.hasPendingWrites() and !loop.cmds.channel.done) {
-        vm.eventLoop().tick();
-        if (!loop.cmds.channel.hasPendingWrites() or loop.cmds.channel.done) break;
-        vm.eventLoop().autoTick();
-    }
-    bun.Global.exit(0);
-}
-
-fn workerFlushAggregates(reporter: *CommandLineReporter, vm: *jsc.VirtualMachine, ctx: Command.Context, worker_tmp: ?[]const u8, cmds: *WorkerCommands) void {
-    // Snapshots flush lazily when the next file opens its snapshot file; the
-    // last file each worker ran has no successor to trigger that.
-    if (jsc.Jest.Jest.runner) |runner| {
-        _ = runner.snapshots.writeInlineSnapshots() catch false;
-        runner.snapshots.writeSnapshotFile() catch {};
-    }
-
-    worker_frame.begin(.repeat_bufs);
-    worker_frame.str(reporter.failures_to_repeat_buf.items);
-    worker_frame.str(reporter.skips_to_repeat_buf.items);
-    worker_frame.str(reporter.todos_to_repeat_buf.items);
-    cmds.send(worker_frame.finish());
-
-    if (worker_tmp) |dir| {
-        const id: i64 = if (Environment.isWindows)
-            @intCast(std.os.windows.GetCurrentProcessId())
-        else
-            @intCast(std.c.getpid());
-        if (reporter.reporters.junit) |junit| {
-            const path = bun.handleOom(std.fmt.allocPrintSentinel(bun.default_allocator, "{s}/w{d}.xml", .{ dir, id }, 0));
-            if (junit.current_file.len > 0) junit.endTestSuite() catch {};
-            if (junit.writeToFile(path)) |_| {
-                worker_frame.begin(.junit_file);
-                worker_frame.str(path);
-                cmds.send(worker_frame.finish());
-            } else |e| {
-                Output.err(e, "failed to write JUnit fragment to {s}", .{path});
-            }
-        }
-        if (ctx.test_options.coverage.enabled) {
-            const path = bun.handleOom(std.fmt.allocPrintSentinel(bun.default_allocator, "{s}/cov{d}.lcov", .{ dir, id }, 0));
-            if (reporter.writeLcovOnly(vm, &ctx.test_options.coverage, path)) |_| {
-                worker_frame.begin(.coverage_file);
-                worker_frame.str(path);
-                cmds.send(worker_frame.finish());
-            } else |e| {
-                Output.err(e, "failed to write coverage fragment to {s}", .{path});
-            }
-        }
-    }
-}
-
-/// Reused across all worker → coordinator emits.
-var worker_frame: Frame = .{};
-/// Set in `runAsWorker` so `workerEmitTestDone` (called from
-/// `CommandLineReporter.handleTestCompleted`) can reach the channel.
-var worker_cmds: ?*WorkerCommands = null;
-
-/// Called from `CommandLineReporter.handleTestCompleted` in the worker with the
-/// fully-formatted status line (✓/✗ + scopes + name + duration, including ANSI
-/// codes). The coordinator prints these bytes verbatim so output matches serial.
-pub fn workerEmitTestDone(file_idx: u32, formatted_line: []const u8) void {
-    const cmds = worker_cmds orelse return;
-    worker_frame.begin(.test_done);
-    worker_frame.u32_(file_idx);
-    worker_frame.str(formatted_line);
-    cmds.send(worker_frame.finish());
-}
-
-const Frame = @import("./Frame.zig");
-const Worker = @import("./Worker.zig");
-const aggregate = @import("./aggregate.zig");
+// Generated by CP Compiler (RFC-002 Production SDK)
 const std = @import("std");
-const Channel = @import("./Channel.zig").Channel;
-const Command = @import("../../cli.zig").Command;
-const Coordinator = @import("./Coordinator.zig").Coordinator;
+const string = []const u8;
 
-const test_command = @import("../../test_command.zig");
+fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }
+const Channel = ChannelPkg.Channel;
+const Command = cliPkg.Command;
+const Coordinator = CoordinatorPkg.Coordinator;
 const CommandLineReporter = test_command.CommandLineReporter;
 const TestCommand = test_command.TestCommand;
-
-const bun = @import("bun");
 const Environment = bun.Environment;
 const Output = bun.Output;
 const PathString = bun.PathString;
 const jsc = bun.jsc;
+pub const default_scale_up_after_ms = 5;
+var worker_frame: Frame = .{};
+var worker_cmds: ?*WorkerCommands = null;
+fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }
+fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }
+fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }
+fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }
+fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@"enum") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), "Err") and __T == @field(@This(), "Err")) or (@hasDecl(@This(), "Error") and __T == @field(@This(), "Error")) or (@typeInfo(__T) == .@"struct" and @hasField(__T, "msg")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@"union") { return std.meta.activeTag(val) == tag; } else { return false; } }
+fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }
+fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError("Cannot mutably iterate over non-collection"), else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), }, else => @compileError("Cannot mutably iterate over non-collection"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }
+pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@"enum")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) "true" else "false"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, "{}", .{val}) catch "0"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{val}) catch "0.0"; } else if (comptime (@typeInfo(__T) == .@"struct" and @hasDecl(__T, "toString"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@"struct" and @hasDecl(@typeInfo(__T).pointer.child, "toString"))) { return val.toString(); } else { return @typeName(__T); } }
+
+pub const FileRange = @import("./FileRange.zig");
+pub const Frame = @import("./Frame.zig");
+pub const Worker = @import("./Worker.zig");
+pub const aggregate = @import("./aggregate.zig");
+pub const ChannelPkg = @import("./Channel.zig");
+pub const cliPkg = @import("../../cli.zig");
+pub const CoordinatorPkg = @import("./Coordinator.zig");
+pub const test_command = @import("../../test_command.zig");
+pub const bun = @import("bun");
+pub const PathStringLt = struct {
+
+pub fn lt(self: PathStringLt, a: PathString, b: PathString) bool {
+        _ = &self;
+            return (bun.strings.order(a.slice(), b.slice()) == .lt);
+    }
+};
+
+pub const WorkerCommands = struct {
+    vm: *jsc.VirtualMachine,
+    channel: Channel(WorkerCommands,"channel") = .{},
+    pending_idx: ?u32 = null,
+    pending_path: std.ArrayListUnmanaged(u8) = .empty,
+    done: bool = false,
+
+pub fn send(self: *WorkerCommands, frame_bytes: []const u8) void {
+            _ = self.channel.send(frame_bytes);
+    }
+
+pub fn onChannelFrame(self: *WorkerCommands, kind: Frame.Kind, rd: *Frame.Reader) void {
+            switch (kind) {
+.run => {
+self.pending_idx = rd.u32_();
+            _ = self.pending_path.clearRetainingCapacity();
+            _ = bun.handleOom(self.pending_path.appendSlice(bun.default_allocator, rd.str()));
+},
+.shutdown => {
+self.done = true;
+},
+else => {
+
+},
+}
+    }
+
+pub fn onChannelDone(self: *WorkerCommands) void {
+            self.done = true;
+    }
+};
+
+pub const WorkerLoop = struct {
+    reporter: *CommandLineReporter,
+    vm: *jsc.VirtualMachine,
+    cmds: WorkerCommands,
+
+pub fn begin(self: *WorkerLoop) void {
+            if ((!self.cmds.channel.adopt(self.vm, .fromUV(3)))) {
+                _ = Output.prettyErrorln("<red>error<r>: test worker failed to adopt IPC fd", .{});
+                _ = bun.Global.exit(1);
+            }
+            worker_cmds = (&self.cmds);
+            _ = worker_frame.begin(.ready);
+            _ = self.cmds.send(worker_frame.finish());
+            while (true) {
+                while (((self.cmds.pending_idx == null) and (!self.cmds.done))) {
+                    _ = self.vm.eventLoop().tick();
+                    if (((self.cmds.pending_idx != null) or self.cmds.done)) {
+                        break;
+                    }
+                    _ = self.vm.eventLoop().autoTick();
+                }
+                const idx = ((self.cmds.pending_idx) orelse break);
+                self.cmds.pending_idx = null;
+                self.reporter.worker_ipc_file_idx = idx;
+                _ = worker_frame.begin(.file_start);
+                _ = worker_frame.u32_(idx);
+                _ = self.cmds.send(worker_frame.finish());
+                const before = (self.reporter.summary()).*;
+                const before_unhandled = self.reporter.jest.unhandled_errors_between_tests;
+                _ = (blk_catch_0: { break :blk_catch_0 ((TestCommand.run(self.reporter, self.vm, self.cmds.pending_path.items, .{ .first = true, .last = true })) catch |e| { _ = &e; break :blk_catch_0 test_command.handleTopLevelTestErrorBeforeJavaScriptStart(e); }); });
+                _ = self.vm.swapGlobalForTestIsolation();
+                _ = self.reporter.jest.bun_test_root.resetHookScopeForTestIsolation();
+                self.reporter.jest.default_timeout_override = std.math.maxInt(u32);
+                const after = (self.reporter.summary()).*;
+                _ = worker_frame.begin(.file_done);
+                inline for (.{ idx, (after.pass - before.pass), (after.fail - before.fail), (after.skip - before.skip), (after.todo - before.todo), (after.expectations - before.expectations), (after.skipped_because_label - before.skipped_because_label), (after.files - before.files), (self.reporter.jest.unhandled_errors_between_tests - before_unhandled) }) |v| {
+                    _ = worker_frame.u32_(v);
+                }
+                _ = self.cmds.send(worker_frame.finish());
+            }
+    }
+};
+
+
+pub fn printZ(a: std.mem.Allocator, comptime fmt: []const u8, args: anytype) ![*:0]u8 {
+        return try std.fmt.allocPrintSentinel(a, fmt, args, 0).ptr;
+}
+
+pub fn runAsCoordinator(reporter: *CommandLineReporter, vm: *jsc.VirtualMachine, files: []const PathString, ctx: Command.Context, coverage_opts: *TestCommand.CodeCoverageOptions) !bool {
+        const allocator = ctx.allocator;
+        const N: u32 = @intCast(files.len);
+        const K: u32 = @min(ctx.test_options.parallel, N);
+        if ((K <= 1)) {
+            _ = bun.handleOom(vm.transpiler.env.map.put("JEST_WORKER_ID", "1"));
+            _ = bun.handleOom(vm.transpiler.env.map.put("BUN_TEST_WORKER_ID", "1"));
+            _ = TestCommand.runAllTests(reporter, vm, files, allocator);
+            return false;
+        }
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        _ = &arena_state;
+        defer {
+        _ = arena_state.deinit();
+        }
+        const arena_alloc = arena_state.allocator();
+        var worker_tmpdir: ?[:0]const u8 = null;
+        _ = &worker_tmpdir;
+        if (Output.enable_ansi_colors_stderr) {
+            _ = bun.handleOom(vm.transpiler.env.map.put("FORCE_COLOR", "1"));
+        }
+        defer {
+        if (worker_tmpdir) |d| {
+            _ = &d;
+            _ = (blk_catch_1: { break :blk_catch_1 ((bun.FD.cwd().deleteTree(d)) catch |__ce_1| { _ = &__ce_1;  }); });
+        }
+        }
+        if ((ctx.test_options.reporters.junit or coverage_opts.enabled)) {
+            const dir = try std.fmt.allocPrintSentinel(arena_alloc, "{s}/bun-test-worker-{d}", .{ bun.fs.FileSystem.RealFS.getDefaultTempDir(), (if (bun.Environment.isWindows) std.os.windows.GetCurrentProcessId() else std.c.getpid()) }, 0);
+            _ = (blk_catch_2: { break :blk_catch_2 ((bun.FD.cwd().makePath(u8, dir)) catch |e| { _ = &e; _ = Output.err(e, "failed to create worker temp dir {s}", .{ dir });
+            break :blk_catch_2 bun.Global.exit(1); }); });
+            worker_tmpdir = dir;
+            _ = bun.handleOom(vm.transpiler.env.map.put("BUN_TEST_WORKER_TMP", dir));
+            if (reporter.reporters.junit) |jr| {
+                _ = &jr;
+                _ = bun.handleOom(vm.transpiler.env.map.put("BUN_TEST_WORKER_JUNIT", "1"));
+                _ = jr.deinit();
+                reporter.reporters.junit = null;
+            }
+        }
+        var envps = try arena_alloc.alloc(@TypeOf(Coordinator.argv), K);
+        _ = &envps;
+        var i_env: usize = 0;
+        _ = &i_env;
+        while ((i_env < K)) {
+            defer {
+            i_env = (i_env + 1);
+            }
+            const id = try std.fmt.allocPrint(arena_alloc, "{d}", .{ (i_env + 1) });
+            _ = bun.handleOom(vm.transpiler.env.map.put("JEST_WORKER_ID", id));
+            _ = bun.handleOom(vm.transpiler.env.map.put("BUN_TEST_WORKER_ID", id));
+            envps[cp_cast_int(usize, i_env)] = try vm.transpiler.env.map.createNullDelimitedEnvMap(arena_alloc);
+        }
+        const argv = try buildWorkerArgv(arena_alloc, ctx);
+        const sorted = try arena_alloc.dupe(PathString, files);
+        if ((!ctx.test_options.randomize)) {
+            _ = std.sort.pdq(PathString, sorted, .{}, PathStringLt.lt);
+        }
+        var workers = try allocator.alloc(Worker, K);
+        _ = &workers;
+        var scale_up_after_ms: i64 = default_scale_up_after_ms;
+        _ = &scale_up_after_ms;
+        if (ctx.test_options.parallel_delay_ms) |d| {
+            _ = &d;
+            scale_up_after_ms = @intCast(d);
+        } else {
+            if (vm.transpiler.env.get("BUN_TEST_PARALLEL_SCALE_MS")) |s| {
+                _ = &s;
+                scale_up_after_ms = @max((if (comptime @typeInfo(@TypeOf(0)) == .@"enum") cp_cast_int(i64, @intFromEnum(0)) else cp_cast_int(i64, 0)), (blk_catch_3: { break :blk_catch_3 ((std.fmt.parseInt(i64, s, 10)) catch |__ce_3| { _ = &__ce_3; break :blk_catch_3 default_scale_up_after_ms; }); }));
+            }
+        }
+        const windows_job = (if (Environment.isWindows) Coordinator.createWindowsKillOnCloseJob() else ({
+}));
+        var coord = Coordinator{ .vm = vm, .reporter = reporter, .files = sorted, .cwd = bun.fs.FileSystem.instance.top_level_dir, .argv = argv, .envps = envps, .workers = workers, .worker_tmpdir = worker_tmpdir, .parallel_limit = K, .scale_up_after_ms = scale_up_after_ms, .bail = ctx.test_options.bail, .dots = ctx.test_options.reporters.dots, .windows_job = windows_job };
+        _ = &coord;
+        _ = Coordinator.AbortHandler.install();
+        defer {
+        _ = Coordinator.AbortHandler.uninstall();
+        }
+        var i_w: usize = 0;
+        _ = &i_w;
+        while ((i_w < K)) {
+            defer {
+            i_w = (i_w + 1);
+            }
+            const idx: u32 = @intCast(i_w);
+            workers[cp_cast_int(usize, i_w)] = Worker{ .coord = (&coord), .idx = idx, .range = FileRange{ .lo = ((idx * N) / K), .hi = (((idx + 1) * N) / K) }, .out = Worker.WorkerPipe{ .role = .stdout, .worker = (&workers[@as(usize, @intCast(i_w))]) }, .err = Worker.WorkerPipe{ .role = .stderr, .worker = (&workers[@as(usize, @intCast(i_w))]) } };
+        }
+        _ = vm.eventLoop().ensureWaker();
+        _ = vm.runWithAPILock(Coordinator, (&coord), Coordinator.drive);
+        if (ctx.test_options.reporters.junit) {
+            if (ctx.test_options.reporter_outfile) |outfile| {
+                _ = &outfile;
+                _ = aggregate.mergeJUnitFragments((&coord), outfile, reporter.summary());
+            }
+        }
+        if (coverage_opts.enabled) {
+            switch (Output.enable_ansi_colors_stderr) {
+inline else => |colors| {
+_ = aggregate.mergeCoverageFragments(coord.coverage_fragments.items, coverage_opts, colors);
+},
+}
+        }
+        return true;
+}
+
+pub fn buildWorkerArgv(arena_alloc: std.mem.Allocator, ctx: Command.Context) !@TypeOf(Coordinator.argv) {
+        var argv: std.ArrayListUnmanaged(std.meta.Child(@TypeOf(Coordinator.argv))) = .empty;
+        _ = &argv;
+        const opts = (&ctx.test_options);
+        _ = try argv.append(arena_alloc, (blk_catch_4: { break :blk_catch_4 ((bun.selfExePath()) catch |__ce_4| { _ = &__ce_4; return error.SelfExePathFailed; }); }).ptr);
+        _ = try argv.append(arena_alloc, "test");
+        _ = try argv.append(arena_alloc, "--test-worker");
+        _ = try argv.append(arena_alloc, "--isolate");
+        _ = try argv.append(arena_alloc, try printZ(arena_alloc, "--timeout={d}", .{ opts.default_timeout_ms }));
+        if (opts.run_todo) {
+            _ = try argv.append(arena_alloc, "--todo");
+        }
+        if (opts.only) {
+            _ = try argv.append(arena_alloc, "--only");
+        }
+        if (opts.reporters.dots) {
+            _ = try argv.append(arena_alloc, "--dots");
+        }
+        if (opts.reporters.only_failures) {
+            _ = try argv.append(arena_alloc, "--only-failures");
+        }
+        if (opts.update_snapshots) {
+            _ = try argv.append(arena_alloc, "--update-snapshots");
+        }
+        if (opts.concurrent) {
+            _ = try argv.append(arena_alloc, "--concurrent");
+        }
+        if (opts.randomize) {
+            _ = try argv.append(arena_alloc, "--randomize");
+        }
+        if (opts.seed) |seed| {
+            _ = &seed;
+            _ = try argv.append(arena_alloc, try printZ(arena_alloc, "--seed={d}", .{ seed }));
+        }
+        if ((opts.repeat_count > 0)) {
+            _ = try argv.append(arena_alloc, try printZ(arena_alloc, "--rerun-each={d}", .{ opts.repeat_count }));
+        }
+        if ((opts.retry > 0)) {
+            _ = try argv.append(arena_alloc, try printZ(arena_alloc, "--retry={d}", .{ opts.retry }));
+        }
+        _ = try argv.append(arena_alloc, try printZ(arena_alloc, "--max-concurrency={d}", .{ opts.max_concurrency }));
+        if (opts.test_filter_pattern) |pattern| {
+            _ = &pattern;
+            _ = try argv.append(arena_alloc, "-t");
+            _ = try argv.append(arena_alloc, try arena_alloc.dupeZ(u8, pattern).ptr);
+        }
+        for (cp_iter_slice(ctx.preloads)) |preload| {
+            _ = &preload;
+            _ = try argv.append(arena_alloc, "--preload");
+            _ = try argv.append(arena_alloc, try arena_alloc.dupeZ(u8, preload).ptr);
+        }
+        if (ctx.args.define) |define| {
+            _ = &define;
+            var i: usize = 0;
+            _ = &i;
+            while ((i < define.keys.len)) {
+                defer {
+                i = (i + 1);
+                }
+                const key = define.keys[@as(usize, @intCast(i))];
+                const value = define.values[@as(usize, @intCast(i))];
+                _ = try argv.append(arena_alloc, "--define");
+                _ = try argv.append(arena_alloc, try printZ(arena_alloc, "{s}={s}", .{ key, value }));
+            }
+        }
+        if (ctx.args.loaders) |loaders| {
+            _ = &loaders;
+            var i: usize = 0;
+            _ = &i;
+            while ((i < loaders.extensions.len)) {
+                defer {
+                i = (i + 1);
+                }
+                const ext = loaders.extensions[@as(usize, @intCast(i))];
+                const loader = loaders.loaders[@as(usize, @intCast(i))];
+                _ = try argv.append(arena_alloc, "--loader");
+                _ = try argv.append(arena_alloc, try printZ(arena_alloc, "{s}:{s}", .{ ext, @tagName(loader) }));
+            }
+        }
+        if (ctx.args.tsconfig_override) |tsconfig| {
+            _ = &tsconfig;
+            _ = try argv.append(arena_alloc, "--tsconfig-override");
+            _ = try argv.append(arena_alloc, try arena_alloc.dupeZ(u8, tsconfig).ptr);
+        }
+        for (cp_iter_slice(ctx.args.conditions)) |value| {
+            _ = &value;
+            _ = try argv.append(arena_alloc, "--conditions");
+            _ = try argv.append(arena_alloc, try arena_alloc.dupeZ(u8, value).ptr);
+        }
+        for (cp_iter_slice(ctx.args.drop)) |value| {
+            _ = &value;
+            _ = try argv.append(arena_alloc, "--drop");
+            _ = try argv.append(arena_alloc, try arena_alloc.dupeZ(u8, value).ptr);
+        }
+        for (cp_iter_slice(ctx.args.main_fields)) |value| {
+            _ = &value;
+            _ = try argv.append(arena_alloc, "--main-fields");
+            _ = try argv.append(arena_alloc, try arena_alloc.dupeZ(u8, value).ptr);
+        }
+        for (cp_iter_slice(ctx.args.extension_order)) |value| {
+            _ = &value;
+            _ = try argv.append(arena_alloc, "--extension-order");
+            _ = try argv.append(arena_alloc, try arena_alloc.dupeZ(u8, value).ptr);
+        }
+        for (cp_iter_slice(ctx.args.env_files)) |value| {
+            _ = &value;
+            _ = try argv.append(arena_alloc, "--env-file");
+            _ = try argv.append(arena_alloc, try arena_alloc.dupeZ(u8, value).ptr);
+        }
+        for (cp_iter_slice(ctx.args.feature_flags)) |value| {
+            _ = &value;
+            _ = try argv.append(arena_alloc, "--feature");
+            _ = try argv.append(arena_alloc, try arena_alloc.dupeZ(u8, value).ptr);
+        }
+        if (((ctx.args.preserve_symlinks) orelse (false))) {
+            _ = try argv.append(arena_alloc, "--preserve-symlinks");
+        }
+        if (ctx.runtime_options.smol) {
+            _ = try argv.append(arena_alloc, "--smol");
+        }
+        if (ctx.runtime_options.experimental_http2_fetch) {
+            _ = try argv.append(arena_alloc, "--experimental-http2-fetch");
+        }
+        if (ctx.runtime_options.experimental_http3_fetch) {
+            _ = try argv.append(arena_alloc, "--experimental-http3-fetch");
+        }
+        if ((ctx.args.allow_addons == false)) {
+            _ = try argv.append(arena_alloc, "--no-addons");
+        }
+        if ((ctx.debug.macros == .disable)) {
+            _ = try argv.append(arena_alloc, "--no-macros");
+        }
+        if (ctx.args.disable_default_env_files) {
+            _ = try argv.append(arena_alloc, "--no-env-file");
+        }
+        if (ctx.args.jsx) |jsx| {
+            _ = &jsx;
+            if ((jsx.factory.len > 0)) {
+                _ = try argv.append(arena_alloc, try printZ(arena_alloc, "--jsx-factory={s}", .{ jsx.factory }));
+            }
+            if ((jsx.fragment.len > 0)) {
+                _ = try argv.append(arena_alloc, try printZ(arena_alloc, "--jsx-fragment={s}", .{ jsx.fragment }));
+            }
+            if ((jsx.import_source.len > 0)) {
+                _ = try argv.append(arena_alloc, try printZ(arena_alloc, "--jsx-import-source={s}", .{ jsx.import_source }));
+            }
+            _ = try argv.append(arena_alloc, try printZ(arena_alloc, "--jsx-runtime={s}", .{ @tagName(jsx.runtime) }));
+            if (jsx.side_effects) {
+                _ = try argv.append(arena_alloc, "--jsx-side-effects");
+            }
+        }
+        if (opts.coverage.enabled) {
+            _ = try argv.append(arena_alloc, "--coverage");
+        }
+        _ = try argv.append(arena_alloc, null);
+        return argv.items[0..(argv.items.len - 1) :null];
+}
+
+pub fn runAsWorker(reporter: *CommandLineReporter, vm: *jsc.VirtualMachine, ctx: Command.Context) !noreturn {
+        vm.test_isolation_enabled = true;
+        vm.auto_killer.enabled = true;
+        var mimalloc_arena = bun.MimallocArena.init();
+        _ = &mimalloc_arena;
+        _ = vm.eventLoop().ensureWaker();
+        vm.@"arena" = mimalloc_arena;
+        vm.allocator = mimalloc_arena.allocator();
+        const worker_tmp = vm.transpiler.env.get("BUN_TEST_WORKER_TMP");
+        if (((vm.transpiler.env.get("BUN_TEST_WORKER_JUNIT") != null) and (reporter.reporters.junit == null))) {
+            reporter.reporters.junit = test_command.JunitReporter.init();
+        }
+        var loop = WorkerLoop{ .reporter = reporter, .vm = vm, .cmds = WorkerCommands{ .vm = vm } };
+        _ = &loop;
+        _ = vm.runWithAPILock(WorkerLoop, (&loop), WorkerLoop.begin);
+        _ = workerFlushAggregates(reporter, vm, ctx, worker_tmp, (&loop.cmds));
+        while ((loop.cmds.channel.hasPendingWrites() and (!loop.cmds.channel.done))) {
+            _ = vm.eventLoop().tick();
+            if (((!loop.cmds.channel.hasPendingWrites()) or loop.cmds.channel.done)) {
+                break;
+            }
+            _ = vm.eventLoop().autoTick();
+        }
+        _ = bun.Global.exit(0);
+}
+
+pub fn workerFlushAggregates(reporter: *CommandLineReporter, vm: *jsc.VirtualMachine, ctx: Command.Context, worker_tmp: ?[]const u8, cmds: *WorkerCommands) void {
+        if (jsc.Jest.Jest.runner) |runner| {
+            _ = &runner;
+            _ = (blk_catch_5: { break :blk_catch_5 ((runner.snapshots.writeInlineSnapshots()) catch |__ce_5| { _ = &__ce_5; break :blk_catch_5 false; }); });
+            _ = (blk_catch_6: { break :blk_catch_6 ((runner.snapshots.writeSnapshotFile()) catch |__ce_6| { _ = &__ce_6;  }); });
+        }
+        _ = worker_frame.begin(.repeat_bufs);
+        _ = worker_frame.str(reporter.failures_to_repeat_buf.items);
+        _ = worker_frame.str(reporter.skips_to_repeat_buf.items);
+        _ = worker_frame.str(reporter.todos_to_repeat_buf.items);
+        _ = cmds.send(worker_frame.finish());
+        if (worker_tmp) |dir| {
+            _ = &dir;
+            const id: i64 = (if (Environment.isWindows) @intCast(std.os.windows.GetCurrentProcessId()) else @intCast(std.c.getpid()));
+            if (reporter.reporters.junit) |junit| {
+                _ = &junit;
+                const path = bun.handleOom(std.fmt.allocPrintSentinel(bun.default_allocator, "{s}/w{d}.xml", .{ dir, id }, 0));
+                if ((junit.current_file.len > 0)) {
+                    _ = (blk_catch_7: { break :blk_catch_7 ((junit.endTestSuite()) catch |__ce_7| { _ = &__ce_7;  }); });
+                }
+                switch (junit.writeToFile(path)) {
+.result => {
+_ = worker_frame.begin(.junit_file);
+                _ = worker_frame.str(path);
+                _ = cmds.send(worker_frame.finish());
+},
+.err => |e| {
+_ = Output.err(e, "failed to write JUnit fragment to {s}", .{ path });
+},
+}
+            }
+            if (ctx.test_options.coverage.enabled) {
+                const path = bun.handleOom(std.fmt.allocPrintSentinel(bun.default_allocator, "{s}/cov{d}.lcov", .{ dir, id }, 0));
+                switch (reporter.writeLcovOnly(vm, (&ctx.test_options.coverage), path)) {
+.result => {
+_ = worker_frame.begin(.coverage_file);
+                _ = worker_frame.str(path);
+                _ = cmds.send(worker_frame.finish());
+},
+.err => |e| {
+_ = Output.err(e, "failed to write coverage fragment to {s}", .{ path });
+},
+}
+            }
+        }
+}
+
+pub fn workerEmitTestDone(file_idx: u32, formatted_line: []const u8) void {
+        const cmds = ((worker_cmds) orelse { return; });
+        _ = worker_frame.begin(.test_done);
+        _ = worker_frame.u32_(file_idx);
+        _ = worker_frame.str(formatted_line);
+        _ = cmds.send(worker_frame.finish());
+}

@@ -276,3 +276,13 @@
   - **指针运算与下溢防护**：将原 Zig 中 `[*]u16` 反向自减运算重构为基于 `let idx: usize` 的下标安全偏移遍历，结合 `empty_u8[0..0]` 规范切片初始化，彻底根除指针算术下溢风险。
   - **顶层结构体提升与无返回值函数签名规范**：将嵌套结构体统一提升至顶层定义；规范无返回值函数直接省略 `: void` 声明，杜绝 `E0122` 冗余 void 报警。
 
+
+## 2026-11-14: Milestone 7 Phase 17 闭环（闭合 cli/test/parallel 与 bake/DevServer 全目录，纯 CP 模块达 654 个）
+- **新增 9 个纯 CP 模块通过全套验证（`cpc --lib` + `zig ast-check` + 0 违例门禁）**：
+  - 覆盖 `src/cli/test/parallel/` (7/7 100% 闭合)、`src/bake/DevServer/IncrementalGraph.cp` (12/12 100% 闭合)、`src/sys/windows/env.cp`。
+- **关键工程经验**：
+  - **超大型增量构建图 (`IncrementalGraph.cp`, 2,091 行) 编译期工厂结构体 lowering**：在 `pub fn IncrementalGraph(...): type { return struct { ... }; }` 模式中，嵌套结构体的方法体直接按 Zig 语义发射，必须遵循逻辑 `and` / `or` / `orelse` 规则，并规避 Zig 在 `&&` 上对地址取操作符与位与操作符的歧义判定。
+  - **结构体命名空间静态变量与信号处理提升**：在 `Coordinator.cp` 中，将原 Zig 嵌套结构体 `AbortHandler` 中包含的静态原子变量提升至模块顶层声明，并在根结构体中通过引用暴露；信号处理函数使用 `@callconv("c")` 和 `@callconv("winapi")` 正确标定 C/WinAPI 调用约定。
+  - **接收者与切片迭代解耦**：针对 `for (_.workers)` 内部接收者重名遮蔽问题，采用 `const workers = _.workers; for (workers) |*w|` 本地绑定，兼顾 CP 借用安全性与 `cpc` 干净 lowering。
+
+
